@@ -4492,6 +4492,9 @@ pub const Context = struct {
     /// quiescent checkpoints; arbitrary native/Zig stack scanning is still a
     /// separate Layer-C requirement.
     active_interpreters: std.ArrayListUnmanaged(*interp.Interpreter) = .empty,
+    /// Future worker registrations, guarded by active_interp_lock. Ordinary
+    /// registration growth cannot consume capacity promised before Thread spawn.
+    active_interpreter_reservations: usize = 0,
     /// Running shared-realm Thread workers, excluding the creator/host
     /// interpreter. Allocation quickening uses this only as an adaptive batch
     /// hint; exact semantics never depend on the sampled value.
@@ -7296,6 +7299,51 @@ pub const Context = struct {
         self.microtasks.release();
     }
 
+    pub const ActiveInterpreterReservation = struct {
+        context: *Context,
+        active: bool = true,
+
+        pub fn cancel(slot: *ActiveInterpreterReservation) void {
+            if (!slot.active) return;
+            const ctx = slot.context;
+            ctx.lockActiveInterpreters();
+            defer ctx.unlockActiveInterpreters();
+            std.debug.assert(ctx.active_interpreter_reservations != 0);
+            ctx.active_interpreter_reservations -= 1;
+            slot.active = false;
+        }
+
+        pub fn activate(slot: *ActiveInterpreterReservation, machine: *interp.Interpreter) void {
+            std.debug.assert(slot.active);
+            const ctx = slot.context;
+            while (true) {
+                ctx.waitForCooperativeGcGate();
+                ctx.lockActiveInterpreters();
+                if (ctx.gc_cooperative_enabled and ctx.gc_par_request.load(.acquire) != 0) {
+                    ctx.unlockActiveInterpreters();
+                    continue;
+                }
+                std.debug.assert(ctx.active_interpreter_reservations != 0);
+                ctx.active_interpreter_reservations -= 1;
+                // Initialize after any GC gate wait: an unregistered stack
+                // interpreter cannot have its captured realm pointers relocated.
+                machine.* = ctx.interpreter();
+                ctx.active_interpreters.appendAssumeCapacity(machine);
+                slot.active = false;
+                ctx.unlockActiveInterpreters();
+                return;
+            }
+        }
+    };
+
+    pub fn prepareActiveInterpreter(self: *Context) error{OutOfMemory}!ActiveInterpreterReservation {
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        try self.reserveActiveInterpretersLocked(1);
+        self.active_interpreter_reservations += 1;
+        return .{ .context = self };
+    }
+
     pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {
         if (!self.gc_cooperative_enabled) {
             self.lockActiveInterpreters();
@@ -9002,10 +9050,12 @@ pub const Context = struct {
     }
 
     fn reserveActiveInterpretersLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
-        const spare = self.active_interpreters.capacity - self.active_interpreters.items.len;
-        if (spare >= additional) return;
+        const occupied = std.math.add(usize, self.active_interpreters.items.len, self.active_interpreter_reservations) catch return error.OutOfMemory;
+        std.debug.assert(occupied <= self.active_interpreters.capacity);
+        if (self.active_interpreters.capacity - occupied >= additional) return;
         const extra = @max(additional, active_interpreter_reserve_granularity);
-        try self.active_interpreters.ensureTotalCapacity(self.gpa, self.active_interpreters.items.len + extra);
+        const required = std.math.add(usize, occupied, extra) catch return error.OutOfMemory;
+        try self.active_interpreters.ensureTotalCapacity(self.gpa, required);
     }
 
     fn scriptTreeWalkPolicy(source: []const u8) ?interp.BytecodeAdmissionReason {
@@ -20759,6 +20809,132 @@ test "memory model: join publishes completion side effects and exception identit
         \\mmAsyncError === mmJoinBoom
     );
     try std.testing.expect(result.asBool());
+}
+
+test "Thread asyncJoin commits thenable adoption without waiting for its deferred result" {
+    for ([_]bool{ false, true }) |gil| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil, .enable_gc = true });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var gate = {go: 0};
+            \\var getters = 0, calls = 0, delivered = 0;
+            \\var resumes = [], joins = [], payload = {marker: 887};
+            \\var deferred = { get then() {
+            \\  ++getters;
+            \\  return function (resolve) { ++calls; resumes.push(resolve); };
+            \\}};
+            \\var thread = new Thread(function () {
+            \\  while (Atomics.load(gate, 'go') === 0) Atomics.wait(gate, 'go', 0, 1000);
+            \\  return deferred;
+            \\});
+            \\for (var i = 0; i < 17; ++i) joins.push(thread.asyncJoin());
+            \\Atomics.store(gate, 'go', 1); Atomics.notify(gate, 'go');
+            \\if (thread.join() !== deferred || getters !== 17 || calls !== 17)
+            \\  throw new Error('join must commit all adoptions without waiting for their result');
+            \\joins.push(thread.asyncJoin());
+            \\joins.forEach(p => p.then(v => {
+            \\  if (v !== payload) throw new Error('adopted result identity');
+            \\  ++delivered;
+            \\}));
+        );
+        const pending = try ctx.evaluate("getters === 18 && calls === 18 && delivered === 0 && resumes.length === 18");
+        try std.testing.expect(pending.asBool());
+        _ = try ctx.evaluate("resumes.forEach(resolve => { resolve(payload); resolve({wrong: true}); });");
+        const done = try ctx.evaluate("delivered === 18");
+        try std.testing.expect(done.asBool());
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+        try std.testing.expectEqual(@as(usize, 0), ctx.active_interpreter_reservations);
+    }
+}
+
+test "Thread asyncJoin retains throwing getter identity through reentrant late joins" {
+    for ([_]bool{ false, true }) |gil| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil, .enable_gc = true });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var gate = {go: 0}, boom = {marker: 887};
+            \\var getters = 0, delivered = 0, reentrant;
+            \\var returned = { get then() {
+            \\  ++getters;
+            \\  if (Thread.current !== thread) throw new Error('then getter lost settling-thread affinity');
+            \\  if (getters === 1) reentrant = thread.asyncJoin();
+            \\  throw boom;
+            \\}};
+            \\var thread = new Thread(function () {
+            \\  while (Atomics.load(gate, 'go') === 0) Atomics.wait(gate, 'go', 0, 1000);
+            \\  return returned;
+            \\});
+            \\var first = thread.asyncJoin();
+            \\Atomics.store(gate, 'go', 1); Atomics.notify(gate, 'go');
+            \\if (thread.join() !== returned || getters !== 2) throw new Error('reentrant settlement');
+            \\[first, reentrant].forEach(p => p.then(
+            \\  () => { throw new Error('getter must reject'); },
+            \\  e => { if (e !== boom) throw new Error('getter exception identity'); ++delivered; }
+            \\));
+        );
+        const done = try ctx.evaluate("delivered === 2 && getters === 2");
+        try std.testing.expect(done.asBool());
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    }
+}
+
+test "Thread asyncJoin of a completed thenable retains the calling worker queue" {
+    for ([_]bool{ false, true }) |gil| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\var completed = new Thread(() => ({then(resolve) { resolve(887); }}));
+            \\completed.join();
+            \\var caller = new Thread(function () {
+            \\  const owner = Thread.current, result = {value: 0, local: false};
+            \\  completed.asyncJoin().then(value => {
+            \\    result.value = value;
+            \\    result.local = Thread.current === owner;
+            \\  });
+            \\  return result;
+            \\});
+            \\var observed = caller.join();
+            \\observed.value === 887 && observed.local;
+        );
+        try std.testing.expect(result.asBool());
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    }
+}
+
+test "Thread startup registry reservation survives competing registration and exhausted allocation" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var reserved = try ctx.prepareActiveInterpreter();
+    defer reserved.cancel();
+    var canceled = try ctx.prepareActiveInterpreter();
+    defer canceled.cancel();
+    const capacity = ctx.active_interpreters.capacity;
+    const machines = try std.testing.allocator.alloc(interp.Interpreter, capacity + 1);
+    defer std.testing.allocator.free(machines);
+    var registered: usize = 0;
+    defer for (machines[0..registered]) |*machine| ctx.popActiveInterpreter(machine);
+    while (registered + 2 < capacity) : (registered += 1) {
+        machines[registered] = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machines[registered]);
+    }
+    const saved = ctx.gpa;
+    var exhausted = std.testing.FailingAllocator.init(saved, .{ .fail_index = 0, .resize_fail_index = 0 });
+    ctx.gpa = exhausted.allocator();
+    defer ctx.gpa = saved;
+    machines[registered] = ctx.interpreter();
+    try std.testing.expectError(error.OutOfMemory, ctx.pushActiveInterpreter(&machines[registered]));
+    try std.testing.expectError(error.OutOfMemory, ctx.prepareActiveInterpreter());
+    try std.testing.expectEqual(@as(usize, 2), ctx.active_interpreter_reservations);
+    reserved.activate(&machines[registered]);
+    registered += 1;
+    try std.testing.expect(!reserved.active);
+    try std.testing.expectEqual(ctx.global_object, machines[registered - 1].global_object.?);
+    canceled.cancel();
+    try std.testing.expectEqual(@as(usize, 0), ctx.active_interpreter_reservations);
+    machines[registered] = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machines[registered]);
+    registered += 1;
+    try std.testing.expectEqual(capacity, registered);
 }
 
 test "Thread completion retains the body exception across a throwing microtask drain" {

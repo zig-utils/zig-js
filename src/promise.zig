@@ -889,6 +889,7 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         if (current_state.promise_resolving_already.load(.acquire)) return Value.undef();
         return err;
     };
+    defer cancelResolvingJob(self, &reservation);
     const current_state = resolvingStateObject(
         self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
     ) orelse {
@@ -1169,6 +1170,83 @@ fn cancelResolvingJob(self: *Interpreter, reservation: *MicrotaskReservation) vo
     reservation.active = false;
 }
 
+/// Locks and prepared capacity form the Promise state/publication transaction.
+/// The commit does not grow Promise/queue storage or execute JavaScript.
+const LockedSettlement = struct {
+    machine: *Interpreter,
+    target: *Promise,
+    state: State,
+    realm_locked: bool,
+
+    fn begin(self: *Interpreter, p: *Promise, state: State) LockedSettlement {
+        std.debug.assert(state != .pending);
+        self.lockMicrotasks();
+        const realm_locked = state == .rejected and self.unhandled_rejections != null and self.realm_lock != null;
+        if (realm_locked) self.lockRealm();
+        p.lockState();
+        return .{ .machine = self, .target = p, .state = state, .realm_locked = realm_locked };
+    }
+
+    fn end(locked: *const LockedSettlement) void {
+        locked.target.unlockState();
+        if (locked.realm_locked) locked.machine.unlockRealm();
+        locked.machine.unlockMicrotasks();
+    }
+
+    fn reactionCount(locked: *const LockedSettlement) usize {
+        return locked.target.reactions.items.len + @intFromBool(locked.target.reactions_inline != null);
+    }
+
+    fn commit(locked: *const LockedSettlement, v: Value, reservation: ?*MicrotaskReservation) void {
+        const self = locked.machine;
+        const p = locked.target;
+        const state = locked.state;
+        const pair_count = locked.reactionCount();
+        const queue = self.microtasks;
+        const unhandled_queue = if (state == .rejected) self.unhandled_rejections else null;
+        std.debug.assert(p.state == .pending);
+        p.state = state;
+        gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
+        p.value = v;
+        if (state == .rejected and !p.is_handled and !p.rejection_queued and !p.rejection_notified) {
+            if (unhandled_queue) |rejections| {
+                p.rejection_queued = true;
+                rejections.append(p);
+                gc_mod.barrierCell(p);
+            }
+        }
+        if (queue) |jobs| {
+            if (pair_count != 0) {
+                const task = Microtask{
+                    .kind = .settlement_batch,
+                    .reaction = undefined,
+                    .argument = Value.undef(),
+                    .fulfilled = state == .fulfilled,
+                    .payload = .{ .promise = p },
+                };
+                if (reservation) |slot| {
+                    jobs.appendInTransactionSlot(task);
+                    slot.active = false;
+                } else {
+                    jobs.appendAssumeCapacity(task);
+                }
+                for (0..pair_count) |_| promise_profile.recordMicrotaskEnqueue(false);
+            } else if (reservation) |slot| {
+                jobs.cancelTransactionSlot();
+                slot.active = false;
+            }
+        } else if (reservation) |slot| {
+            std.debug.assert(!slot.active);
+        }
+        // The selected reactions remain traced by the settled Promise until batch
+        // materialization copies them into ordinary queue jobs. Their retained
+        // activation edges therefore bridge this interval directly.
+        if (!p.rejection_linked.load(.acquire))
+            p.awaiting_activation_or_rejection_link.awaiting_async_activation = null;
+        p.async_forward_to = null;
+    }
+};
+
 fn settleWithReservation(
     self: *Interpreter,
     p: *Promise,
@@ -1176,83 +1254,68 @@ fn settleWithReservation(
     v: Value,
     reservation: ?*MicrotaskReservation,
 ) EvalError!void {
-    std.debug.assert(state != .pending);
-
-    const unhandled_queue = if (state == .rejected) self.unhandled_rejections else null;
-    // Scheduling is one queue -> realm -> Promise transaction. A settlement
-    // publishes one batch descriptor regardless of fanout; the Promise retains
-    // exact reaction ownership until the queue materializes the batch before
-    // dequeue. Native resolving functions reserve this one slot before they
-    // consume [[AlreadyResolved]], making their scheduling commit infallible.
-    self.lockMicrotasks();
-    const realm_locked = unhandled_queue != null and self.realm_lock != null;
-    if (realm_locked) self.lockRealm();
-    p.lockState();
+    const locked = LockedSettlement.begin(self, p, state);
     if (p.state != .pending) {
-        p.unlockState();
-        if (realm_locked) self.unlockRealm();
-        self.unlockMicrotasks();
+        locked.end();
         if (reservation) |slot| cancelResolvingJob(self, slot);
         return;
     }
-    const pair_count = p.reactions.items.len + @intFromBool(p.reactions_inline != null);
-    const queue = self.microtasks;
-    if (queue != null and pair_count != 0) {
+    if (self.microtasks) |queue| if (locked.reactionCount() != 0) {
         if (reservation) |slot| {
-            std.debug.assert(slot.active and slot.queue == queue.?);
+            std.debug.assert(slot.active and slot.queue == queue);
         } else {
-            queue.?.reserve(self.arena, 1) catch |err| {
-                p.unlockState();
-                if (realm_locked) self.unlockRealm();
-                self.unlockMicrotasks();
+            queue.reserve(self.arena, 1) catch |err| {
+                locked.end();
                 return err;
             };
         }
+    };
+    locked.commit(v, reservation);
+    locked.end();
+}
+
+/// An intrinsic Promise completion slot reserved before its capability escapes.
+/// Resolution retains this slot on error so the owner can reject with its exact
+/// rooted failure value. Move this token with the capability; never copy it into
+/// two live owners. All methods use the queue that was reserved at preparation.
+pub const PreparedSettlement = struct {
+    slot: MicrotaskReservation = .{},
+
+    pub fn prepare(self: *Interpreter, queue: *MicrotaskQueue) EvalError!PreparedSettlement {
+        self.lockJobQueue(queue);
+        defer self.unlockJobQueue(queue);
+        try queue.reserveTransactionSlot(self.arena);
+        return .{ .slot = .{ .queue = queue, .active = true } };
     }
 
-    p.state = state;
-    gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
-    p.value = v;
-    if (state == .rejected and !p.is_handled and !p.rejection_queued and !p.rejection_notified) {
-        if (unhandled_queue) |rejections| {
-            p.rejection_queued = true;
-            rejections.append(p);
-            gc_mod.barrierCell(p);
-        }
+    pub fn cancel(prepared: *PreparedSettlement, self: *Interpreter) void {
+        cancelResolvingJob(self, &prepared.slot);
     }
-    if (queue) |jobs| {
-        if (pair_count != 0) {
-            const task = Microtask{
-                .kind = .settlement_batch,
-                .reaction = undefined,
-                .argument = Value.undef(),
-                .fulfilled = state == .fulfilled,
-                .payload = .{ .promise = p },
-            };
-            if (reservation) |slot| {
-                jobs.appendInTransactionSlot(task);
-                slot.active = false;
-            } else {
-                jobs.appendAssumeCapacity(task);
-            }
-            for (0..pair_count) |_| promise_profile.recordMicrotaskEnqueue(false);
-        } else if (reservation) |slot| {
-            jobs.cancelTransactionSlot();
-            slot.active = false;
-        }
-    } else if (reservation) |slot| {
-        std.debug.assert(!slot.active);
+
+    pub fn resolve(prepared: *PreparedSettlement, self: *Interpreter, p: *Promise, v: Value) EvalError!void {
+        std.debug.assert(prepared.slot.active);
+        const saved = self.microtasks;
+        self.microtasks = prepared.slot.queue.?;
+        defer self.microtasks = saved;
+        // On an abrupt completion the caller reloads its authoritative roots
+        // before rejecting. No user callback is retried and the slot stays owned.
+        try resolveWithReservation(self, p, v, &prepared.slot);
+        prepared.cancel(self);
     }
-    // The selected reactions remain traced by the settled Promise until batch
-    // materialization copies them into ordinary queue jobs. Their retained
-    // activation edges therefore bridge this interval directly.
-    if (!p.rejection_linked.load(.acquire))
-        p.awaiting_activation_or_rejection_link.awaiting_async_activation = null;
-    p.async_forward_to = null;
-    p.unlockState();
-    if (realm_locked) self.unlockRealm();
-    self.unlockMicrotasks();
-}
+
+    /// Inputs must already have durable roots. Rejection-tracker and reaction
+    /// publication need no interpreter/queue growth, safepoint, or JS call.
+    pub fn reject(prepared: *PreparedSettlement, self: *Interpreter, p: *Promise, reason: Value) void {
+        std.debug.assert(prepared.slot.active);
+        const saved = self.microtasks;
+        self.microtasks = prepared.slot.queue.?;
+        defer self.microtasks = saved;
+        const locked = LockedSettlement.begin(self, p, .rejected);
+        if (p.state == .pending) locked.commit(reason, &prepared.slot);
+        locked.end();
+        prepared.cancel(self);
+    }
+};
 
 fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!void {
     return settleWithReservation(self, p, state, v, null);
@@ -1375,8 +1438,6 @@ fn resolveRootedWithReservation(
     v: Value,
     reservation: ?*MicrotaskReservation,
 ) EvalError!void {
-    defer if (reservation) |slot| cancelResolvingJob(self, slot);
-
     if (!isPending(self.tempPromiseRoot(promise_mark, p))) return;
     if (promiseOf(self.tempRoot(value_mark, v))) |inner|
         if (inner == self.tempPromiseRoot(promise_mark, p)) {

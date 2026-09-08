@@ -4216,6 +4216,8 @@ pub const Binding = struct {
             rec.join_mutex.lockUncancelable(io);
             defer rec.join_mutex.unlock(io);
             markValue(v, rec.result);
+            markValue(v, rec.entry_function);
+            for (rec.entry_args) |arg| markValue(v, arg);
             if (rec.js_obj) |o| v.mark(o);
             for (rec.pending_joins.items) |pending| v.mark(pending.promise);
             for (rec.settling_joins.items) |pending| v.mark(pending.promise);

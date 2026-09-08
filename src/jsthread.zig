@@ -33,15 +33,9 @@ const Interpreter = interp.Interpreter;
 
 pub const PendingJoin = struct {
     promise: *value.Object,
-    microtasks: *promise.MicrotaskQueue,
-    /// The thread that registered this `asyncJoin` (the joiner), or null for the
-    /// main/host thread. When the joiner is a spawned thread that has finished
-    /// (`done`), its local `microtasks` queue is being abandoned, so the finishing
-    /// thread routes this settlement's reactions to the realm queue
-    /// (`ctx.microtasks`, which the host keeps draining) instead — otherwise a
-    /// nested `asyncJoin` reaction strands in a dead thread's queue. A still-live
-    /// joiner keeps its reactions (thread affinity preserved).
-    owner: ?*ThreadRecord = null,
+    /// Final realm/host destination reserved before exposing the capability.
+    /// A worker's local queue can close independently of this pending join.
+    settlement: promise.PreparedSettlement = .{},
 };
 
 pub const ThreadRecord = struct {
@@ -49,6 +43,11 @@ pub const ThreadRecord = struct {
     gil: *gil_mod.Gil,
     ctx: *Context,
     thread: ?std.Thread = null,
+    interpreter_registration: ?Context.ActiveInterpreterReservation = null,
+    /// Precisely rooted before spawn and through the body call. An OS thread
+    /// waiting to register its interpreter has no scanned argument stack yet.
+    entry_function: Value = Value.undef(),
+    entry_args: []Value = &.{},
     /// Guards completion state independently from the context GIL. Shipping
     /// GIL-mode joiners still release the GIL while parked, but `parallel_js`
     /// joiners wait only on this mutex/condition pair.
@@ -63,19 +62,17 @@ pub const ThreadRecord = struct {
     done_cond: std.Io.Condition = .init,
     /// The realm's wrapper object (`Thread.current` returns it).
     js_obj: ?*value.Object = null,
-    /// Promises handed out by `asyncJoin` before completion; settled by the
-    /// finishing thread (reactions run on the settling thread's queue — the
-    /// PR's ordinary-promise rule; awaiters elsewhere observe the shared
-    /// state via awaitValue's GIL-yield loop).
+    /// Promises handed out by `asyncJoin` before completion. The finishing
+    /// thread initiates resolution; each prepared token owns publication into
+    /// the realm/host queue until that resolution or exact rejection commits.
     pending_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
     /// Authoritative root for the snapshot being settled after `done`. The
     /// finisher borrows this same backing; collection and moving relocation
     /// visit its entries under `join_mutex` throughout settlement.
     settling_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
-    /// `done` publishes the synchronous result before the finishing thread
-    /// settles the pre-existing asyncJoin snapshot. A synchronous join must
-    /// wait for both transitions or it can drain the joiner queue in between
-    /// them and miss the settlement reactions.
+    /// True after every snapshot capability has committed resolution/rejection
+    /// and required job publication. Adopted thenables may remain pending. A
+    /// synchronous join waits for this and exit before its completion drain.
     joins_settled: bool = true,
     /// Arena-lived queue; `join_mutex` closes peer publication before transfer.
     microtasks: ?*promise.MicrotaskQueue = null,
@@ -811,7 +808,12 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const rec = try a.create(ThreadRecord);
     rec.* = .{ .id = g.next_thread_id, .gil = g, .ctx = ctx };
     rec.js_obj = makeWrapper(ctx, rec) catch return error.OutOfMemory;
-    const call_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
+    rec.entry_function = fn_v;
+    rec.entry_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
+    rec.microtasks = try a.create(promise.MicrotaskQueue);
+    rec.microtasks.?.* = .{};
+    rec.interpreter_registration = try ctx.prepareActiveInterpreter();
+    errdefer rec.interpreter_registration.?.cancel();
     if (ctx.parallel_js) ctx.microtasks.acquire();
     ctx.microtasks.prepareTransfer(a, &rec.microtask_transfer) catch |err| {
         if (ctx.parallel_js) ctx.microtasks.release();
@@ -820,12 +822,17 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     if (ctx.parallel_js) ctx.microtasks.release();
     errdefer cancelUnusedThreadTransfer(rec);
     g.next_thread_id += 1;
+    gc_mod.barrierValue(rec.entry_function);
+    for (rec.entry_args) |arg| gc_mod.barrierValue(arg);
     ctx.js_threads.appendAssumeCapacity(rec);
     if (ctx.js_threads.items.len >= 3) ctx.enableCooperativeGcTracking();
 
-    rec.thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, threadMain, .{ rec, fn_v, call_args }) catch {
+    rec.thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, threadMain, .{rec}) catch {
         rec.done = true;
         rec.exited = true;
+        rec.entry_function = Value.undef();
+        rec.entry_args = &.{};
+        rec.microtasks = null;
         return self.throwError("Error", "Thread: could not spawn OS thread");
     };
     return Value.obj(rec.js_obj.?);
@@ -858,7 +865,7 @@ fn acquireGilForTeardown(self: *Interpreter, g: *gil_mod.Gil) void {
     }
 }
 
-fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
+fn threadMain(rec: *ThreadRecord) void {
     const profile_started = startLifecycleTimer();
     defer finishWorkerRunTimer(profile_started);
     const g = rec.gil;
@@ -900,35 +907,18 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // global object, and shapes (safe under the GIL), with its own job queues.
     // join() performs the joiner's completion checkpoint before observing the
     // result, which is the only cross-thread microtask drain point.
-    // Heap-allocate the per-thread microtask queue (arena-owned, freed at realm
-    // teardown) instead of putting it on this thread's native stack. A peer
-    // settling a cross-thread promise appends into this queue under the queue's
-    // microtask lock, growing its ArrayList header; on the stack that write
-    // races the collector's CONSERVATIVE scan of this thread's stack (the blind
-    // word scan can't take that queue lock). Off the stack the header is never
-    // conservatively scanned, and the queued tasks stay precisely rooted via
-    // `machine.microtasks` in `traceInterpreterRoots` (which holds the lock).
-    const microtasks = rec.ctx.arena().create(promise.MicrotaskQueue) catch {
-        var pj = publishThreadCompletion(rec, true, outOfMemoryCompletionValue(rec.ctx));
-        finishThreadJoinSettlement(rec);
-        pj.deinit(rec.ctx.arena());
-        return;
-    };
-    microtasks.* = .{};
+    // Both queue storage and registry capacity were prepared before spawn.
+    // Entering the collector-visible registry cannot now lose pending joins to
+    // startup OOM. The entry callable/arguments stay rooted in the ThreadRecord.
+    const microtasks = rec.microtasks.?;
     var async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty;
-    rec.microtasks = microtasks;
-    var machine = rec.ctx.interpreter();
-    rec.ctx.pushActiveInterpreter(&machine) catch {
-        var pending_joins = publishThreadCompletion(rec, true, outOfMemoryCompletionValue(rec.ctx));
-        finishThreadJoinSettlement(rec);
-        pending_joins.deinit(rec.ctx.arena());
-        return;
-    };
+    var machine: Interpreter = undefined;
+    rec.interpreter_registration.?.activate(&machine);
     defer rec.ctx.popActiveInterpreter(&machine);
-    const ai_saved = gc_mod.setActiveInterpreter(&machine);
-    defer _ = gc_mod.setActiveInterpreter(ai_saved);
     machine.microtasks = microtasks;
     machine.async_waiters = &async_waiters;
+    const ai_saved = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
     // A spawned Thread gets no step ceiling. The count is a runaway proxy only
     // for work whose duration this interpreter controls, and a worker parked or
     // spinning on a peer's signal accumulates steps at a rate that peer sets —
@@ -938,7 +928,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     machine.step_budget = std.math.maxInt(u64);
     defer machine.abandonTimers();
     var threw = false;
-    if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
+    if (machine.callValueWithThis(rec.entry_function, rec.entry_args, Value.undef())) |out| {
         // The running native stack is not a precise peer root. Publish into
         // the join-mutex-protected record before any GC-capable checkpoint,
         // while leaving `done` false so observers cannot see completion early.
@@ -979,31 +969,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     }
     // `rec.result` and `rec.settling_joins` remain the authoritative precise
     // roots. Reload each result after earlier settlements may have moved it.
-    const saved_microtasks = machine.microtasks;
-    for (pending_joins.items) |pending| {
-        // Route the settlement's reactions. When the joiner is a spawned thread
-        // (`owner != null`) we enqueue into the realm queue (`ctx.microtasks`,
-        // which the host drains until every thread is done) rather than the
-        // joiner thread's local queue: that queue can be torn down before — or
-        // concurrently with — this settlement, stranding a nested-`asyncJoin`
-        // reaction (its `.then` continuation may even have been registered by a
-        // third thread via thenable adoption). The main-thread joiner's queue
-        // *is* `ctx.microtasks`, so this is identical for it. (A live joiner
-        // thread loses strict reaction affinity, but the reaction still runs in
-        // the shared realm, which is what asyncJoin's await observers need; no
-        // liveness race remains.)
-        machine.microtasks = if (pending.owner != null) &rec.ctx.microtasks else pending.microtasks;
-        const result = threadResult(rec);
-        if (promise.promiseOf(Value.obj(pending.promise))) |pp| {
-            if (threw)
-                promise.reject(&machine, pp, result) catch {}
-            else
-                promise.resolve(&machine, pp, result) catch {};
-        }
-    }
-    machine.microtasks = saved_microtasks;
+    settleThreadJoins(rec, &machine, pending_joins.items, threw);
     machine.drainMicrotasks() catch {};
-    transferPendingJoinQueue(rec.ctx, microtasks, &rec.ctx.microtasks);
     transferPropAsyncQueue(g, microtasks, &rec.ctx.microtasks);
     // Pending prop-async tickets now target the realm queue, but another peer
     // may already have removed one of this thread's tickets from the global
@@ -1069,6 +1036,8 @@ fn rootThreadResult(rec: *ThreadRecord, result: Value) void {
     defer rec.join_mutex.unlock(io);
     std.debug.assert(!rec.done);
     rec.result = result;
+    rec.entry_function = Value.undef();
+    rec.entry_args = &.{};
 }
 
 fn threadResult(rec: *ThreadRecord) Value {
@@ -1094,9 +1063,37 @@ fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.A
     return pending;
 }
 
+fn joinSettlementFailure(ctx: *Context, self: *Interpreter, err: interp.EvalError) Value {
+    return switch (err) {
+        error.OutOfMemory => outOfMemoryCompletionValue(ctx),
+        error.Throw => self.exception,
+        // Promise resolution performs a normal Get("then"), never an optional
+        // chain expression; the short-circuit sentinel cannot escape that Get.
+        error.OptShortCircuit => unreachable,
+    };
+}
+
+fn settleThreadJoins(rec: *ThreadRecord, self: *Interpreter, pending_joins: []PendingJoin, threw: bool) void {
+    for (pending_joins) |*pending| {
+        const pp = promise.promiseOf(Value.obj(pending.promise)).?;
+        if (threw) {
+            pending.settlement.reject(self, pp, threadResult(rec));
+        } else {
+            pending.settlement.resolve(self, pp, threadResult(rec)) catch |err| {
+                const reason = joinSettlementFailure(rec.ctx, self, err);
+                // Resolution may have moved either object before failing. The
+                // snapshot remains the authoritative traced/relocated owner.
+                pending.settlement.reject(self, promise.promiseOf(Value.obj(pending.promise)).?, reason);
+            };
+        }
+        std.debug.assert(!pending.settlement.slot.active);
+    }
+}
+
 fn finishThreadJoinSettlement(rec: *ThreadRecord) void {
     const io = agent.engineIo();
     rec.join_mutex.lockUncancelable(io);
+    for (rec.settling_joins.items) |pending| std.debug.assert(!pending.settlement.slot.active);
     rec.settling_joins = .empty;
     rec.joins_settled = true;
     rec.done_cond.broadcast(io);
@@ -1108,6 +1105,17 @@ fn threadJoinReadyLocked(rec: *const ThreadRecord) bool {
     // publication boundary. In particular, Context collection must not run
     // while the worker still owns an active interpreter or native stack.
     return rec.done and rec.joins_settled and rec.exited;
+}
+
+fn appendPreparedJoinLocked(rec: *ThreadRecord, self: *Interpreter, wrapper: *value.Object, queue: *promise.MicrotaskQueue) !void {
+    // Lock order is join -> queue, as for property-async publication. No JS or
+    // collecting allocation may reenter the ThreadRecord root lock here.
+    gc_runtime.enterTraceSensitiveLock();
+    defer gc_runtime.leaveTraceSensitiveLock();
+    var settlement = try promise.PreparedSettlement.prepare(self, queue);
+    errdefer settlement.cancel(self);
+    gc_mod.barrierValue(Value.obj(wrapper));
+    try appendPendingJoinLocked(rec, self.arena, .{ .promise = wrapper, .settlement = settlement });
 }
 
 fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending: PendingJoin) !void {
@@ -1238,6 +1246,122 @@ test "Thread completion result is precisely rooted before done despite exhausted
     try std.testing.expectEqual(baseline, heap.live_cells);
 }
 
+test "Thread asyncJoin commits exact OOM for every pending capability before settlement completion" {
+    for (0..4) |phase| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_threads = true });
+        defer ctx.destroy();
+        ctx.gc_scan_native_stack = false;
+        const saved_ctx = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved_ctx);
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const saved_machine = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(saved_machine);
+        var record = ThreadRecord{ .id = 77, .gil = ctx.gil.?, .ctx = ctx };
+        try ctx.js_threads.append(ctx.gpa, &record);
+        defer _ = ctx.js_threads.pop();
+        const Getter = struct {
+            calls: usize = 0,
+            ctx: *Context,
+            fn get(raw: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
+                _ = raw;
+                const state: *@This() = @ptrCast(@alignCast(this.asObj().private_data.?));
+                state.calls += 1;
+                // No native stack fallback: the completion snapshot and active
+                // resolution roots must retain all capabilities during Get.
+                state.ctx.gc.?.collect();
+                return error.OutOfMemory;
+            }
+        };
+        var getter = Getter{ .ctx = ctx };
+        const result = try gc_mod.allocObj(ctx.arena());
+        result.private_data = &getter;
+        try interp.setNativeGetter(ctx.arena(), ctx.root_shape, result, "then", Getter.get);
+        rootThreadResult(&record, Value.obj(result));
+        const count = 17;
+        for (0..count) |i| {
+            const wrapper = try promise.newPromise(&machine);
+            const pp = promise.promiseOf(Value.obj(wrapper)).?;
+            var settlement = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
+            errdefer settlement.cancel(&machine);
+            try appendPendingJoinLocked(&record, ctx.arena(), .{ .promise = wrapper, .settlement = settlement });
+            try promise.performThenDetached(&machine, pp, Value.undef(), Value.undef(), Value.num(@floatFromInt(i)));
+        }
+        var pending = publishThreadCompletion(&record, phase == 3, threadResult(&record));
+        defer pending.deinit(ctx.arena());
+        try std.testing.expect(!record.joins_settled and !threadJoinReadyLocked(&record));
+        const arena = machine.arena;
+        var exhausted = std.testing.FailingAllocator.init(arena, .{ .fail_index = if (phase == 1) 1 else 0, .resize_fail_index = 0 });
+        if (phase != 2) machine.arena = exhausted.allocator();
+        settleThreadJoins(&record, &machine, pending.items, phase == 3);
+        machine.arena = arena;
+        try std.testing.expect(!record.joins_settled);
+        try std.testing.expectEqual(@as(usize, if (phase == 2) count else 0), getter.calls);
+        if (phase < 2) try std.testing.expect(exhausted.has_induced_failure);
+        if (phase == 3) try std.testing.expectEqual(@as(usize, 0), exhausted.alloc_index);
+        const reason = if (phase == 3) threadResult(&record) else outOfMemoryCompletionValue(ctx);
+        for (pending.items) |item| {
+            const pp = promise.promiseOf(Value.obj(item.promise)).?;
+            try std.testing.expectEqual(promise.State.rejected, pp.state);
+            try std.testing.expectEqual(reason.asObj(), pp.value.asObj());
+            try std.testing.expect(!item.settlement.slot.active);
+        }
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+        finishThreadJoinSettlement(&record);
+        try std.testing.expect(record.joins_settled and !threadJoinReadyLocked(&record));
+        try promise.materializeSettlementBatches(&machine, &ctx.microtasks);
+        for (0..count) |i| {
+            const job = ctx.microtasks.pop().?;
+            try std.testing.expect(!job.fulfilled);
+            try std.testing.expectEqual(@as(f64, @floatFromInt(i)), job.reaction.extra_argument.?.asNum());
+            try std.testing.expectEqual(reason.asObj(), job.argument.asObj());
+        }
+        try std.testing.expect(ctx.microtasks.isEmpty());
+    }
+}
+
+test "Thread startup entry roots retain and relocate the callable and arguments before registration" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.gc_scan_native_stack = false;
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    const heap = ctx.gc.?;
+    heap.collect();
+    const baseline = heap.live_cells;
+    var record = ThreadRecord{ .id = 1, .gil = undefined, .ctx = ctx };
+    try ctx.js_threads.append(ctx.gpa, &record);
+    defer _ = ctx.js_threads.pop();
+    const function = try gc_mod.allocObj(ctx.arena());
+    const captured = try gc_mod.allocObj(ctx.arena());
+    const argument = try gc_mod.allocObj(ctx.arena());
+    try function.setOwn(ctx.arena(), ctx.root_shape, "captured", Value.obj(captured));
+    try argument.setOwn(ctx.arena(), ctx.root_shape, "marker", Value.num(887));
+    var args = [_]Value{Value.obj(argument)};
+    record.entry_function = Value.obj(function);
+    record.entry_args = &args;
+    heap.collect();
+    try std.testing.expectEqual(baseline + 3, heap.live_cells);
+    try std.testing.expectEqual(@as(f64, 887), record.entry_args[0].asObj().getOwn("marker").?.asNum());
+    var moved: [2]value.Object = @splat(.{});
+    const Plan = struct {
+        from: [2]*value.Object,
+        to: *[2]value.Object,
+        pub fn resolve(self: *const @This(), cell: *anyopaque) *anyopaque {
+            for (self.from, 0..) |old, i| if (cell == @as(*anyopaque, @ptrCast(old))) return &self.to[i];
+            return cell;
+        }
+    };
+    relocateThreadRecordRoots(&record, &Plan{ .from = .{ function, argument }, .to = &moved });
+    try std.testing.expectEqual(&moved[0], record.entry_function.asObj());
+    try std.testing.expectEqual(&moved[1], record.entry_args[0].asObj());
+    rootThreadResult(&record, Value.undef());
+    try std.testing.expect(record.entry_function.isUndefined() and record.entry_args.len == 0);
+    heap.collect();
+    try std.testing.expectEqual(baseline, heap.live_cells);
+}
+
 test "Thread asyncJoin pending growth and synchronous join settlement gate" {
     var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
     const a = probe.allocator();
@@ -1248,9 +1372,8 @@ test "Thread asyncJoin pending growth and synchronous join settlement gate" {
     };
     defer rec.pending_joins.deinit(a);
 
-    var microtasks = promise.MicrotaskQueue{};
     var first_promise = value.Object{};
-    try appendPendingJoinLocked(&rec, a, .{ .promise = &first_promise, .microtasks = &microtasks });
+    try appendPendingJoinLocked(&rec, a, .{ .promise = &first_promise });
     try std.testing.expect(probe.saw_trace_sensitive_alloc);
     try std.testing.expect(rec.pending_joins.capacity >= pending_join_reserve_granularity);
 
@@ -1261,12 +1384,12 @@ test "Thread asyncJoin pending growth and synchronous join settlement gate" {
 
     var i: usize = 0;
     while (rec.pending_joins.items.len < first_capacity) : (i += 1) {
-        try appendPendingJoinLocked(&rec, a, .{ .promise = &promises[i], .microtasks = &microtasks });
+        try appendPendingJoinLocked(&rec, a, .{ .promise = &promises[i] });
     }
     try std.testing.expectEqual(first_capacity, rec.pending_joins.items.len);
     try std.testing.expectEqual(first_capacity, rec.pending_joins.capacity);
 
-    try appendPendingJoinLocked(&rec, a, .{ .promise = &promises[i], .microtasks = &microtasks });
+    try appendPendingJoinLocked(&rec, a, .{ .promise = &promises[i] });
     try std.testing.expectEqual(first_capacity + 1, rec.pending_joins.items.len);
     try std.testing.expect(rec.pending_joins.capacity > first_capacity);
 
@@ -2184,6 +2307,8 @@ pub fn relocateGilTaskRoots(g: *gil_mod.Gil, v: anytype) void {
 /// metadata and deliberately remain unchanged.
 pub fn relocateThreadRecordRoots(record: *ThreadRecord, v: anytype) void {
     gc_relocation.rewriteValueSlot(v, &record.result);
+    gc_relocation.rewriteValueSlot(v, &record.entry_function);
+    for (record.entry_args) |*arg| gc_relocation.rewriteValueSlot(v, arg);
     gc_relocation.rewriteOptionalSlot(v, value.Object, &record.js_obj);
     for (record.pending_joins.items) |*pending|
         gc_relocation.rewriteRequiredSlot(v, value.Object, &pending.promise);
@@ -2215,8 +2340,8 @@ test "realm root relocation rewrites GIL tasks thread records and property waite
     g.tasks = .fromOwnedSlice(&task_items);
 
     var queue = promise.MicrotaskQueue{};
-    var pending_joins = [_]PendingJoin{.{ .promise = &old_objects[5], .microtasks = &queue }};
-    var settling_joins = [_]PendingJoin{.{ .promise = &old_objects[6], .microtasks = &queue }};
+    var pending_joins = [_]PendingJoin{.{ .promise = &old_objects[5] }};
+    var settling_joins = [_]PendingJoin{.{ .promise = &old_objects[6] }};
     var record = ThreadRecord{
         .id = 7,
         .gil = &g,
@@ -3472,20 +3597,6 @@ fn abandonPropAsyncQueue(g: *gil_mod.Gil, queue: *promise.MicrotaskQueue) void {
     shrinkPropAsyncLocked(g, write);
 }
 
-fn transferPendingJoinQueue(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
-    const g = ctx.gil orelse return;
-    const io = agent.engineIo();
-    g.lockApi();
-    defer g.unlockApi();
-    for (ctx.js_threads.items) |rec| {
-        rec.join_mutex.lockUncancelable(io);
-        for (rec.pending_joins.items) |*pending| {
-            if (pending.microtasks == from) pending.microtasks = to;
-        }
-        rec.join_mutex.unlock(io);
-    }
-}
-
 /// Resolve expired property waitAsync tickets — called from the awaiters'
 /// poll points (awaitValue's GIL-handover loop, the drain tail).
 pub fn pollPropAsync(self: *Interpreter) void {
@@ -4013,27 +4124,39 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.asyncJoin called on incompatible receiver");
+    const current_queue = self.microtasks orelse
+        return self.throwError("Error", "Thread.prototype.asyncJoin requires a microtask queue");
     const p_obj = try promise.newPromise(self);
-    const pp = promise.promiseOf(Value.obj(p_obj)).?;
+    const root = try self.pushTempRoot(Value.obj(p_obj));
+    defer self.restoreTempRoots(root);
     const io = agent.engineIo();
     rec.join_mutex.lockUncancelable(io);
     if (rec.done) {
         const threw = rec.threw;
-        const result = rec.result;
         rec.join_mutex.unlock(io);
-        if (threw) try promise.reject(self, pp, result) else try promise.resolve(self, pp, result);
+        // An already-completed Thread resolves on the caller, preserving its
+        // current queue/affinity. This token is consumed before returning.
+        var settlement = try promise.PreparedSettlement.prepare(self, current_queue);
+        defer settlement.cancel(self);
+        const pp = promise.promiseOf(self.tempRoot(root, Value.obj(p_obj))).?;
+        if (threw) {
+            settlement.reject(self, pp, threadResult(rec));
+        } else {
+            settlement.resolve(self, pp, threadResult(rec)) catch |err| {
+                const reason = joinSettlementFailure(rec.ctx, self, err);
+                settlement.reject(self, promise.promiseOf(self.tempRoot(root, Value.obj(p_obj))).?, reason);
+            };
+        }
     } else {
-        const microtasks = self.microtasks orelse {
-            rec.join_mutex.unlock(io);
-            return self.throwError("Error", "Thread.prototype.asyncJoin requires a microtask queue");
-        };
-        appendPendingJoinLocked(rec, self.arena, .{ .promise = p_obj, .microtasks = microtasks, .owner = t_current }) catch |err| {
+        // The pending capability instead outlives its caller: reserve its final
+        // realm/host destination while the same lock excludes completion.
+        appendPreparedJoinLocked(rec, self, self.tempRoot(root, Value.obj(p_obj)).asObj(), if (t_current != null) &rec.ctx.microtasks else current_queue) catch |err| {
             rec.join_mutex.unlock(io);
             return err;
         };
         rec.join_mutex.unlock(io);
     }
-    return Value.obj(p_obj);
+    return self.tempRoot(root, Value.obj(p_obj));
 }
 
 /// `Thread.restrict(obj)` — pin `obj` to the calling thread; any enforced
