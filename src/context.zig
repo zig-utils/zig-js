@@ -13747,6 +13747,49 @@ test "Symbol constructor probes and ordinary wrapper coercion" {
 // `01` and `0x10` are "Unable to parse JSON string" because JSC parses the
 // leading `0` as a complete value and then rejects the remainder, and a raw
 // control byte inside a string is reported as an unterminated string.
+// A direct eval inherits its caller's `new.target`, so one inside a function
+// legitimately accepts it. An INDIRECT eval runs global code, which has none --
+// and the caller's permission used to survive that boundary, so a direct eval
+// nested in indirect-eval'd global code wrongly accepted `new.target` (#900).
+// Only the last case regressed; the rest pin the behaviour that must not move.
+test "an indirect eval does not carry the caller's new.target into global code" {
+    // Rejected: global code has no new.target binding, however it is reached.
+    try expectEvalStr("SyntaxError",
+        \\var caught = "";
+        \\try { (0, eval)("new.target"); } catch (e) { caught = e.name; }
+        \\caught
+    );
+    try expectEvalStr("SyntaxError",
+        \\var caught = "";
+        \\try { eval("new.target"); } catch (e) { caught = e.name; }
+        \\caught
+    );
+    // The regression: a function's permission must not survive an indirect eval.
+    try expectEvalStr("SyntaxError",
+        \\function f() {
+        \\  return (0, eval)("try { eval('new.target'); 'no throw' } catch (e) { e.name }");
+        \\}
+        \\f()
+    );
+    // Still legal: a direct eval inside a function inherits that function's
+    // binding, and the function's own binding survives the indirect eval above.
+    try expectEvalStr("function",
+        \\function g() { return eval("typeof new.target"); }
+        \\new g()
+    );
+    try expectEvalStr("undefined",
+        \\function h() { return eval("typeof new.target"); }
+        \\h()
+    );
+    try expectEvalStr("no throw",
+        \\function k() {
+        \\  var inner = (0, eval)("1 + 1");
+        \\  return eval("typeof new.target") === "function" && inner === 2 ? "no throw" : "wrong";
+        \\}
+        \\new k()
+    );
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

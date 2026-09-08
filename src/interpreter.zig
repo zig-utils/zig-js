@@ -21693,6 +21693,15 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // evaluation does; borrowing a movable StringCell leaves dangling names.
     const src = try args[0].asWtf8Owned(self.arena);
     if (sourceOnlyEmptyBlocks(src)) return Value.undef();
+    // An INDIRECT eval runs global code, which has no new.target binding. The
+    // caller's permission has to be cleared for the whole evaluation, not just
+    // for this parse: otherwise an indirect eval invoked from inside a function
+    // leaks that function's binding into the global code it creates, and a
+    // direct eval nested in that code accepts `new.target`. Restored on the way
+    // out so the calling function's own binding survives.
+    const saved_eval_new_target = self.direct_eval_new_target_allowed;
+    defer self.direct_eval_new_target_allowed = saved_eval_new_target;
+    if (!self.direct_eval_call) self.direct_eval_new_target_allowed = false;
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("eval", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
