@@ -13741,6 +13741,98 @@ test "Symbol constructor probes and ordinary wrapper coercion" {
 // requirement (#889). Every case below is the verbatim JSC message. The second
 // half re-runs each case inside a generator body, which only the bytecode VM
 // can execute, so the two tiers are held to the same text.
+// JSON.parse collapsed every syntax fault into one string; JavaScriptCore names
+// the fault (#898). Every expected string below came from a differential against
+// a real JavaScriptCore backend, including the ones that look surprising:
+// `01` and `0x10` are "Unable to parse JSON string" because JSC parses the
+// leading `0` as a complete value and then rejects the remainder, and a raw
+// control byte inside a string is reported as an unterminated string.
+test "JSON.parse names the syntax fault the way JavaScriptCore does" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "''", .message = "Unexpected EOF" },
+        .{ .source = "'   '", .message = "Unexpected EOF" },
+        .{ .source = "'[1,'", .message = "Unexpected EOF" },
+        .{ .source = "'{'", .message = "Expected '}'" },
+        .{ .source = "'{]'", .message = "Expected '}'" },
+        .{ .source = "'{a:1}'", .message = "Expected '}'" },
+        .{ .source = "'{,}'", .message = "Expected '}'" },
+        .{ .source = "'{\"a\":1'", .message = "Expected '}'" },
+        .{ .source = "'[1'", .message = "Expected ']'" },
+        .{ .source = "'[1 2]'", .message = "Expected ']'" },
+        .{ .source = "'{\"a\"}'", .message = "Expected ':' before value in object property definition" },
+        .{ .source = "'{\"a\" 1}'", .message = "Expected ':' before value in object property definition" },
+        .{ .source = "'{\"a\":1,\"b\"}'", .message = "Expected ':' before value in object property definition" },
+        // A non-string property name reads as a missing brace at the first
+        // property, but as a bad name once a comma has promised another one.
+        .{ .source = "'{\"a\":1,}'", .message = "Property name must be a string literal" },
+        .{ .source = "'{\"a\":1,,}'", .message = "Property name must be a string literal" },
+        .{ .source = "\"{'a':1}\"", .message = "Single quotes (') are not allowed in JSON" },
+        .{ .source = "\"'a'\"", .message = "Single quotes (') are not allowed in JSON" },
+        // A trailing comma in an array has its own wording, distinct from the
+        // bare `Unexpected token ','` that a missing element produces.
+        .{ .source = "'[1,]'", .message = "Unexpected comma at the end of array expression" },
+        .{ .source = "'[\"a\",]'", .message = "Unexpected comma at the end of array expression" },
+        .{ .source = "'[,]'", .message = "Unexpected token ','" },
+        .{ .source = "'[1,,2]'", .message = "Unexpected token ','" },
+        .{ .source = "'}'", .message = "Unexpected token '}'" },
+        .{ .source = "']'", .message = "Unexpected token ']'" },
+        .{ .source = "'{\"a\":}'", .message = "Unexpected token '}'" },
+        .{ .source = "'.1'", .message = "Unexpected token '.'" },
+        .{ .source = "'+1'", .message = "Unrecognized token '+'" },
+        .{ .source = "'@'", .message = "Unrecognized token '@'" },
+        .{ .source = "'*'", .message = "Unrecognized token '*'" },
+        // An identifier-shaped run is echoed whole, including the truncated
+        // literals a keyword match rejected.
+        .{ .source = "'NaN'", .message = "Unexpected identifier \"NaN\"" },
+        .{ .source = "'Infinity'", .message = "Unexpected identifier \"Infinity\"" },
+        .{ .source = "'undefined'", .message = "Unexpected identifier \"undefined\"" },
+        .{ .source = "'tru'", .message = "Unexpected identifier \"tru\"" },
+        .{ .source = "'nul'", .message = "Unexpected identifier \"nul\"" },
+        .{ .source = "'True'", .message = "Unexpected identifier \"True\"" },
+        .{ .source = "'$x'", .message = "Unexpected identifier \"$x\"" },
+        .{ .source = "'a1b'", .message = "Unexpected identifier \"a1b\"" },
+        .{ .source = "'\"abc'", .message = "Unterminated string" },
+        .{ .source = "'\"a\\tb\"'", .message = "Unterminated string" },
+        .{ .source = "'\"a\\\\qb\"'", .message = "Invalid escape character q" },
+        .{ .source = "'\"\\\\x41\"'", .message = "Invalid escape character x" },
+        .{ .source = "'\"a\\\\u12\"'", .message = "\\u must be followed by 4 hex digits" },
+        .{ .source = "'\"a\\\\u12g4\"'", .message = "\"\\u12g4\" is not a valid unicode escape" },
+        .{ .source = "'-'", .message = "Invalid number" },
+        .{ .source = "'-x'", .message = "Invalid number" },
+        .{ .source = "'1.'", .message = "Invalid digits after decimal point" },
+        .{ .source = "'1..2'", .message = "Invalid digits after decimal point" },
+        .{ .source = "'1e'", .message = "Exponent symbols should be followed by an optional '+' or '-' and then by at least one number" },
+        .{ .source = "'1e+'", .message = "Exponent symbols should be followed by an optional '+' or '-' and then by at least one number" },
+        // A leading zero is a complete value plus trailing content, not a
+        // malformed number -- JSC words it accordingly.
+        .{ .source = "'01'", .message = "Unable to parse JSON string" },
+        .{ .source = "'00'", .message = "Unable to parse JSON string" },
+        .{ .source = "'0x10'", .message = "Unable to parse JSON string" },
+        .{ .source = "'1 2'", .message = "Unable to parse JSON string" },
+        .{ .source = "'{} {}'", .message = "Unable to parse JSON string" },
+        .{ .source = "'1e5e5'", .message = "Unable to parse JSON string" },
+    };
+    var buffer: [640]u8 = undefined;
+    for (cases) |case| {
+        const probe = try std.fmt.bufPrint(
+            &buffer,
+            "var caught = ''; try {{ JSON.parse({s}); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught",
+            .{case.source},
+        );
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "SyntaxError: JSON Parse error: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        try expectEvalStr(expected, probe);
+    }
+    // JSON.stringify on a cycle was emitting V8's wording, not JavaScriptCore's.
+    try expectEvalStr("TypeError: JSON.stringify cannot serialize cyclic structures.",
+        \\var caught = "";
+        \\var o = {}; o.self = o;
+        \\try { JSON.stringify(o); } catch (e) { caught = e.name + ": " + e.message; }
+        \\caught
+    );
+}
+
 test "a failed call names its callee the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

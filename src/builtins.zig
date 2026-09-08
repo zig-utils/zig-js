@@ -3063,7 +3063,7 @@ const Stringifier = struct {
                 // incorrectly reject legal repeated sibling references.
                 const identity = value.RuntimeObjectIdentity.init(o);
                 if (try st.active.enter(self, a, st.cycle_allocator, identity))
-                    return self.throwError("TypeError", "Converting circular structure to JSON");
+                    return self.throwError("TypeError", "JSON.stringify cannot serialize cyclic structures.");
                 defer st.active.leave(identity);
                 const shape = try st.jsonShape(o);
                 if (shape.is_array) try st.serializeArray(buf, Value.obj(o), shape) else try st.serializeObject(buf, Value.obj(o), shape);
@@ -3386,14 +3386,14 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
     var p = JsonParser{ .s = s, .i = 0, .interp = self };
     p.skipWs();
     const parsed = p.parseValue() catch |err| switch (err) {
-        error.Invalid => return self.throwError("SyntaxError", "JSON.rawJSON: invalid JSON"),
+        error.Invalid => return self.throwError("SyntaxError", try jsonFaultMessage(self, p.fault)),
         error.OutOfMemory => return error.OutOfMemory,
         error.Throw => return error.Throw,
         error.OptShortCircuit => return error.OptShortCircuit,
     };
     const v = parsed.value;
     p.skipWs();
-    if (p.i != s.len) return self.throwError("SyntaxError", "JSON.rawJSON: trailing characters");
+    if (p.i != s.len) return self.throwError("SyntaxError", try jsonFaultMessage(self, .unable_to_parse));
     // The outermost value must be a primitive (not an object or array).
     if (v.isObject() and !v.asObj().is_bigint and !v.asObj().is_symbol)
         return self.throwError("SyntaxError", "JSON.rawJSON text must be a primitive JSON value");
@@ -3441,14 +3441,14 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     var p = JsonParser{ .s = text, .i = 0, .interp = self, .track_records = has_reviver };
     p.skipWs();
     const parsed = p.parseValue() catch |err| switch (err) {
-        error.Invalid => return self.throwError("SyntaxError", "JSON.parse: invalid JSON"),
+        error.Invalid => return self.throwError("SyntaxError", try jsonFaultMessage(self, p.fault)),
         error.OutOfMemory => return error.OutOfMemory,
         error.Throw => return error.Throw,
         error.OptShortCircuit => return error.OptShortCircuit,
     };
     const v = parsed.value;
     p.skipWs();
-    if (p.i != text.len) return self.throwError("SyntaxError", "JSON.parse: trailing characters");
+    if (p.i != text.len) return self.throwError("SyntaxError", try jsonFaultMessage(self, .unable_to_parse));
 
     // Optional reviver: walk the result bottom-up, replacing (or deleting, when
     // the reviver returns undefined) each property by the reviver's return.
@@ -3573,6 +3573,56 @@ fn internalizeStore(self: *Interpreter, val: Value, key: []const u8, nv: Value) 
 /// inferred-error-set dependency loop.
 const JErr = error{Invalid} || HostError;
 
+/// Which JSON syntax fault occurred. JavaScriptCore names each one, so the
+/// parser records the reason alongside its single `error.Invalid`; every string
+/// below is JSC's verbatim wording, measured against a real JSC backend.
+const JsonFault = union(enum) {
+    unexpected_eof,
+    /// Trailing content after a complete value. JSC reports `01` and `0x10`
+    /// this way too: it parses the leading `0` and then rejects the remainder.
+    unable_to_parse,
+    expected_object_close,
+    expected_array_close,
+    expected_colon,
+    property_name_not_string,
+    single_quotes,
+    trailing_array_comma,
+    unexpected_token: []const u8,
+    unrecognized_token: []const u8,
+    unexpected_identifier: []const u8,
+    unterminated_string,
+    invalid_escape: []const u8,
+    incomplete_unicode_escape,
+    invalid_unicode_escape: []const u8,
+    invalid_number,
+    invalid_fraction_digits,
+    invalid_exponent,
+};
+
+fn jsonFaultMessage(self: *Interpreter, fault: JsonFault) std.mem.Allocator.Error![]const u8 {
+    const prefix = "JSON Parse error: ";
+    return switch (fault) {
+        .unexpected_eof => prefix ++ "Unexpected EOF",
+        .unable_to_parse => prefix ++ "Unable to parse JSON string",
+        .expected_object_close => prefix ++ "Expected '}'",
+        .expected_array_close => prefix ++ "Expected ']'",
+        .expected_colon => prefix ++ "Expected ':' before value in object property definition",
+        .property_name_not_string => prefix ++ "Property name must be a string literal",
+        .single_quotes => prefix ++ "Single quotes (') are not allowed in JSON",
+        .trailing_array_comma => prefix ++ "Unexpected comma at the end of array expression",
+        .unterminated_string => prefix ++ "Unterminated string",
+        .incomplete_unicode_escape => prefix ++ "\\u must be followed by 4 hex digits",
+        .invalid_number => prefix ++ "Invalid number",
+        .invalid_fraction_digits => prefix ++ "Invalid digits after decimal point",
+        .invalid_exponent => prefix ++ "Exponent symbols should be followed by an optional '+' or '-' and then by at least one number",
+        .unexpected_token => |c| try std.fmt.allocPrint(self.arena, prefix ++ "Unexpected token '{s}'", .{c}),
+        .unrecognized_token => |c| try std.fmt.allocPrint(self.arena, prefix ++ "Unrecognized token '{s}'", .{c}),
+        .unexpected_identifier => |w| try std.fmt.allocPrint(self.arena, prefix ++ "Unexpected identifier \"{s}\"", .{w}),
+        .invalid_escape => |c| try std.fmt.allocPrint(self.arena, prefix ++ "Invalid escape character {s}", .{c}),
+        .invalid_unicode_escape => |t| try std.fmt.allocPrint(self.arena, prefix ++ "\"{s}\" is not a valid unicode escape", .{t}),
+    };
+}
+
 const JsonParsed = struct {
     value: Value,
     record: ?*JsonParseRecord = null,
@@ -3660,6 +3710,47 @@ const JsonParser = struct {
     interp: *Interpreter,
     track_records: bool = false,
     record_hash_context: ?JsonStringHashContext = null,
+    /// Set by `fail` alongside every `error.Invalid`, read once at the public
+    /// boundary. Only meaningful after a parse returned `error.Invalid`.
+    fault: JsonFault = .unexpected_eof,
+
+    fn fail(p: *JsonParser, fault: JsonFault) JErr {
+        p.fault = fault;
+        return error.Invalid;
+    }
+
+    fn identifierPart(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+    }
+
+    /// The complete UTF-8 sequence starting at `at`. JavaScriptCore echoes the
+    /// offending CHARACTER, and a lone byte from a multi-byte sequence is not a
+    /// legal string for the engine to carry.
+    fn characterAt(p: *const JsonParser, at: usize) []const u8 {
+        if (at >= p.s.len) return p.s[p.s.len..];
+        const len = std.unicode.utf8ByteSequenceLength(p.s[at]) catch 1;
+        return p.s[at..@min(at + len, p.s.len)];
+    }
+
+    /// Classify a byte that cannot begin a JSON value, the way JSC does: an
+    /// identifier-looking run is echoed whole (`NaN`, `undefined`, and the
+    /// truncated `tru`/`nul` a literal match rejected), a single quote gets its
+    /// own advice, structural punctuation is "unexpected" and anything else is
+    /// "unrecognized".
+    fn failValueStart(p: *JsonParser) JErr {
+        if (p.i >= p.s.len) return p.fail(.unexpected_eof);
+        const c = p.s[p.i];
+        if (c == '\'') return p.fail(.single_quotes);
+        if (std.ascii.isAlphabetic(c) or c == '_' or c == '$') {
+            var j = p.i;
+            while (j < p.s.len and identifierPart(p.s[j])) j += 1;
+            return p.fail(.{ .unexpected_identifier = p.s[p.i..j] });
+        }
+        return switch (c) {
+            '}', ']', ',', '.', ':' => p.fail(.{ .unexpected_token = p.characterAt(p.i) }),
+            else => p.fail(.{ .unrecognized_token = p.characterAt(p.i) }),
+        };
+    }
 
     fn recordHashContext(p: *JsonParser) HostError!JsonStringHashContext {
         if (p.record_hash_context) |context| return context;
@@ -3694,7 +3785,7 @@ const JsonParser = struct {
 
     fn parseValue(p: *JsonParser) JErr!JsonParsed {
         p.skipWs();
-        if (p.i >= p.s.len) return error.Invalid;
+        if (p.i >= p.s.len) return p.fail(.unexpected_eof);
         const c = p.s[p.i];
         switch (c) {
             // Only containers recurse back into parseValue. Charge their
@@ -3723,13 +3814,16 @@ const JsonParser = struct {
             't' => return p.parseLiteral("true", Value.boolVal(true)),
             'f' => return p.parseLiteral("false", Value.boolVal(false)),
             'n' => return p.parseLiteral("null", Value.nul()),
-            else => return p.parseNumber(),
+            else => {
+                if (c == '-' or std.ascii.isDigit(c)) return p.parseNumber();
+                return p.failValueStart();
+            },
         }
     }
 
     fn parseLiteral(p: *JsonParser, lit: []const u8, v: Value) JErr!JsonParsed {
         const start = p.i;
-        if (p.i + lit.len > p.s.len or !std.mem.eql(u8, p.s[p.i .. p.i + lit.len], lit)) return error.Invalid;
+        if (p.i + lit.len > p.s.len or !std.mem.eql(u8, p.s[p.i .. p.i + lit.len], lit)) return p.failValueStart();
         p.i += lit.len;
         return p.parsed(v, p.s[start..p.i], .none);
     }
@@ -3739,26 +3833,26 @@ const JsonParser = struct {
         const digit = std.ascii.isDigit;
         if (p.i < p.s.len and p.s[p.i] == '-') p.i += 1; // optional minus (no leading '+')
         // Integer part: a lone '0', or [1-9] followed by digits (no leading zeros).
-        if (p.i >= p.s.len) return error.Invalid;
+        if (p.i >= p.s.len) return p.fail(.invalid_number);
         if (p.s[p.i] == '0') {
             p.i += 1;
         } else if (p.s[p.i] >= '1' and p.s[p.i] <= '9') {
             while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
-        } else return error.Invalid;
+        } else return p.fail(.invalid_number);
         // Fraction: a '.' must be followed by at least one digit.
         if (p.i < p.s.len and p.s[p.i] == '.') {
             p.i += 1;
-            if (p.i >= p.s.len or !digit(p.s[p.i])) return error.Invalid;
+            if (p.i >= p.s.len or !digit(p.s[p.i])) return p.fail(.invalid_fraction_digits);
             while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
         }
         // Exponent: e/E, optional sign, at least one digit.
         if (p.i < p.s.len and (p.s[p.i] == 'e' or p.s[p.i] == 'E')) {
             p.i += 1;
             if (p.i < p.s.len and (p.s[p.i] == '+' or p.s[p.i] == '-')) p.i += 1;
-            if (p.i >= p.s.len or !digit(p.s[p.i])) return error.Invalid;
+            if (p.i >= p.s.len or !digit(p.s[p.i])) return p.fail(.invalid_exponent);
             while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
         }
-        const n = std.fmt.parseFloat(f64, p.s[start..p.i]) catch return error.Invalid;
+        const n = std.fmt.parseFloat(f64, p.s[start..p.i]) catch return p.fail(.invalid_number);
         return p.parsed(Value.num(n), p.s[start..p.i], .none);
     }
 
@@ -3773,7 +3867,7 @@ const JsonParser = struct {
                 return result;
             }
             if (c == '\\') break;
-            if (c < 0x20) return error.Invalid;
+            if (c < 0x20) return p.fail(.unterminated_string);
         }
 
         // Escapes require decoding into owned scratch. The overwhelmingly
@@ -3793,7 +3887,7 @@ const JsonParser = struct {
             }
             if (c == '\\') {
                 p.i += 1;
-                if (p.i >= p.s.len) return error.Invalid;
+                if (p.i >= p.s.len) return p.fail(.unterminated_string);
                 const e = p.s[p.i];
                 try buf.append(a, switch (e) {
                     'n' => '\n',
@@ -3806,8 +3900,9 @@ const JsonParser = struct {
                     '\\' => '\\',
                     'u' => {
                         // \uXXXX — decode the UTF-16 code unit(s) and store (W)TF-8.
-                        if (p.i + 4 >= p.s.len) return error.Invalid;
-                        const code = std.fmt.parseInt(u16, p.s[p.i + 1 .. p.i + 5], 16) catch return error.Invalid;
+                        if (p.i + 4 >= p.s.len) return p.fail(.incomplete_unicode_escape);
+                        const code = std.fmt.parseInt(u16, p.s[p.i + 1 .. p.i + 5], 16) catch
+                            return p.fail(.{ .invalid_unicode_escape = p.s[p.i - 1 .. p.i + 5] });
                         p.i += 4;
                         // A high surrogate immediately followed by a low surrogate
                         // combines into an astral code point. Any UNPAIRED surrogate
@@ -3817,7 +3912,8 @@ const JsonParser = struct {
                         if (code >= 0xD800 and code <= 0xDBFF and
                             p.i + 6 < p.s.len and p.s[p.i + 1] == '\\' and p.s[p.i + 2] == 'u')
                         {
-                            const low = std.fmt.parseInt(u16, p.s[p.i + 3 .. p.i + 7], 16) catch return error.Invalid;
+                            const low = std.fmt.parseInt(u16, p.s[p.i + 3 .. p.i + 7], 16) catch
+                                return p.fail(.{ .invalid_unicode_escape = p.s[p.i + 1 .. p.i + 7] });
                             if (low >= 0xDC00 and low <= 0xDFFF) {
                                 const cp: u21 = 0x10000 + ((@as(u21, code) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
                                 try appendUtf8Codepoint(a, &buf, cp);
@@ -3831,17 +3927,17 @@ const JsonParser = struct {
                         p.i += 1;
                         continue;
                     },
-                    else => return error.Invalid, // unknown escape
+                    else => return p.fail(.{ .invalid_escape = p.characterAt(p.i) }), // unknown escape
                 });
                 p.i += 1;
             } else if (c < 0x20) {
-                return error.Invalid; // raw control characters are not allowed in JSON strings
+                return p.fail(.unterminated_string); // JSC words a raw control byte this way
             } else {
                 try buf.append(a, c);
                 p.i += 1;
             }
         }
-        return error.Invalid;
+        return p.fail(.unterminated_string);
     }
 
     fn parseArray(p: *JsonParser) JErr!JsonParsed {
@@ -3858,16 +3954,20 @@ const JsonParser = struct {
             try result.asObj().appendElement(p.interp.arena, child.value);
             if (p.track_records) try elements.append(p.interp.arena, child.record.?);
             p.skipWs();
-            if (p.i >= p.s.len) return error.Invalid;
+            if (p.i >= p.s.len) return p.fail(.expected_array_close);
             if (p.s[p.i] == ',') {
                 p.i += 1;
+                // `[1,]` is its own diagnostic in JSC, distinct from the
+                // `Unexpected token ','` that `[,]` and `[1,,2]` produce.
+                p.skipWs();
+                if (p.i < p.s.len and p.s[p.i] == ']') return p.fail(.trailing_array_comma);
                 continue;
             }
             if (p.s[p.i] == ']') {
                 p.i += 1;
                 return p.parsed(result, null, .{ .elements = elements });
             }
-            return error.Invalid;
+            return p.fail(.expected_array_close);
         }
     }
 
@@ -3880,12 +3980,16 @@ const JsonParser = struct {
             p.i += 1;
             return p.parsed(result, null, .{ .entries = entries });
         }
+        var after_comma = false;
         while (true) {
             p.skipWs();
-            if (p.i >= p.s.len or p.s[p.i] != '"') return error.Invalid;
+            if (p.i >= p.s.len or p.s[p.i] != '"') {
+                if (p.i < p.s.len and p.s[p.i] == '\'') return p.fail(.single_quotes);
+                return p.fail(if (after_comma) .property_name_not_string else .expected_object_close);
+            }
             const key = try p.parseString();
             p.skipWs();
-            if (p.i >= p.s.len or p.s[p.i] != ':') return error.Invalid;
+            if (p.i >= p.s.len or p.s[p.i] != ':') return p.fail(.expected_colon);
             p.i += 1;
             const child = try p.parseValue();
             // Parsed JSON strings are public property keys. Encode a leading
@@ -3905,16 +4009,17 @@ const JsonParser = struct {
                 try p.recordHashContext(),
             );
             p.skipWs();
-            if (p.i >= p.s.len) return error.Invalid;
+            if (p.i >= p.s.len) return p.fail(.expected_object_close);
             if (p.s[p.i] == ',') {
                 p.i += 1;
+                after_comma = true;
                 continue;
             }
             if (p.s[p.i] == '}') {
                 p.i += 1;
                 return p.parsed(result, null, .{ .entries = entries });
             }
-            return error.Invalid;
+            return p.fail(.expected_object_close);
         }
     }
 };
