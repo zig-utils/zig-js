@@ -52,7 +52,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
+          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
       # benchmark-comparison-test includes the representative-matrix contract,
       # which is a durable TypeScript tool executed by the owned Home runtime.
       # Keep this producer chain identical to the main CI job: zig-js first
