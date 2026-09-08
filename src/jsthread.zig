@@ -91,6 +91,9 @@ pub const ThreadRecord = struct {
 
 const pending_join_reserve_granularity = 16;
 
+// Only a live native worker borrows a ThreadRecord in TLS. Host identity comes
+// from the entered interpreter's realm; Context creation/destruction must never
+// leave an arena-owned main record in native TLS (#905).
 threadlocal var t_current: ?*ThreadRecord = null;
 
 /// Internal profiling counters for issue #1's long-tail contention work.
@@ -508,15 +511,25 @@ inline fn finishWorkerRunTimer(start_ns: ?i96) void {
     }
 }
 
-pub fn currentThreadId() u64 {
-    return if (t_current) |rec| rec.id else 0;
+fn currentThreadRecord(self: *const Interpreter) ?*ThreadRecord {
+    const raw = self.gc_realm_context orelse return null;
+    const ctx: *Context = @ptrCast(@alignCast(raw));
+    // A native callback may enter another Context and then return to this
+    // worker. Keep its native identity alive, but use the nested realm's host
+    // identity for the duration of that entry.
+    if (t_current) |rec| if (rec.ctx == ctx) return rec;
+    return ctx.main_js_thread;
+}
+
+pub fn currentThreadId(self: *const Interpreter) u64 {
+    return if (currentThreadRecord(self)) |rec| rec.id else 0;
 }
 
 /// Only the realm host owns whole-run-loop quiescence and Context teardown.
 /// A spawned Thread must publish its own completion without waiting for an
 /// unrelated peer-owned task: that peer may be synchronously joining it.
-pub fn isRealmHostThread() bool {
-    return t_current == null;
+pub fn isRealmHostThread(self: *const Interpreter) bool {
+    return currentThreadId(self) == 0;
 }
 
 test "jsthread contention stats reset and snapshot" {
@@ -704,7 +717,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
     const main_rec = try a.create(ThreadRecord);
     main_rec.* = .{ .id = 0, .gil = ctx.gil.?, .ctx = ctx, .done = true, .exited = true, .microtasks = &ctx.microtasks };
     main_rec.js_obj = try makeWrapper(ctx, main_rec);
-    t_current = main_rec;
+    ctx.main_js_thread = main_rec;
     ctx.js_threads.appendAssumeCapacity(main_rec);
 
     try installSyncAPI(ctx);
@@ -916,6 +929,7 @@ fn threadMain(rec: *ThreadRecord) void {
         if (rec.ctx.parallel_js) g.release();
     }
     t_current = rec;
+    defer t_current = null;
     defer clearThreadLocalValuesForCurrentThread(rec);
     // A per-thread interpreter over the SHARED realm: same arena, environment,
     // global object, and shapes (safe under the GIL), with its own job queues.
@@ -1448,7 +1462,7 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.join called on incompatible receiver");
-    if (rec == t_current) return self.throwError("Error", "Thread cannot join itself");
+    if (rec == currentThreadRecord(self)) return self.throwError("Error", "Thread cannot join itself");
     // The gate guards the BLOCK, not the call: joining a finished thread is
     // always allowed.
     const io = agent.engineIo();
@@ -1489,8 +1503,7 @@ fn threadCurrentGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    _ = self;
-    const rec = t_current orelse return Value.undef();
+    const rec = currentThreadRecord(self) orelse return Value.undef();
     return Value.obj(rec.js_obj.?);
 }
 
@@ -2086,8 +2099,8 @@ test "ThreadLocal value index is secure lazy failure atomic and exact" {
     try std.testing.expectEqual(tids.len - 1, map.count());
 }
 
-fn rememberThreadLocalForCurrentThread(rec: *TLRecord) !void {
-    const thread_rec = t_current orelse return;
+fn rememberThreadLocalForCurrentThread(self: *Interpreter, rec: *TLRecord) !void {
+    const thread_rec = currentThreadRecord(self) orelse return;
     if (thread_rec.id == 0) return;
     for (thread_rec.touched_thread_locals.items) |seen| {
         if (seen == rec) return;
@@ -3145,7 +3158,7 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
         rec.unlockMap();
         return Value.undef();
     }
-    try rememberThreadLocalForCurrentThread(rec);
+    try rememberThreadLocalForCurrentThread(self, rec);
     rec.lockMap();
     defer rec.unlockMap();
     try rec.map.put(rec.arena, currentTid(), v);
@@ -3628,7 +3641,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
     defer completion.cancel(self);
     var exit_completion: promise.PreparedSettlement = .{};
     defer exit_completion.cancel(self);
-    if (t_current) |rec| if (microtasks != &rec.ctx.microtasks) {
+    if (currentThreadRecord(self)) |rec| if (microtasks != &rec.ctx.microtasks) {
         // Notification may win before or after the owner closes its local
         // queue. Both possible destinations must already own publication space.
         exit_completion = try promise.PreparedSettlement.prepare(self, &rec.ctx.microtasks);
@@ -3641,7 +3654,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
         .promise = self.tempRoot(roots + 2, promise_value).asObj(),
         .microtasks = microtasks,
-        .thread = t_current,
+        .thread = currentThreadRecord(self),
         .owner = @ptrCast(g),
     };
     var owner_locked = t.thread != null;
@@ -4277,7 +4290,7 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     } else {
         // The pending capability instead outlives its caller: reserve its final
         // realm/host destination while the same lock excludes completion.
-        appendPreparedJoinLocked(rec, self, self.tempRoot(root, Value.obj(p_obj)).asObj(), if (t_current != null) &rec.ctx.microtasks else current_queue) catch |err| {
+        appendPreparedJoinLocked(rec, self, self.tempRoot(root, Value.obj(p_obj)).asObj(), &rec.ctx.microtasks) catch |err| {
             rec.join_mutex.unlock(io);
             return err;
         };
@@ -5329,5 +5342,76 @@ test "property waitAsync admission OOM preserves prior ticket and notification o
         try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
         try std.testing.expect(g.prop_mutex.tryLock());
         g.prop_mutex.unlock(agent.engineIo());
+    }
+}
+
+test "Thread identity preserves native workers across nested host entry and ThreadLocal cleanup" {
+    const Probe = struct {
+        gil_mode: bool,
+        failure: ?anyerror = null,
+        host_calls: usize = 0,
+        worker_calls: usize = 0,
+        fn hostIdentity(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            return Value.boolVal(isRealmHostThread(machine) and currentThreadId(machine) == 0);
+        }
+        fn nestedEntry(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const probe: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            const before = currentThreadRecord(machine);
+            const was_host = isRealmHostThread(machine);
+            if (was_host) probe.host_calls += 1 else probe.worker_calls += 1;
+            const nested = Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = probe.gil_mode }) catch |err| {
+                probe.failure = err;
+                return Value.boolVal(false);
+            };
+            var matches = false;
+            {
+                defer nested.destroy();
+                const saved = gc_mod.setActiveContext(nested);
+                defer gc_mod.restoreActiveContext(saved);
+                interp.setNative(nested.arena(), nested.root_shape, nested.global_object, "nestedHostIdentity", 0, hostIdentity) catch |err| {
+                    probe.failure = err;
+                    return Value.boolVal(false);
+                };
+                const observed = nested.evaluate("Thread.current.id === 0 && nestedHostIdentity();") catch |err| {
+                    probe.failure = err;
+                    return Value.boolVal(false);
+                };
+                matches = observed.asBool();
+            }
+            return Value.boolVal(matches and before == currentThreadRecord(machine) and was_host == isRealmHostThread(machine));
+        }
+    };
+    for ([_]bool{ false, true }) |gil_mode| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil_mode });
+        defer ctx.destroy();
+        var probe = Probe{ .gil_mode = gil_mode };
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "nestedThreadEntry", 0, Probe.nestedEntry);
+        ctx.global_object.getOwn("nestedThreadEntry").?.asObj().private_data = &probe;
+        try std.testing.expect((try ctx.evaluate(
+            \\globalThis.identityLocal = new ThreadLocal();
+            \\identityLocal.value = 'main';
+            \\globalThis.hostIdentity = Thread.current;
+            \\nestedThreadEntry() && Thread.current === hostIdentity;
+        )).asBool());
+        try std.testing.expect((try ctx.evaluate(
+            \\new Thread(function() {
+            \\  const me = Thread.current;
+            \\  if (!nestedThreadEntry()) throw new Error('nested identity');
+            \\  identityLocal.value = { marker: 905 };
+            \\  return Thread.current === me && me.id !== 0 && identityLocal.value.marker === 905;
+            \\}).join();
+        )).asBool());
+        try std.testing.expect(probe.failure == null);
+        try std.testing.expectEqual(@as(usize, 1), probe.host_calls);
+        try std.testing.expectEqual(@as(usize, 1), probe.worker_calls);
+        const local = recOf(TLRecord, ctx.global_object.getOwn("identityLocal").?).?;
+        try std.testing.expectEqual(@as(usize, 1), local.map.count());
+        try std.testing.expectEqualStrings("main", local.map.get(currentTid()).?.asStr());
+        for (ctx.js_threads.items) |rec| try std.testing.expectEqual(@as(usize, 0), rec.touched_thread_locals.items.len);
+        try std.testing.expect(t_current == null);
     }
 }

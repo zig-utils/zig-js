@@ -11569,7 +11569,7 @@ pub const Interpreter = struct {
                 self.unlockMicrotasks();
                 const tasks_empty = g.tasks_queued.load(.acquire) == 0;
                 if (q_empty and tasks_empty) {
-                    if (jsthread.isRealmHostThread() and
+                    if (jsthread.isRealmHostThread(self) and
                         g.inFlightTaskCount() > self.ownedHoldJobCount())
                     {
                         jsthread.waitForTaskStateChange(self);
@@ -23292,7 +23292,7 @@ fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         self.unlockMicrotasks();
         const tasks_queued = if (self.gil) |g| g.tasks_queued.load(.acquire) != 0 else false;
         const tasks_in_flight = if (self.gil) |g|
-            jsthread.isRealmHostThread() and g.inFlightTaskCount() > self.ownedHoldJobCount()
+            jsthread.isRealmHostThread(self) and g.inFlightTaskCount() > self.ownedHoldJobCount()
         else
             false;
         if (before == 0 and after == 0 and !tasks_queued and !tasks_in_flight) break;
@@ -36876,7 +36876,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         const t_ns: ?u64 = if (std.math.isNan(t_ms) or t_ms == std.math.inf(f64)) null else if (t_ms <= 0) 0 else if (t_ms >= 1e12) null else @intFromFloat(t_ms * std.time.ns_per_ms);
         return jsthread.propWait(self, args, t_ns);
     }
-    if (args.len > 0 and args[0].isObject() and args[0].asObj().typedArray() != null and self.gil != null and jsthread.currentThreadId() != 0)
+    if (args.len > 0 and args[0].isObject() and args[0].asObj().typedArray() != null and self.gil != null and jsthread.currentThreadId(self) != 0)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef(), false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else Value.undef());

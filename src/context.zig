@@ -4487,6 +4487,10 @@ pub const Context = struct {
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
+    /// Published once during Thread API installation, before any realm entry
+    /// or worker spawn. Separate from the growable registry so host identity
+    /// reads need neither a lock nor a borrowed slice during peer admission.
+    main_js_thread: ?*jsthread.ThreadRecord = null,
     /// Interpreters currently executing or draining host checkpoints in this
     /// realm. GC-mode collections trace these explicit execution roots at
     /// quiescent checkpoints; arbitrary native/Zig stack scanning is still a
@@ -5700,7 +5704,7 @@ pub const Context = struct {
             .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,
             .gc = self.gc,
-            .gc_realm_context = if (self.gc != null) self else null,
+            .gc_realm_context = self,
             .gc_environment_trace_active = if (self.gc_state) |state| &state.environment_trace_active else null,
             // Interpreter-owned buffers are reclaimable side storage, not GC
             // cells. Allocate them directly from the Context allocator so a
@@ -42999,5 +43003,31 @@ test "host checkpoint receives terminal Thread drain OOM after asyncJoin publica
             try std.testing.expectEqual(@as(usize, 1), fault.calls);
             try std.testing.expect(ctx.microtasks.isEmpty());
         }
+    }
+}
+
+test "Thread identity remains realm scoped across alternating hosts and Context destruction" {
+    for ([_]bool{ false, true }) |enable_gc| {
+        const first = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_threads = true, .enable_gc = enable_gc });
+        defer first.destroy();
+        _ = try first.evaluate("globalThis.savedThreadIdentity = Thread.current;");
+        const second = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_threads = true, .enable_gc = enable_gc });
+        var second_live = true;
+        defer if (second_live) second.destroy();
+        _ = try second.evaluate("globalThis.savedThreadIdentity = Thread.current;");
+        try std.testing.expect((try first.evaluate("Thread.current === savedThreadIdentity;")).asBool());
+        try std.testing.expect((try second.evaluate("Thread.current === savedThreadIdentity;")).asBool());
+        try std.testing.expect(first.main_js_thread.?.js_obj != second.main_js_thread.?.js_obj);
+        second.destroy();
+        second_live = false;
+        try std.testing.expect((try first.evaluate("Thread.current === savedThreadIdentity && Thread.current.id === 0;")).asBool());
+        _ = try first.evaluate(
+            \\globalThis.identityWaitDeliveries = 0;
+            \\Atomics.waitAsync({ value: 0 }, 'value', 0, 1).value.then(function() { identityWaitDeliveries++; });
+        );
+        try std.testing.expectEqual(@as(f64, 1), first.global_object.getOwn("identityWaitDeliveries").?.asNum());
+        try std.testing.expect(first.microtasks.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), first.microtasks.reservations);
+        try std.testing.expect(first.main_js_thread.?.prop_async_head == null);
     }
 }
