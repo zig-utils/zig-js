@@ -1795,7 +1795,7 @@ fn applyDescriptor(self: *Interpreter, target_input: *value.Object, key: []const
         d = descriptor_root.get(self);
         if (trap.isUndefined() or trap.isNull())
             return applyDescriptor(self, self.tempRoot(proxy_target_root, Value.obj(tgt)).asObj(), key, d);
-        if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
+        if (!trap.isCallable()) return self.throwError("TypeError", "'defineProperty' property of a Proxy's handler should be callable");
         const trap_desc = try d.toObject(self);
         const res = try self.callValueWithThis(trap, &.{ self.tempRoot(proxy_target_root, Value.obj(tgt)), try self.keyToValue(key), trap_desc }, self.tempRoot(handler_root, Value.obj(handler)));
         if (!res.toBoolean()) return false;
@@ -1807,18 +1807,18 @@ fn applyDescriptor(self: *Interpreter, target_input: *value.Object, key: []const
         d = descriptor_root.get(self);
         const setting_nonconfig = if (d.configurable) |c| !c else false;
         if (target_desc.isUndefined()) {
-            if (!extensible) return self.throwError("TypeError", "proxy 'defineProperty' cannot add a property to a non-extensible target");
-            if (setting_nonconfig) return self.throwError("TypeError", "proxy 'defineProperty' cannot define a non-configurable property absent from the target");
+            if (!extensible) return self.throwError("TypeError", "Proxy's 'defineProperty' trap returned true even though getOwnPropertyDescriptor of the Proxy's target returned undefined and the target is non-extensible");
+            if (setting_nonconfig) return self.throwError("TypeError", "Proxy's 'defineProperty' trap returned true for a non-configurable field even though getOwnPropertyDescriptor of the Proxy's target returned undefined");
         } else {
             const current = self.tempRoot(target_desc_root, target_desc).asObj();
             const current_attr = completedDescAttr(current);
             if (!current_attr.configurable and !try compatibleRedefine(current_attr, current.getOwn("value"), completedDescAccessor(current), d))
-                return self.throwError("TypeError", "proxy 'defineProperty' cannot report an incompatible non-configurable redefinition");
+                return self.throwError("TypeError", "Proxy's 'defineProperty' trap did not define a property on its target that is compatible with the trap's input descriptor");
             if (setting_nonconfig and current_attr.configurable)
-                return self.throwError("TypeError", "proxy 'defineProperty' cannot report a configurable target property as non-configurable");
+                return self.throwError("TypeError", "Proxy's 'defineProperty' trap did not define a non-configurable property on its target even though the input descriptor to the trap said it must do so");
             if (!current_attr.configurable and current_attr.writable) {
                 if (d.writable) |w| if (!w)
-                    return self.throwError("TypeError", "proxy 'defineProperty' cannot report a non-configurable writable property as non-writable");
+                    return self.throwError("TypeError", "Proxy's 'defineProperty' trap returned true for a non-writable input descriptor when the target's property is non-configurable and writable");
             }
         }
         return true;
@@ -2581,9 +2581,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         const trap = try self.getProperty(Value.obj(handler), "getOwnPropertyDescriptor");
         if (trap.isUndefined() or trap.isNull())
             return objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ self.tempRoot(target_root, Value.obj(tgt)), try self.keyToValue(key) });
-        if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap is not callable");
+        if (!trap.isCallable()) return self.throwError("TypeError", "'getOwnPropertyDescriptor' property of a Proxy's handler should be callable");
         const res = try self.callValueWithThis(trap, &.{ self.tempRoot(target_root, Value.obj(tgt)), try self.keyToValue(key) }, self.tempRoot(handler_root, Value.obj(handler)));
-        if (!res.isUndefined() and !isRealObject(res)) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
+        if (!res.isUndefined() and !isRealObject(res)) return self.throwError("TypeError", "result of 'getOwnPropertyDescriptor' call should either be an Object or undefined");
         const result_root = try self.pushTempRoot(res);
         const target_desc = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ self.tempRoot(target_root, Value.obj(tgt)), try self.keyToValue(key) });
         const descriptor_root = try self.pushTempRoot(target_desc);
@@ -2592,7 +2592,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         if (res.isUndefined()) {
             if (target_desc.isObject()) {
                 const target_attr = completedDescAttr(target_desc.asObj());
-                if (!target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable property as absent");
+                if (!target_attr.configurable) return self.throwError("TypeError", "When the result of 'getOwnPropertyDescriptor' is undefined the target must be configurable");
                 if (!try proxyTargetExtensible(self, self.tempRoot(target_root, Value.obj(tgt)).asObj()))
                     return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a property of a non-extensible target as absent");
             }
@@ -2606,8 +2606,8 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             .configurable = result_desc.configurable.?,
         };
         if (!target_desc.isObject()) {
-            if (!target_extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new property on a non-extensible target");
-            if (!result_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new non-configurable property");
+            if (!target_extensible) return self.throwError("TypeError", "Result from 'getOwnPropertyDescriptor' fails the IsCompatiblePropertyDescriptor test");
+            if (!result_attr.configurable) return self.throwError("TypeError", "Result from 'getOwnPropertyDescriptor' can't be non-configurable when the 'target' doesn't have it as an own property or if it is a configurable own property on 'target'");
         } else {
             const target_obj = self.tempRoot(descriptor_root, target_desc).asObj();
             const target_attr = completedDescAttr(target_obj);
@@ -2616,10 +2616,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             if (!target_attr.configurable and !try compatibleRedefine(target_attr, target_data, target_acc, result_desc))
                 return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' reported an incompatible descriptor");
             if (!result_attr.configurable) {
-                if (target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a configurable target property as non-configurable");
+                if (target_attr.configurable) return self.throwError("TypeError", "Result from 'getOwnPropertyDescriptor' can't be non-configurable when the 'target' doesn't have it as an own property or if it is a configurable own property on 'target'");
                 if (result_desc.writable) |w| {
                     if (!w and target_attr.writable)
-                        return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable writable target property as non-writable");
+                        return self.throwError("TypeError", "Result from 'getOwnPropertyDescriptor' can't be non-configurable and non-writable when the target's property is writable");
                 }
             }
         }

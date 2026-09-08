@@ -13794,6 +13794,66 @@ test "an indirect eval does not carry the caller's new.target into global code" 
     );
 }
 
+// The Proxy and detached-buffer message tables read as V8-derived; JavaScriptCore
+// words them differently and, in several places, collapses distinctions zig-js
+// drew (#903). Every string below was measured against a real JavaScriptCore
+// backend. Two shapes are worth noting: JSC uses ONE constant for every
+// operation on a revoked proxy rather than naming the trap, and ONE constant for
+// any operation on a detached view whether it is a TypedArray or a DataView.
+test "Proxy and detached-buffer TypeErrors match JavaScriptCore" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        // Invariant traps. JSC's prefix varies per trap, so this is a table.
+        .{ .source = "var t={};Object.defineProperty(t,'a',{value:1,writable:false,configurable:false});new Proxy(t,{get:function(){return 2}}).a", .message = "Proxy handler's 'get' result of a non-configurable and non-writable property should be the same value as the target's property" },
+        .{ .source = "var t={};Object.defineProperty(t,'a',{value:1,configurable:false});'a' in new Proxy(t,{has:function(){return false}})", .message = "Proxy 'has' must return 'true' for non-configurable properties" },
+        .{ .source = "var t={};Object.isExtensible(new Proxy(t,{isExtensible:function(){return false}}))", .message = "Proxy object's 'isExtensible' trap returned false when the target is extensible. It should have returned true" },
+        .{ .source = "var t={};Object.preventExtensions(new Proxy(t,{preventExtensions:function(){return true}}))", .message = "Proxy's 'preventExtensions' trap returned true even though its target is extensible. It should have returned false" },
+        .{ .source = "Object.defineProperty(new Proxy({},{defineProperty:1}),'a',{value:1})", .message = "'defineProperty' property of a Proxy's handler should be callable" },
+        // JSC names the key the ownKeys trap dropped, so this one interpolates.
+        .{ .source = "var t={};Object.defineProperty(t,'a',{value:1,configurable:false});Object.keys(new Proxy(t,{ownKeys:function(){return []}}))", .message = "Proxy object's 'target' has the non-configurable property 'a' that was not in the result from the 'ownKeys' trap" },
+        // A revoked proxy reports one constant regardless of the operation.
+        .{ .source = "var r=Proxy.revocable({},{});r.revoke();r.proxy.a", .message = "Proxy has already been revoked. No more operations are allowed to be performed on it" },
+        .{ .source = "var r=Proxy.revocable({},{});r.revoke();r.proxy.a=1", .message = "Proxy has already been revoked. No more operations are allowed to be performed on it" },
+        .{ .source = "var r=Proxy.revocable(function(){},{});r.revoke();r.proxy()", .message = "Proxy has already been revoked. No more operations are allowed to be performed on it" },
+        .{ .source = "var r=Proxy.revocable({},{});r.revoke();Object.keys(r.proxy)", .message = "Proxy has already been revoked. No more operations are allowed to be performed on it" },
+        // One constant for any operation on a detached view -- TypedArray
+        // methods and DataView accessors alike.
+        .{ .source = "var b=new ArrayBuffer(8);var a=new Uint8Array(b);b.transfer();a.sort()", .message = "Underlying ArrayBuffer has been detached from the view or out-of-bounds" },
+        .{ .source = "var b=new ArrayBuffer(8);var a=new Uint8Array(b);b.transfer();a.set([1])", .message = "Underlying ArrayBuffer has been detached from the view or out-of-bounds" },
+        .{ .source = "var b=new ArrayBuffer(8);var d=new DataView(b);b.transfer();d.getUint8(0)", .message = "Underlying ArrayBuffer has been detached from the view or out-of-bounds" },
+        .{ .source = "var b=new ArrayBuffer(8);var d=new DataView(b);b.transfer();d.byteLength", .message = "Underlying ArrayBuffer has been detached from the view or out-of-bounds" },
+        .{ .source = "var b=new ArrayBuffer(8);var a=new Int32Array(b);b.transfer();Atomics.add(a,0,1)", .message = "Underlying ArrayBuffer has been detached from the view or out-of-bounds" },
+        // Constructing a view over a detached buffer is a different constant...
+        .{ .source = "var b=new ArrayBuffer(8);b.transfer();new Uint8Array(b)", .message = "Buffer is already detached" },
+        .{ .source = "var b=new ArrayBuffer(8);b.transfer();new DataView(b)", .message = "Buffer is already detached" },
+        // ...and an ArrayBuffer.prototype method names its receiver.
+        .{ .source = "var b=new ArrayBuffer(8);b.transfer();b.slice(0)", .message = "Receiver is detached" },
+        .{ .source = "var b=new ArrayBuffer(8);b.transfer();b.transfer()", .message = "Receiver is detached" },
+        .{ .source = "var b=new ArrayBuffer(8,{maxByteLength:16});b.transfer();b.resize(4)", .message = "Receiver is detached" },
+        .{ .source = "Atomics.add({},0,1)", .message = "Argument needs to be a typed array." },
+    };
+    var buffer: [768]u8 = undefined;
+    for (cases) |case| {
+        const probe = try std.fmt.bufPrint(
+            &buffer,
+            "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.message; }} caught",
+            .{case.source},
+        );
+        try expectEvalStr(case.message, probe);
+    }
+    // Two range faults that shared one string; JSC distinguishes them.
+    try expectEvalStr("ArrayBuffer length minus the byteOffset is not a multiple of the element size",
+        \\var caught = "";
+        \\try { new Uint32Array(new ArrayBuffer(8), 3); } catch (e) { caught = e.message; }
+        \\caught
+    );
+    try expectEvalStr("Length out of range of buffer",
+        \\var caught = "";
+        \\try { new Uint8Array(new ArrayBuffer(8), 16); } catch (e) { caught = e.message; }
+        \\caught
+    );
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

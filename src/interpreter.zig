@@ -9357,7 +9357,7 @@ pub const Interpreter = struct {
         if (!callee.isObject()) return self.throwNotAFunction(callee, site);
         const obj = callee.asObj();
         if (obj.proxyHandler() != null or obj.proxy_revoked) {
-            const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
+            const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
             // A Proxy has a [[Call]] method only if its target is callable; if not,
             // calling it is a TypeError BEFORE the apply trap runs (9.5.12).
             if (!obj.behavior.proxy_callable) return self.throwNotAFunction(callee, site);
@@ -10413,7 +10413,7 @@ pub const Interpreter = struct {
                 const res = try self.callValueWithThis(trap, &.{ Value.obj(target), arr, new_target }, Value.obj(obj.proxyHandler().?));
                 // The [[Construct]] trap must return an Object (9.5.14 step 9).
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint)
-                    return self.throwError("TypeError", "proxy 'construct' trap must return an object");
+                    return self.throwError("TypeError", "Result from Proxy handler's 'construct' method should be an object");
                 return res;
             }
             return self.constructNTAtSite(Value.obj(target), args, new_target, site);
@@ -14680,7 +14680,7 @@ pub const Interpreter = struct {
     /// is revoked or the trap isn't callable.
     fn proxyTrap(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!?Value {
         if (o.proxy_revoked or o.proxyHandler() == null)
-            return self.throwError("TypeError", "Cannot perform 'get' on a proxy that has been revoked");
+            return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         return self.proxyTrapFromHandler(Value.obj(o.proxyHandler().?), name);
     }
 
@@ -14788,15 +14788,15 @@ pub const Interpreter = struct {
     /// or null result, and enforce the non-extensible-target invariant.
     pub fn proxyGetProto(self: *Interpreter, o: *value.Object) EvalError!Value {
         try self.proxyDepth();
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'getPrototypeOf' on a proxy that has been revoked");
+        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         const trap = (try self.proxyTrap(o, "getPrototypeOf")) orelse return self.ordinaryProtoValue(target);
         const res = try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxyHandler().?));
         if (!res.isNull() and (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint))
-            return self.throwError("TypeError", "proxy 'getPrototypeOf' trap must return an object or null");
+            return self.throwError("TypeError", "Proxy handler's 'getPrototypeOf' trap should either return an object or null");
         if (!try self.ordinaryIsExtensible(target)) {
             const tp = try self.ordinaryProtoValue(target);
             const same = (res.isNull() and tp.isNull()) or (res.isObject() and tp.isObject() and res.asObj() == tp.asObj());
-            if (!same) return self.throwError("TypeError", "proxy 'getPrototypeOf' trap result must match the prototype of a non-extensible target");
+            if (!same) return self.throwError("TypeError", "Proxy's 'getPrototypeOf' trap for a non-extensible target should return the same value as the target's prototype");
         }
         return res;
     }
@@ -14823,7 +14823,7 @@ pub const Interpreter = struct {
             return self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj());
         const res = (try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)))).toBoolean();
         if (res != try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj()))
-            return self.throwError("TypeError", "proxy 'isExtensible' trap result must match the target's extensibility");
+            return self.throwError("TypeError", "Proxy object's 'isExtensible' trap returned false when the target is extensible. It should have returned true");
         return res;
     }
 
@@ -14846,7 +14846,7 @@ pub const Interpreter = struct {
         };
         const res = (try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)))).toBoolean();
         if (res and try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj()))
-            return self.throwError("TypeError", "proxy 'preventExtensions' cannot report success while the target is extensible");
+            return self.throwError("TypeError", "Proxy's 'preventExtensions' trap returned true even though its target is extensible. It should have returned false");
         return res;
     }
 
@@ -14862,7 +14862,7 @@ pub const Interpreter = struct {
         if (try self.ordinaryIsExtensible(target)) return true;
         const target_proto = try self.ordinaryProtoValue(target);
         if (!sameProtoValue(new_proto, target_proto))
-            return self.throwError("TypeError", "proxy 'setPrototypeOf' cannot report success with a different prototype on a non-extensible target");
+            return self.throwError("TypeError", "Proxy 'setPrototypeOf' trap returned true when its target is non-extensible and the new prototype value is not the same as the current prototype value. It should have returned false");
         return true;
     }
 
@@ -14870,7 +14870,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'get' on a proxy that has been revoked");
+        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         if (try self.proxyTrap(o, "get")) |trap| {
             const res = try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key), receiver }, Value.obj(o.proxyHandler().?));
             // [[Get]] invariant (9.5.8): a non-configurable non-writable data
@@ -14880,10 +14880,10 @@ pub const Interpreter = struct {
             if (target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
                 if (target.getAccessor(key)) |acc| {
                     if ((acc.get == null or acc.get.?.isUndefined()) and !res.isUndefined())
-                        return self.throwError("TypeError", "proxy 'get' must report undefined for a non-configurable accessor with no getter");
+                        return self.throwError("TypeError", "Proxy handler's 'get' result of a non-configurable accessor property without a getter should be undefined");
                 } else if (!target.getAttr(key).writable) {
                     if (target.getOwn(key)) |tv| if (!value.sameValue(res, tv))
-                        return self.throwError("TypeError", "proxy 'get' must report the target value for a non-configurable non-writable property");
+                        return self.throwError("TypeError", "Proxy handler's 'get' result of a non-configurable and non-writable property should be the same value as the target's property");
                 }
             }
             return res;
@@ -14895,7 +14895,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'set' on a proxy that has been revoked");
+        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         if (try self.proxyTrap(o, "set")) |trap| {
             const ok = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key), v, receiver }, Value.obj(o.proxyHandler().?))).toBoolean();
             // [[Set]] invariant (9.5.9): a successful set can't disagree with a
@@ -14904,10 +14904,10 @@ pub const Interpreter = struct {
             if (ok) try self.checkRestricted(target);
             if (ok and target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
                 if (target.getAccessor(key)) |acc| {
-                    if (acc.set == null or acc.set.?.isUndefined()) return self.throwError("TypeError", "proxy 'set' cannot succeed for a non-configurable accessor with no setter");
+                    if (acc.set == null or acc.set.?.isUndefined()) return self.throwError("TypeError", "Proxy handler's 'set' method on a non-configurable accessor property without a setter should return false");
                 } else if (!target.getAttr(key).writable) {
                     if (target.getOwn(key)) |tv| if (!value.sameValue(v, tv))
-                        return self.throwError("TypeError", "proxy 'set' cannot change a non-configurable non-writable property");
+                        return self.throwError("TypeError", "Proxy handler's 'set' on a non-configurable and non-writable property on 'target' should either return false or be the same value already on the 'target'");
                 }
             }
             return ok;
@@ -14919,14 +14919,14 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'has' on a proxy that has been revoked");
+        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         if (try self.proxyTrap(o, "has")) |trap| {
             const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key) }, Value.obj(o.proxyHandler().?))).toBoolean();
             // [[HasProperty]] invariant (9.5.7): can't hide a non-configurable
             // own property, nor an own property of a non-extensible target.
             if (!b) try self.checkRestricted(target);
             if (!b and target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key)) {
-                if (!target.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'has' cannot report a non-configurable own property as absent");
+                if (!target.getAttr(key).configurable) return self.throwError("TypeError", "Proxy 'has' must return 'true' for non-configurable properties");
                 if (!try self.ordinaryIsExtensible(target)) return self.throwError("TypeError", "proxy 'has' cannot report an own property of a non-extensible target as absent");
             }
             return b;
@@ -14938,13 +14938,13 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'deleteProperty' on a proxy that has been revoked");
+        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         if (try self.proxyTrap(o, "deleteProperty")) |trap| {
             const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key) }, Value.obj(o.proxyHandler().?))).toBoolean();
             // [[Delete]] invariant (9.5.10): can't report deleting a
             // non-configurable property, nor any property of a non-extensible target.
             if (b and target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key)) {
-                if (!target.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'deleteProperty' cannot delete a non-configurable property");
+                if (!target.getAttr(key).configurable) return self.throwError("TypeError", "Proxy handler's 'deleteProperty' method should return false when the target's property is not configurable");
                 if (!try self.ordinaryIsExtensible(target)) return self.throwError("TypeError", "proxy 'deleteProperty' cannot delete a property of a non-extensible target");
             }
             return b;
@@ -15218,8 +15218,8 @@ pub const Interpreter = struct {
         self.depth += 1;
         defer self.depth -= 1;
         const scratch = self.scratch_allocator orelse self.arena;
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
-        const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
+        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
+        const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         const target_root = try self.pushTempRoot(Value.obj(target));
         defer self.restoreTempRoots(target_root);
         const handler_root = try self.pushTempRoot(Value.obj(handler));
@@ -15228,7 +15228,7 @@ pub const Interpreter = struct {
         const trap = (try self.proxyTrapFromHandler(Value.obj(handler), "ownKeys")) orelse
             return self.objectOwnKeysList(self.tempRoot(target_root, Value.obj(target)).asObj());
         const res = try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)));
-        if (!builtins.isRealObject(res)) return self.throwError("TypeError", "ownKeys trap must return an object");
+        if (!builtins.isRealObject(res)) return self.throwError("TypeError", "Proxy handler's 'ownKeys' method must return an object");
         const result_root = try self.pushTempRoot(res);
         const len = toLen(try self.toNumberV(try self.getProperty(res, "length")));
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -15236,7 +15236,7 @@ pub const Interpreter = struct {
         while (i < len) : (i += 1) {
             const k = try self.getProperty(self.tempRoot(result_root, res), try std.fmt.allocPrint(self.arena, "{d}", .{i}));
             if (!k.isString() and !(k.isObject() and k.asObj().is_symbol))
-                return self.throwError("TypeError", "ownKeys trap result includes a non-String, non-Symbol key");
+                return self.throwError("TypeError", "Proxy handler's 'ownKeys' method must return an array-like object containing only Strings and Symbols");
             // CreateListFromArrayLike owns each key beyond subsequent getters;
             // borrowed String-cell bytes cannot outlive their current address.
             try list.append(self.arena, try self.arena.dupe(u8, try self.keyOf(k)));
@@ -15245,7 +15245,7 @@ pub const Interpreter = struct {
         defer seen.deinit(scratch);
         for (list.items) |k| {
             if (try seen.getOrPutSecure(self, scratch, k))
-                return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
+                return self.throwError("TypeError", "Proxy handler's 'ownKeys' trap result must not contain any duplicate names");
         }
         const extensible = try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj());
         const tkeys = try self.objectOwnKeysList(self.tempRoot(target_root, Value.obj(target)).asObj());
@@ -15261,14 +15261,18 @@ pub const Interpreter = struct {
         if (extensible and !has_nonconfig) return list.items;
         for (tkeys, nonconfigurable) |tk, nonconfig| {
             if (nonconfig and !seen.remove(tk))
-                return self.throwError("TypeError", "ownKeys trap omitted a non-configurable key");
+                return self.throwErrorFmt(
+                    "TypeError",
+                    "Proxy object's 'target' has the non-configurable property '{s}' that was not in the result from the 'ownKeys' trap",
+                    .{tk},
+                );
         }
         if (extensible) return list.items;
         for (tkeys, nonconfigurable) |tk, nonconfig| {
             if (!nonconfig and !seen.remove(tk))
                 return self.throwError("TypeError", "ownKeys trap omitted a key on a non-extensible target");
         }
-        if (seen.count() != 0) return self.throwError("TypeError", "ownKeys trap added a key absent from a non-extensible target");
+        if (seen.count() != 0) return self.throwError("TypeError", "Proxy handler's 'ownKeys' method returned a key that was not present in its non-extensible target");
         return list.items;
     }
 
@@ -17299,7 +17303,7 @@ pub const Interpreter = struct {
             // re-checked for detachment AFTER both coercions run user code.
             const buffer = a0.asObj();
             const byte_offset: usize = @intCast(if (args.len > 1) try toIndexArg(self, args[1], "byteOffset") else 0);
-            if (byte_offset % size != 0) return self.throwError("RangeError", "invalid typed array offset");
+            if (byte_offset % size != 0) return self.throwError("RangeError", "ArrayBuffer length minus the byteOffset is not a multiple of the element size");
             const has_len = args.len > 2 and !args[2].isUndefined();
             const req_len: usize = if (has_len) @intCast(try toIndexArg(self, args[2], "length")) else 0;
             // Snapshot detached + byte length under the buffer lock: a peer's
@@ -17311,8 +17315,8 @@ pub const Interpreter = struct {
             const ab_detached = abuf.isDetached();
             const buflen = if (ab_detached) 0 else abuf.bytes().len;
             abuf.unlockBuffer();
-            if (ab_detached) return self.throwError("TypeError", "Cannot construct a TypedArray on a detached buffer");
-            if (byte_offset > buflen) return self.throwError("RangeError", "invalid typed array offset");
+            if (ab_detached) return self.throwError("TypeError", "Buffer is already detached");
+            if (byte_offset > buflen) return self.throwError("RangeError", "Length out of range of buffer");
             var length: usize = undefined;
             // Omitting the length on a resizable buffer makes the view
             // length-tracking; on a fixed buffer it spans the remaining bytes.
@@ -24715,7 +24719,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const initial_detached = ab.isDetached();
     const buf_len = if (initial_detached) 0 else ab.bytes().len;
     ab.unlockBuffer();
-    if (initial_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (initial_detached) return self.throwError("TypeError", "Buffer is already detached");
     if (offset > @as(u64, @intCast(buf_len))) return self.throwError("RangeError", "byteOffset exceeds source ArrayBuffer byteLength");
     var view_len: usize = buf_len - @as(usize, @intCast(offset));
     // Omitting byteLength on a resizable buffer makes the view length-tracking.
@@ -24726,8 +24730,8 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         const length_detached = ab.isDetached();
         const length_buf_len = if (length_detached) 0 else ab.bytes().len;
         ab.unlockBuffer();
-        if (length_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-        if (offset + vl > @as(u64, @intCast(length_buf_len))) return self.throwError("RangeError", "Invalid DataView length");
+        if (length_detached) return self.throwError("TypeError", "Buffer is already detached");
+        if (offset + vl > @as(u64, @intCast(length_buf_len))) return self.throwError("RangeError", "Length out of range of buffer");
         view_len = @intCast(vl);
     }
     const o = (try self.newObject()).asObj();
@@ -24740,10 +24744,10 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const final_detached = ab.isDetached();
     const live_len = if (final_detached) 0 else ab.bytes().len;
     ab.unlockBuffer();
-    if (final_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (final_detached) return self.throwError("TypeError", "Buffer is already detached");
     if (offset > @as(u64, @intCast(live_len))) return self.throwError("RangeError", "byteOffset exceeds source ArrayBuffer byteLength");
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
-        return self.throwError("RangeError", "Invalid DataView length");
+        return self.throwError("RangeError", "Length out of range of buffer");
     const dv = try (try o.dataViewAllocator(self.arena)).create(value.DataViewData);
     dv.* = .{ .buffer = buf_v.asObj(), .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
     try o.setDataView(self.arena, dv);
@@ -24765,15 +24769,15 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
             defer if (locked) ab.unlockBuffer();
             const bytes = ab.bytes();
             const view_len = blk: {
-                if (ab.isDetached()) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
-                if (dv.byte_offset > bytes.len) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (ab.isDetached()) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
+                if (dv.byte_offset > bytes.len) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
                 if (dv.track_length) break :blk bytes.len - dv.byte_offset;
-                if (dv.byte_length > bytes.len - dv.byte_offset) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (dv.byte_length > bytes.len - dv.byte_offset) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
                 break :blk dv.byte_length;
             };
             const view_len_u64: u64 = @intCast(view_len);
             if (get_index > view_len_u64 or @as(u64, t.bytes) > view_len_u64 - get_index)
-                return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+                return self.throwError("RangeError", "Out of bounds access");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
             const UInt = switch (t.bytes) {
@@ -24834,15 +24838,15 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             defer if (locked) ab.unlockBuffer();
             const bytes = ab.bytes();
             const view_len = blk: {
-                if (ab.isDetached()) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
-                if (dv.byte_offset > bytes.len) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (ab.isDetached()) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
+                if (dv.byte_offset > bytes.len) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
                 if (dv.track_length) break :blk bytes.len - dv.byte_offset;
-                if (dv.byte_length > bytes.len - dv.byte_offset) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (dv.byte_length > bytes.len - dv.byte_offset) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
                 break :blk dv.byte_length;
             };
             const view_len_u64: u64 = @intCast(view_len);
             if (get_index > view_len_u64 or @as(u64, t.bytes) > view_len_u64 - get_index)
-                return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+                return self.throwError("RangeError", "Out of bounds access");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
             const UInt = switch (t.bytes) {
@@ -24895,7 +24899,7 @@ fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
     const dv = this.asObj().dataView().?;
     // get byteLength throws when the view is detached or out of bounds.
-    const cur = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+    const cur = dv.currentByteLength() orelse return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
     return Value.num(@floatFromInt(cur));
 }
 
@@ -24905,7 +24909,7 @@ fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
     const dv = this.asObj().dataView().?;
     // get byteOffset throws when the view is detached or out of bounds.
-    if (dv.currentByteLength() == null) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+    if (dv.currentByteLength() == null) return throwDataViewTypeError(self, "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
     return Value.num(@floatFromInt(dv.byte_offset));
 }
 
@@ -27236,11 +27240,11 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     if (!this.isObject() or this.asObj().arrayBuffer() == null or this.asObj().arrayBuffer().?.is_shared != want_shared)
         return self.throwError("TypeError", kind_name ++ ".prototype.slice called on an incompatible receiver");
     const ab = this.asObj().arrayBuffer().?;
-    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     const blen = ab.bytes().len;
     const start = try relIndex(self, if (args.len > 0) args[0] else Value.undef(), blen, 0);
     const end = try relIndex(self, if (args.len > 1) args[1] else Value.undef(), blen, @floatFromInt(blen));
-    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     const src_len = ab.bytes().len;
     const safe_count = if (start >= src_len) 0 else @min(if (end > start) end - start else 0, src_len - start);
     // ArrayBufferSpeciesCreate(O, newLen).
@@ -27256,7 +27260,7 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     if (!want_shared and nb.immutable) return self.throwError("TypeError", "species constructor returned an immutable ArrayBuffer");
     if (new_v.asObj() == this.asObj()) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
     if (nb.bytes().len < safe_count) return self.throwError("TypeError", "ArrayBuffer species constructor returned too small a buffer");
-    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     {
         // Hold the source across the bulk copy: the species constructor above ran
         // user code and a peer may resize()+free `ab`'s base concurrently, which
@@ -27324,7 +27328,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     // checking detached target/source buffers.
     const cur_len = ta.currentLength();
     if (cur_len == null and !eq(name, "subarray") and !eq(name, "set"))
-        return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+        return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
     const len = cur_len orelse 0;
     const recv = Value.obj(o);
     const cb_this: Value = if (args.len > 1) args[1] else Value.undef();
@@ -27555,7 +27559,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const locked = abuf.needsElementLock();
         if (locked) abuf.lockBuffer();
         defer if (locked) abuf.unlockBuffer();
-        const live_len = ta.currentLength() orelse return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+        const live_len = ta.currentLength() orelse return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
         const count = @min(
             @min(if (end > start) end - start else 0, len - target),
             @min(if (target < live_len) live_len - target else 0, if (start < live_len) live_len - start else 0),
@@ -27667,7 +27671,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const offset: usize = @intCast(offset_u64);
         // The offset's ToInteger can run user code (a valueOf) that detaches or
         // shrinks the target's buffer; re-read the live length afterwards.
-        const tlen = ta.currentLength() orelse return self.throwError("TypeError", "Cannot set on a TypedArray whose buffer is detached or out of bounds");
+        const tlen = ta.currentLength() orelse return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
         if (src.isObject() and src.asObj().typedArray() != null) {
             const s = src.asObj().typedArray().?;
             if (s.kind.isBigInt() != ta.kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when setting a TypedArray");
@@ -28469,7 +28473,7 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
     if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
     const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0], "newLength")) else ab.bytes().len;
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     if (ab.immutable) return self.throwError("TypeError", "ArrayBuffer is already immutable");
     const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
     // Serialize bytes-copy + detach against a peer's Atomics (see transfer).
@@ -28482,7 +28486,7 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
         ab.setDetached(true);
     }
     ab.unlockBuffer();
-    if (was_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (was_detached) return self.throwError("TypeError", "Receiver is detached");
     return Value.obj(out);
 }
 
@@ -28493,12 +28497,12 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
     if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "Receiver must be ArrayBuffer");
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "sliceToImmutable cannot be called on a SharedArrayBuffer");
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     const blen = ab.bytes().len;
     const start = try relIndex(self, if (args.len > 0) args[0] else Value.undef(), blen, 0);
     const end = try relIndex(self, if (args.len > 1) args[1] else Value.undef(), blen, @floatFromInt(blen));
     const count = if (end > start) end - start else 0;
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     const out = try self.makeArrayBuffer(count);
     {
         // `sliceToImmutable` leaves the source buffer live, so a no-GIL peer can
@@ -28508,7 +28512,7 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
         const locked = ab.needsElementLock();
         if (locked) ab.lockBuffer();
         defer if (locked) ab.unlockBuffer();
-        if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+        if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
         const src = ab.bytes();
         if (src.len < end) return self.throwError("RangeError", "ArrayBuffer shrank below resolved slice end");
         @memcpy(out.arrayBuffer().?.bytes()[0..count], src[start .. start + count]);
@@ -28525,13 +28529,13 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a SharedArrayBuffer");
     if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
     const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "newLength");
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
     if (new_len > ab.max_byte_length.?) return self.throwError("RangeError", "resize exceeds maxByteLength");
     const nl: usize = @intCast(new_len);
     if (ab.native_handle.load(.acquire)) |handle| {
         ab.lockBuffer();
         defer ab.unlockBuffer();
-        if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+        if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
         handle.resize(nl) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NotResizable => return self.throwError("TypeError", "ArrayBuffer is not resizable"),
@@ -28544,7 +28548,7 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     ab.lockBuffer();
     if (ab.isDetached()) {
         ab.unlockBuffer();
-        return self.throwError("TypeError", "ArrayBuffer is detached");
+        return self.throwError("TypeError", "Receiver is detached");
     }
     const old_data = ab.local_data;
     const copy_len = @min(nl, old_data.len);
@@ -28566,7 +28570,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
             const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0], "newLength")) else ab.bytes().len;
-            if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+            if (ab.isDetached()) return self.throwError("TypeError", "Receiver is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
             const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
             // Serialize the bytes copy + detach against a peer's Atomics on this
@@ -28583,7 +28587,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
                 ab.setDetached(true);
             }
             ab.unlockBuffer();
-            if (was_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+            if (was_detached) return self.throwError("TypeError", "Receiver is detached");
             return Value.obj(out);
         }
     }.call;
@@ -36571,7 +36575,7 @@ fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!vo
 /// a Float or Uint8Clamped view) over an attached buffer; returns the in-bounds
 /// element index from ToIndex(request).
 fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, only_int32: bool, require_shared: bool) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
-    if (!ta_v.isObject() or ta_v.asObj().typedArray() == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
+    if (!ta_v.isObject() or ta_v.asObj().typedArray() == null) return self.throwError("TypeError", "Argument needs to be a typed array.");
     const ta = ta_v.asObj().typedArray().?;
     // ValidateIntegerTypedArray(typedArray, waitable): a waitable op
     // (wait/notify/waitAsync) only accepts Int32Array or BigInt64Array; the
@@ -36595,11 +36599,11 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
     // is coerced. currentLength() folds in both, and also re-witnesses a
     // length-tracking view against the live buffer size — the length that
     // MakeTypedArrayWithBufferWitnessRecord/TypedArrayLength would compute.
-    const cur_len = ta.currentLength() orelse return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
+    const cur_len = ta.currentLength() orelse return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
     // ValidateAtomicAccess bounds-checks against that *current* length, not the
     // cached one: a grown buffer exposes the new indices, and a length-tracking
     // view that shrank rejects a now-past-the-end index with a RangeError.
-    const i = try toIndexArg(self, idx_v, "index");
+    const i = try toIndexArg(self, idx_v, "accessIndex");
     if (i >= cur_len) return self.throwError("RangeError", "Access index out of bounds for atomic access.");
     return .{ .ta = ta, .i = @intCast(i) };
 }
@@ -36651,9 +36655,9 @@ fn atomicsRawToValue(self: *Interpreter, kind: value.TAKind, raw: u64) value.Hos
 /// Re-check just before the actual read/write — a detached (or now out-of-bounds)
 /// buffer is a TypeError.
 fn atomicsRevalidate(self: *Interpreter, ta: *value.TypedArrayData, i: usize) value.HostError!void {
-    const ab = ta.buffer.arrayBuffer() orelse return self.throwError("TypeError", "ArrayBuffer is detached");
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
-    const len = ta.currentLength() orelse return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
+    const ab = ta.buffer.arrayBuffer() orelse return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
+    if (ab.isDetached()) return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
+    const len = ta.currentLength() orelse return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
     if (i >= len) return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
 }
 
@@ -38379,7 +38383,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 }
             } else if (so.typedArray()) |ta| {
                 const len = ta.currentLength() orelse
-                    return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+                    return self.throwError("TypeError", "Underlying ArrayBuffer has been detached from the view or out-of-bounds");
                 if (i < len) {
                     val = switch (kind) {
                         1 => Value.num(@floatFromInt(i)), // keys
