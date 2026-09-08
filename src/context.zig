@@ -20761,6 +20761,30 @@ test "memory model: join publishes completion side effects and exception identit
     try std.testing.expect(result.asBool());
 }
 
+test "Thread completion retains the body exception across a throwing microtask drain" {
+    for ([_]bool{ false, true }) |gil| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\var body = {tag: 'body'};
+            \\var drain = {tag: 'drain'};
+            \\var delivered = 0;
+            \\var thread = new Thread(function () {
+            \\  for (let i = 0; i < 16; ++i) queueMicrotask(function () {
+            \\    if (i < 2) throw drain;
+            \\    ++delivered;
+            \\  });
+            \\  throw body;
+            \\});
+            \\var correct = false;
+            \\try { thread.join(); } catch (error) { correct = error === body; }
+            \\correct && delivered === 14;
+        );
+        try std.testing.expect(result.asBool());
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    }
+}
+
 test "memory model: spawned thread drains its FIFO microtasks before completion" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();

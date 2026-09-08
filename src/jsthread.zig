@@ -68,21 +68,21 @@ pub const ThreadRecord = struct {
     /// PR's ordinary-promise rule; awaiters elsewhere observe the shared
     /// state via awaitValue's GIL-yield loop).
     pending_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
-    /// Snapshot being settled by the finishing thread after `done` is
-    /// published. This duplicates the local settlement list solely as a GC root:
-    /// `publishThreadCompletion` must remove entries from `pending_joins` under
-    /// `join_mutex`, but a parallel collector can start before the finisher has
-    /// copied those promises into its interpreter temp roots.
+    /// Authoritative root for the snapshot being settled after `done`. The
+    /// finisher borrows this same backing; collection and moving relocation
+    /// visit its entries under `join_mutex` throughout settlement.
     settling_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
     /// `done` publishes the synchronous result before the finishing thread
     /// settles the pre-existing asyncJoin snapshot. A synchronous join must
     /// wait for both transitions or it can drain the joiner queue in between
     /// them and miss the settlement reactions.
     joins_settled: bool = true,
-    /// The live microtask queue for this JS thread. Worker queues are stack
-    /// locals in `threadMain`; outstanding async tickets are transferred away
-    /// before that stack frame exits.
+    /// Arena-lived queue; `join_mutex` closes peer publication before transfer.
     microtasks: ?*promise.MicrotaskQueue = null,
+    /// One reserved realm-queue descriptor, established before OS-thread spawn.
+    /// On exit it takes ownership of the closed local queue's backing. State is
+    /// protected by `ctx.microtasks.lock`; its storage lives with this record.
+    microtask_transfer: promise.MicrotaskTransfer = .{},
     /// ThreadLocal records this thread has stored into. The records are
     /// arena-lived host data; this list lets thread exit remove the OS-thread
     /// keyed entries so ThreadLocal-only JS roots do not survive termination.
@@ -810,9 +810,16 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     try ctx.reserveJsThreadsLocked(1);
     const rec = try a.create(ThreadRecord);
     rec.* = .{ .id = g.next_thread_id, .gil = g, .ctx = ctx };
-    g.next_thread_id += 1;
     rec.js_obj = makeWrapper(ctx, rec) catch return error.OutOfMemory;
     const call_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
+    if (ctx.parallel_js) ctx.microtasks.acquire();
+    ctx.microtasks.prepareTransfer(a, &rec.microtask_transfer) catch |err| {
+        if (ctx.parallel_js) ctx.microtasks.release();
+        return err;
+    };
+    if (ctx.parallel_js) ctx.microtasks.release();
+    errdefer cancelUnusedThreadTransfer(rec);
+    g.next_thread_id += 1;
     ctx.js_threads.appendAssumeCapacity(rec);
     if (ctx.js_threads.items.len >= 3) ctx.enableCooperativeGcTracking();
 
@@ -862,6 +869,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     }
     if (!rec.ctx.parallel_js) g.acquire();
     defer if (!rec.ctx.parallel_js) g.release();
+    // GIL-mode queue state must be inspected before releasing the GIL too.
+    defer cancelUnusedThreadTransfer(rec);
     const gc_saved = gc_mod.setActiveContext(rec.ctx);
     defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(rec.ctx.arena());
@@ -928,19 +937,12 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // bounded by join, termination, and the wall-clock watchdog.
     machine.step_budget = std.math.maxInt(u64);
     defer machine.abandonTimers();
-    var result: Value = Value.undef();
     var threw = false;
     if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
-        // Root the return value before the drains below. They run JS that can
-        // trigger a mid-script parallel GC, and until `publishThreadCompletion`
-        // records `out` in `rec.result` it lives ONLY on this thread's native
-        // stack — which the collector does not conservatively scan for a running
-        // peer (only parked peers' frozen stacks and self-published precise
-        // roots). Without a precise root here `out` is swept during the drain,
-        // and every later root/barrier then holds a dangling pointer, surfacing
-        // as the `promiseOf` alignment panic in thread settlement. `gc_temp_roots`
-        // is a precise per-interpreter root, published at every safepoint.
-        machine.gc_temp_roots.append(machine.arena, out) catch {};
+        // The running native stack is not a precise peer root. Publish into
+        // the join-mutex-protected record before any GC-capable checkpoint,
+        // while leaving `done` false so observers cannot see completion early.
+        rootThreadResult(rec, out);
         machine.drainMicrotasks() catch {};
         // Thread-local async waiters are owned by this interpreter. If a thread
         // returns a pending Atomics.waitAsync promise, asyncJoin can assimilate
@@ -950,8 +952,13 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         pumpTasks(&machine);
         machine.settleAsyncWaiters();
         machine.keepaliveTimers();
-        result = out;
     } else |err| {
+        // Preserve the body exception before a draining callback can overwrite
+        // the interpreter exception slot or moving GC can rewrite the value.
+        rootThreadResult(rec, switch (err) {
+            error.OutOfMemory => outOfMemoryCompletionValue(rec.ctx),
+            else => machine.exception,
+        });
         machine.drainMicrotasks() catch {};
         if (async_waiters.items.len > 0) {
             agent.abandonAsync(@ptrCast(&async_waiters));
@@ -959,32 +966,19 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         }
         abandonPropAsyncQueue(g, microtasks);
         threw = true;
-        result = switch (err) {
-            error.OutOfMemory => outOfMemoryCompletionValue(rec.ctx),
-            else => machine.exception,
-        };
     }
     // Settle asyncJoin promises on this (the settling) thread, then drain
     // the reactions it just queued. `publishThreadCompletion` snapshots the
     // pending join list under `join_mutex`; JS/promise work runs after release.
     if (rec.ctx.parallel_js) acquireGilForTeardown(&machine, g);
     defer if (rec.ctx.parallel_js) g.release();
-    var pending_joins = publishThreadCompletion(rec, threw, result);
+    var pending_joins = publishThreadCompletion(rec, threw, threadResult(rec));
     defer {
         finishThreadJoinSettlement(rec);
         pending_joins.deinit(rec.ctx.arena());
     }
-    // publishThreadCompletion emptied `rec.pending_joins` (a GC root) into this
-    // local snapshot, so settle the promises and the result value under explicit
-    // roots: settlement runs JS (reaction and thenable `then` getters, microtask
-    // drain) that can trigger a mid-script GC, and `resolve` reads the result
-    // value's shape (`promiseOf`) — a swept result surfaces as a misaligned
-    // `Object.promise`. Root both the snapshot promises and the result in
-    // `gc_temp_roots` (traced per-interpreter) for the settlement's duration.
-    const temp_root_mark = machine.gc_temp_roots.items.len;
-    defer machine.gc_temp_roots.shrinkRetainingCapacity(temp_root_mark);
-    machine.gc_temp_roots.append(machine.arena, result) catch {};
-    for (pending_joins.items) |pending| machine.gc_temp_roots.append(machine.arena, Value.obj(pending.promise)) catch {};
+    // `rec.result` and `rec.settling_joins` remain the authoritative precise
+    // roots. Reload each result after earlier settlements may have moved it.
     const saved_microtasks = machine.microtasks;
     for (pending_joins.items) |pending| {
         // Route the settlement's reactions. When the joiner is a spawned thread
@@ -999,16 +993,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         // the shared realm, which is what asyncJoin's await observers need; no
         // liveness race remains.)
         machine.microtasks = if (pending.owner != null) &rec.ctx.microtasks else pending.microtasks;
-        // Re-shade the result and the pending promise on each iteration: a prior
-        // iteration's `resolve` runs JS (thenable `then` getters, reaction
-        // enqueue) that can begin *and* advance a mid-script parallel GC, and
-        // `resolve` immediately reads the result value's shape (`promiseOf`). The
-        // gc_temp_roots rooting above is captured by the self-publish handshake at
-        // safepoints, but this barrier closes the narrow window where a mark
-        // starts within a reaction chain between safepoints — shading is
-        // idempotent and cheap (a no-op when no mark is active).
-        gc_mod.barrierValue(result);
-        gc_mod.barrierValue(Value.obj(pending.promise));
+        const result = threadResult(rec);
         if (promise.promiseOf(Value.obj(pending.promise))) |pp| {
             if (threw)
                 promise.reject(&machine, pp, result) catch {}
@@ -1037,10 +1022,10 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // keeps draining — otherwise they strand when this queue is abandoned below.
     // Serialized with peer enqueues by the source and destination queue locks
     // under no-GIL (a direct transfer in GIL mode).
-    transferMicrotasks(rec.ctx, microtasks, &rec.ctx.microtasks);
+    transferMicrotasks(rec.ctx, microtasks, &rec.ctx.microtasks, &rec.microtask_transfer);
 }
 
-fn transferMicrotasks(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
+fn transferMicrotasks(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue, transfer: *promise.MicrotaskTransfer) void {
     if (from == to) return;
     if (ctx.parallel_js) {
         const from_addr = @intFromPtr(from);
@@ -1053,7 +1038,7 @@ fn transferMicrotasks(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise
             to.acquire();
             from.acquire();
         }
-        transferMicrotasksUnlocked(ctx, from, to);
+        to.publishTransfer(from, transfer);
         if (source_first) {
             to.release();
             from.release();
@@ -1063,14 +1048,34 @@ fn transferMicrotasks(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise
         }
         return;
     }
-    transferMicrotasksUnlocked(ctx, from, to);
+    to.publishTransfer(from, transfer);
 }
 
-fn transferMicrotasksUnlocked(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
-    if (!from.isEmpty()) {
-        to.appendPendingSlice(ctx.arena(), from) catch {};
-        from.clearRetainingCapacity();
-    }
+fn cancelUnusedThreadTransfer(rec: *ThreadRecord) void {
+    const queue = &rec.ctx.microtasks;
+    if (rec.ctx.parallel_js) queue.acquire();
+    defer if (rec.ctx.parallel_js) queue.release();
+    // Startup failures have no committed local jobs, but must release their
+    // constructor reservation. Successful transfer may already be consumed by
+    // the host; neither queued nor consumed ownership belongs to this thread.
+    if (rec.microtask_transfer.state == .reserved)
+        queue.cancelTransfer(&rec.microtask_transfer);
+}
+
+fn rootThreadResult(rec: *ThreadRecord, result: Value) void {
+    gc_mod.barrierValue(result);
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    defer rec.join_mutex.unlock(io);
+    std.debug.assert(!rec.done);
+    rec.result = result;
+}
+
+fn threadResult(rec: *ThreadRecord) Value {
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    defer rec.join_mutex.unlock(io);
+    return rec.result;
 }
 
 fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.ArrayListUnmanaged(PendingJoin) {
@@ -1116,6 +1121,121 @@ fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending
         try rec.pending_joins.ensureTotalCapacity(arena, rec.pending_joins.items.len + pending_join_reserve_granularity);
     }
     rec.pending_joins.appendAssumeCapacity(pending);
+}
+
+test "microtask concurrent closed queue transfers retain FIFO and single ownership" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    const producers = 8;
+    const per_producer = 32;
+    const State = struct {
+        ctx: *Context,
+        source: promise.MicrotaskQueue = .{},
+        transfer: promise.MicrotaskTransfer = .{},
+        ready: *std.atomic.Value(bool),
+        done: *std.atomic.Value(usize),
+        fn run(self: *@This()) void {
+            while (!self.ready.load(.acquire)) std.atomic.spinLoopHint();
+            transferMicrotasks(self.ctx, &self.source, &self.ctx.microtasks, &self.transfer);
+            _ = self.done.fetchAdd(1, .release);
+        }
+    };
+    var ready = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(usize).init(0);
+    var states: [producers]State = undefined;
+    var threads: [producers]std.Thread = undefined;
+    var spawned: usize = 0;
+    defer {
+        ready.store(true, .release);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
+    for (&states, 0..) |*state, i| {
+        state.* = .{ .ctx = ctx, .ready = &ready, .done = &done };
+        ctx.microtasks.acquire();
+        ctx.microtasks.prepareTransfer(ctx.arena(), &state.transfer) catch |err| {
+            ctx.microtasks.release();
+            return err;
+        };
+        ctx.microtasks.release();
+        for (0..per_producer) |j| try state.source.append(ctx.arena(), .{
+            .kind = .native_callback,
+            .reaction = undefined,
+            .argument = Value.num(@floatFromInt(i * per_producer + j)),
+            .fulfilled = true,
+        });
+        threads[i] = try std.Thread.spawn(.{}, State.run, .{state});
+        spawned += 1;
+    }
+    ready.store(true, .release);
+    var expected: [producers]usize = @splat(0);
+    var received: usize = 0;
+    var machine = ctx.interpreter();
+    while (true) {
+        const producers_done = done.load(.acquire) == producers;
+        ctx.microtasks.acquire();
+        promise.materializeSettlementBatches(&machine, &ctx.microtasks) catch |err| {
+            ctx.microtasks.release();
+            return err;
+        };
+        const task = ctx.microtasks.pop();
+        ctx.microtasks.release();
+        if (task) |job| {
+            const n: usize = @intFromFloat(job.argument.asNum());
+            const producer = n / per_producer;
+            try std.testing.expect(producer < producers);
+            try std.testing.expectEqual(expected[producer], n % per_producer);
+            expected[producer] += 1;
+            received += 1;
+        } else if (producers_done) break else std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, producers * per_producer), received);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    for (&states) |*state| {
+        try std.testing.expect(state.source.isEmpty());
+        try std.testing.expectEqual(.consumed, state.transfer.state);
+    }
+}
+
+test "Thread completion result is precisely rooted before done despite exhausted temp roots" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.gc_scan_native_stack = false;
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    const heap = ctx.gc.?;
+    heap.collect();
+    const baseline = heap.live_cells;
+    var record = ThreadRecord{ .id = 1, .gil = undefined, .ctx = ctx };
+    try ctx.js_threads.append(ctx.gpa, &record);
+    defer _ = ctx.js_threads.pop();
+    const result = try gc_mod.allocObj(ctx.arena());
+    const child = try gc_mod.allocObj(ctx.arena());
+    try result.setOwn(ctx.arena(), ctx.root_shape, "child", Value.obj(child));
+    try child.setOwn(ctx.arena(), ctx.root_shape, "marker", Value.num(887));
+    var unavailable = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    var machine = ctx.interpreter();
+    machine.arena = unavailable.allocator();
+    try std.testing.expectError(error.OutOfMemory, machine.pushTempRoot(Value.obj(result)));
+    rootThreadResult(&record, Value.obj(result));
+    try std.testing.expect(!record.done);
+    try std.testing.expect(!threadJoinReadyLocked(&record));
+    heap.collect();
+    try std.testing.expectEqual(baseline + 2, heap.live_cells);
+    try std.testing.expectEqual(@as(f64, 887), threadResult(&record).asObj().getOwn("child").?.asObj().getOwn("marker").?.asNum());
+    var relocated = value.Object{};
+    const Plan = struct {
+        old: *value.Object,
+        new: *value.Object,
+        pub fn resolve(self: *const @This(), cell: *anyopaque) *anyopaque {
+            return if (cell == @as(*anyopaque, @ptrCast(self.old))) self.new else cell;
+        }
+    };
+    relocateThreadRecordRoots(&record, &Plan{ .old = result, .new = &relocated });
+    try std.testing.expectEqual(&relocated, threadResult(&record).asObj());
+    try std.testing.expect(!record.done);
+    rootThreadResult(&record, Value.undef());
+    heap.collect();
+    try std.testing.expectEqual(baseline, heap.live_cells);
 }
 
 test "Thread asyncJoin pending growth and synchronous join settlement gate" {
@@ -1193,10 +1313,10 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     errdefer if (join_mutex_locked) rec.join_mutex.unlock(io);
     while (!threadJoinReadyLocked(rec)) try parkPumpThreadJoin(self, rec);
     const threw = rec.threw;
-    const result = rec.result;
     rec.join_mutex.unlock(io);
     join_mutex_locked = false;
     self.drainMicrotasks() catch {};
+    const result = threadResult(rec);
     if (threw) {
         self.exception = result;
         return error.Throw;

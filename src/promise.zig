@@ -305,13 +305,16 @@ fn linkAsyncForward(source: *Promise, destination: *Promise) void {
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
-    kind: enum { reaction, settlement_batch, thenable, callback, native_callback, job, next_tick } = .reaction,
+    kind: enum { reaction, settlement_batch, transferred_batch, thenable, callback, native_callback, job, next_tick } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
     thenable: Value = Value.undef(),
     then_fn: Value = Value.undef(),
-    promise: ?*Promise = null,
+    /// Selected by `kind`: transferred batches own arena-lived backing, while
+    /// thenable and settlement jobs own a managed Promise. The union preserves
+    /// the ordinary job's allocation density.
+    payload: extern union { promise: ?*Promise, transfer: *MicrotaskTransfer } = .{ .promise = null },
     /// `.callback` jobs (HTML queueMicrotask): the function to invoke with no
     /// arguments. Settles no promise; a throw propagates as a reported exception.
     callback: Value = Value.undef(),
@@ -330,6 +333,21 @@ pub const Microtask = struct {
     /// arena-owned and every value is traced while queued or in an active drain
     /// batch, so one- and two-argument private calls remain observably distinct.
     job_args: []const Value = &.{},
+};
+
+/// One future queue handoff, reserved before a Thread can publish work. After
+/// closure, the destination owns the moved backing through its descriptor; no
+/// pointer into a running thread's queue or native stack remains. All state is
+/// guarded by the destination queue lock after preparation.
+pub const MicrotaskTransfer = struct {
+    destination: ?*MicrotaskQueue = null,
+    state: enum { empty, reserved, queued, consumed } = .empty,
+    items: std.ArrayListUnmanaged(Microtask) = .empty,
+    head: usize = 0,
+
+    pub fn pendingItems(self: *MicrotaskTransfer) []Microtask {
+        return self.items.items[self.head..];
+    }
 };
 
 pub const MicrotaskQueue = struct {
@@ -375,11 +393,45 @@ pub const MicrotaskQueue = struct {
         _ = self.generation.fetchAdd(1, .release);
     }
 
-    pub fn appendPendingSlice(self: *MicrotaskQueue, a: std.mem.Allocator, other: *MicrotaskQueue) !void {
-        const pending = other.pendingItems();
-        try self.reserve(a, pending.len);
-        self.items.appendSliceAssumeCapacity(pending);
-        if (pending.len > 0) _ = self.generation.fetchAdd(@intCast(pending.len), .release);
+    pub fn prepareTransfer(self: *MicrotaskQueue, a: std.mem.Allocator, transfer: *MicrotaskTransfer) !void {
+        std.debug.assert(transfer.state == .empty);
+        try self.reserveTransactionSlot(a);
+        transfer.destination = self;
+        transfer.state = .reserved;
+    }
+
+    pub fn cancelTransfer(self: *MicrotaskQueue, transfer: *MicrotaskTransfer) void {
+        std.debug.assert(transfer.destination == self and transfer.state == .reserved);
+        self.cancelTransactionSlot();
+        transfer.state = .consumed;
+    }
+
+    /// Both queue locks are held, and source publication is closed. The one
+    /// descriptor slot was reserved before source work could become observable.
+    /// This moves backing ownership; materialization may fail later but can
+    /// never clear the source without retaining its complete pending suffix.
+    pub fn publishTransfer(self: *MicrotaskQueue, source: *MicrotaskQueue, transfer: *MicrotaskTransfer) void {
+        std.debug.assert(source != self and source.reservations == 0);
+        std.debug.assert(transfer.destination == self and transfer.state == .reserved);
+        const count = source.pendingLen();
+        if (count == 0) {
+            self.cancelTransfer(transfer);
+            return;
+        }
+        transfer.items = source.items;
+        transfer.head = source.head;
+        gc_mod.barrierMicrotasks(transfer.pendingItems());
+        self.appendInTransactionSlot(.{
+            .kind = .transferred_batch,
+            .reaction = undefined,
+            .argument = Value.undef(),
+            .fulfilled = true,
+            .payload = .{ .transfer = transfer },
+        });
+        if (count > 1) _ = self.generation.fetchAdd(@intCast(count - 1), .release);
+        transfer.state = .queued;
+        source.items = .empty;
+        source.head = 0;
     }
 
     /// The batch copy must succeed before detaching. Its original occupied
@@ -510,10 +562,126 @@ test "microtask queue is FIFO with a head cursor" {
     try source.append(a, .{ .reaction = undefined, .argument = Value.num(5), .fulfilled = true });
     try source.append(a, .{ .reaction = undefined, .argument = Value.num(6), .fulfilled = true });
     try std.testing.expectEqual(@as(f64, 5), source.pop().?.argument.asNum());
-    try q.appendPendingSlice(a, &source);
+    var transfer = MicrotaskTransfer{};
+    try q.prepareTransfer(a, &transfer);
+    q.publishTransfer(&source, &transfer);
+    var machine = Interpreter{ .arena = a, .env = undefined, .root_shape = undefined };
+    try materializeSettlementBatches(&machine, &q);
     try std.testing.expectEqual(@as(u64, 5), q.enqueueGeneration());
     try std.testing.expectEqual(@as(usize, 1), q.pendingLen());
     try std.testing.expectEqual(@as(f64, 6), q.pop().?.argument.asNum());
+}
+
+test "microtask transfer owns the closed suffix through allocation failure" {
+    const a = std.testing.allocator;
+    const Job = struct {
+        fn make(n: f64) Microtask {
+            return .{ .kind = .native_callback, .reaction = undefined, .argument = Value.num(n), .fulfilled = true };
+        }
+    };
+    for ([_]bool{ false, true }) |nonempty| {
+        var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+        const storage = try a.alloc(Microtask, 2 + @as(usize, @intFromBool(nonempty)));
+        var destination = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+        defer destination.items.deinit(a);
+        var source = MicrotaskQueue{};
+        defer source.items.deinit(a);
+        if (nonempty) try destination.append(a, Job.make(1));
+        var transfer = MicrotaskTransfer{};
+        try destination.prepareTransfer(unavailable.allocator(), &transfer);
+        try destination.reserveTransactionSlot(unavailable.allocator());
+        try std.testing.expectError(error.OutOfMemory, destination.append(unavailable.allocator(), Job.make(2)));
+        for ([_]f64{ 10, 11, 12, 13 }) |n| try source.append(a, Job.make(n));
+        try std.testing.expectEqual(@as(f64, 10), source.pop().?.argument.asNum());
+        const backing = source.items.items.ptr;
+        const generation = destination.enqueueGeneration();
+        destination.publishTransfer(&source, &transfer);
+        try std.testing.expect(source.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), source.items.capacity);
+        try std.testing.expectEqual(backing, transfer.items.items.ptr);
+        try std.testing.expectEqual(@as(usize, 1), transfer.head);
+        try std.testing.expectEqual(generation + 3, destination.enqueueGeneration());
+        try std.testing.expectEqual(@as(usize, 1), destination.reservations);
+        var machine = Interpreter{ .arena = unavailable.allocator(), .env = undefined, .root_shape = undefined };
+        try std.testing.expectError(error.OutOfMemory, materializeSettlementBatches(&machine, &destination));
+        try std.testing.expectEqual(.queued, transfer.state);
+        try std.testing.expectEqual(backing, transfer.items.items.ptr);
+        for (transfer.pendingItems(), 11..) |task, n|
+            try std.testing.expectEqual(@as(f64, @floatFromInt(n)), task.argument.asNum());
+        try std.testing.expectEqual(.transferred_batch, destination.pendingItems()[@intFromBool(nonempty)].kind);
+        machine.arena = a;
+        try materializeSettlementBatches(&machine, &destination);
+        try std.testing.expectEqual(.consumed, transfer.state);
+        try std.testing.expectEqual(@as(usize, 0), transfer.items.capacity);
+        try std.testing.expectEqual(@as(usize, 0), transfer.head);
+        destination.appendInTransactionSlot(Job.make(99));
+        if (nonempty) try std.testing.expectEqual(@as(f64, 1), destination.pop().?.argument.asNum());
+        for ([_]f64{ 11, 12, 13, 99 }) |n|
+            try std.testing.expectEqual(n, destination.pop().?.argument.asNum());
+        try std.testing.expect(destination.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), destination.reservations);
+    }
+}
+
+test "microtask transferred settlement batch expands atomically with sibling reactions" {
+    const a = std.testing.allocator;
+    const pair = ReactionPair{
+        .fulfill = .{ .handler = null, .detached = true },
+        .reject = .{ .handler = null, .detached = true },
+    };
+    var overflow = [_]ReactionPair{pair};
+    var settled = Promise{ .state = .fulfilled, .value = Value.num(886), .reactions_inline = pair, .reactions = .fromOwnedSlice(&overflow) };
+    var source = MicrotaskQueue{};
+    defer source.items.deinit(a);
+    try source.append(a, .{ .kind = .settlement_batch, .reaction = undefined, .argument = Value.undef(), .fulfilled = true, .payload = .{ .promise = &settled } });
+    const storage = try a.alloc(Microtask, 1);
+    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    defer queue.items.deinit(a);
+    var transfer = MicrotaskTransfer{};
+    try queue.prepareTransfer(a, &transfer);
+    queue.publishTransfer(&source, &transfer);
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    var machine = Interpreter{ .arena = unavailable.allocator(), .env = undefined, .root_shape = undefined };
+    try std.testing.expectError(error.OutOfMemory, materializeSettlementBatches(&machine, &queue));
+    try std.testing.expectEqual(.queued, transfer.state);
+    try std.testing.expect(settled.reactions_inline != null);
+    try std.testing.expectEqual(@as(usize, 1), settled.reactions.items.len);
+    machine.arena = a;
+    try materializeSettlementBatches(&machine, &queue);
+    try std.testing.expectEqual(.consumed, transfer.state);
+    try std.testing.expect(settled.reactions_inline == null);
+    try std.testing.expectEqual(@as(usize, 0), settled.reactions.items.len);
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingLen());
+    for (0..2) |_| {
+        const task = queue.pop().?;
+        try std.testing.expectEqual(.reaction, task.kind);
+        try std.testing.expectEqual(@as(f64, 886), task.argument.asNum());
+    }
+    try std.testing.expect(queue.isEmpty());
+}
+
+test "microtask transfer preparation and empty completion preserve reservation ownership" {
+    const a = std.testing.allocator;
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    var queue = MicrotaskQueue{};
+    defer queue.items.deinit(a);
+    var transfer = MicrotaskTransfer{};
+    try std.testing.expectError(error.OutOfMemory, queue.prepareTransfer(unavailable.allocator(), &transfer));
+    try std.testing.expectEqual(.empty, transfer.state);
+    try std.testing.expect(transfer.destination == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try queue.prepareTransfer(a, &transfer);
+    var empty = MicrotaskQueue{};
+    queue.publishTransfer(&empty, &transfer);
+    try std.testing.expectEqual(.consumed, transfer.state);
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expectEqual(@as(u64, 0), queue.enqueueGeneration());
+    var canceled = MicrotaskTransfer{};
+    try queue.prepareTransfer(unavailable.allocator(), &canceled);
+    queue.cancelTransfer(&canceled);
+    try std.testing.expectEqual(.consumed, canceled.state);
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expectEqual(@sizeOf(?*Promise), @sizeOf(@FieldType(Microtask, "payload")));
 }
 
 test "microtask batch reservations survive OOM and nested restoration" {
@@ -1059,7 +1227,7 @@ fn settleWithReservation(
                 .reaction = undefined,
                 .argument = Value.undef(),
                 .fulfilled = state == .fulfilled,
-                .promise = p,
+                .payload = .{ .promise = p },
             };
             if (reservation) |slot| {
                 jobs.appendInTransactionSlot(task);
@@ -1090,26 +1258,78 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     return settleWithReservation(self, p, state, v, null);
 }
 
-/// Expand settlement descriptors before any job leaves the protected queue.
-/// Both passes run under the queue lock. The first reserves the complete final
-/// layout; only then does the second transfer reaction ownership, so OOM leaves
-/// the descriptor and Promise graph byte-for-byte retryable.
+fn settlementJobCount(task: Microtask) usize {
+    std.debug.assert(task.kind != .transferred_batch);
+    if (task.kind != .settlement_batch) return 1;
+    const p = task.payload.promise orelse unreachable;
+    p.lockState();
+    defer p.unlockState();
+    const count = p.reactions.items.len + @intFromBool(p.reactions_inline != null);
+    std.debug.assert(count != 0);
+    return count;
+}
+
+fn materializedJobCount(task: Microtask) EvalError!usize {
+    if (task.kind != .transferred_batch) return settlementJobCount(task);
+    const transfer = task.payload.transfer;
+    std.debug.assert(transfer.state == .queued);
+    var count: usize = 0;
+    // Only the realm queue accepts transfers; a closed worker buffer contains
+    // ordinary/settlement jobs, so the graph is one level deep, never recursive.
+    for (transfer.pendingItems()) |child|
+        count = std.math.add(usize, count, settlementJobCount(child)) catch return error.OutOfMemory;
+    std.debug.assert(count != 0);
+    return count;
+}
+
+fn materializeSettlement(self: *Interpreter, task: Microtask, output: []Microtask) void {
+    if (task.kind != .settlement_batch) {
+        std.debug.assert(task.kind != .transferred_batch and output.len == 1);
+        output[0] = task;
+        return;
+    }
+    const p = task.payload.promise orelse unreachable;
+    p.lockState();
+    const inline_pair = p.reactions_inline;
+    var pairs = p.reactions;
+    var out: usize = 0;
+    if (inline_pair) |pair| {
+        output[out] = .{
+            .reaction = if (task.fulfilled) pair.fulfill else pair.reject,
+            .argument = p.value,
+            .fulfilled = task.fulfilled,
+        };
+        out += 1;
+    }
+    for (pairs.items) |pair| {
+        output[out] = .{
+            .reaction = if (task.fulfilled) pair.fulfill else pair.reject,
+            .argument = p.value,
+            .fulfilled = task.fulfilled,
+        };
+        out += 1;
+    }
+    std.debug.assert(out == output.len);
+    p.reactions_inline = null;
+    p.reactions = .empty;
+    p.unlockState();
+    disposeMovedReactions(self, p, &pairs, out * 2);
+}
+
+/// Reserve the complete expanded layout before either reaction or transferred
+/// backing ownership changes. OOM retains every descriptor and its graph in the
+/// destination queue. The commit pass only moves/copies owned jobs and frees
+/// consumed backing; no allocator growth or user code remains.
 pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) EvalError!void {
     var pending = queue.pendingItems();
     var expanded_len = pending.len;
     var has_batch = false;
     for (pending) |task| {
-        if (task.kind != .settlement_batch) continue;
+        if (task.kind != .settlement_batch and task.kind != .transferred_batch) continue;
         has_batch = true;
-        const p = task.promise orelse unreachable;
-        p.lockState();
-        const count = p.reactions.items.len + @intFromBool(p.reactions_inline != null);
-        p.unlockState();
-        std.debug.assert(count != 0);
-        expanded_len = std.math.add(usize, expanded_len, count - 1) catch return error.OutOfMemory;
+        expanded_len = std.math.add(usize, expanded_len, (try materializedJobCount(task)) - 1) catch return error.OutOfMemory;
     }
     if (!has_batch) return;
-
     if (queue.head != 0) {
         std.mem.copyForwards(Microtask, queue.items.items[0..pending.len], pending);
         queue.items.items.len = pending.len;
@@ -1117,7 +1337,6 @@ pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) 
         pending = queue.items.items;
     }
     try queue.reserve(self.arena, expanded_len - pending.len);
-
     const original_len = pending.len;
     queue.items.items.len = expanded_len;
     var read = original_len;
@@ -1125,41 +1344,25 @@ pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) 
     while (read != 0) {
         read -= 1;
         const task = queue.items.items[read];
-        if (task.kind != .settlement_batch) {
-            write -= 1;
-            queue.items.items[write] = task;
-            continue;
-        }
-
-        const p = task.promise orelse unreachable;
-        p.lockState();
-        const inline_pair = p.reactions_inline;
-        var pairs = p.reactions;
-        const count = pairs.items.len + @intFromBool(inline_pair != null);
-        std.debug.assert(count != 0 and write >= count);
+        // The first pass proved this exact immutable descriptor count fits.
+        const count = materializedJobCount(task) catch unreachable;
         write -= count;
-        var out = write;
-        if (inline_pair) |pair| {
-            queue.items.items[out] = .{
-                .reaction = if (task.fulfilled) pair.fulfill else pair.reject,
-                .argument = p.value,
-                .fulfilled = task.fulfilled,
-            };
-            out += 1;
-        }
-        for (pairs.items) |pair| {
-            queue.items.items[out] = .{
-                .reaction = if (task.fulfilled) pair.fulfill else pair.reject,
-                .argument = p.value,
-                .fulfilled = task.fulfilled,
-            };
-            out += 1;
-        }
-        std.debug.assert(out == write + count);
-        p.reactions_inline = null;
-        p.reactions = .empty;
-        p.unlockState();
-        disposeMovedReactions(self, p, &pairs, count * 2);
+        const output = queue.items.items[write..][0..count];
+        if (task.kind == .transferred_batch) {
+            const transfer = task.payload.transfer;
+            std.debug.assert(transfer.destination == queue);
+            var out: usize = 0;
+            for (transfer.pendingItems()) |child| {
+                const child_count = settlementJobCount(child);
+                materializeSettlement(self, child, output[out..][0..child_count]);
+                out += child_count;
+            }
+            std.debug.assert(out == count);
+            transfer.items.deinit(self.arena);
+            transfer.items = .empty;
+            transfer.head = 0;
+            transfer.state = .consumed;
+        } else materializeSettlement(self, task, output);
     }
     std.debug.assert(write == 0);
 }
@@ -1202,7 +1405,7 @@ fn resolveRootedWithReservation(
                 .fulfilled = true,
                 .thenable = self.tempRoot(value_mark, v),
                 .then_fn = then_fn,
-                .promise = self.tempPromiseRoot(promise_mark, p),
+                .payload = .{ .promise = self.tempPromiseRoot(promise_mark, p) },
             }, reservation);
             if (promiseOf(self.tempRoot(value_mark, v))) |inner|
                 linkAsyncForward(inner, self.tempPromiseRoot(promise_mark, p));
@@ -1776,7 +1979,7 @@ fn settleReaction(self: *Interpreter, r: *Reaction, fulfilled: bool, arg: Value)
 }
 
 pub fn runJob(self: *Interpreter, task: *Microtask) EvalError!void {
-    std.debug.assert(task.kind != .settlement_batch);
+    std.debug.assert(task.kind != .settlement_batch and task.kind != .transferred_batch);
     if (task.kind == .native_callback) {
         promise_profile.recordMicrotaskRun(false);
         if (task.native_callback) |callback| callback(task.native_callback_context);
@@ -1799,8 +2002,8 @@ pub fn runJob(self: *Interpreter, task: *Microtask) EvalError!void {
     }
     if (task.kind == .thenable) {
         promise_profile.recordMicrotaskRun(true);
-        if (task.promise == null or !isPending(task.promise.?)) return;
-        const nr = try nativeResolveReject(self, task.promise.?);
+        if (task.payload.promise == null or !isPending(task.payload.promise.?)) return;
+        const nr = try nativeResolveReject(self, task.payload.promise.?);
         const resolve_mark = try self.pushTempRoot(nr.resolve);
         defer self.restoreTempRoots(resolve_mark);
         const reject_mark = try self.pushTempRoot(nr.reject);

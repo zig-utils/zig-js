@@ -2199,11 +2199,12 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
             traceReaction(mt.reaction, v);
             markValue(v, mt.argument);
         },
-        .settlement_batch => if (mt.promise) |p| markManaged(v, p),
+        .settlement_batch => if (mt.payload.promise) |p| markManaged(v, p),
+        .transferred_batch => traceTransferredMicrotasks(mt.payload.transfer, v),
         .thenable => {
             markValue(v, mt.thenable);
             markValue(v, mt.then_fn);
-            if (mt.promise) |p| markManaged(v, p);
+            if (mt.payload.promise) |p| markManaged(v, p);
         },
         .callback => markValue(v, mt.callback),
         .native_callback => {},
@@ -2225,11 +2226,12 @@ inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
             relocateReaction(&mt.reaction, v);
             gc_relocation.rewriteValueSlot(v, &mt.argument);
         },
-        .settlement_batch => gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.promise),
+        .settlement_batch => gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.payload.promise),
+        .transferred_batch => relocateTransferredMicrotasks(mt.payload.transfer, v),
         .thenable => {
             gc_relocation.rewriteValueSlot(v, &mt.thenable);
             gc_relocation.rewriteValueSlot(v, &mt.then_fn);
-            gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.promise);
+            gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.payload.promise);
         },
         .callback => gc_relocation.rewriteValueSlot(v, &mt.callback),
         .native_callback => {},
@@ -2243,6 +2245,36 @@ inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
             for (@constCast(mt.job_args)) |*argument|
                 gc_relocation.rewriteValueSlot(v, argument);
         },
+    }
+}
+
+fn traceTransferredMicrotasks(transfer: *promise.MicrotaskTransfer, v: anytype) void {
+    std.debug.assert(transfer.state == .queued);
+    for (transfer.pendingItems()) |task| {
+        std.debug.assert(task.kind != .transferred_batch);
+        traceMicrotask(task, v);
+    }
+}
+
+fn relocateTransferredMicrotasks(transfer: *promise.MicrotaskTransfer, v: anytype) void {
+    std.debug.assert(transfer.state == .queued);
+    for (transfer.pendingItems()) |*task| {
+        std.debug.assert(task.kind != .transferred_batch);
+        relocateMicrotask(task, v);
+    }
+}
+
+/// Publish the outgoing roots of moved arena backing while its destination
+/// queue is locked. The same lock makes a newly starting root scan observe the
+/// descriptor if marking starts after this check.
+pub fn barrierMicrotasks(tasks: []const promise.Microtask) void {
+    const raw = active_heap orelse return;
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    if (!heap.marking.load(.acquire)) return;
+    var visitor = RootPublishVisitor{};
+    for (tasks) |task| {
+        std.debug.assert(task.kind != .transferred_batch);
+        traceMicrotask(task, &visitor);
     }
 }
 
@@ -2639,7 +2671,7 @@ test "realm root relocation rewrites microtask variants and module graph" {
             .fulfilled = true,
             .thenable = Value.obj(&old_objects[2]),
             .then_fn = Value.obj(&old_objects[3]),
-            .promise = &old_promises[1],
+            .payload = .{ .promise = &old_promises[1] },
         },
         .{
             .kind = .callback,
@@ -2725,7 +2757,7 @@ test "realm root relocation rewrites microtask variants and module graph" {
     try std.testing.expectEqual(&new_objects[1], tasks[0].argument.asObj());
     try std.testing.expectEqual(&new_objects[2], tasks[1].thenable.asObj());
     try std.testing.expectEqual(&new_objects[3], tasks[1].then_fn.asObj());
-    try std.testing.expectEqual(&new_promises[1], tasks[1].promise.?);
+    try std.testing.expectEqual(&new_promises[1], tasks[1].payload.promise.?);
     try std.testing.expectEqual(&new_objects[4], tasks[2].callback.asObj());
     try std.testing.expectEqual(&new_objects[5], tasks[3].job.asObj());
     try std.testing.expectEqual(&new_objects[6], tasks[3].job_first.asObj());
@@ -5519,6 +5551,96 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(collection.weak_entries.items[0].key.?));
 }
 
+test "microtask transfer shades its graph after the concurrent root scan" {
+    const ctx = try ContextMod.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.gc_scan_native_stack = false;
+    const saved = setActiveContext(ctx);
+    defer restoreActiveContext(saved);
+    const heap = ctx.gc.?;
+    heap.collect();
+    const baseline = heap.live_cells;
+    const object = try allocObj(ctx.arena());
+    const child = try allocObj(ctx.arena());
+    try object.setOwn(ctx.arena(), ctx.root_shape, "child", Value.obj(child));
+    var source = promise.MicrotaskQueue{};
+    try source.append(ctx.arena(), .{
+        .kind = .callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .callback = Value.obj(object),
+    });
+    var transfer = promise.MicrotaskTransfer{};
+    try ctx.microtasks.prepareTransfer(ctx.arena(), &transfer);
+    heap.beginConcurrentMark();
+    var visitor = Heap.Visitor{ .heap = heap };
+    try std.testing.expect(!visitor.isMarked(object));
+    ctx.microtasks.acquire();
+    ctx.microtasks.publishTransfer(&source, &transfer);
+    ctx.microtasks.release();
+    try std.testing.expect(visitor.isMarked(object));
+    while (!heap.concurrentMarkRound()) {}
+    heap.finishConcurrentMark();
+    try std.testing.expectEqual(baseline + 2, heap.live_cells);
+    try std.testing.expectEqual(child, transfer.pendingItems()[0].callback.asObj().getOwn("child").?.asObj());
+    var machine = ctx.interpreter();
+    try promise.materializeSettlementBatches(&machine, &ctx.microtasks);
+    try std.testing.expectEqual(.consumed, transfer.state);
+    ctx.microtasks.clearRetainingCapacity();
+    heap.collect();
+    try std.testing.expectEqual(baseline, heap.live_cells);
+}
+
+test "microtask transferred backing traces and relocates only its owned suffix" {
+    var old_objects: [3]Object = @splat(.{});
+    var new_objects = old_objects;
+    var jobs: [3]promise.Microtask = undefined;
+    for (&jobs, &old_objects) |*job, *object| job.* = .{
+        .kind = .callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .callback = Value.obj(object),
+    };
+    var transfer = promise.MicrotaskTransfer{
+        .state = .queued,
+        .items = .fromOwnedSlice(&jobs),
+        .head = 1,
+    };
+    var descriptor = promise.Microtask{
+        .kind = .transferred_batch,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .payload = .{ .transfer = &transfer },
+    };
+    const Visitor = struct {
+        old: *[3]Object,
+        new: *[3]Object,
+        seen: [3]bool = @splat(false),
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            for (self.old, 0..) |*object, i|
+                if (cell == @as(*anyopaque, @ptrCast(object))) {
+                    self.seen[i] = true;
+                };
+        }
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            for (self.old, 0..) |*object, i|
+                if (old == @as(*anyopaque, @ptrCast(object))) return &self.new[i];
+            return old;
+        }
+    };
+    var visitor = Visitor{ .old = &old_objects, .new = &new_objects };
+    traceMicrotask(descriptor, &visitor);
+    try std.testing.expectEqual([_]bool{ false, true, true }, visitor.seen);
+    relocateMicrotask(&descriptor, &visitor);
+    try std.testing.expectEqual(&old_objects[0], jobs[0].callback.asObj());
+    try std.testing.expectEqual(&new_objects[1], jobs[1].callback.asObj());
+    try std.testing.expectEqual(&new_objects[2], jobs[2].callback.asObj());
+    try std.testing.expectEqual(&transfer, descriptor.payload.transfer);
+}
+
 test "gc traces only the active microtask variant" {
     const Recorder = struct {
         marked: [8]?*anyopaque = .{ null, null, null, null, null, null, null, null },
@@ -5556,7 +5678,7 @@ test "gc traces only the active microtask variant" {
         .fulfilled = true,
         .thenable = Value.obj(&thenable),
         .then_fn = Value.obj(&then_fn),
-        .promise = &inactive_result,
+        .payload = .{ .promise = &inactive_result },
     }, &reaction_marks);
     try std.testing.expect(reaction_marks.contains(&reaction_handler));
     try std.testing.expect(reaction_marks.contains(&reaction_argument));
@@ -5571,7 +5693,7 @@ test "gc traces only the active microtask variant" {
         .reaction = undefined,
         .argument = Value.obj(&inactive_argument),
         .fulfilled = true,
-        .promise = &settlement_result,
+        .payload = .{ .promise = &settlement_result },
     }, &settlement_marks);
     try std.testing.expect(settlement_marks.contains(&settlement_result));
     try std.testing.expect(!settlement_marks.contains(&inactive_argument));
@@ -5584,7 +5706,7 @@ test "gc traces only the active microtask variant" {
         .fulfilled = true,
         .thenable = Value.obj(&thenable),
         .then_fn = Value.obj(&then_fn),
-        .promise = &thenable_result,
+        .payload = .{ .promise = &thenable_result },
     }, &thenable_marks);
     try std.testing.expect(thenable_marks.contains(&thenable));
     try std.testing.expect(thenable_marks.contains(&then_fn));
