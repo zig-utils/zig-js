@@ -42304,3 +42304,50 @@ test "required bytecode keeps program scratch rooted and isolated across collect
     const inventory = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expect(inventory.count(.program_compiled) >= 1);
 }
+
+test "Promise job returned thenable and reserved OOM survive moving getter failure" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 16 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const Fault = struct {
+        context: *Context,
+        calls: usize = 0,
+        moved: bool = false,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            const before = machine.current_microtask.?.argument.asObj();
+            fault.context.gc_scan_native_stack = false;
+            const result = fault.context.collectYoungAfterRootValidation(fault.context.gc.?);
+            fault.moved = result.status == .compacted and before != machine.current_microtask.?.argument.asObj();
+            return error.OutOfMemory;
+        }
+    };
+    var fault = Fault{ .context = ctx };
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    const fail = try gc_mod.allocObj(ctx.arena());
+    fail.* = .{ .native = Fault.fail, .private_data = &fault };
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "moveAndFailJob", Value.obj(fail));
+    _ = try ctx.evaluate(
+        \\var jobHandlerCalls = 0, jobSuffixCalls = 0;
+        \\var movingJobResult = Promise.resolve(1).then(function () {
+        \\  jobHandlerCalls++;
+        \\  return { child: { alive: 885 }, get then() { return moveAndFailJob(); } };
+        \\});
+        \\Promise.resolve(2).then(function () { jobSuffixCalls++; });
+    );
+    try std.testing.expect(fault.moved);
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("jobHandlerCalls").?.asNum());
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("jobSuffixCalls").?.asNum());
+    const result = promise.promiseOf(ctx.global_object.getOwn("movingJobResult").?).?;
+    try std.testing.expectEqual(promise.State.rejected, result.state);
+    try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.asObj(), result.value.asObj());
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}

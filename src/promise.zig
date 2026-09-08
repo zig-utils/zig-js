@@ -480,6 +480,13 @@ pub const MicrotaskQueue = struct {
         try self.items.ensureTotalCapacity(a, required);
     }
 
+    /// Called with the queue locked, before an await-driven dequeue. Failure
+    /// leaves the current job queued and its callback entirely unobserved.
+    pub fn prepareJobPublication(self: *MicrotaskQueue, a: std.mem.Allocator) !PreparedSettlement {
+        try self.reserveTransactionSlot(a);
+        return PreparedSettlement.fromReservedSlot(self);
+    }
+
     fn reserveTransactionSlot(self: *MicrotaskQueue, a: std.mem.Allocator) !void {
         try self.reserve(a, 1);
         self.reservations += 1;
@@ -866,6 +873,10 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
+    // A consumed resolving record is a no-op even when this interpreter has
+    // no spare root storage. Keep the later check/CAS for concurrent contenders.
+    const entry_state = resolvingStateObject(fnobj) orelse return Value.undef();
+    if (entry_state.promise_resolving_already.load(.acquire)) return Value.undef();
     const argument = if (args.len > 0) args[0] else Value.undef();
     const roots_mark = try self.pushTempRootSlice(&.{ Value.obj(fnobj), argument });
     defer self.restoreTempRoots(roots_mark);
@@ -900,14 +911,20 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         cancelResolvingJob(self, &reservation);
         return Value.undef();
     }
-    try resolveRootedWithReservation(
+    resolveRootedWithReservation(
         self,
         promise_mark,
         target,
         roots_mark + 1,
         argument,
         &reservation,
-    );
+    ) catch |err| {
+        // ECMA-262 27.2.1.3.2: after [[AlreadyResolved]] is consumed, an
+        // engine failure must complete this exact Promise, never abandon it.
+        const reason = try abruptJobValue(self, err);
+        rejectWithReservation(self, self.tempPromiseRoot(promise_mark, target), reason, &reservation);
+        if (err == error.Throw) self.exception = Value.undef();
+    };
     std.debug.assert(!reservation.active);
     return Value.undef();
 }
@@ -916,6 +933,10 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
+    // A consumed resolving record is a no-op even when this interpreter has
+    // no spare root storage. Keep the later check/CAS for concurrent contenders.
+    const entry_state = resolvingStateObject(fnobj) orelse return Value.undef();
+    if (entry_state.promise_resolving_already.load(.acquire)) return Value.undef();
     const reason = if (args.len > 0) args[0] else Value.undef();
     const roots_mark = try self.pushTempRootSlice(&.{ Value.obj(fnobj), reason });
     defer self.restoreTempRoots(roots_mark);
@@ -1281,6 +1302,12 @@ fn settleWithReservation(
 pub const PreparedSettlement = struct {
     slot: MicrotaskReservation = .{},
 
+    /// Transfer one already-owned batch reservation into the current job. The
+    /// batch accounts for consumption or retains an unused slot until restore.
+    pub fn fromReservedSlot(queue: *MicrotaskQueue) PreparedSettlement {
+        return .{ .slot = .{ .queue = queue, .active = true } };
+    }
+
     pub fn prepare(self: *Interpreter, queue: *MicrotaskQueue) EvalError!PreparedSettlement {
         self.lockJobQueue(queue);
         defer self.unlockJobQueue(queue);
@@ -1307,15 +1334,28 @@ pub const PreparedSettlement = struct {
     /// publication need no interpreter/queue growth, safepoint, or JS call.
     pub fn reject(prepared: *PreparedSettlement, self: *Interpreter, p: *Promise, reason: Value) void {
         std.debug.assert(prepared.slot.active);
-        const saved = self.microtasks;
-        self.microtasks = prepared.slot.queue.?;
-        defer self.microtasks = saved;
-        const locked = LockedSettlement.begin(self, p, .rejected);
-        if (p.state == .pending) locked.commit(reason, &prepared.slot);
-        locked.end();
-        prepared.cancel(self);
+        rejectWithReservation(self, p, reason, &prepared.slot);
     }
 };
+
+fn rejectWithReservation(self: *Interpreter, p: *Promise, reason: Value, slot: *MicrotaskReservation) void {
+    std.debug.assert(slot.active or slot.queue == null);
+    const saved = self.microtasks;
+    self.microtasks = slot.queue;
+    defer self.microtasks = saved;
+    const locked = LockedSettlement.begin(self, p, .rejected);
+    if (p.state == .pending) locked.commit(reason, slot);
+    locked.end();
+    cancelResolvingJob(self, slot);
+}
+
+fn abruptJobValue(self: *Interpreter, err: EvalError) EvalError!Value {
+    return switch (err) {
+        error.OutOfMemory => if (self.out_of_memory_exception.isUndefined()) Value.staticStr("OutOfMemoryError") else self.out_of_memory_exception,
+        error.Throw => self.exception,
+        error.OptShortCircuit => err,
+    };
+}
 
 fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!void {
     return settleWithReservation(self, p, state, v, null);
@@ -2031,15 +2071,77 @@ fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
 
 /// Run one reaction job: invoke the handler (or pass through) and settle the
 /// dependent promise. A handler that throws rejects the dependent promise.
-fn settleReaction(self: *Interpreter, r: *Reaction, fulfilled: bool, arg: Value) EvalError!void {
-    if (r.result) |result| {
-        if (fulfilled) try resolve(self, result, arg) else try reject(self, result, arg);
-        return;
-    }
-    if (fulfilled) _ = try self.callValue(r.resolve, &.{arg}) else _ = try self.callValue(r.reject, &.{arg});
+fn nativeReactionState(r: *const Reaction) ?*Object {
+    if (!r.resolve.isObject() or !r.reject.isObject()) return null;
+    const state = r.resolve.asObj();
+    if (state.native != resolveThunk or r.reject.asObj().native != rejectThunk) return null;
+    if (resolvingStateObject(r.reject.asObj()) != state) return null;
+    return state;
 }
 
-pub fn runJob(self: *Interpreter, task: *Microtask) EvalError!void {
+fn rejectResolvingState(self: *Interpreter, state: *Object, reason: Value, publication: *PreparedSettlement) bool {
+    if (state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return false;
+    publication.reject(self, resolvingTarget(state).?, reason);
+    return true;
+}
+
+fn settleReaction(self: *Interpreter, task: *Microtask, publication: *PreparedSettlement) EvalError!void {
+    if (task.reaction.result) |result| {
+        if (task.fulfilled) {
+            publication.resolve(self, result, task.argument) catch |err| {
+                const reason = try abruptJobValue(self, err);
+                publication.reject(self, task.reaction.result.?, reason);
+                if (err == error.Throw) self.exception = Value.undef();
+            };
+        } else publication.reject(self, result, task.argument);
+        return;
+    }
+    const callback = if (task.fulfilled) task.reaction.resolve else task.reaction.reject;
+    _ = self.callValue(callback, &.{task.argument}) catch |err| {
+        // Custom species keep their ordinary Call/abrupt semantics. For the
+        // engine's paired native closures, root/call setup OOM must instead
+        // complete the still-unclaimed capability using the job's owned slot.
+        const state = nativeReactionState(&task.reaction) orelse return err;
+        const reason = try abruptJobValue(self, err);
+        if (!rejectResolvingState(self, state, reason, publication)) return err;
+        if (err == error.Throw) self.exception = Value.undef();
+    };
+}
+
+fn runThenableJob(self: *Interpreter, task: *Microtask, publication: *PreparedSettlement) EvalError!void {
+    if (task.payload.promise == null or !isPending(task.payload.promise.?)) return;
+    // Reserve both root slots before creating the resolving pair. On failure
+    // no user function has observed the pair; the current job roots its target.
+    const pair_mark = self.pushTempRootSlice(&.{ Value.undef(), Value.undef() }) catch |err| {
+        publication.reject(self, task.payload.promise.?, try abruptJobValue(self, err));
+        return;
+    };
+    defer self.restoreTempRoots(pair_mark);
+    const nr = nativeResolveReject(self, task.payload.promise.?) catch |err| {
+        publication.reject(self, task.payload.promise.?, try abruptJobValue(self, err));
+        if (err == error.Throw) self.exception = Value.undef();
+        return;
+    };
+    self.setTempRoot(pair_mark, nr.resolve);
+    self.setTempRoot(pair_mark + 1, nr.reject);
+    if (self.callValueWithThis(
+        task.then_fn,
+        &.{ self.tempRoot(pair_mark, nr.resolve), self.tempRoot(pair_mark + 1, nr.reject) },
+        task.thenable,
+    )) |_| {} else |err| {
+        const reason = try abruptJobValue(self, err);
+        const state = self.tempRoot(pair_mark, nr.resolve).asObj();
+        // NewPromiseResolveThenableJob's abrupt branch invokes the intrinsic
+        // rejection operation on the shared once-only record. It cannot depend
+        // on allocating another call frame/root array to perform that commit.
+        if (!rejectResolvingState(self, state, reason, publication) and err != error.Throw) return err;
+        if (err == error.Throw) self.exception = Value.undef();
+    }
+}
+
+/// The caller owns the current job and one queue publication slot. A consumed
+/// slot follows the Promise completion; an unused slot returns to the caller.
+pub fn runJob(self: *Interpreter, task: *Microtask, publication: *PreparedSettlement) EvalError!void {
     std.debug.assert(task.kind != .settlement_batch and task.kind != .transferred_batch);
     if (task.kind == .native_callback) {
         promise_profile.recordMicrotaskRun(false);
@@ -2063,46 +2165,337 @@ pub fn runJob(self: *Interpreter, task: *Microtask) EvalError!void {
     }
     if (task.kind == .thenable) {
         promise_profile.recordMicrotaskRun(true);
-        if (task.payload.promise == null or !isPending(task.payload.promise.?)) return;
-        const nr = try nativeResolveReject(self, task.payload.promise.?);
-        const resolve_mark = try self.pushTempRoot(nr.resolve);
-        defer self.restoreTempRoots(resolve_mark);
-        const reject_mark = try self.pushTempRoot(nr.reject);
-        defer self.restoreTempRoots(reject_mark);
-        if (self.callValueWithThis(
-            task.then_fn,
-            &.{ self.tempRoot(resolve_mark, nr.resolve), self.tempRoot(reject_mark, nr.reject) },
-            task.thenable,
-        )) |_| {} else |err| {
-            if (err == error.Throw) {
-                const reason = self.exception;
-                self.exception = Value.undef();
-                _ = try self.callValue(self.tempRoot(reject_mark, nr.reject), &.{reason});
-            } else return err;
-        }
-        return;
+        return runThenableJob(self, task, publication);
     }
     promise_profile.recordMicrotaskRun(false);
-    const r = &task.reaction;
-    if (r.handler) |h| {
-        const result = if (r.extra_argument) |extra|
-            self.callValueWithThis(h, &.{ task.argument, extra }, Value.undef())
+    if (task.reaction.handler) |handler| {
+        const result = if (task.reaction.extra_argument) |extra|
+            self.callValueWithThis(handler, &.{ task.argument, extra }, Value.undef())
         else
-            self.callValueWithThis(h, &.{task.argument}, Value.undef());
+            self.callValueWithThis(handler, &.{task.argument}, Value.undef());
         if (result) |res| {
-            if (r.detached) return;
-            try settleReaction(self, r, true, res);
+            if (task.reaction.detached) return;
+            // The callback's input is no longer needed. Its current-job slot
+            // now owns the result across allocating/moving settlement work.
+            gc_mod.barrierValue(res);
+            task.argument = res;
+            task.fulfilled = true;
         } else |err| {
-            if (r.detached) return err;
-            if (err == error.Throw) {
-                const reason = self.exception;
-                self.exception = Value.undef();
-                try settleReaction(self, r, false, reason);
-            } else return err;
+            if (task.reaction.detached) return err;
+            if (err != error.Throw and task.reaction.result == null and nativeReactionState(&task.reaction) == null) return err;
+            const reason = try abruptJobValue(self, err);
+            gc_mod.barrierValue(reason);
+            task.argument = reason;
+            task.fulfilled = false;
+            if (err == error.Throw) self.exception = Value.undef();
         }
-    } else {
-        // Pass-through: a fulfill reaction with no handler forwards the value;
-        // a reject reaction with no handler forwards the rejection.
-        try settleReaction(self, r, task.fulfilled, task.argument);
     }
+    try settleReaction(self, task, publication);
+}
+
+test "Promise job preparation OOM rejects its target and keeps the untouched suffix" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .heap_limit_bytes = 16 * 1024 * 1024 });
+    defer ctx.destroy();
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    const Calls = struct {
+        then_calls: usize = 0,
+        suffix_calls: usize = 0,
+        fn then(_: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
+            const calls: *@This() = @ptrCast(@alignCast(this.asObj().private_data.?));
+            calls.then_calls += 1;
+            return Value.undef();
+        }
+        fn suffix(raw: ?*anyopaque) callconv(.c) void {
+            const calls: *@This() = @ptrCast(@alignCast(raw.?));
+            calls.suffix_calls += 1;
+        }
+    };
+    var calls = Calls{};
+    const wrapper = try newPromise(&machine);
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "jobTarget", Value.obj(wrapper));
+    const thenable = try gc_mod.allocObj(ctx.arena());
+    thenable.private_data = &calls;
+    const method = try gc_mod.allocObj(ctx.arena());
+    method.native = Calls.then;
+    try ctx.microtasks.append(ctx.arena(), .{
+        .kind = .thenable,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .thenable = Value.obj(thenable),
+        .then_fn = Value.obj(method),
+        .payload = .{ .promise = promiseOf(Value.obj(wrapper)).? },
+    });
+    try ctx.microtasks.append(ctx.arena(), .{
+        .kind = .native_callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .native_callback = Calls.suffix,
+        .native_callback_context = &calls,
+    });
+    // The batch copy succeeds; resolving-function root storage cannot grow
+    // after the first job has left the queue. Its native then body never runs.
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 1, .resize_fail_index = 0 });
+    machine.arena = exhausted.allocator();
+    var failure: ?EvalError = null;
+    machine.drainMicrotasks() catch |err| {
+        failure = err;
+    };
+    machine.arena = ctx.arena();
+    try std.testing.expect(exhausted.has_induced_failure);
+    const target = promiseOf(ctx.global_object.getOwn("jobTarget").?).?;
+    try std.testing.expectEqual(State.rejected, target.state);
+    try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.asObj(), target.value.asObj());
+    try std.testing.expect(failure == null);
+    try std.testing.expectEqual(@as(usize, 0), calls.then_calls);
+    try std.testing.expectEqual(@as(usize, 1), calls.suffix_calls);
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "Promise job resolver getter OOM commits rejection after the once-only claim" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .heap_limit_bytes = 16 * 1024 * 1024 });
+    defer ctx.destroy();
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    const Fault = struct {
+        context: *Context,
+        calls: usize = 0,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            fault.context.gc_scan_native_stack = false;
+            fault.context.gc.?.collect();
+            return error.OutOfMemory;
+        }
+    };
+    var fault = Fault{ .context = ctx };
+    const fail = try gc_mod.allocObj(ctx.arena());
+    fail.* = .{ .native = Fault.fail, .private_data = &fault };
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "failJob", Value.obj(fail));
+    _ = try ctx.evaluate("var jobInput = { get then() { return failJob(); } };");
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    const wrapper = try newPromise(&machine);
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "jobTarget", Value.obj(wrapper));
+    const pair = try nativeResolveReject(&machine, promiseOf(Value.obj(wrapper)).?);
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "jobResolve", pair.resolve);
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "jobReject", pair.reject);
+    _ = try machine.callValue(pair.resolve, &.{ctx.global_object.getOwn("jobInput").?});
+    const target = promiseOf(ctx.global_object.getOwn("jobTarget").?).?;
+    try std.testing.expectEqual(State.rejected, target.state);
+    try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.asObj(), target.value.asObj());
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+    try std.testing.expect(ctx.global_object.getOwn("jobResolve").?.asObj().promise_resolving_already.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    try std.testing.expect(ctx.microtasks.isEmpty());
+}
+
+test "Promise job consumed resolvers need no fresh roots even while adoption is pending" {
+    // The once-only bit, not the target's terminal state, controls duplicates.
+    // Empty root arrays distinguish this from reuse of previously grown storage.
+    for ([_]State{ .pending, .fulfilled, .rejected }) |state| {
+        var target = Promise{ .state = state, .value = Value.num(885) };
+        var res = Object{ .native = resolveThunk, .private_data = &target };
+        res.promise_resolving_already.store(true, .release);
+        var rej = Object{ .native = rejectThunk, .private_data = &res };
+        var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var sentinel: u8 = 0;
+        var machine = Interpreter{ .arena = exhausted.allocator(), .env = undefined, .root_shape = undefined, .gc = &sentinel };
+        machine.active_native = &res;
+        _ = try resolveThunk(&machine, Value.undef(), &.{Value.num(1)});
+        machine.active_native = &rej;
+        _ = try rejectThunk(&machine, Value.undef(), &.{Value.num(2)});
+        try std.testing.expect(!exhausted.has_induced_failure);
+        try std.testing.expectEqual(state, target.state);
+        try std.testing.expectEqual(@as(f64, 885), target.value.asNum());
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.capacity);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_promise_roots.capacity);
+    }
+}
+
+test "Promise job reaction handler OOM rejects intrinsic and native capabilities without replay" {
+    const Context = @import("context.zig").Context;
+    const Calls = struct {
+        handler_calls: usize = 0,
+        suffix_calls: usize = 0,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const calls: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            calls.handler_calls += 1;
+            return error.OutOfMemory;
+        }
+        fn suffix(raw: ?*anyopaque) callconv(.c) void {
+            const calls: *@This() = @ptrCast(@alignCast(raw.?));
+            calls.suffix_calls += 1;
+        }
+    };
+    for ([_]bool{ false, true }) |native_pair| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .heap_limit_bytes = 16 * 1024 * 1024 });
+        defer ctx.destroy();
+        const saved_ctx = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved_ctx);
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const saved_machine = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(saved_machine);
+        var calls = Calls{};
+        const wrapper = try newPromise(&machine);
+        try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "jobTarget", Value.obj(wrapper));
+        const handler = try gc_mod.allocObj(ctx.arena());
+        handler.* = .{ .native = Calls.fail, .private_data = &calls };
+        var reaction = Reaction{ .handler = Value.obj(handler), .result = promiseOf(Value.obj(wrapper)).? };
+        if (native_pair) {
+            const pair = try nativeResolveReject(&machine, reaction.result.?);
+            reaction.result = null;
+            reaction.resolve = pair.resolve;
+            reaction.reject = pair.reject;
+        }
+        try ctx.microtasks.append(ctx.arena(), .{ .reaction = reaction, .argument = Value.num(1), .fulfilled = true });
+        try enqueueNativeCallback(&machine, &calls, Calls.suffix);
+        try machine.drainMicrotasks();
+        const target = promiseOf(ctx.global_object.getOwn("jobTarget").?).?;
+        try std.testing.expectEqual(State.rejected, target.state);
+        try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.asObj(), target.value.asObj());
+        try std.testing.expectEqual(@as(usize, 1), calls.handler_calls);
+        try std.testing.expectEqual(@as(usize, 1), calls.suffix_calls);
+        try std.testing.expect(ctx.microtasks.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    }
+}
+
+test "Promise job consumed publication preserves suffix before its newly queued reactions" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const Calls = struct {
+        count: usize = 0,
+        ordered: bool = true,
+        fn abort(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+        fn record(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine_arg: *Interpreter = @ptrCast(@alignCast(raw));
+            const calls: *@This() = @ptrCast(@alignCast(machine_arg.active_native.?.private_data.?));
+            calls.count += 1;
+            calls.ordered = calls.ordered and args[0].asNum() == @as(f64, @floatFromInt(calls.count));
+            return Value.undef();
+        }
+    };
+    var calls = Calls{};
+    const handler = try gc_mod.allocObj(ctx.arena());
+    handler.* = .{ .native = Calls.record, .private_data = &calls };
+    const abort = try gc_mod.allocObj(ctx.arena());
+    abort.native = Calls.abort;
+    const dependent = Reaction{ .handler = Value.obj(handler), .detached = true };
+    var target = Promise{ .reactions_inline = .{ .fulfill = dependent, .reject = dependent } };
+    try ctx.microtasks.append(ctx.arena(), .{
+        .reaction = .{ .handler = null, .result = &target },
+        .argument = Value.num(2),
+        .fulfilled = true,
+    });
+    try enqueueCallback(&machine, Value.obj(abort));
+    try ctx.microtasks.append(ctx.arena(), .{ .reaction = dependent, .argument = Value.num(1), .fulfilled = true });
+    try std.testing.expectError(error.OutOfMemory, machine.drainMicrotasks());
+    try std.testing.expectEqual(State.fulfilled, target.state);
+    try std.testing.expectEqual(@as(usize, 2), ctx.microtasks.pendingLen());
+    try std.testing.expectEqual(.reaction, ctx.microtasks.pendingItems()[0].kind);
+    try std.testing.expectEqual(.settlement_batch, ctx.microtasks.pendingItems()[1].kind);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    try machine.drainMicrotasks();
+    try std.testing.expect(calls.ordered);
+    try std.testing.expectEqual(@as(usize, 2), calls.count);
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "Promise job custom capability abrupt completion is observed without fallback calls" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const Calls = struct {
+        resolve_calls: usize = 0,
+        reject_calls: usize = 0,
+        fn resolve(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine_arg: *Interpreter = @ptrCast(@alignCast(raw));
+            const calls: *@This() = @ptrCast(@alignCast(machine_arg.active_native.?.private_data.?));
+            calls.resolve_calls += 1;
+            return error.OutOfMemory;
+        }
+        fn reject(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine_arg: *Interpreter = @ptrCast(@alignCast(raw));
+            const calls: *@This() = @ptrCast(@alignCast(machine_arg.active_native.?.private_data.?));
+            calls.reject_calls += 1;
+            return Value.undef();
+        }
+    };
+    var calls = Calls{};
+    const res = try gc_mod.allocObj(ctx.arena());
+    res.* = .{ .native = Calls.resolve, .private_data = &calls };
+    const rej = try gc_mod.allocObj(ctx.arena());
+    rej.* = .{ .native = Calls.reject, .private_data = &calls };
+    try ctx.microtasks.append(ctx.arena(), .{
+        .reaction = .{ .handler = null, .resolve = Value.obj(res), .reject = Value.obj(rej) },
+        .argument = Value.num(885),
+        .fulfilled = true,
+    });
+    try std.testing.expectError(error.OutOfMemory, machine.drainMicrotasks());
+    try machine.drainMicrotasks();
+    try std.testing.expectEqual(@as(usize, 1), calls.resolve_calls);
+    try std.testing.expectEqual(@as(usize, 0), calls.reject_calls);
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "Promise job thenable OOM after resolution preserves its committed adoption" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const Fault = struct {
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+    };
+    const fail = try gc_mod.allocObj(ctx.arena());
+    fail.native = Fault.fail;
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "failJob", Value.obj(fail));
+    _ = try ctx.evaluate(
+        \\var jobThenCalls = 0, jobAdoptionCalls = 0;
+        \\var jobInput = { then: function(resolve) {
+        \\  jobThenCalls++;
+        \\  resolve({ then: function(next) { jobAdoptionCalls++; next(885); } });
+        \\  failJob();
+        \\}};
+    );
+    var machine = ctx.interpreter();
+    const wrapper = try newPromise(&machine);
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "adoptedJob", Value.obj(wrapper));
+    try resolve(&machine, promiseOf(Value.obj(wrapper)).?, ctx.global_object.getOwn("jobInput").?);
+    try std.testing.expectError(error.OutOfMemory, machine.drainMicrotasks());
+    try std.testing.expectEqual(State.pending, promiseOf(ctx.global_object.getOwn("adoptedJob").?).?.state);
+    try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    try machine.drainMicrotasks();
+    const target = promiseOf(ctx.global_object.getOwn("adoptedJob").?).?;
+    try std.testing.expectEqual(State.fulfilled, target.state);
+    try std.testing.expectEqual(@as(f64, 885), target.value.asNum());
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("jobThenCalls").?.asNum());
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("jobAdoptionCalls").?.asNum());
+    try std.testing.expect(ctx.microtasks.isEmpty());
 }

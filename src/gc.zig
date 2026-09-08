@@ -2972,6 +2972,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markValue(v, machine.ret_value);
     markValue(v, machine.this_value);
     markValue(v, machine.exception);
+    markValue(v, machine.out_of_memory_exception);
     markValue(v, machine.new_target);
     if (machine.this_cell) |cell| markValue(v, cell.value());
     if (machine.active_native) |o| v.mark(o);
@@ -3125,6 +3126,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteValueSlot(v, &machine.ret_value);
     gc_relocation.rewriteValueSlot(v, &machine.this_value);
     gc_relocation.rewriteValueSlot(v, &machine.exception);
+    gc_relocation.rewriteValueSlot(v, &machine.out_of_memory_exception);
     gc_relocation.rewriteValueSlot(v, &machine.new_target);
     if (machine.this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
     gc_relocation.rewriteOptionalSlot(v, Object, &machine.active_native);
@@ -5854,4 +5856,39 @@ test "Wasm relocation: direct and exception-payload execution roots" {
     try std.testing.expectEqual(&new_pending_ref, pending_externrefs[0].asObj());
     try std.testing.expectEqual(@intFromPtr(&numeric_only), stack[0].numeric);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&funcref_only)), stack[1].funcref);
+}
+
+test "Promise job cached OOM value is a precise interpreter root and relocation slot" {
+    const ctx = try ContextMod.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const saved = setActiveContext(ctx);
+    defer restoreActiveContext(saved);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    ctx.gc_scan_native_stack = false;
+    const heap = ctx.gc.?;
+    heap.collect();
+    const baseline = heap.live_cells;
+    const object = try allocObj(ctx.arena());
+    const child = try allocObj(ctx.arena());
+    try object.setOwn(ctx.arena(), ctx.root_shape, "child", Value.obj(child));
+    machine.out_of_memory_exception = Value.obj(object);
+    heap.collect();
+    try std.testing.expectEqual(baseline + 2, heap.live_cells);
+    try std.testing.expectEqual(child, machine.out_of_memory_exception.asObj().getOwn("child").?.asObj());
+    const Plan = struct {
+        old: *Object,
+        new: *Object,
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            return if (old == @as(*anyopaque, @ptrCast(self.old))) self.new else old;
+        }
+    };
+    var relocated = Object{};
+    const plan = Plan{ .old = object, .new = &relocated };
+    relocateInterpreterRoots(&machine, &plan);
+    try std.testing.expectEqual(&relocated, machine.out_of_memory_exception.asObj());
+    machine.out_of_memory_exception = Value.undef();
+    heap.collect();
+    try std.testing.expectEqual(baseline, heap.live_cells);
 }

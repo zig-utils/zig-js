@@ -11025,18 +11025,21 @@ pub const Interpreter = struct {
         batch: *std.ArrayListUnmanaged(promise.Microtask),
     ) EvalError!void {
         while (try self.jobQueueDequeueBatch(queue, batch)) {
+            var reservations = batch.items.len;
             var i: usize = 0;
             while (i < batch.items.len) : (i += 1) {
                 const job = batch.items[i];
                 self.current_microtask_batch = batch.items[i + 1 ..];
                 self.current_microtask = job;
-                promise.runJob(self, &self.current_microtask.?) catch |err| {
+                var publication = promise.PreparedSettlement.fromReservedSlot(queue);
+                promise.runJob(self, &self.current_microtask.?, &publication) catch |err| {
+                    if (!publication.slot.active) reservations -= 1;
                     if (job.kind == .next_tick and err == error.Throw) {
                         const thrown = self.exception;
                         self.exception = Value.undef();
                         const handled = handleProcessUncaughtException(self, thrown, false) catch |dispatch_err| {
                             self.lockJobQueue(queue);
-                            queue.restoreBatch(batch.items[i + 1 ..], batch.items.len);
+                            queue.restoreBatch(batch.items[i + 1 ..], reservations);
                             self.unlockJobQueue(queue);
                             self.current_microtask = null;
                             self.current_microtask_batch = &.{};
@@ -11050,17 +11053,18 @@ pub const Interpreter = struct {
                         self.exception = thrown;
                     }
                     self.lockJobQueue(queue);
-                    queue.restoreBatch(batch.items[i + 1 ..], batch.items.len);
+                    queue.restoreBatch(batch.items[i + 1 ..], reservations);
                     self.unlockJobQueue(queue);
                     self.current_microtask = null;
                     self.current_microtask_batch = &.{};
                     return err;
                 };
+                if (!publication.slot.active) reservations -= 1;
                 self.current_microtask = null;
                 self.serviceRequestedGcCheckpoint();
             }
             self.lockJobQueue(queue);
-            queue.finishBatch(batch.items.len);
+            queue.finishBatch(reservations);
             self.unlockJobQueue(queue);
             self.current_microtask_batch = &.{};
             batch.clearRetainingCapacity();
@@ -11071,11 +11075,13 @@ pub const Interpreter = struct {
     /// Holds the current microtask queue lock only across the queue mutation — never across the
     /// job's execution — so it stays a brief leaf-lock that can't deadlock with
     /// the GIL or any per-structure lock.
-    fn microtaskDequeue(self: *Interpreter) EvalError!?promise.Microtask {
+    fn microtaskDequeue(self: *Interpreter, publication: *promise.PreparedSettlement) EvalError!?promise.Microtask {
         const q = self.microtasks orelse return null;
         self.lockMicrotasks();
         defer self.unlockMicrotasks();
         try promise.materializeSettlementBatches(self, q);
+        if (q.isEmpty()) return null;
+        publication.* = try q.prepareJobPublication(self.arena);
         return q.pop();
     }
 
@@ -11695,9 +11701,11 @@ pub const Interpreter = struct {
         var outer_roots: MicrotaskRootFrame = undefined;
         self.saveMicrotaskRoots(&outer_roots);
         defer self.restoreMicrotaskRoots(&outer_roots);
-        if (try self.microtaskDequeue()) |job| {
+        var publication: promise.PreparedSettlement = .{};
+        defer publication.cancel(self);
+        if (try self.microtaskDequeue(&publication)) |job| {
             self.current_microtask = job;
-            promise.runJob(self, &self.current_microtask.?) catch |err| {
+            promise.runJob(self, &self.current_microtask.?, &publication) catch |err| {
                 self.current_microtask = null;
                 return err;
             };
@@ -61617,4 +61625,71 @@ test "interpreter debug location cache retains four colliding statements with bo
     try std.testing.expectEqual(@as(u64, 4), stats.location_cache_hits);
     try std.testing.expectEqual(@as(u64, 6), stats.location_cache_misses);
     try std.testing.expectEqual(@as(u64, 6), stats.lock_acquires);
+}
+
+test "Promise job await dequeue reserves before observing its callback" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const Callback = struct {
+        fn run(raw: ?*anyopaque) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+    var calls: usize = 0;
+    const storage = try ctx.arena().alloc(promise.Microtask, 1);
+    storage[0] = .{
+        .kind = .native_callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .native_callback = Callback.run,
+        .native_callback_context = &calls,
+    };
+    var queue = promise.MicrotaskQueue{ .items = .fromOwnedSlice(storage) };
+    machine.microtasks = &queue;
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = exhausted.allocator();
+    try std.testing.expectError(error.OutOfMemory, machine.runOneMicrotask());
+    try std.testing.expectEqual(@as(usize, 0), calls);
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expect(machine.current_microtask == null);
+    machine.arena = ctx.arena();
+    try std.testing.expect(try machine.runOneMicrotask());
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+}
+
+test "Promise job await preparation OOM consumes its owned rejection slot" {
+    var target = promise.Promise{ .is_handled = true };
+    var storage: [2]promise.Microtask = undefined;
+    storage[0] = .{
+        .kind = .thenable,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .payload = .{ .promise = &target },
+    };
+    var queue = promise.MicrotaskQueue{ .items = .{ .items = storage[0..1], .capacity = storage.len } };
+    var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var sentinel: u8 = 0;
+    var machine = Interpreter{
+        .arena = exhausted.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .gc = &sentinel,
+        .microtasks = &queue,
+        .out_of_memory_exception = Value.num(885),
+    };
+    try std.testing.expect(try machine.runOneMicrotask());
+    try std.testing.expect(exhausted.has_induced_failure);
+    try std.testing.expectEqual(promise.State.rejected, target.state);
+    try std.testing.expectEqual(@as(f64, 885), target.value.asNum());
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expect(machine.current_microtask == null);
 }
