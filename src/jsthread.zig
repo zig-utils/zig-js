@@ -769,6 +769,21 @@ fn recordOf(self: *Interpreter, this: Value) ?*ThreadRecord {
     return @ptrCast(@alignCast(pd));
 }
 
+/// The registry is stable under api_lock; completion is independently guarded
+/// by each record's join_mutex. Preserve the admission boundary at done even
+/// when join settlement or native-thread exit is still in progress.
+fn liveThreadCountLocked(records: []const *ThreadRecord) u32 {
+    const io = agent.engineIo();
+    var live: u32 = 0;
+    for (records) |rec| {
+        rec.join_mutex.lockUncancelable(io);
+        const done = rec.done;
+        rec.join_mutex.unlock(io);
+        if (!done) live += 1;
+    }
+    return live;
+}
+
 /// `new Thread(fn, ...args)` — spawn fn on a new OS thread in this realm.
 fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -785,19 +800,15 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     // The cap-check → id-claim → list-append must be one atomic transaction:
     // two concurrent constructions (once the GIL is dropped during bytecode)
     // must not both pass the live cap or claim the same `next_thread_id`. The
-    // GIL serializes this today; `api_lock` keeps it serialized independently of
-    // the GIL. No JS runs inside, so there is no reentrancy back into the lock.
+    // API lock serializes this independently of the execution GIL. No JS runs
+    // inside, so there is no reentrancy back into the lock.
     g.lockApi();
     defer g.unlockApi();
 
     // Live cap and id-space checks come BEFORE the id is consumed — a
     // refused spawn must not burn a TID or leak a live entry (I17).
     if (ctx.max_js_threads) |cap| {
-        var live: u32 = 0;
-        for (ctx.js_threads.items) |r| {
-            if (!r.done) live += 1;
-        }
-        if (live >= cap)
+        if (liveThreadCountLocked(ctx.js_threads.items) >= cap)
             return self.throwError("RangeError", "too many live Threads (or thread-ID space exhausted)");
     }
     if (g.next_thread_id > 0x7ffe)
@@ -4857,4 +4868,135 @@ fn wakeAsyncCondWaiters(self: *Interpreter, entries: []const CondEntry) void {
         }
     }
     if (ready_len > 0) enqueueHoldJobs(self, ready_batch[0..ready_len]) catch {};
+}
+
+test "Thread capped admission counts completion under its publication mutex" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var g = gil_mod.Gil{};
+    var records: [256]ThreadRecord = undefined;
+    var pointers: [records.len]*ThreadRecord = undefined;
+    for (&records, &pointers, 0..) |*rec, *ptr, i| {
+        rec.* = .{ .id = @intCast(i + 1), .gil = &g, .ctx = undefined };
+        ptr.* = rec;
+    }
+    const Writer = struct {
+        records: []ThreadRecord,
+        start: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+            for (self.records) |*rec| {
+                _ = publishThreadCompletion(rec, false, Value.num(895));
+                std.Thread.yield() catch {};
+            }
+            self.finished.store(true, .release);
+        }
+    };
+    var writer = Writer{ .records = &records };
+    const thread = try std.Thread.spawn(.{}, Writer.run, .{&writer});
+    var joined = false;
+    defer {
+        writer.start.store(true, .release);
+        if (!joined) thread.join();
+    }
+    g.lockApi();
+    const initial = liveThreadCountLocked(&pointers);
+    g.unlockApi();
+    try std.testing.expectEqual(@as(u32, records.len), initial);
+    writer.start.store(true, .release);
+    var previous = initial;
+    var monotonic = true;
+    while (true) {
+        g.lockApi();
+        const live = liveThreadCountLocked(&pointers);
+        g.unlockApi();
+        monotonic = monotonic and live <= previous;
+        previous = live;
+        if (writer.finished.load(.acquire)) break;
+    }
+    thread.join();
+    joined = true;
+    try std.testing.expect(monotonic);
+    // Completed bodies leave the cap before native exit or join settlement.
+    records[0].joins_settled = false;
+    for (&records) |*rec| try std.testing.expect(!rec.exited);
+    g.lockApi();
+    const final = liveThreadCountLocked(&pointers);
+    g.unlockApi();
+    try std.testing.expectEqual(@as(u32, 0), final);
+}
+
+test "Thread capped admission refuses without consuming IDs and admits after completion" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |serialized| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = !serialized,
+            .max_js_threads = 1,
+        });
+        defer ctx.destroy();
+        const before_id = ctx.gil.?.next_thread_id;
+        const before_count = ctx.js_threads.items.len;
+        const result = ctx.evaluate(
+            \\var admissionLock = new Lock(), admitted, admissionRefused = false;
+            \\admissionLock.hold(function () {
+            \\  admitted = new Thread(function () {
+            \\    return admissionLock.hold(function () { return 895; });
+            \\  });
+            \\  try { new Thread(function () { return 0; }); }
+            \\  catch (error) { admissionRefused = error instanceof RangeError; }
+            \\});
+            \\admissionRefused && admitted.join() === 895;
+        ) catch |err| {
+            if (ctx.exception) |exception| if (exception.isObject()) {
+                if (exception.asObj().getOwn("message")) |message|
+                    std.debug.print("admission test serialized={}: {s}\n", .{ serialized, message.asStr() });
+            };
+            return err;
+        };
+        try std.testing.expect(result.asBool());
+        try std.testing.expectEqual(before_id + 1, ctx.gil.?.next_thread_id);
+        try std.testing.expectEqual(before_count + 1, ctx.js_threads.items.len);
+        try std.testing.expectEqual(@as(f64, 896), (try ctx.evaluate("new Thread(function () { return 896; }).join();")).asNum());
+        try std.testing.expectEqual(before_id + 2, ctx.gil.?.next_thread_id);
+        try std.testing.expectEqual(before_count + 2, ctx.js_threads.items.len);
+    }
+}
+
+test "Thread capped admission error OOM leaves IDs and startup reservations untouched" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |serialized| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = !serialized,
+            .max_js_threads = 0,
+        });
+        defer ctx.destroy();
+        const Callback = struct {
+            fn run(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+                return Value.undef();
+            }
+        };
+        var callable = value.Object{ .native = Callback.run };
+        var machine = ctx.interpreter();
+        machine.active_native = ctx.env.get("Thread").?.asObj();
+        machine.new_target = Value.obj(machine.active_native.?);
+        var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+        machine.arena = exhausted.allocator();
+        const before_id = ctx.gil.?.next_thread_id;
+        const before_count = ctx.js_threads.items.len;
+        const before_slots = ctx.microtasks.reservations;
+        const before_registrations = ctx.active_interpreter_reservations;
+        try std.testing.expectError(error.OutOfMemory, threadCtorFn(&machine, Value.undef(), &.{Value.obj(&callable)}));
+        try std.testing.expect(exhausted.has_induced_failure);
+        try std.testing.expectEqual(before_id, ctx.gil.?.next_thread_id);
+        try std.testing.expectEqual(before_count, ctx.js_threads.items.len);
+        try std.testing.expectEqual(before_slots, ctx.microtasks.reservations);
+        try std.testing.expectEqual(before_registrations, ctx.active_interpreter_reservations);
+        try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    }
 }
