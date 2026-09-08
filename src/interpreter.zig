@@ -29087,8 +29087,17 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
 /// structurally valid). This prevents memory pressure from being surfaced as a
 /// user-visible RangeError or, worse, a partially lowercased locale.
 fn canonicalizeLocaleTagForIntl(self: *Interpreter, a: std.mem.Allocator, tag: []const u8) EvalError![]const u8 {
-    if (!isStructurallyValidLanguageTag(tag))
-        return self.throwErrorFmt("RangeError", "invalid language tag: {s}", .{tag});
+    return canonicalizeLocaleTagForIntlNaming(self, a, tag, false);
+}
+
+/// JavaScriptCore names the offending tag when the failure comes from
+/// CanonicalizeLocaleList (`new Intl.NumberFormat('!!')`), but not from the
+/// `Intl.Locale` constructor. Measured; the two wordings are not interchangeable.
+fn canonicalizeLocaleTagForIntlNaming(self: *Interpreter, a: std.mem.Allocator, tag: []const u8, name_tag: bool) EvalError![]const u8 {
+    if (!isStructurallyValidLanguageTag(tag)) {
+        if (name_tag) return self.throwErrorFmt("RangeError", "invalid language tag: {s}", .{tag});
+        return self.throwError("RangeError", "invalid language tag");
+    }
     return canonicalizeLocaleTag(a, tag) orelse error.OutOfMemory;
 }
 
@@ -29324,7 +29333,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         const s = if (v.isString()) try v.asWtf8(self.arena) else locale_tag.?;
         var canonical_arena = std.heap.ArenaAllocator.init(scratch);
         defer canonical_arena.deinit();
-        const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
+        const c = try canonicalizeLocaleTagForIntlNaming(self, canonical_arena.allocator(), s, true);
         try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
         return arr;
     }
@@ -29359,7 +29368,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         // toString must not be observed).
         const s = intlLocaleTag(ev) orelse try self.toStringWtf8(ev);
         _ = canonical_arena.reset(.retain_capacity);
-        const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
+        const c = try canonicalizeLocaleTagForIntlNaming(self, canonical_arena.allocator(), s, true);
         var duplicate = if (locale_index) |*index|
             index.contains(c)
         else
@@ -30018,6 +30027,37 @@ fn dtfWellFormedType(s: []const u8) bool {
     return true;
 }
 
+/// JavaScriptCore lists an option's legal values rather than echoing the bad
+/// one: `dateStyle must be "full", "long", "medium", or "short"`. Two values are
+/// joined bare; three or more take an Oxford comma before the final `or`.
+///
+/// Whether the sentence reads "must be" or "must be either" is per-option data,
+/// not a rule: the DateTimeFormat component options and `Intl.PluralRules`'s
+/// `type` omit "either" while `Intl.ListFormat`'s and `Intl.DisplayNames`'s
+/// `type` include it. Both were measured against JavaScriptCore.
+fn intlBadOptionValue(
+    self: *Interpreter,
+    name: []const u8,
+    allowed: []const []const u8,
+    either: bool,
+) EvalError {
+    var list: std.ArrayListUnmanaged(u8) = .empty;
+    for (allowed, 0..) |a, i| {
+        if (i != 0) {
+            if (allowed.len > 2) try list.appendSlice(self.arena, ",");
+            try list.appendSlice(self.arena, if (i + 1 == allowed.len) " or " else " ");
+        }
+        try list.appendSlice(self.arena, "\"");
+        try list.appendSlice(self.arena, a);
+        try list.appendSlice(self.arena, "\"");
+    }
+    return self.throwErrorFmt("RangeError", "{s} must be {s}{s}", .{
+        name,
+        if (either) "either " else "",
+        list.items,
+    });
+}
+
 /// GetOption(opts, name, "string", «allowed», fallback): read a property,
 /// ToString-coerce it (running getters/toString), and require membership in
 /// `allowed` (RangeError otherwise). Returns the canonical allowed string, or
@@ -30027,7 +30067,17 @@ fn dtfGetStr(self: *Interpreter, opts: Value, name: []const u8, allowed: []const
     if (v.isUndefined()) return fallback;
     const s = try self.toStringWtf8(v);
     for (allowed) |a| if (std.mem.eql(u8, s, a)) return a;
-    return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid value '{s}' for option {s}", .{ s, name }));
+    return intlBadOptionValue(self, name, allowed, true);
+}
+
+/// `dtfGetStr` for the options JavaScriptCore words without "either" -- the
+/// DateTimeFormat date/time components.
+fn dtfGetStrPlain(self: *Interpreter, opts: Value, name: []const u8, allowed: []const []const u8, fallback: ?[]const u8) EvalError!?[]const u8 {
+    const v = try self.getProperty(opts, name);
+    if (v.isUndefined()) return fallback;
+    const s = try self.toStringWtf8(v);
+    for (allowed) |a| if (std.mem.eql(u8, s, a)) return a;
+    return intlBadOptionValue(self, name, allowed, false);
 }
 
 /// GetOption for a free-form Unicode type value (calendar/numberingSystem):
@@ -30038,7 +30088,10 @@ fn dtfGetType(self: *Interpreter, opts: Value, name: []const u8) EvalError!?[]co
     const s = try self.toStringWtf8(v);
     // The well-formedness check runs on the raw value (so a non-ASCII char like
     // U+0130 İ rejects); the canonical form is then ASCII-lowercased.
-    if (!dtfWellFormedType(s)) return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid value for option {s}", .{name}));
+    if (!dtfWellFormedType(s)) return self.throwErrorFmt("RangeError", "{s} is not a well-formed {s} value", .{
+        name,
+        if (std.mem.eql(u8, name, "numberingSystem")) "numbering system" else name,
+    });
     return try std.ascii.allocLowerString(self.arena, s);
 }
 
@@ -30211,35 +30264,36 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequire
     // Read options only when an options object was supplied; the required/default
     // logic below still runs for `new Intl.DateTimeFormat()` (no options).
     if (raw.isObject()) {
-        const style3 = [_][]const u8{ "long", "short", "narrow" };
+        // JavaScriptCore lists these components narrow-first.
+        const style3 = [_][]const u8{ "narrow", "short", "long" };
         const numeric2 = [_][]const u8{ "2-digit", "numeric" };
         _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
         if (try dtfGetType(self, raw, "calendar")) |c| r.calendar = c;
         if (try dtfGetType(self, raw, "numberingSystem")) |c| r.numbering_system = c;
         const h12v = try self.getProperty(raw, "hour12");
         if (!h12v.isUndefined()) r.hour12 = h12v.toBoolean();
-        if (try dtfGetStr(self, raw, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, null)) |c| r.hour_cycle = c;
+        if (try dtfGetStrPlain(self, raw, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, null)) |c| r.hour_cycle = c;
         const tzv = try self.getProperty(raw, "timeZone");
         if (!tzv.isUndefined()) r.time_zone = try self.toStringWtf8(tzv);
-        if (try dtfGetStr(self, raw, "weekday", &style3, null)) |c| r.weekday = c;
-        if (try dtfGetStr(self, raw, "era", &style3, null)) |c| r.era = c;
-        if (try dtfGetStr(self, raw, "year", &numeric2, null)) |c| r.year = c;
-        if (try dtfGetStr(self, raw, "month", &.{ "2-digit", "numeric", "long", "short", "narrow" }, null)) |c| r.month = c;
-        if (try dtfGetStr(self, raw, "day", &numeric2, null)) |c| r.day = c;
-        if (try dtfGetStr(self, raw, "dayPeriod", &style3, null)) |c| r.day_period = c;
-        if (try dtfGetStr(self, raw, "hour", &numeric2, null)) |c| r.hour = c;
-        if (try dtfGetStr(self, raw, "minute", &numeric2, null)) |c| r.minute = c;
-        if (try dtfGetStr(self, raw, "second", &numeric2, null)) |c| r.second = c;
+        if (try dtfGetStrPlain(self, raw, "weekday", &style3, null)) |c| r.weekday = c;
+        if (try dtfGetStrPlain(self, raw, "era", &style3, null)) |c| r.era = c;
+        if (try dtfGetStrPlain(self, raw, "year", &numeric2, null)) |c| r.year = c;
+        if (try dtfGetStrPlain(self, raw, "month", &.{ "2-digit", "numeric", "narrow", "short", "long" }, null)) |c| r.month = c;
+        if (try dtfGetStrPlain(self, raw, "day", &numeric2, null)) |c| r.day = c;
+        if (try dtfGetStrPlain(self, raw, "dayPeriod", &style3, null)) |c| r.day_period = c;
+        if (try dtfGetStrPlain(self, raw, "hour", &numeric2, null)) |c| r.hour = c;
+        if (try dtfGetStrPlain(self, raw, "minute", &numeric2, null)) |c| r.minute = c;
+        if (try dtfGetStrPlain(self, raw, "second", &numeric2, null)) |c| r.second = c;
         const fsdv = try self.getProperty(raw, "fractionalSecondDigits");
         if (!fsdv.isUndefined()) {
             const n = try self.toNumberV(fsdv);
             if (std.math.isNan(n) or n < 1 or n > 3) return self.throwError("RangeError", "fractionalSecondDigits must be between 1 and 3");
             r.frac_sec = @intFromFloat(@floor(n));
         }
-        if (try dtfGetStr(self, raw, "timeZoneName", &.{ "short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, null)) |c| r.time_zone_name = c;
+        if (try dtfGetStrPlain(self, raw, "timeZoneName", &.{ "short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, null)) |c| r.time_zone_name = c;
         _ = try dtfGetStr(self, raw, "formatMatcher", &.{ "basic", "best fit" }, "best fit");
-        if (try dtfGetStr(self, raw, "dateStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.date_style = c;
-        if (try dtfGetStr(self, raw, "timeStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.time_style = c;
+        if (try dtfGetStrPlain(self, raw, "dateStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.date_style = c;
+        if (try dtfGetStrPlain(self, raw, "timeStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.time_style = c;
     }
     // Canonicalize the time zone and map the deprecated "islamic"/"islamic-rgsa"
     // calendars to a concrete available fallback.
@@ -30576,14 +30630,14 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
                 try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
                 return a;
             };
-            return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
+            return intlBadOptionValue(s, name, allowed, true);
         }
         // GetNumberOption in [lo, hi]; stores the integer value when present.
         fn num(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, lo: f64, hi: f64) EvalError!void {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return;
             const n = @trunc(try s.toNumberV(v));
-            if (std.math.isNan(n) or n < lo or n > hi) return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "{s} value is out of range", .{name}));
+            if (std.math.isNan(n) or n < lo or n > hi) return s.throwErrorFmt("RangeError", "{s} is out of range", .{name});
             try s.setProp(dst, name, Value.num(n));
         }
     };
@@ -30599,7 +30653,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     const nsv = try self.getProperty(raw, "numberingSystem");
     if (!nsv.isUndefined()) {
         const ns = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(nsv));
-        if (!dtfWellFormedType(ns)) return self.throwError("RangeError", "invalid numberingSystem");
+        if (!dtfWellFormedType(ns)) return self.throwError("RangeError", "numberingSystem is not a well-formed numbering system value");
         try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
     }
     // SetNumberFormatUnitOptions: style, then currency*/unit* (all read).
@@ -30609,18 +30663,18 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     // A present currency is validated regardless of style (IsWellFormedCurrencyCode
     // = exactly three ASCII letters).
     if (cur_code) |code| {
-        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) return self.throwError("RangeError", "invalid currency code");
+        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) return self.throwError("RangeError", "currency is not a well-formed currency code");
     }
     const cdisp = try H.str(self, raw, ro, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
     const csign = try H.str(self, raw, ro, "currencySign", &.{ "standard", "accounting" });
     const uv = try self.getProperty(raw, "unit");
     const unit: ?[]const u8 = if (uv.isUndefined()) null else try self.toStringWtf8(uv);
-    const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "long", "narrow" });
+    const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "narrow", "long" });
     // A missing currency under style:"currency" is a TypeError (takes precedence
     // over the unit check); a present-but-malformed unit is a RangeError for any
     // style.
     if (std.mem.eql(u8, style, "currency") and cur_code == null) return self.throwError("TypeError", "currency must be a string");
-    if (unit) |u| if (!isWellFormedUnitIdentifier(u)) return self.throwError("RangeError", "invalid unit identifier");
+    if (unit) |u| if (!isWellFormedUnitIdentifier(u)) return self.throwError("RangeError", "unit is not a well-formed unit identifier");
     if (std.mem.eql(u8, style, "currency")) {
         try self.setProp(ro, "currency", try Value.strOwned(self.arena, try std.ascii.allocUpperString(self.arena, cur_code.?)));
         if (cdisp == null) try self.setProp(ro, "currencyDisplay", Value.str("symbol"));
@@ -30691,7 +30745,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
                 // The strings "true"/"false" fall back to the default ("auto").
             } else if (std.mem.eql(u8, s, "min2") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "always")) {
                 try self.setProp(ro, "useGrouping", try Value.strAlloc(self.arena, s));
-            } else return self.throwError("RangeError", "invalid value for option useGrouping");
+            } else return self.throwError("RangeError", "useGrouping must be either true, false, \"min2\", \"auto\", or \"always\"");
         }
     }
     _ = try H.str(self, raw, ro, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
@@ -30863,13 +30917,13 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
                 try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
                 return a;
             };
-            return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
+            return intlBadOptionValue(s, name, allowed, false);
         }
         fn num(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, lo: f64, hi: f64) EvalError!void {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return;
             const n = @trunc(try s.toNumberV(v));
-            if (std.math.isNan(n) or n < lo or n > hi) return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "{s} value is out of range", .{name}));
+            if (std.math.isNan(n) or n < lo or n > hi) return s.throwErrorFmt("RangeError", "{s} is out of range", .{name});
             try s.setProp(dst, name, Value.num(n));
         }
     };
@@ -31112,7 +31166,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
                 const style = (try dtfGetStr(self, raw, "style", &.{ "narrow", "short", "long" }, "long")).?;
                 const typ = try dtfGetStr(self, raw, "type", &.{ "language", "region", "script", "currency", "calendar", "dateTimeField" }, null);
-                if (typ == null) return self.throwError("TypeError", "DisplayNames requires the type option");
+                if (typ == null) return self.throwError("TypeError", "type must not be undefined");
                 const fallback = (try dtfGetStr(self, raw, "fallback", &.{ "code", "none" }, "code")).?;
                 const ld = (try dtfGetStr(self, raw, "languageDisplay", &.{ "dialect", "standard" }, "dialect")).?;
                 try installDisplayNamesData(self, o, resolved, style, typ.?, fallback, ld);
@@ -31137,7 +31191,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     const cov = try self.getProperty(raw, "collation");
                     if (!cov.isUndefined()) {
                         const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(cov));
-                        if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
+                        if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "collation is not a well-formed collation value");
                         try self.setProp(ro, "collation", try Value.strAlloc(self.arena, cstr));
                     }
                     const num = try self.getProperty(raw, "numeric");
@@ -32858,7 +32912,7 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
         const collation = try self.getProperty(raw, "collation");
         if (!collation.isUndefined()) {
             const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(collation));
-            if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
+            if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "collation is not a well-formed collation value");
             if (collatorCollationSupported(locale, cstr)) opts.collation = .fromString(cstr);
         }
         const num = try self.getProperty(raw, "numeric");
@@ -35485,7 +35539,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
             if (locale) |names| name = dnStyleLookup(data.style, names.scripts_long, names.scripts_short, names.scripts_narrow, canon);
         },
         .currency => {
-            if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "invalid currency code");
+            if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "currency is not a well-formed currency code");
             var currency_buf: [3]u8 = undefined;
             canon = std.ascii.upperString(&currency_buf, code);
             if (locale) |names| name = dnStyleLookup(data.style, names.currencies_long, names.currencies_short, names.currencies_narrow, canon);

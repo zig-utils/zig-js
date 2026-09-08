@@ -13854,6 +13854,74 @@ test "Proxy and detached-buffer TypeErrors match JavaScriptCore" {
     );
 }
 
+// JavaScriptCore enumerates an Intl option's legal values instead of echoing
+// the bad one, and zig-js had two templates, one of which dropped the offending
+// value entirely (#901). Whether the sentence reads "must be" or "must be
+// either" is per-option DATA, not a rule: PluralRules `type` omits "either"
+// while ListFormat's and DisplayNames' `type` include it, and the DateTimeFormat
+// components omit it while that same constructor's localeMatcher/formatMatcher
+// include it. The value ORDER is also per-option -- `style` is long-first for
+// RelativeTimeFormat and ListFormat but narrow-first for DisplayNames. Every
+// string below was measured against a real JavaScriptCore backend.
+test "Intl option errors enumerate the legal values as JavaScriptCore does" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        // DateTimeFormat components: no "either", narrow-first.
+        .{ .source = "new Intl.DateTimeFormat('en',{weekday:'X'})", .message = "weekday must be \"narrow\", \"short\", or \"long\"" },
+        .{ .source = "new Intl.DateTimeFormat('en',{era:'X'})", .message = "era must be \"narrow\", \"short\", or \"long\"" },
+        .{ .source = "new Intl.DateTimeFormat('en',{month:'X'})", .message = "month must be \"2-digit\", \"numeric\", \"narrow\", \"short\", or \"long\"" },
+        .{ .source = "new Intl.DateTimeFormat('en',{day:'X'})", .message = "day must be \"2-digit\" or \"numeric\"" },
+        .{ .source = "new Intl.DateTimeFormat('en',{hourCycle:'X'})", .message = "hourCycle must be \"h11\", \"h12\", \"h23\", or \"h24\"" },
+        .{ .source = "new Intl.DateTimeFormat('en',{dateStyle:'X'})", .message = "dateStyle must be \"full\", \"long\", \"medium\", or \"short\"" },
+        // ...but the same constructor's matcher options DO take "either".
+        .{ .source = "new Intl.DateTimeFormat('en',{localeMatcher:'X'})", .message = "localeMatcher must be either \"lookup\" or \"best fit\"" },
+        .{ .source = "new Intl.DateTimeFormat('en',{formatMatcher:'X'})", .message = "formatMatcher must be either \"basic\" or \"best fit\"" },
+        // PluralRules `type` omits "either"; the other `type`s take it.
+        .{ .source = "new Intl.PluralRules('en',{type:'X'})", .message = "type must be \"cardinal\" or \"ordinal\"" },
+        .{ .source = "new Intl.ListFormat('en',{type:'X'})", .message = "type must be either \"conjunction\", \"disjunction\", or \"unit\"" },
+        .{ .source = "new Intl.DisplayNames('en',{type:'X'})", .message = "type must be either \"language\", \"region\", \"script\", \"currency\", \"calendar\", or \"dateTimeField\"" },
+        // `style` order differs by constructor.
+        .{ .source = "new Intl.RelativeTimeFormat('en',{style:'X'})", .message = "style must be either \"long\", \"short\", or \"narrow\"" },
+        .{ .source = "new Intl.ListFormat('en',{style:'X'})", .message = "style must be either \"long\", \"short\", or \"narrow\"" },
+        .{ .source = "new Intl.DisplayNames('en',{type:'language',style:'X'})", .message = "style must be either \"narrow\", \"short\", or \"long\"" },
+        // These previously dropped the offending value entirely.
+        .{ .source = "new Intl.NumberFormat('en',{style:'X'})", .message = "style must be either \"decimal\", \"percent\", \"currency\", or \"unit\"" },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'X'})", .message = "notation must be either \"standard\", \"scientific\", \"engineering\", or \"compact\"" },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'X'})", .message = "roundingMode must be either \"ceil\", \"floor\", \"expand\", \"trunc\", \"halfCeil\", \"halfFloor\", \"halfExpand\", \"halfTrunc\", or \"halfEven\"" },
+        // useGrouping mixes booleans with strings, so they stay unquoted.
+        .{ .source = "new Intl.NumberFormat('en',{useGrouping:'X'})", .message = "useGrouping must be either true, false, \"min2\", \"auto\", or \"always\"" },
+        // Well-formedness and range wording.
+        .{ .source = "new Intl.DateTimeFormat('en',{calendar:'!!'})", .message = "calendar is not a well-formed calendar value" },
+        .{ .source = "new Intl.DateTimeFormat('en',{numberingSystem:'!!'})", .message = "numberingSystem is not a well-formed numbering system value" },
+        .{ .source = "new Intl.Collator('en',{collation:'!!'})", .message = "collation is not a well-formed collation value" },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'zz'})", .message = "currency is not a well-formed currency code" },
+        .{ .source = "new Intl.NumberFormat('en',{style:'unit',unit:'X'})", .message = "unit is not a well-formed unit identifier" },
+        .{ .source = "new Intl.NumberFormat('en',{minimumFractionDigits:-1})", .message = "minimumFractionDigits is out of range" },
+        .{ .source = "new Intl.DisplayNames('en',{})", .message = "type must not be undefined" },
+    };
+    var buffer: [768]u8 = undefined;
+    for (cases) |case| {
+        const probe = try std.fmt.bufPrint(
+            &buffer,
+            "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.message; }} caught",
+            .{case.source},
+        );
+        try expectEvalStr(case.message, probe);
+    }
+    // A malformed tag is named when it comes from CanonicalizeLocaleList, but
+    // not from the Intl.Locale constructor. The two are not interchangeable.
+    try expectEvalStr("invalid language tag: !!bogus!!",
+        \\var caught = "";
+        \\try { new Intl.NumberFormat("!!bogus!!"); } catch (e) { caught = e.message; }
+        \\caught
+    );
+    try expectEvalStr("invalid language tag",
+        \\var caught = "";
+        \\try { new Intl.Locale("!!bogus!!"); } catch (e) { caught = e.message; }
+        \\caught
+    );
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{
