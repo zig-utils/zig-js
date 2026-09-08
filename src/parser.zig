@@ -3421,7 +3421,6 @@ pub const Parser = struct {
             if (self.new_target_depth == 0) return ParseError.UnexpectedToken;
             return self.alloc(.new_target_expr);
         }
-        const callee_start_token = self.pos;
         const parenthesized_callee = self.check(.lparen);
         var callee = if (parenthesized_callee) blk: {
             _ = self.advance();
@@ -3441,7 +3440,7 @@ pub const Parser = struct {
                 // `new MemberExpression Arguments` includes private property
                 // access; it has the same lexical-name gate as ordinary access.
                 const name = try self.parseMemberName();
-                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name, .source = self.sourceFrom(callee_start_token) } });
+                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name, .source = self.sourceFrom(new_start_token) } });
             } else if (self.check(.question_dot)) {
                 // `new o?.C()` / `new C?.()` is syntactically invalid; callers
                 // must parenthesize the optional chain (`new (o?.C)()`).
@@ -3449,13 +3448,13 @@ pub const Parser = struct {
             } else if (self.match(.lbracket)) {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
-                callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx, .source = self.sourceFrom(callee_start_token) } });
+                callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx, .source = self.sourceFrom(new_start_token) } });
             } else if (self.check(.template)) {
                 // `new tag`tmpl`` parses as `new (tag`tmpl`)`: a tagged template is a
                 // MemberExpression, so it binds to the `new` operand (the tag call
                 // happens first, then `new` constructs its result).
                 const tmpl = self.advance();
-                callee = try self.parseTaggedTemplate(callee, tmpl.text, tmpl.template_substitutions, self.sourceFrom(callee_start_token));
+                callee = try self.parseTaggedTemplate(callee, tmpl.text, tmpl.template_substitutions, self.sourceFrom(new_start_token));
             } else break;
         }
         const args: []*Node = if (self.check(.lparen)) try self.parseArgs() else &.{};

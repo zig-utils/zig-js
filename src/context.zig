@@ -13823,6 +13823,13 @@ test "failed non-CallExpression calls use JavaScriptCore diagnostics" {
         .{ .source = "var o = {m:1}; o /*c*/ . m `x${2}y`", .message = "1 is not a function (near '...o /*c*/ . m `x${2}y`...')" },
         .{ .source = "var tag = Symbol('s'); tag`x`", .message = "Symbol(s) is not a function (near '...tag`x`...')" },
         .{ .source = "var tag = {}; tag`x`", .message = "Object is not a function (near '...tag`x`...')" },
+        // A Proxy is named by its own internal class, not its target's.
+        .{ .source = "var tag = new Proxy({}, {}); tag`x`", .message = "ProxyObject is not a function (near '...tag`x`...')" },
+        // Under `new`, JavaScriptCore's approximate span starts at the `new`
+        // keyword and includes it. Verified against the oracle, not inferred.
+        .{ .source = "var tag = 1; new tag`x`", .message = "1 is not a function (near '...new tag`x`...')" },
+        .{ .source = "var o = {m:1}; new o.m`x`", .message = "1 is not a function (near '...new o.m`x`...')" },
+        .{ .source = "var tag = 1; new tag`a${1}b`", .message = "1 is not a function (near '...new tag`a${1}b`...')" },
     };
     var buffer: [512]u8 = undefined;
     for (tagged_cases) |case| {
@@ -13846,6 +13853,7 @@ test "failed non-CallExpression calls use JavaScriptCore diagnostics" {
         .{ .source = "'s'", .message = "\"s\" is not a function" },
         .{ .source = "Symbol('s')", .message = "Symbol(s) is not a function" },
         .{ .source = "{}", .message = "Object is not a function" },
+        .{ .source = "new Proxy({}, {})", .message = "ProxyObject is not a function" },
     };
     for (internal_cases) |case| {
         const probe = try std.fmt.bufPrint(&buffer, "var caught = ''; var it = {{ [Symbol.iterator]: function () {{ return {{ next: {s} }}; }} }}; try {{ [...it]; }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
@@ -13877,6 +13885,15 @@ test "construction and member TypeErrors include JavaScriptCore evaluation sourc
         .{ .source = "var g = {}; new g.m()", .message = "undefined is not a constructor (evaluating 'new g.m()')" },
         .{ .source = "var g = 1; new g", .message = "1 is not a constructor (evaluating 'new g')" },
         .{ .source = "var g = 1; new g(...[])", .message = "1 is not a constructor (evaluating 'new g(...[])')" },
+        // A Proxy is named by its own internal class here too.
+        .{ .source = "var p = new Proxy({}, {}); new p()", .message = "ProxyObject is not a constructor (evaluating 'new p()')" },
+        .{ .source = "var p = new Proxy(new Map(), {}); new p()", .message = "ProxyObject is not a constructor (evaluating 'new p()')" },
+        // A member expression under `new` carries the `new` in its span, and
+        // still stops at the sub-expression that actually produced nullish.
+        .{ .source = "var o = {}; new o.m.n()", .message = "undefined is not an object (evaluating 'new o.m.n')" },
+        .{ .source = "var o = {}; new o.a.b.c()", .message = "undefined is not an object (evaluating 'new o.a.b')" },
+        .{ .source = "var o = {}; var k = 'a'; new o.z[k]()", .message = "undefined is not an object (evaluating 'new o.z[k]')" },
+        .{ .source = "var o = null; new o.m()", .message = "null is not an object (evaluating 'new o.m')" },
     };
     var buffer: [512]u8 = undefined;
     for (cases) |case| {

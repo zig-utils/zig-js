@@ -185,6 +185,10 @@ pub fn notAConstructorSubject(self: *Interpreter, v: Value) EvalError![]const u8
     if (o.is_symbol) return try std.fmt.allocPrint(self.arena, "Symbol({s})", .{o.symbolDescription() orelse ""});
     if (o.is_bigint) return try self.toStringWtf8(v);
     if (o.isCallableObject()) return "function";
+    // JavaScriptCore names a Proxy by its own internal class. The tag ladder
+    // below refuses to walk into a proxy, so this used to fall through to
+    // "Object"; a CALLABLE proxy is already "function" above, as it is in JSC.
+    if (o.proxyHandler() != null or o.proxy_revoked) return "ProxyObject";
     if (o.proxyHandler() == null and !o.proxy_revoked) {
         if (symbolToStringTagKey(self)) |tk| {
             var cur: ?*value.Object = o;
