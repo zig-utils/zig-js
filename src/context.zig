@@ -4036,6 +4036,9 @@ pub const Context = struct {
     /// Opaque owner installed by the C API for grouped contexts. Kept opaque so
     /// the engine core does not depend on the public ABI wrapper type.
     c_api_group: ?*anyopaque = null,
+    /// Immutable C-boundary OOM value handle, admitted before the Context is
+    /// exposed to an embedder. Its static string needs no managed root.
+    c_api_oom_handle: ?*anyopaque = null,
     /// Public inspectability is opt-in. The opaque session list is owned by the
     /// C API; each live session retains this Context, so it is necessarily null
     /// before engine teardown.

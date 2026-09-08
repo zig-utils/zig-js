@@ -1360,6 +1360,9 @@ const CContextGroup = struct {
     /// JavaScriptCore stores the active exception on the VM, not the realm.
     /// Preserve a distinct cell so sibling globals observe the same identity.
     pending_exception: ?*Boxed = null,
+    /// Stable, immutable OOM exception cell admitted during VM construction.
+    /// A failed checkpoint must not allocate in order to stop later VM drains.
+    oom_exception: ?*Boxed = null,
     termination_exception: ?*Boxed = null,
     termination_requested: std.atomic.Value(bool) = .init(false),
     execution_forbidden: std.atomic.Value(bool) = .init(false),
@@ -3325,6 +3328,24 @@ fn box(ctx: *Context, v: Value) JSValueRef {
     return @ptrCast(b);
 }
 
+fn initializeCApiOomHandle(ctx: *Context) !void {
+    if (ctx.c_api_oom_handle != null) return;
+    ctx.c_api_oom_handle = @ptrCast(@constCast(box(ctx, Value.staticStr("OutOfMemory")) orelse return error.OutOfMemory));
+}
+
+fn cApiOomHandle(ctx: *Context) JSValueRef {
+    return @ptrCast(ctx.c_api_oom_handle.?);
+}
+
+fn initializePrivateOomException(group: *CContextGroup) !void {
+    try initializeCApiOomHandle(group.primary);
+    group.oom_exception = privateExceptionBox(
+        group.primary,
+        Value.staticStr("OutOfMemory"),
+        privateEncodedFromRef(cApiOomHandle(group.primary)),
+    ) orelse return error.OutOfMemory;
+}
+
 fn privateBoxInOwner(storage_owner: *Context, realm: *Context, v: Value) JSValueRef {
     const b = storage_owner.arena().create(Boxed) catch return null;
     b.* = .{ .value = v, .owner = realm, .storage_owner = storage_owner };
@@ -3468,11 +3489,15 @@ fn privateSetPendingValue(context: *Context, thrown: Value) void {
 }
 
 fn privateSetPendingAbrupt(context: *Context, machine: *interp.Interpreter, err: anyerror) void {
-    const thrown = if (err == error.Throw)
-        machine.exception
-    else
-        context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory");
-    privateSetPendingValue(context, thrown);
+    if (err == error.Throw) {
+        privateSetPendingValue(context, machine.exception);
+        return;
+    }
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    group.pending_exception = group.oom_exception.?;
+    group.primary.private_pending_exception_root = group.oom_exception.?.value;
 }
 
 fn privateEncodeResult(context: *Context, machine: *interp.Interpreter, result: Value) EncodedValue {
@@ -16932,12 +16957,19 @@ fn strFrom(ref: JSStringRef) ?*JsString {
 
 fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
     if (exc != null) {
+        if (std.mem.eql(u8, message, "OutOfMemory")) {
+            exc[0] = cApiOomHandle(ctx);
+            return;
+        }
         const gc_saved = gc_mod.setActiveContext(ctx);
         defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(ctx.arena());
         defer _ = strcell.setActiveArena(sa_saved);
-        const v = Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory");
-        exc[0] = box(ctx, v);
+        const v = Value.strAlloc(ctx.arena(), message) catch {
+            exc[0] = cApiOomHandle(ctx);
+            return;
+        };
+        exc[0] = box(ctx, v) orelse cApiOomHandle(ctx);
     }
 }
 
@@ -17027,30 +17059,29 @@ fn attachEvaluationRuntimeSourceMetadata(
     try setDiagnosticField(ctx, obj, "startingLineNumber", Value.num(@floatFromInt(if (starting_line_number > 0) starting_line_number else 1)));
 }
 
-fn setEvaluationException(ctx: *Context, exc: ExceptionRef, err: anyerror, source_url: JSStringRef, starting_line_number: c_int) void {
+fn evaluationExceptionValue(ctx: *Context, err: anyerror, source_url: JSStringRef, starting_line_number: c_int) Value {
+    const gc_saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(gc_saved);
+    const sa_saved = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     if (isEvaluationParseError(err)) {
         if (ctx.last_evaluation_diagnostic) |loc| {
             const source_name = evaluationSourceName(source_url);
             const base_line: usize = if (starting_line_number > 0) @intCast(starting_line_number) else 1;
             const line = loc.line + base_line - 1;
             const message = std.fmt.allocPrint(ctx.arena(), "{s}: {s}:{d}:{d}", .{
-                @errorName(err),
-                source_name,
-                line,
-                loc.column,
-            }) catch {
-                setException(ctx, exc, @errorName(err));
-                return;
-            };
-            const syntax_error = makeEvaluationSyntaxError(ctx, message, source_name, line, loc.column, loc.byte_offset) catch {
-                setException(ctx, exc, message);
-                return;
-            };
-            setExceptionValue(ctx, exc, syntax_error);
-            return;
+                @errorName(err), source_name, line, loc.column,
+            }) catch return Value.strAlloc(ctx.arena(), @errorName(err)) catch Value.staticStr("OutOfMemory");
+            return makeEvaluationSyntaxError(ctx, message, source_name, line, loc.column, loc.byte_offset) catch
+                (Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory"));
         }
     }
-    setException(ctx, exc, @errorName(err));
+    return Value.strAlloc(ctx.arena(), @errorName(err)) catch Value.staticStr("OutOfMemory");
+}
+
+fn setEvaluationException(ctx: *Context, exc: ExceptionRef, err: anyerror, source_url: JSStringRef, starting_line_number: c_int) void {
+    if (exc == null) return;
+    exc[0] = box(ctx, evaluationExceptionValue(ctx, err, source_url, starting_line_number)) orelse cApiOomHandle(ctx);
 }
 
 fn propAttrFromC(attrs: c_uint) value.PropAttr {
@@ -17131,6 +17162,12 @@ fn createContextGroupForPrimary(primary: *Context, record_allocator: std.mem.All
         .atom_strings = strcell.InternTable.init(gpa),
     };
     primary.c_api_group = @ptrCast(group);
+    initializePrivateOomException(group) catch {
+        primary.c_api_group = null;
+        record_allocator.destroy(group);
+        primary.destroy();
+        return null;
+    };
     primary.watchdog_check_flag = &group.need_watchdog_check;
     primary.watchdog_deadline_ns = &group.execution_deadline_ns;
     primary.shell_timeout_check_flag = &group.need_shell_timeout_check;
@@ -17288,6 +17325,12 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     }
+    initializeCApiOomHandle(ctx) catch {
+        destroy_created(ctx, precise);
+        if (group.release()) group.destroy();
+        if (created_group) JSContextGroupRelease(effective_ref);
+        return null;
+    };
     ctx.initCApiRef();
     const ctx_ref: JSContextRef = @ptrCast(ctx);
     if (global_class != null) {
@@ -17316,6 +17359,10 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
 /// on failure. (`JSGlobalContextCreate` stays single-threaded for JSC parity.)
 export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
     const ctx = Context.createWith(gpa, .{ .enable_threads = true, .gil = gil }) catch return null;
+    initializeCApiOomHandle(ctx) catch {
+        ctx.destroy();
+        return null;
+    };
     ctx.initCApiRef();
     return @ptrCast(ctx);
 }
@@ -19861,6 +19908,13 @@ export fn JSEvaluateScript(
         Value.obj(objectArgFrom(c, this_object, exception) orelse return null)
     else
         Value.obj(c.global_object);
+    // Reserve the single externally returned completion before executing user
+    // code. A primary throw must remain boxable even when cleanup exhausts the
+    // arena; successful completion must not fail after observable side effects.
+    const completion = boxedFrom(box(c, Value.undef()) orelse {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    }).?;
     const saved_script_id = c.debug_script_id;
     const saved_start_line = c.debug_script_start_line;
     defer {
@@ -19883,13 +19937,16 @@ export fn JSEvaluateScript(
         if (err == error.Throw) {
             const thrown = c.exception orelse Value.str("uncaught exception");
             attachEvaluationRuntimeSourceMetadata(c, thrown, source_url, starting_line_number) catch {};
-            if (exception != null) exception[0] = box(c, thrown);
+            completion.value = thrown;
+            if (exception != null) exception[0] = @ptrCast(completion);
         } else {
-            setEvaluationException(c, exception, err, source_url, starting_line_number);
+            completion.value = evaluationExceptionValue(c, err, source_url, starting_line_number);
+            if (exception != null) exception[0] = @ptrCast(completion);
         }
         return null;
     };
-    return boxResult(c, exception, result);
+    completion.value = result;
+    return @ptrCast(completion);
 }
 
 // ---- JSValue inspection ------------------------------------------------
@@ -24912,8 +24969,8 @@ test "private lifecycle and test reporter agents are session exact and reentrant
     try std.testing.expect(!tests.contains("\"parentId\":-1"));
 
     const before_invalid = tests.len;
-    Bun__TestReporterAgentReportTestFound(tests.session, call_frame, 13, &live_name, @enumFromInt(255), -1);
-    Bun__TestReporterAgentReportTestEnd(tests.session, 13, @enumFromInt(255), 1);
+    Bun__TestReporterAgentReportTestFound(tests.session, call_frame, 13, &live_name, @fromBackingInt(@intCast(255)), -1);
+    Bun__TestReporterAgentReportTestEnd(tests.session, 13, @fromBackingInt(@intCast(255)), 1);
     Bun__TestReporterAgentReportTestStart(lifecycle.session, 13);
     Bun__TestReporterAgentReportTestStart(@ptrFromInt(1), 13);
     try std.testing.expectEqual(before_invalid, tests.len);
@@ -25080,7 +25137,7 @@ test "private HTTP server inspector events are exact failure atomic and session 
     Bun__HTTPServerAgent__notifyResponseReceived(first.session, 45, 7, 200, &status_text, &malformed, false, 1251);
     Bun__HTTPServerAgent__notifyResponseReceived(first.session, 45, 7, 200, &status_text, &odd, false, 1251);
     Bun__HTTPServerAgent__notifyResponseReceived(first.session, 45, 7, 200, &status_text, &non_string, false, 1251);
-    Bun__HTTPServerAgent__notifyRequestWillBeSent(first.session, 45, 7, 0, &url, &full_url, @enumFromInt(255), &headers, &empty_params, false, 1251);
+    Bun__HTTPServerAgent__notifyRequestWillBeSent(first.session, 45, 7, 0, &url, &full_url, @fromBackingInt(@intCast(255)), &headers, &empty_params, false, 1251);
     Bun__HTTPServerAgent__notifyBodyChunkReceived(first.session, 45, 7, 0, &chunk, std.math.inf(f64));
     Bun__HTTPServerAgent__notifyRequestFinished(second.session, 45, 7, 1251, 1);
     Bun__HTTPServerAgent__notifyRequestFinished(@ptrFromInt(1), 45, 7, 1251, 1);
@@ -25202,8 +25259,8 @@ test "private debugger async-call hooks preserve lifecycle and active parent sta
 
     // Upstream returns before converting the enum when no debugger agent is
     // attached. An otherwise-invalid value must therefore remain a true no-op.
-    Debugger__didScheduleAsyncCall(sibling, @enumFromInt(255), 0, true);
-    Debugger__didCancelAsyncCall(null, @enumFromInt(255), 0);
+    Debugger__didScheduleAsyncCall(sibling, @fromBackingInt(@intCast(255)), 0, true);
+    Debugger__didCancelAsyncCall(null, @fromBackingInt(@intCast(255)), 0);
 
     JSGlobalContextSetInspectable(first, true);
     var capture: State = .{};
@@ -26413,6 +26470,7 @@ test "C-API: inspector remote objects stay rooted until deterministic release" {
     };
 
     const context = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    try initializeCApiOomHandle(context);
     context.initCApiRef();
     const ctx: JSContextRef = @ptrCast(context);
     defer JSGlobalContextRelease(ctx);
@@ -27696,6 +27754,7 @@ test "C-API: class finalizers run once after sweep and may reenter collection" {
     var definition: JSClassDefinition = .{ .finalize = State.finalize };
     const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
     const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
+    try initializeCApiOomHandle(context);
     context.initCApiRef();
     const ctx: JSContextRef = @ptrCast(context);
     State.context = ctx;
@@ -27739,6 +27798,7 @@ test "C-API: GC roots shared class prototypes and static functions" {
     var definition: JSClassDefinition = .{ .static_functions = &functions };
     const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
     const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
+    try initializeCApiOomHandle(context);
     context.initCApiRef();
     const ctx: JSContextRef = @ptrCast(context);
     const name = JSStringCreateWithUTF8CString("run") orelse return error.StringInitFailed;
@@ -27761,6 +27821,7 @@ test "C-API: constructor objects retain their instance class through precise GC"
     var definition: JSClassDefinition = .{ .class_name = "RetainedByConstructor" };
     const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
     const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
+    try initializeCApiOomHandle(context);
     context.initCApiRef();
     const ctx: JSContextRef = @ptrCast(context);
     const constructor = JSObjectMakeConstructor(ctx, class, null) orelse return error.ConstructorCreateFailed;
@@ -27945,7 +28006,7 @@ test "C-API: TypedArray ArrayBuffer views preserve offsets and reject invalid ge
 
     try std.testing.expect(JSObjectMakeTypedArray(ctx, .none, 1, &exception) == null);
     try std.testing.expect(JSObjectMakeTypedArray(ctx, .array_buffer, 1, &exception) == null);
-    try std.testing.expect(JSObjectMakeTypedArray(ctx, @enumFromInt(99), 1, &exception) == null);
+    try std.testing.expect(JSObjectMakeTypedArray(ctx, @fromBackingInt(@intCast(99)), 1, &exception) == null);
     try std.testing.expect(exception == null);
 
     try std.testing.expect(JSObjectMakeTypedArrayWithArrayBufferAndOffset(ctx, .uint32_array, buffer, 2, 1, &exception) == null);
@@ -28074,6 +28135,7 @@ test "C-API: GC finalization releases no-copy bytes before context teardown" {
     };
 
     const c = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    try initializeCApiOomHandle(c);
     c.initCApiRef();
     const ctx: JSContextRef = @ptrCast(c);
     var bytes = [_]u8{ 1, 2, 3, 4 };
@@ -28090,6 +28152,7 @@ test "C-API: GC finalization releases no-copy bytes before context teardown" {
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 
     const teardown_context = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    try initializeCApiOomHandle(teardown_context);
     teardown_context.initCApiRef();
     const teardown_ctx: JSContextRef = @ptrCast(teardown_context);
     var teardown_bytes = [_]u8{ 5, 6, 7, 8 };
@@ -28121,6 +28184,8 @@ test "private external ZigString callbacks are exact-once and post-sweep" {
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
+            try initializePrivateOomException(group);
+            try initializeCApiOomHandle(primary);
             primary.initCApiRef();
             return group;
         }
@@ -30279,8 +30344,10 @@ test "private embedding references retain strong targets and clear weak targets"
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
+            try initializePrivateOomException(group);
             primary.watchdog_check_flag = &group.need_watchdog_check;
             primary.watchdog_deadline_ns = &group.execution_deadline_ns;
+            try initializeCApiOomHandle(primary);
             primary.initCApiRef();
             return group;
         }
@@ -30876,6 +30943,7 @@ test "private shared memfd imports preserve slices private writes and mapping ow
     try std.testing.expectEqual(releases_before + 2, private_mmap_release_count.load(.monotonic));
 
     const gc_context_object = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    try initializeCApiOomHandle(gc_context_object);
     gc_context_object.initCApiRef();
     const gc_context: JSContextRef = @ptrCast(gc_context_object);
     _ = ArrayBuffer__fromSharedMemfd(
@@ -33256,7 +33324,7 @@ test "private proxy internal-field projection is pure and identity preserving" {
     try std.testing.expectEqual(EncodedValue.null, Bun__ProxyObject__getInternalField(revoked, .handler));
     try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(EncodedValue.fromInt32(233), .target));
     try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(target, .target));
-    try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(proxy, @enumFromInt(233)));
+    try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(proxy, @fromBackingInt(@intCast(233))));
 
     JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(233));
     try std.testing.expectEqual(target, Bun__ProxyObject__getInternalField(proxy, .target));
@@ -33683,8 +33751,10 @@ test "private rooted native value containers retain and release exact cells" {
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
+            try initializePrivateOomException(group);
             primary.watchdog_check_flag = &group.need_watchdog_check;
             primary.watchdog_deadline_ns = &group.execution_deadline_ns;
+            try initializeCApiOomHandle(primary);
             primary.initCApiRef();
             return group;
         }
@@ -35843,4 +35913,114 @@ test "host checkpoint private VM preserves pending OOM until explicit clear" {
     try std.testing.expect(group.pending_exception == null);
     try std.testing.expectEqual(@as(usize, 1), fault.calls);
     try std.testing.expect(context.microtasks.isEmpty());
+}
+
+test "host checkpoint exhausted public handle allocator still reports the abrupt completion" {
+    const Fault = struct {
+        context: *Context,
+        exhausted: ContextMod.LockedArena,
+        allocator: std.testing.FailingAllocator,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.exhausted.inner = fault.allocator.allocator();
+            fault.context.locked_arena = &fault.exhausted;
+            _ = try fault.context.arena().alloc(u8, 1);
+            return Value.undef();
+        }
+    };
+    for ([_]bool{ false, true }) |primary_throw| {
+        const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+        defer JSGlobalContextRelease(global);
+        const context = ctxForEvaluation(global).?;
+        var fault = Fault{
+            .context = context,
+            .exhausted = .{ .inner = context.arena() },
+            .allocator = .init(context.arena(), .{ .fail_index = 0, .resize_fail_index = 0 }),
+        };
+        const original_lock = context.locked_arena;
+        defer context.locked_arena = original_lock;
+        try interp.setNative(context.arena(), context.root_shape, context.global_object, "checkpointFault", 0, Fault.fail);
+        context.global_object.getOwn("checkpointFault").?.asObj().private_data = &fault;
+        const source = JSStringCreateWithUTF8CString(if (primary_throw)
+            "globalThis.exhaustedPrimary = { marker: 896 }; globalThis.exhaustedSuffix = 0; queueMicrotask(checkpointFault); queueMicrotask(function() { exhaustedSuffix++; }); throw exhaustedPrimary;"
+        else
+            "globalThis.exhaustedSuffix = 0; queueMicrotask(checkpointFault); queueMicrotask(function() { exhaustedSuffix++; }); 42;");
+        defer JSStringRelease(source);
+        var exception: JSValueRef = null;
+        try std.testing.expect(JSEvaluateScript(global, source, null, null, 1, &exception) == null);
+        try std.testing.expect(fault.allocator.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 1), context.microtasks.pendingLen());
+        try std.testing.expect(exception != null);
+        if (primary_throw) {
+            try std.testing.expectEqual(context.global_object.getOwn("exhaustedPrimary").?.asObj(), boxedFrom(exception).?.value.asObj());
+        } else {
+            try std.testing.expectEqualStrings("OutOfMemory", boxedFrom(exception).?.value.asStr());
+        }
+        const unadmitted = JSStringCreateWithUTF8CString("globalThis.exhaustedSuffix = 999;");
+        defer JSStringRelease(unadmitted);
+        exception = null;
+        try std.testing.expect(JSEvaluateScript(global, unadmitted, null, null, 1, &exception) == null);
+        try std.testing.expectEqualStrings("OutOfMemory", boxedFrom(exception).?.value.asStr());
+        try std.testing.expectEqual(@as(f64, 0), context.global_object.getOwn("exhaustedSuffix").?.asNum());
+        try std.testing.expectEqual(@as(usize, 1), context.microtasks.pendingLen());
+        context.locked_arena = original_lock;
+        _ = try context.evaluate("0;");
+        try std.testing.expectEqual(@as(f64, 1), context.global_object.getOwn("exhaustedSuffix").?.asNum());
+    }
+}
+
+test "host checkpoint exhausted private handle allocator retains a pending exception" {
+    const Fault = struct {
+        context: *Context,
+        owner: *Context,
+        exhausted: ContextMod.LockedArena,
+        allocator: std.testing.FailingAllocator,
+        calls: usize = 0,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.exhausted.inner = fault.allocator.allocator();
+            fault.context.locked_arena = &fault.exhausted;
+            fault.owner.locked_arena = &fault.exhausted;
+            _ = try fault.owner.arena().alloc(u8, 1);
+            return Value.undef();
+        }
+        fn suffix(raw: ?*anyopaque) callconv(.c) void {
+            const fault: *@This() = @ptrCast(@alignCast(raw.?));
+            fault.calls += 1;
+        }
+    };
+    const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global).?;
+    const group = privatePropertyBoundaryGroup(context).?;
+    var fault = Fault{
+        .context = context,
+        .owner = group.primary,
+        .exhausted = .{ .inner = context.arena() },
+        .allocator = .init(context.arena(), .{ .fail_index = 0, .resize_fail_index = 0 }),
+    };
+    const original_context_lock = context.locked_arena;
+    const original_owner_lock = group.primary.locked_arena;
+    defer {
+        context.locked_arena = original_context_lock;
+        group.primary.locked_arena = original_owner_lock;
+    }
+    try interp.setNative(context.arena(), context.root_shape, context.global_object, "checkpointFault", 0, Fault.fail);
+    context.global_object.getOwn("checkpointFault").?.asObj().private_data = &fault;
+    var machine = context.interpreter();
+    try promise.enqueueCallback(&machine, context.global_object.getOwn("checkpointFault").?);
+    try promise.enqueueNativeCallback(&machine, &fault, Fault.suffix);
+    privateVMDrainMicrotasks(group);
+    try std.testing.expect(fault.allocator.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), fault.calls);
+    try std.testing.expect(JSGlobalObject__hasException(global));
+    privateVMDrainMicrotasks(group);
+    try std.testing.expectEqual(@as(usize, 0), fault.calls);
+    context.locked_arena = original_context_lock;
+    group.primary.locked_arena = original_owner_lock;
+    JSGlobalObject__clearException(global);
+    privateVMDrainMicrotasks(group);
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
 }
