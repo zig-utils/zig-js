@@ -6744,7 +6744,9 @@ fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
         return false;
     }
     if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
-        std.debug.print("seed {d}: finalization asyncJoin did not finish a parallel collection\n", .{seed});
+        std.debug.print("seed {d}: finalization asyncJoin did not finish a parallel collection: {any}\n", .{
+            seed, ctx.parallelGcStats().?,
+        });
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__finAsyncJoinOracle") catch |err| {
