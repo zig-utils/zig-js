@@ -6903,11 +6903,15 @@ pub const Context = struct {
         return earliest;
     }
 
-    fn keepaliveTimers(raw_context: ?*anyopaque, machine: *interp.Interpreter) void {
+    fn keepaliveTimers(raw_context: ?*anyopaque, machine: *interp.Interpreter) interp.EvalError!void {
         const self: *Context = @ptrCast(@alignCast(raw_context orelse return));
         const owner = machine.microtasks orelse return;
         while (self.earliestRefedTimerDeadline(owner)) |deadline| {
-            machine.drainMicrotasks() catch return;
+            if (machine.host_checkpoint_error) |err| return err;
+            machine.drainMicrotasks() catch |err| {
+                if (err == error.Throw) return;
+                return err;
+            };
             const next = self.earliestRefedTimerDeadline(owner) orelse return;
             const now = timerNowNs();
             if (next <= now) continue;
@@ -9140,6 +9144,7 @@ pub const Context = struct {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
+        self.exception = null;
         const gc_saved = gc_mod.setActiveContext(self);
         defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
@@ -9272,13 +9277,14 @@ pub const Context = struct {
             machine.setTempRoot(result_root_mark, primary_exception);
         }
         const top_level_failed = if (outcome) |_| false else |_| true;
+        var checkpoint_error: ?interp.EvalError = if (outcome) |_| null else |err| if (err == error.Throw) null else err;
         if (outcome) |_| {} else |err| {
             if (err == error.Throw) {
                 if (!machine.debug_exception_origin_notified) machine.notifyDebuggerException(false) catch |notify_err| {
-                    if (notify_err != error.Throw) return notify_err;
+                    if (notify_err != error.Throw) checkpoint_error = notify_err;
                 };
-                machine.notifyDebuggerException(true) catch |notify_err| {
-                    if (notify_err != error.Throw) return notify_err;
+                if (checkpoint_error == null) machine.notifyDebuggerException(true) catch |notify_err| {
+                    if (notify_err != error.Throw) checkpoint_error = notify_err;
                 };
             }
         }
@@ -9288,18 +9294,15 @@ pub const Context = struct {
         // have executed by the time `evaluate` returns. Then the waitAsync
         // tail: block for outstanding async waiters (notify/deadline), resolve
         // them, and drain again until quiescent.
-        machine.drainMicrotasks() catch {};
-        machine.settleAsyncWaiters();
-        machine.drainFinalizationCleanupJobs() catch {};
-        machine.drainMicrotasks() catch {};
-        machine.settleAsyncWaiters();
-        if (!top_level_failed) machine.keepaliveTimers();
+        if (checkpoint_error == null) machine.drainHostCheckpoint(!top_level_failed) catch |err| {
+            checkpoint_error = err;
+        };
         // Shell keepalive (threads mode): a pending Thread completion is a
         // pending settlement — the realm stays alive until every spawned
         // thread finishes (each drains its own queue and settles its
         // asyncJoins), then drains whatever those settlements queued here.
         if (self.gil) |g| {
-            if (top_level_failed) {
+            if (top_level_failed or checkpoint_error != null) {
                 self.teardown_stop.store(true, .release);
                 agent.interruptWaiters();
             }
@@ -9375,19 +9378,20 @@ pub const Context = struct {
             // flag cleared: otherwise a step checkpoint inside a cleanup
             // reaction can throw "worker terminated", abort the microtask batch,
             // and silently drop later reactions copied into that batch.
-            if (top_level_failed) self.teardown_stop.store(false, .release);
-            machine.drainMicrotasks() catch {};
-            machine.settleAsyncWaiters();
-            machine.drainFinalizationCleanupJobs() catch {};
-            machine.drainMicrotasks() catch {};
-            machine.settleAsyncWaiters();
-            if (!top_level_failed) machine.keepaliveTimers();
+            if (top_level_failed or checkpoint_error != null) self.teardown_stop.store(false, .release);
+            if (checkpoint_error == null) machine.drainHostCheckpoint(!top_level_failed) catch |err| {
+                checkpoint_error = err;
+            };
         }
         if (outcome) |result| {
             // A script-visible `gc()` request is serviced before returning to
             // the host, while this interpreter and its result root are still
             // registered as precise root sources.
             self.collectRequestedGarbage();
+            if (checkpoint_error) |err| {
+                self.surfaceEscapedOutOfMemory(err);
+                return err;
+            }
             return machine.tempRoot(result_root_mark, result);
         } else |err| {
             self.collectRequestedGarbage();
@@ -9494,6 +9498,7 @@ pub const Context = struct {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
+        self.exception = null;
         const gc_saved = gc_mod.setActiveContext(self);
         defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
@@ -9542,18 +9547,23 @@ pub const Context = struct {
         const primary_exception = machine.exception;
         if (outcome) |_| {} else |_| machine.setTempRoot(completion_root, primary_exception);
         const module_started = if (outcome) |_| true else |_| false;
-        if (module_started) try self.drainUntilModuleSettled(&machine, root);
-        machine.drainMicrotasks() catch {};
-        machine.settleAsyncWaiters();
-        machine.drainFinalizationCleanupJobs() catch {};
-        machine.drainMicrotasks() catch {};
-        machine.settleAsyncWaiters();
-        if (outcome) |_| machine.keepaliveTimers() else |_| {}
+        if (module_started) self.drainUntilModuleSettled(&machine, root) catch |err| {
+            self.surfaceEscapedOutOfMemory(err);
+            return err;
+        };
+        var checkpoint_error: ?interp.EvalError = if (outcome) |_| null else |err| if (err == error.Throw) null else err;
+        if (checkpoint_error == null) machine.drainHostCheckpoint(module_started) catch |err| {
+            checkpoint_error = err;
+        };
         outcome catch |err| {
             if (err == error.Throw) self.exception = machine.tempRoot(completion_root, primary_exception);
             self.surfaceEscapedOutOfMemory(err);
             return err;
         };
+        if (checkpoint_error) |err| {
+            self.surfaceEscapedOutOfMemory(err);
+            return err;
+        }
         return Value.undef();
     }
 
@@ -10462,7 +10472,7 @@ pub const Context = struct {
             const before = self.microtaskPendingLen(machine);
             if (before == 0 and !m.async_suspended) return;
             try machine.drainMicrotasks();
-            machine.settleAsyncWaiters();
+            try machine.settleAsyncWaiters();
             const after = self.microtaskPendingLen(machine);
             if (after == 0 and before == 0) return;
         }
@@ -10700,7 +10710,7 @@ pub const Context = struct {
             if (progressed) continue;
             if (self.microtaskPendingLen(machine) == 0) break;
             try machine.drainMicrotasks();
-            machine.settleAsyncWaiters();
+            try machine.settleAsyncWaiters();
         }
         for (self.deferred_async_started.items) |dep| {
             try self.drainUntilModuleSettled(machine, dep);
@@ -42705,4 +42715,240 @@ test "host checkpoint primary script exception remains exact through cleanup mov
     try std.testing.expect(ctx.exception != null and ctx.exception.?.isObject());
     try std.testing.expectEqual(ctx.global_object.getOwn("movingPrimaryError").?.asObj(), ctx.exception.?.asObj());
     try std.testing.expectEqualStrings("moving-primary", ctx.exception.?.asObj().getOwn("message").?.asStr());
+}
+
+test "host checkpoint reports unowned OOM and retains exact adoption and FIFO suffix" {
+    const Fault = struct {
+        calls: usize = 0,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            return error.OutOfMemory;
+        }
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |module| {
+        for ([_]bool{ false, true }) |primary_throw| {
+            for (0..3) |mode| {
+                const ctx = try Context.createWith(std.testing.allocator, .{
+                    .enable_gc = mode != 0,
+                    .enable_threads = mode != 0,
+                    .gil = mode == 1,
+                });
+                defer ctx.destroy();
+                var fault = Fault{};
+                const saved = gc_mod.setActiveContext(ctx);
+                defer gc_mod.restoreActiveContext(saved);
+                try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointFault", 0, Fault.fail);
+                ctx.global_object.getOwn("checkpointFault").?.asObj().private_data = &fault;
+                _ = try ctx.evaluate(
+                    \\globalThis.checkpointOrder = '';
+                    \\globalThis.checkpointPrimary = new TypeError('original');
+                    \\globalThis.checkpointInput = { then: function(resolve) {
+                    \\    checkpointOrder += 'A';
+                    \\    resolve({ then: function(next) { checkpointOrder += 'D'; next(896); } });
+                    \\    checkpointFault();
+                    \\}};
+                );
+                const source =
+                    \\globalThis.checkpointTarget = Promise.resolve(checkpointInput);
+                    \\queueMicrotask(function() { checkpointOrder += 'B'; });
+                    \\queueMicrotask(function() { checkpointOrder += 'C'; });
+                ;
+                const owned = try std.fmt.allocPrint(ctx.arena(), "{s}\n{s}", .{ source, if (primary_throw) "throw checkpointPrimary;" else "42;" });
+                const outcome = if (module)
+                    ctx.evaluateModule("/checkpoint-oom.mjs", owned, .{ .ctx = ctx, .load = Fault.load })
+                else
+                    ctx.evaluate(owned);
+                try std.testing.expectError(if (primary_throw) error.Throw else error.OutOfMemory, outcome);
+                if (primary_throw) try std.testing.expectEqual(ctx.global_object.getOwn("checkpointPrimary").?.asObj(), ctx.exception.?.asObj());
+                try std.testing.expectEqual(@as(usize, 1), fault.calls);
+                try std.testing.expectEqualStrings("A", ctx.global_object.getOwn("checkpointOrder").?.asStr());
+                try std.testing.expectEqual(promise.State.pending, promise.promiseOf(ctx.global_object.getOwn("checkpointTarget").?).?.state);
+                try std.testing.expectEqual(@as(usize, 3), ctx.microtasks.pendingLen());
+                try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+                _ = try ctx.evaluate("0;");
+                try std.testing.expectEqualStrings("ABCD", ctx.global_object.getOwn("checkpointOrder").?.asStr());
+                const target = promise.promiseOf(ctx.global_object.getOwn("checkpointTarget").?).?;
+                try std.testing.expectEqual(promise.State.fulfilled, target.state);
+                try std.testing.expectEqual(@as(f64, 896), target.value.asNum());
+                try std.testing.expectEqual(@as(usize, 1), fault.calls);
+                try std.testing.expect(ctx.microtasks.isEmpty());
+            }
+        }
+    }
+}
+
+test "host checkpoint distinguishes committed OOM rejection from an unowned error" {
+    const Fault = struct {
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+    };
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointFault", 0, Fault.fail);
+    const result = try ctx.evaluate(
+        \\globalThis.checkpointRejected = Promise.resolve().then(checkpointFault);
+        \\globalThis.checkpointOrdinary = Promise.resolve().then(function() { throw new TypeError('job'); });
+        \\42;
+    );
+    try std.testing.expectEqual(@as(f64, 42), result.asNum());
+    try std.testing.expectEqual(promise.State.rejected, promise.promiseOf(ctx.global_object.getOwn("checkpointRejected").?).?.state);
+    try std.testing.expectEqual(promise.State.rejected, promise.promiseOf(ctx.global_object.getOwn("checkpointOrdinary").?).?.state);
+    try std.testing.expect(ctx.exception == null);
+    try std.testing.expect(ctx.microtasks.isEmpty());
+}
+
+test "host checkpoint allocator failure stops callback suffix until recovery" {
+    const Fault = struct {
+        allocator: std.testing.FailingAllocator,
+        calls: usize = 0,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            machine.arena = fault.allocator.allocator();
+            _ = try machine.arena.alloc(u8, 1);
+            return Value.undef();
+        }
+    };
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var fault = Fault{ .allocator = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 }) };
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointFault", 0, Fault.fail);
+    ctx.global_object.getOwn("checkpointFault").?.asObj().private_data = &fault;
+    try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
+        \\globalThis.checkpointSuffix = 0;
+        \\queueMicrotask(checkpointFault);
+        \\queueMicrotask(function() { checkpointSuffix++; });
+    ));
+    try std.testing.expect(fault.allocator.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+    try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("checkpointSuffix").?.asNum());
+    try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+    _ = try ctx.evaluate("0;");
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("checkpointSuffix").?.asNum());
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+}
+
+test "host checkpoint join preserves worker throw and stops secondary OOM cleanup" {
+    const Fault = struct {
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+    };
+    for ([_]bool{ false, true }) |gil_mode| {
+        for ([_]bool{ false, true }) |primary_throw| {
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil_mode });
+            defer ctx.destroy();
+            const saved = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved);
+            try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointFault", 0, Fault.fail);
+            const source = if (primary_throw)
+                "globalThis.joinPrimary = { marker: 896 }; globalThis.checkpointThread = new Thread(function() { throw joinPrimary; });"
+            else
+                "globalThis.checkpointThread = new Thread(function() { return 42; });";
+            _ = try ctx.evaluate(source);
+            try std.testing.expectError(if (primary_throw) error.Throw else error.OutOfMemory, ctx.evaluate(
+                \\globalThis.joinSuffix = 0;
+                \\queueMicrotask(checkpointFault);
+                \\queueMicrotask(function() { joinSuffix++; });
+                \\checkpointThread.join();
+            ));
+            if (primary_throw) try std.testing.expectEqual(ctx.global_object.getOwn("joinPrimary").?.asObj(), ctx.exception.?.asObj());
+            try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("joinSuffix").?.asNum());
+            try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+            _ = try ctx.evaluate("0;");
+            try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("joinSuffix").?.asNum());
+        }
+    }
+}
+
+test "host checkpoint timer OOM retains queued callback without replaying the timer" {
+    const Fault = struct {
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+    };
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointFault", 0, Fault.fail);
+    try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
+        \\globalThis.timerCheckpointCalls = 0;
+        \\globalThis.timerCheckpointSuffix = 0;
+        \\setTimeout(function() {
+        \\  timerCheckpointCalls++;
+        \\  queueMicrotask(function() { timerCheckpointSuffix++; });
+        \\  checkpointFault();
+        \\}, 5);
+    ));
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("timerCheckpointCalls").?.asNum());
+    try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("timerCheckpointSuffix").?.asNum());
+    try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+    _ = try ctx.evaluate("0;");
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("timerCheckpointCalls").?.asNum());
+    try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("timerCheckpointSuffix").?.asNum());
+}
+
+test "host checkpoint finalization OOM retains untouched cleanup records" {
+    const Fault = struct {
+        calls: usize = 0,
+        fn cleanup(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            if (args[0].asNum() == 1) return error.OutOfMemory;
+            return Value.undef();
+        }
+    };
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var fault = Fault{};
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointCleanup", 1, Fault.cleanup);
+    ctx.global_object.getOwn("checkpointCleanup").?.asObj().private_data = &fault;
+    const registry = (try ctx.evaluate("globalThis.checkpointRegistry = new FinalizationRegistry(checkpointCleanup);")).asObj();
+    try registry.finRecordAppend(ctx.arena(), .{ .held = Value.num(1), .ready = true });
+    try registry.finRecordAppend(ctx.arena(), .{ .held = Value.num(2), .ready = true });
+    ctx.queueFinalizationRegistryCleanup(registry);
+    try std.testing.expectError(error.OutOfMemory, ctx.evaluate("42;"));
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+    try std.testing.expectEqual(@as(usize, 1), ctx.finalization_cleanup_jobs.items.len);
+    _ = try ctx.evaluate("0;");
+    try std.testing.expectEqual(@as(usize, 2), fault.calls);
+    try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
+}
+
+test "host checkpoint never resumes the suffix of a failed explicit script drain" {
+    const Fault = struct {
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |module| {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointFault", 0, Fault.fail);
+        const source =
+            \\globalThis.explicitCheckpointSuffix = 0;
+            \\queueMicrotask(checkpointFault);
+            \\queueMicrotask(function() { explicitCheckpointSuffix++; });
+            \\drainMicrotasks();
+        ;
+        const outcome = if (module)
+            ctx.evaluateModule("/explicit-checkpoint.mjs", source, .{ .ctx = ctx, .load = Fault.load })
+        else
+            ctx.evaluate(source);
+        try std.testing.expectError(error.OutOfMemory, outcome);
+        try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("explicitCheckpointSuffix").?.asNum());
+        try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+        _ = try ctx.evaluate("0;");
+        try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("explicitCheckpointSuffix").?.asNum());
+    }
 }

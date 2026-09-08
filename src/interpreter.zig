@@ -3539,7 +3539,11 @@ pub const Interpreter = struct {
     timer_set_ref: ?*const fn (?*anyopaque, *Interpreter, u64, ?bool) bool = null,
     timer_refresh: ?*const fn (?*anyopaque, *Interpreter, u64) bool = null,
     timer_poll: ?*const fn (?*anyopaque, *Interpreter) EvalError!void = null,
-    timer_keepalive: ?*const fn (?*anyopaque, *Interpreter) void = null,
+    timer_keepalive: ?*const fn (?*anyopaque, *Interpreter) EvalError!void = null,
+    /// A join can preserve a worker's original throw while its completion
+    /// checkpoint fails. Keep that secondary boundary until this host entry
+    /// exits, so later cleanup cannot run its retained suffix (#896).
+    host_checkpoint_error: ?EvalError = null,
     timer_abandon: ?*const fn (?*anyopaque, *Interpreter) void = null,
     polling_timers: bool = false,
     /// Context-owned FinalizationRegistry cleanup job queue. GC marks records
@@ -10982,9 +10986,9 @@ pub const Interpreter = struct {
         try poll(self.timer_ctx, self);
     }
 
-    pub fn keepaliveTimers(self: *Interpreter) void {
+    pub fn keepaliveTimers(self: *Interpreter) EvalError!void {
         const keepalive = self.timer_keepalive orelse return;
-        keepalive(self.timer_ctx, self);
+        try keepalive(self.timer_ctx, self);
     }
 
     pub fn abandonTimers(self: *Interpreter) void {
@@ -11030,6 +11034,31 @@ pub const Interpreter = struct {
         }
         try self.pollAbortSignalTimeouts();
         try self.pollTimers();
+    }
+
+    /// Ordinary job exceptions belong to the job/host notification channel.
+    /// An unowned engine failure instead ends this checkpoint; its restored
+    /// suffix must remain pending until a later host entry (#896).
+    pub fn drainHostMicrotasks(self: *Interpreter) EvalError!void {
+        if (self.host_checkpoint_error) |err| return err;
+        self.drainMicrotasks() catch |err| {
+            if (err != error.Throw) return err;
+        };
+    }
+
+    pub fn drainHostCheckpoint(self: *Interpreter, keepalive: bool) EvalError!void {
+        try self.drainHostMicrotasks();
+        try self.settleAsyncWaiters();
+        try self.drainFinalizationCleanupJobs();
+        try self.drainHostMicrotasks();
+        try self.settleAsyncWaiters();
+        if (keepalive) try self.keepaliveTimers();
+    }
+
+    pub fn drainAgentCheckpoint(self: *Interpreter) EvalError!void {
+        try self.drainHostMicrotasks();
+        try self.settleAsyncWaiters();
+        try self.keepaliveTimers();
     }
 
     /// Move each pending burst out under its queue lock, then execute unlocked.
@@ -11523,7 +11552,7 @@ pub const Interpreter = struct {
     /// (infinite deadline with no live agent to notify; those promises are
     /// abandoned pending, the host's prerogative). Called after the main
     /// microtask drain in Context.evaluate/evaluateModule and agent realms.
-    pub fn settleAsyncWaiters(self: *Interpreter) void {
+    pub fn settleAsyncWaiters(self: *Interpreter) EvalError!void {
         const park_with_gil = self.use_thread_gil and self.gil != null;
         if (self.gil) |g| {
             // Quiescence loop: pumped tasks queue microtasks which can queue
@@ -11531,7 +11560,7 @@ pub const Interpreter = struct {
             while (true) {
                 jsthread.pumpTasks(self);
                 jsthread.pollPropAsync(self);
-                self.drainMicrotasks() catch {};
+                try self.drainHostMicrotasks();
                 // A peer thread settling an asyncJoin/propAsync can `enqueue`
                 // (locked append) into this shared realm queue concurrently, so
                 // read its length under the same queue lock.
@@ -11577,7 +11606,7 @@ pub const Interpreter = struct {
                     e.completion.fulfillPrimitive(self, pp, outcome);
                 }
             }
-            self.drainMicrotasks() catch {};
+            try self.drainHostMicrotasks();
         }
         self.abandonAsyncWaiters();
     }
@@ -11787,7 +11816,7 @@ pub const Interpreter = struct {
             }
             if (self.async_waiters) |waiters| {
                 if (self.asyncWaiterCount(waiters) > 0) {
-                    self.settleAsyncWaiters();
+                    try self.settleAsyncWaiters();
                     continue;
                 }
             }
@@ -36567,8 +36596,8 @@ fn agentThreadRun(src: []const u8) void {
     } else |_| {
         _ = machine.eval(prog) catch {};
     }
-    machine.drainMicrotasks() catch {};
-    machine.settleAsyncWaiters();
+    machine.drainHostMicrotasks() catch return;
+    machine.settleAsyncWaiters() catch return;
 }
 
 fn host262AgentStartFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -61826,7 +61855,7 @@ test "shared-buffer waitAsync completion survives exhausted temporary-root stora
 
     var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
     machine.arena = exhausted.allocator();
-    machine.settleAsyncWaiters();
+    try std.testing.expectError(error.OutOfMemory, machine.settleAsyncWaiters());
     try std.testing.expectEqual(promise.State.fulfilled, pp.state);
     try std.testing.expectEqualStrings("timed-out", pp.value.asStr());
     try std.testing.expect(machine.async_waiter_completion == null);
@@ -61868,7 +61897,7 @@ test "shared-buffer waitAsync admission OOM preserves an existing native waiter"
     try std.testing.expectEqual(@as(usize, 1), agent.notify(storage, 0, 2));
     second.cancel(&machine);
     machine.arena = ctx.arena();
-    machine.settleAsyncWaiters();
+    try machine.settleAsyncWaiters();
     try std.testing.expectEqual(promise.State.fulfilled, promise.promiseOf(Value.obj(object)).?.state);
     try std.testing.expectEqualStrings("ok", promise.promiseOf(Value.obj(object)).?.value.asStr());
     try std.testing.expectEqual(promise.State.pending, promise.promiseOf(Value.obj(other)).?.state);
@@ -61902,16 +61931,19 @@ test "shared-buffer waitAsync harvest boundary retains every outcome under alloc
     try std.testing.expectEqual(@as(usize, count), agent.notify(storage, 0, count));
     var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
     machine.arena = exhausted.allocator();
-    machine.settleAsyncWaiters();
-    for (targets) |target| {
+    try std.testing.expectError(error.OutOfMemory, machine.settleAsyncWaiters());
+    for (targets[0..16]) |target| {
         try std.testing.expectEqual(promise.State.fulfilled, target.state);
         try std.testing.expectEqualStrings("ok", target.value.asStr());
     }
-    try std.testing.expectEqual(@as(usize, 0), ctx.async_waiters.items.len);
-    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    try std.testing.expectEqual(@as(usize, count - 16), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(@as(usize, count - 16), ctx.microtasks.reservations);
     try std.testing.expect(machine.async_waiter_completion == null);
     try std.testing.expectEqual(@as(usize, 0), agent.notify(storage, 0, count));
     machine.arena = ctx.arena();
+    try machine.settleAsyncWaiters();
+    try std.testing.expectEqual(@as(usize, 0), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
     try machine.drainMicrotasks();
     try std.testing.expect(ctx.microtasks.isEmpty());
     for (dependents) |dependent| {

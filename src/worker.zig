@@ -1159,9 +1159,7 @@ fn workerMain(w: *Worker) void {
         const event = machine.newObject() catch continue;
         machine.setProp(event.asObj(), "data", data) catch continue;
         _ = machine.callValueWithThis(handler, &.{event}, Value.undef()) catch {};
-        machine.drainMicrotasks() catch {};
-        machine.settleAsyncWaiters();
-        machine.keepaliveTimers();
+        machine.drainAgentCheckpoint() catch return;
     }
 }
 

@@ -942,20 +942,24 @@ fn threadMain(rec: *ThreadRecord) void {
     machine.step_budget = std.math.maxInt(u64);
     defer machine.abandonTimers();
     var threw = false;
+    var checkpoint_failed = false;
     if (machine.callValueWithThis(rec.entry_function, rec.entry_args, Value.undef())) |out| {
         // The running native stack is not a precise peer root. Publish into
         // the join-mutex-protected record before any GC-capable checkpoint,
         // while leaving `done` false so observers cannot see completion early.
         rootThreadResult(rec, out);
-        machine.drainMicrotasks() catch {};
         // Thread-local async waiters are owned by this interpreter. If a thread
         // returns a pending Atomics.waitAsync promise, asyncJoin can assimilate
         // the promise object but cannot harvest this soon-to-be-destroyed
         // waiter list, so run the thread's final settlement checkpoint before
         // publishing completion.
-        pumpTasks(&machine);
-        machine.settleAsyncWaiters();
-        machine.keepaliveTimers();
+        machine.drainAgentCheckpoint() catch |err| {
+            checkpoint_failed = true;
+            rootThreadResult(rec, joinSettlementFailure(rec.ctx, &machine, err));
+            threw = true;
+            machine.abandonAsyncWaiters();
+            abandonPropAsyncQueue(&machine, microtasks);
+        };
     } else |err| {
         // Preserve the body exception before a draining callback can overwrite
         // the interpreter exception slot or moving GC can rewrite the value.
@@ -963,7 +967,10 @@ fn threadMain(rec: *ThreadRecord) void {
             error.OutOfMemory => outOfMemoryCompletionValue(rec.ctx),
             else => machine.exception,
         });
-        machine.drainMicrotasks() catch {};
+        checkpoint_failed = err != error.Throw;
+        if (!checkpoint_failed) machine.drainHostMicrotasks() catch {
+            checkpoint_failed = true;
+        };
         if (async_waiters.items.len > 0) {
             machine.abandonAsyncWaiters();
         }
@@ -983,7 +990,7 @@ fn threadMain(rec: *ThreadRecord) void {
     // `rec.result` and `rec.settling_joins` remain the authoritative precise
     // roots. Reload each result after earlier settlements may have moved it.
     settleThreadJoins(rec, &machine, pending_joins.items, threw);
-    machine.drainMicrotasks() catch {};
+    if (!checkpoint_failed) machine.drainMicrotasks() catch {};
     transferPropAsyncQueue(&machine, rec, microtasks, &rec.ctx.microtasks);
     // Pending prop-async tickets now target the realm queue, but another peer
     // may already have removed one of this thread's tickets from the global
@@ -1451,7 +1458,13 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const threw = rec.threw;
     rec.join_mutex.unlock(io);
     join_mutex_locked = false;
-    self.drainMicrotasks() catch {};
+    // The worker result remains precisely rooted by its record across this
+    // checkpoint. Its original throw wins; a successful result cannot hide
+    // an unowned engine error from the joining thread's queue (#896).
+    self.drainHostMicrotasks() catch |err| {
+        self.host_checkpoint_error = err;
+        if (!threw) return err;
+    };
     const result = threadResult(rec);
     if (threw) {
         self.exception = result;

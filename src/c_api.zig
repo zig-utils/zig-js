@@ -35780,3 +35780,67 @@ test "Fetch Body preserves ReadableStream lifecycle" {
     _ = JSC__JSGlobalObject__drainMicrotasks(sibling);
     try std.testing.expect((try sibling_internal.evaluate("__siblingBody407")).asBool());
 }
+
+test "host checkpoint public C evaluation reports OOM and retains the queued suffix" {
+    const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global).?;
+    const Fault = struct {
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+    };
+    const saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(saved);
+    try interp.setNative(context.arena(), context.root_shape, context.global_object, "checkpointFault", 0, Fault.fail);
+    const source = JSStringCreateWithUTF8CString("globalThis.cCheckpointSuffix = 0; queueMicrotask(checkpointFault); queueMicrotask(function() { cCheckpointSuffix++; }); 42;");
+    defer JSStringRelease(source);
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSEvaluateScript(global, source, null, null, 1, &exception) == null);
+    try std.testing.expect(exception != null);
+    try std.testing.expectEqual(@as(f64, 0), context.global_object.getOwn("cCheckpointSuffix").?.asNum());
+    try std.testing.expectEqual(@as(usize, 1), context.microtasks.pendingLen());
+    const recovery = JSStringCreateWithUTF8CString("0;");
+    defer JSStringRelease(recovery);
+    exception = null;
+    try std.testing.expect(JSEvaluateScript(global, recovery, null, null, 1, &exception) != null);
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 1), context.global_object.getOwn("cCheckpointSuffix").?.asNum());
+}
+
+test "host checkpoint private VM preserves pending OOM until explicit clear" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global).?;
+    const group = privatePropertyBoundaryGroup(context).?;
+    const Fault = struct {
+        calls: usize = 0,
+        fn fail(_: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            return error.OutOfMemory;
+        }
+        fn suffix(raw: ?*anyopaque) callconv(.c) void {
+            const state: *@This() = @ptrCast(@alignCast(raw.?));
+            state.calls += 1;
+        }
+    };
+    const saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(saved);
+    var fault = Fault{};
+    try interp.setNative(context.arena(), context.root_shape, context.global_object, "checkpointFault", 0, Fault.fail);
+    var machine = context.interpreter();
+    try promise.enqueueCallback(&machine, context.global_object.getOwn("checkpointFault").?);
+    try promise.enqueueNativeCallback(&machine, &fault, Fault.suffix);
+    privateVMDrainMicrotasks(group);
+    try std.testing.expect(group.pending_exception != null);
+    try std.testing.expectEqual(@as(usize, 0), fault.calls);
+    try std.testing.expectEqual(@as(usize, 1), context.microtasks.pendingLen());
+    privateVMDrainMicrotasks(group);
+    try std.testing.expectEqual(@as(usize, 0), fault.calls);
+    JSGlobalObject__clearException(global);
+    privateVMDrainMicrotasks(group);
+    try std.testing.expect(group.pending_exception == null);
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+    try std.testing.expect(context.microtasks.isEmpty());
+}
