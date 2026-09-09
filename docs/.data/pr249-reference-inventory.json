@@ -2064,11 +2064,11 @@
         "premise": "A reader repeatedly constructs a new TypedArray from a buffer after a concurrent transfer has detached it.",
         "verification": {
           "default": {
-            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "evidence": "TypeError: Buffer is already detached",
             "status": "fail"
           },
           "parallel_js": {
-            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "evidence": "TypeError: Buffer is already detached",
             "status": "fail"
           }
         },

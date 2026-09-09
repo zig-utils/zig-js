@@ -217,7 +217,8 @@ function runOne(
   mode: "serialized" | "parallel-js",
   timeoutMs: number,
 ): Item {
-  const expected = expectation(entry, mode),
+  const started = Date.now(),
+    expected = expectation(entry, mode),
     result = run(command(entry.case, mode), { timeoutMs }),
     output = `${result.stdout}\n${result.stderr}`,
     observed = result.timedOut
@@ -231,18 +232,18 @@ function runOne(
       expected.evidence.length > 0
         ? [expected.evidence]
         : [],
-    matched =
-      observed === expected.status &&
-      evidence.every((item) =>
-        output.replaceAll('"', "").includes(item.replaceAll('"', "")),
-      );
+    missingEvidence = evidence.filter((item) =>
+      !output.replaceAll('"', "").includes(item.replaceAll('"', "")),
+    ),
+    matched = observed === expected.status && missingEvidence.length === 0;
   return {
     command: command(entry.case, mode),
     expected_status: expected.status,
     observed_status: observed,
     expectation_matched: matched,
     exit_code: result.exitCode,
-    ms: 0,
+    ms: Date.now() - started,
+    missing_evidence: missingEvidence,
     output: outputSummary(output),
   };
 }
@@ -401,10 +402,20 @@ function main(): void {
       `unpromoted: ${inventory.summary.blocked} blocked, ${inventory.summary.terminal_disposition} terminal dispositions, ${inventory.summary.helper_preload} helper/preload`,
     );
     if (errors.length) errors.forEach((error) => console.error(`  ${error}`));
-    if (args.runDispositionProbes)
+    if (args.runDispositionProbes) {
       console.log(
         `terminal disposition probes: ${PROBES.length - probeFailures}/${PROBES.length} matched`,
       );
+      for (const result of probeResults.filter((item) => !item.expectation_matched)) {
+        console.error(
+          `  ${result.case}: expected ${result.expected_status}, observed ${result.observed_status} (exit ${result.exit_code}, ${result.ms} ms)`,
+        );
+        for (const evidence of result.missing_evidence)
+          console.error(`    missing evidence: ${evidence}`);
+        for (const line of result.output.tail)
+          console.error(`    ${line}`);
+      }
+    }
   }
   requireValue(!errors.length || !args.checkInventory, errors.join("\n"));
   requireValue(selfTest, "inventory drift self-test failed");
