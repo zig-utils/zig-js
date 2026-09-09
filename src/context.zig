@@ -4101,10 +4101,11 @@ pub const Context = struct {
     /// The empty root shape every object in this context transitions from.
     root_shape: *Shape,
     exception: ?value.Value = null,
-    /// Private-JSC VM exception root. The C ABI stores the distinct exception
-    /// cell on its shared group record; the primary Context keeps the thrown
-    /// value alive for precise GC until that cell is cleared or taken.
-    private_pending_exception_root: ?value.Value = null,
+    /// VM-owned exception slots point into stable native handles. Publication
+    /// and clearing use realm_lock; tracing holds it and movement stops mutators.
+    /// Root the actual aliases so both exception and value projections relocate.
+    private_pending_exception_root: ?PrivateExceptionRoot = null,
+    private_termination_exception_root: ?PrivateExceptionRoot = null,
     /// The value inherited by callbacks wrapped through Bun/Home's private
     /// AsyncContextFrame ABI. `undefined` is the exact inactive sentinel used
     /// by JSC. This realm-local slot is a precise root because a callback can
@@ -4704,9 +4705,15 @@ pub const Context = struct {
     /// when the GC is off.
     pub const GcHeap = @import("gc.zig").Heap;
     pub const GcBinding = @import("gc.zig").Binding;
+    pub const PrivateExceptionRoot = struct {
+        value: *value.Value,
+        encoded_value: ?*value.Value,
+    };
     pub const CApiHandle = struct {
         ref: *anyopaque,
         count: usize,
+        /// A protected private Exception owns its encoded value projection too.
+        encoded_value: ?*value.Value = null,
     };
     const ProtectedValueRecord = struct {
         owner: *Context,

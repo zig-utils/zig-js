@@ -1417,6 +1417,13 @@ const CContextGroup = struct {
         }
     }
 
+    fn setPendingException(self: *CContextGroup, exception: ?*Boxed) void {
+        self.primary.realmLock();
+        defer self.primary.realmUnlock();
+        self.pending_exception = exception;
+        self.primary.private_pending_exception_root = if (exception) |boxed| privateExceptionRoot(boxed) else null;
+    }
+
     fn usesPreciseHeap(self: *const CContextGroup) bool {
         return self.primary.gc != null;
     }
@@ -3352,6 +3359,12 @@ fn privateBoxInOwner(storage_owner: *Context, realm: *Context, v: Value) JSValue
     return @ptrCast(b);
 }
 
+fn privateExceptionRoot(boxed: *Boxed) Context.PrivateExceptionRoot {
+    std.debug.assert(boxed.private_kind == .exception);
+    const encoded_box = privateBoxedFrom(boxed.exception_encoded);
+    return .{ .value = &boxed.value, .encoded_value = if (encoded_box) |alias| &alias.value else null };
+}
+
 fn privateExceptionBox(ctx: *Context, thrown: Value, encoded: EncodedValue) ?*Boxed {
     const owner = if (ctx.c_api_group) |opaque_group| blk: {
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
@@ -3483,9 +3496,7 @@ fn privateSetPendingValue(context: *Context, thrown: Value) void {
     if (group.pending_exception != null) return;
     const encoded = privateEncodedFromValue(context, thrown);
     if (encoded == .empty) return;
-    group.pending_exception = privateExceptionBox(context, thrown, encoded);
-    if (group.pending_exception != null)
-        group.primary.private_pending_exception_root = thrown;
+    group.setPendingException(privateExceptionBox(context, thrown, encoded));
 }
 
 fn privateSetPendingAbrupt(context: *Context, machine: *interp.Interpreter, err: anyerror) void {
@@ -3496,8 +3507,7 @@ fn privateSetPendingAbrupt(context: *Context, machine: *interp.Interpreter, err:
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    group.pending_exception = group.oom_exception.?;
-    group.primary.private_pending_exception_root = group.oom_exception.?.value;
+    group.setPendingException(group.oom_exception.?);
 }
 
 fn privateEncodeResult(context: *Context, machine: *interp.Interpreter, result: Value) EncodedValue {
@@ -4112,8 +4122,7 @@ fn privateTakePendingExceptionValue(context: *Context) ?Value {
     const opaque_group = context.c_api_group orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     const exception = group.pending_exception orelse return null;
-    group.pending_exception = null;
-    group.primary.private_pending_exception_root = null;
+    group.setPendingException(null);
     return exception.value;
 }
 
@@ -13858,8 +13867,7 @@ export fn JSGlobalObject__clearException(global: JSContextRef) callconv(.c) void
     const context = ctxForHandleInspection(global) orelse return;
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    group.pending_exception = null;
-    group.primary.private_pending_exception_root = null;
+    group.setPendingException(null);
 }
 
 fn privateCPUProfilerSetHooks(group: *CContextGroup, enabled: bool) void {
@@ -14704,8 +14712,7 @@ fn privateMaterializeTermination(group: *CContextGroup) ?*Boxed {
     if (group.pending_exception) |pending| return pending;
     if (!group.termination_requested.load(.acquire)) return null;
     if (group.termination_exception) |termination| {
-        group.pending_exception = termination;
-        group.primary.private_pending_exception_root = termination.value;
+        group.setPendingException(termination);
         return termination;
     }
 
@@ -14721,9 +14728,11 @@ fn privateMaterializeTermination(group: *CContextGroup) ?*Boxed {
     const encoded = privateEncodedFromValue(context, thrown);
     if (encoded == .empty) return null;
     const exception = privateExceptionBox(context, thrown, encoded) orelse return null;
+    context.realmLock();
     group.termination_exception = exception;
-    group.pending_exception = exception;
-    group.primary.private_pending_exception_root = thrown;
+    context.private_termination_exception_root = privateExceptionRoot(exception);
+    context.realmUnlock();
+    group.setPendingException(exception);
     return exception;
 }
 
@@ -14773,8 +14782,7 @@ export fn TopExceptionScope__exceptionIncludingTraps(ptr: ?*anyopaque) callconv(
 export fn TopExceptionScope__clearException(ptr: ?*anyopaque) callconv(.c) void {
     const scope = privateTopExceptionScope(ptr) orelse return;
     const group = scope.group orelse return;
-    group.pending_exception = null;
-    group.primary.private_pending_exception_root = null;
+    group.setPendingException(null);
 }
 
 export fn TopExceptionScope__assertNoException(ptr: ?*anyopaque) callconv(.c) void {
@@ -14793,8 +14801,7 @@ export fn JSGlobalObject__clearExceptionExceptTermination(global: JSContextRef) 
     const group = privatePropertyBoundaryGroup(context) orelse return false;
     if (group.pending_exception) |pending| {
         if (group.termination_exception == pending) return false;
-        group.pending_exception = null;
-        group.primary.private_pending_exception_root = null;
+        group.setPendingException(null);
     }
     return true;
 }
@@ -14815,8 +14822,7 @@ export fn JSGlobalObject__setTimeZone(global: JSContextRef, time_zone: ?*const P
         // false return; clear any transient boundary exception they published.
         if (context.c_api_group) |opaque_group| {
             const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-            group.pending_exception = null;
-            group.primary.private_pending_exception_root = null;
+            group.setPendingException(null);
         }
         return false;
     };
@@ -14839,8 +14845,7 @@ export fn JSGlobalObject__clearTerminationException(global: JSContextRef) callco
     group.termination_requested.store(false, .release);
     if (group.pending_exception) |pending| {
         if (group.termination_exception == pending) {
-            group.pending_exception = null;
-            group.primary.private_pending_exception_root = null;
+            group.setPendingException(null);
         }
     }
 }
@@ -15954,8 +15959,7 @@ export fn JSGlobalObject__tryTakeException(global: JSContextRef) callconv(.c) En
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     const exception = group.pending_exception orelse return .empty;
-    group.pending_exception = null;
-    group.primary.private_pending_exception_root = null;
+    group.setPendingException(null);
     return EncodedValue.fromCellAddress(@intFromPtr(exception)) catch .empty;
 }
 
@@ -15973,16 +15977,14 @@ export fn JSC__VM__throwError(
     if (encoded.asCellAddress()) |_| {
         const boxed = privateBoxedFrom(encoded) orelse return;
         if (boxed.private_kind == .exception) {
-            group.pending_exception = boxed;
-            group.primary.private_pending_exception_root = boxed.value;
+            if (boxed.storage_owner != group.primary) return;
+            group.setPendingException(boxed);
             return;
         }
     } else |_| {}
 
     const thrown = privateValueFrom(global, encoded) orelse return;
-    group.pending_exception = privateExceptionBox(context, thrown, encoded);
-    if (group.pending_exception != null)
-        group.primary.private_pending_exception_root = thrown;
+    group.setPendingException(privateExceptionBox(context, thrown, encoded));
 }
 
 export fn JSC__Exception__asJSValue(exception: ?*anyopaque) callconv(.c) EncodedValue {
@@ -20485,7 +20487,7 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
 }
 
 fn valueProtectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
-    if (valueFromContext(c, @ptrCast(raw)) == null) return false;
+    if (boxed.owner != c and (c.c_api_group == null or boxed.owner.c_api_group != c.c_api_group)) return false;
     // Shared JSC realms use one VM-lifetime arena, so a handle created by a
     // sibling context is already stable for the entire group lifetime. Precise
     // Precise groups route VM-owned private boxes through the hidden owner;
@@ -20504,18 +20506,23 @@ fn valueProtectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
         }
     }
     root_context.reserveCApiHandlesLocked(1) catch return false;
-    root_context.c_api_handles.appendAssumeCapacity(.{ .ref = raw, .count = 1 });
+    root_context.c_api_handles.appendAssumeCapacity(.{
+        .ref = raw,
+        .count = 1,
+        .encoded_value = if (boxed.private_kind == .exception) privateExceptionRoot(boxed).encoded_value else null,
+    });
     return true;
 }
 
 fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
+    if (boxed.private_kind != .value) return false;
     return valueProtectInContext(c, boxed, v.?);
 }
 
 fn valueUnprotectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
-    if (valueFromContext(c, @ptrCast(raw)) == null) return false;
+    if (boxed.owner != c and (c.c_api_group == null or boxed.owner.c_api_group != c.c_api_group)) return false;
     if (c.gc == null) return true;
     const root_context = boxed.storage_owner;
     if (root_context.gc != c.gc) return false;
@@ -20536,6 +20543,7 @@ fn valueUnprotectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
 fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
+    if (boxed.private_kind != .value) return false;
     const removed = valueUnprotectInContext(c, boxed, v.?);
     if (removed) if (c.c_api_group) |opaque_group| {
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
@@ -20550,7 +20558,7 @@ fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
 /// C-API root table to keep the same behavior under precise and parallel GC.
 fn privateSetValueProtected(encoded: EncodedValue, protected: bool) void {
     const boxed = privateBoxedFrom(encoded) orelse return;
-    if (boxed.private_kind != .value) return;
+    if (boxed.private_kind == .structure) return;
     if (protected) {
         _ = valueProtectInContext(boxed.owner, boxed, @ptrCast(boxed));
     } else {
@@ -36023,4 +36031,139 @@ test "host checkpoint exhausted private handle allocator retains a pending excep
     JSGlobalObject__clearException(global);
     privateVMDrainMicrotasks(group);
     try std.testing.expectEqual(@as(usize, 1), fault.calls);
+}
+
+test "private exception roots rewrite pending handles across nursery and compaction" {
+    for ([_]bool{ false, true }) |compact| {
+        const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+        const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+        defer JSContextGroupRelease(group_ref);
+        const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+        const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+        defer JSGlobalContextRelease(global);
+        primary.gc_scan_native_stack = false;
+        const heap = primary.gc.?;
+        heap.threshold_bytes = std.math.maxInt(usize);
+        heap.nursery_threshold_bytes = std.math.maxInt(usize);
+        if (compact) _ = try primary.evaluate(
+            "globalThis.discard = []; for (let i = 0; i < 4096; i++) discard.push({ i }); discard = null;",
+        );
+        const thrown = try primary.evaluate("({ marker: 908, nested: { live: true } })");
+        const encoded = privateEncodedFromValue(primary, thrown);
+        JSC__VM__throwError(@ptrCast(group), global, encoded);
+        const exception = group.pending_exception orelse return error.MissingException;
+        const before = exception.value.asObj();
+        if (compact) {
+            const result = primary.compactGarbage();
+            try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, result.status);
+            try std.testing.expect(result.moved_cells > 0);
+        } else {
+            const collections_before = heap.accounting().moving_minor_collections;
+            heap.nursery_threshold_bytes = 1;
+            _ = try primary.evaluate("0");
+            try std.testing.expectEqual(collections_before + 1, heap.accounting().moving_minor_collections);
+            try std.testing.expect(heap.accounting().last_minor_moved_cells > 0);
+        }
+        // Native stack scanning is disabled: the VM owns both boundary aliases.
+        try std.testing.expect(before != exception.value.asObj());
+        try std.testing.expectEqual(exception.value.asObj(), privateValueFrom(global, encoded).?.asObj());
+        try std.testing.expectEqual(@as(f64, 908), exception.value.asObj().getOwn("marker").?.asNum());
+        try std.testing.expectEqual(encoded, JSC__Exception__asJSValue(@ptrCast(exception)));
+        JSC__VM__throwError(@ptrCast(group), global, EncodedValue.fromInt32(1));
+        try std.testing.expectEqual(exception, group.pending_exception.?);
+        const taken = JSGlobalObject__tryTakeException(global);
+        try std.testing.expectEqual(@intFromPtr(exception), try taken.asCellAddress());
+        try std.testing.expect(group.pending_exception == null);
+    }
+}
+
+test "private exception roots retain cleared termination cache through full collection" {
+    const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    primary.gc_scan_native_stack = false;
+    JSGlobalObject__requestTermination(global);
+    const exception = privateMaterializeTermination(group) orelse return error.MissingException;
+    const encoded = JSC__Exception__asJSValue(@ptrCast(exception));
+    JSGlobalObject__clearTerminationException(global);
+    try std.testing.expect(group.pending_exception == null);
+    primary.collectGarbage();
+    try std.testing.expect(primary.gc_cell_backing.?.realmIdForCellAddress(@intFromPtr(exception.value.asObj())) != ContextMod.GcCellBacking.no_realm);
+    JSGlobalObject__requestTermination(global);
+    try std.testing.expectEqual(exception, privateMaterializeTermination(group).?);
+    try std.testing.expectEqual(encoded, JSC__Exception__asJSValue(@ptrCast(exception)));
+    try std.testing.expectEqualStrings("TerminationError", exception.value.asObj().getOwn("name").?.asStr());
+    JSGlobalObject__clearTerminationException(global);
+}
+
+test "private exception roots retain protected retired realm and release on final unprotect" {
+    const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const retiring = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    const realm = ctxForEvaluation(retiring).?;
+    primary.gc_scan_native_stack = false;
+    realm.gc_scan_native_stack = false;
+    const encoded = privateEncodedFromValue(realm, try realm.evaluate("({ marker: 908 })"));
+    JSC__VM__throwError(@ptrCast(group), retiring, encoded);
+    const exception = group.pending_exception.?;
+    const handle = privateEncodedFromRef(@ptrCast(exception));
+    Bun__JSValue__protect(handle);
+    Bun__JSValue__protect(handle);
+    try std.testing.expectEqual(@as(usize, 1), primary.c_api_handles.items.len);
+    JSGlobalContextRelease(retiring);
+    try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
+    try std.testing.expectEqual(handle, JSGlobalObject__tryTakeException(global));
+    primary.collectGarbage();
+    try std.testing.expectEqual(@as(f64, 908), privateValueFrom(global, encoded).?.asObj().getOwn("marker").?.asNum());
+    Bun__JSValue__unprotect(handle);
+    try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
+    _ = try primary.evaluate("globalThis.discard = []; for (let i = 0; i < 4096; i++) discard.push({ i }); discard = null;");
+    const before = exception.value.asObj();
+    const moved = primary.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(before != exception.value.asObj());
+    try std.testing.expectEqual(exception.value.asObj(), privateValueFrom(global, encoded).?.asObj());
+    Bun__JSValue__unprotect(handle);
+    try std.testing.expectEqual(@as(usize, 0), primary.c_api_handles.items.len);
+    try std.testing.expectEqual(@as(usize, 0), group.retiring_precise_contexts.items.len);
+}
+
+test "private exception roots publish existing handles without allocation and reject foreign VMs" {
+    const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const encoded = privateEncodedFromValue(primary, try primary.evaluate("({ marker: 908 })"));
+    JSC__VM__throwError(@ptrCast(group), global, encoded);
+    const handle = JSGlobalObject__tryTakeException(global);
+    Bun__JSValue__protect(handle);
+    defer Bun__JSValue__unprotect(handle);
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(foreign), foreign, handle);
+    try std.testing.expect(!JSGlobalObject__hasException(foreign));
+    JSGlobalObject__requestTermination(global);
+    const termination = privateMaterializeTermination(group).?;
+    JSGlobalObject__clearTerminationException(global);
+    var failing = std.testing.FailingAllocator.init(primary.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    var exhausted = ContextMod.LockedArena{ .inner = failing.allocator() };
+    const original = primary.locked_arena;
+    primary.locked_arena = &exhausted;
+    defer primary.locked_arena = original;
+    JSC__VM__throwError(@ptrCast(group), global, handle);
+    try std.testing.expectEqual(handle, JSGlobalObject__tryTakeException(global));
+    JSGlobalObject__requestTermination(global);
+    try std.testing.expectEqual(termination, privateMaterializeTermination(group).?);
+    JSGlobalObject__clearTerminationException(global);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
 }

@@ -3538,7 +3538,9 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     context.tdz_marker = &old_objects[1];
     context.c_api_builtin_constructors[0] = Value.obj(&old_objects[2]);
     context.reserved_thread_oom_error = Value.obj(&old_objects[3]);
-    context.private_pending_exception_root = Value.obj(&old_objects[4]);
+    var exception_value = Value.obj(&old_objects[4]);
+    var encoded_exception_value = exception_value;
+    context.private_pending_exception_root = .{ .value = &exception_value, .encoded_value = &encoded_exception_value };
     context.private_async_context = Value.obj(&old_objects[16]);
     context.exception = Value.obj(&old_objects[17]);
     try context.env.put("__gc_relocation_context_root__", Value.obj(&old_objects[5]));
@@ -3669,7 +3671,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     try std.testing.expectEqual(&new_objects[1], context.tdz_marker);
     try std.testing.expectEqual(&new_objects[2], context.c_api_builtin_constructors[0].asObj());
     try std.testing.expectEqual(&new_objects[3], context.reserved_thread_oom_error.?.asObj());
-    try std.testing.expectEqual(&new_objects[4], context.private_pending_exception_root.?.asObj());
+    try std.testing.expectEqual(&new_objects[4], exception_value.asObj());
+    try std.testing.expectEqual(&new_objects[4], encoded_exception_value.asObj());
     try std.testing.expectEqual(&new_objects[16], context.private_async_context.asObj());
     try std.testing.expectEqual(&new_objects[5], context.env.get("__gc_relocation_context_root__").?.asObj());
     try std.testing.expectEqual(&new_objects[6], microtask_items[0].callback.asObj());
@@ -3821,7 +3824,12 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
     for (&ctx.c_api_builtin_constructors) |*constructor|
         gc_relocation.rewriteValueSlot(v, constructor);
     gc_relocation.rewriteOptionalValueSlot(v, &ctx.reserved_thread_oom_error);
-    gc_relocation.rewriteOptionalValueSlot(v, &ctx.private_pending_exception_root);
+    for ([_]?ContextMod.Context.PrivateExceptionRoot{ ctx.private_pending_exception_root, ctx.private_termination_exception_root }) |maybe_root| {
+        if (maybe_root) |root| {
+            gc_relocation.rewriteValueSlot(v, root.value);
+            if (root.encoded_value) |slot| gc_relocation.rewriteValueSlot(v, slot);
+        }
+    }
     gc_relocation.rewriteValueSlot(v, &ctx.private_async_context);
     relocateEnv(&ctx.env, v);
 
@@ -3849,6 +3857,7 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
         // Each stable Boxed handle aliases its first field (`Value`).
         const slot: *Value = @ptrCast(@alignCast(handle.ref));
         gc_relocation.rewriteValueSlot(v, slot);
+        if (handle.encoded_value) |alias| gc_relocation.rewriteValueSlot(v, alias);
     }
     for (ctx.protected_values.items) |handle|
         gc_relocation.rewriteValueSlot(v, &handle.value);
@@ -4192,7 +4201,6 @@ pub const Binding = struct {
         v.mark(ctx.tdz_marker);
         for (ctx.c_api_builtin_constructors) |constructor| markValue(v, constructor);
         if (ctx.reserved_thread_oom_error) |err| markValue(v, err);
-        if (ctx.private_pending_exception_root) |err| markValue(v, err);
         markValue(v, ctx.private_async_context);
         traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
 
@@ -4209,6 +4217,12 @@ pub const Binding = struct {
         // queue traversal marks every intrusive node; `tracePromise` therefore
         // does not treat the overlaid rejection successor as an independent edge.
         ctx.realmLock();
+        for ([_]?ContextMod.Context.PrivateExceptionRoot{ ctx.private_pending_exception_root, ctx.private_termination_exception_root }) |maybe_root| {
+            if (maybe_root) |root| {
+                markValue(v, root.value.*);
+                if (root.encoded_value) |slot| markValue(v, slot.*);
+            }
+        }
         var unhandled = ctx.unhandled_rejections.iterator();
         while (unhandled.next()) |rejected| markManaged(v, rejected);
         var handled = ctx.handled_rejections.iterator();
@@ -4227,6 +4241,7 @@ pub const Binding = struct {
             // each ref is a `*Boxed` ({ value: Value }), so the pointer aliases `*Value`.
             const vp: *const Value = @ptrCast(@alignCast(h.ref));
             markValue(v, vp.*);
+            if (h.encoded_value) |alias| markValue(v, alias.*);
         }
         for (ctx.protected_values.items) |handle| markValue(v, handle.value);
         for (ctx.private_strong_roots.items) |root| markValue(v, root.value);

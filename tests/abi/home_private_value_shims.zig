@@ -1798,6 +1798,25 @@ pub fn main() void {
     Bun__JSValue__unprotect(protected_value);
     Bun__JSValue__unprotect(protected_value);
 
+    // Exception cells and their ordinary-value projections share counted
+    // protection; clear/take removes only the VM's pending ownership (#908).
+    const exception_value = evaluate(protected_context, "({ marker: 908 })");
+    const exception_vm = JSC__JSGlobalObject__vm(protected_context);
+    JSC__VM__throwError(exception_vm, protected_context, exception_value);
+    const exception_handle = JSGlobalObject__tryTakeException(protected_context);
+    Bun__JSValue__protect(exception_handle);
+    Bun__JSValue__protect(exception_handle);
+    JSGarbageCollect(protected_context);
+    if (JSC__Exception__asJSValue(exception_handle.cellPointer()) != exception_value or
+        JSValueToNumber(protected_context, getProperty(protected_context, exception_value, "marker").cellPointer(), null) != 908)
+        fail("protected exception lost its value projection");
+    Bun__JSValue__unprotect(exception_handle);
+    JSC__VM__throwError(exception_vm, protected_context, exception_handle);
+    JSGarbageCollect(protected_context);
+    if (JSGlobalObject__tryTakeException(protected_context) != exception_handle)
+        fail("protected exception rethrow changed identity");
+    Bun__JSValue__unprotect(exception_handle);
+
     // Revision-pinned property iterator (#368): the independently compiled
     // consumer sees the exact opaque pointer/BunString ABI, stable name
     // snapshot, UTF-16 length, and observable-versus-VMInquiry split.

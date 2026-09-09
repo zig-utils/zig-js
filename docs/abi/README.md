@@ -720,7 +720,15 @@ one context group observe the same VM pointer and pending cell; taking or
 clearing through either realm clears the shared state. Throws preserve the
 original primitive or Error identity, retain the first pending exception, and
 keep the thrown value rooted until clear/take. Exception cells remain distinct
-from ordinary values and can be safely rethrown.
+from ordinary values and can be safely rethrown while owned by the VM or
+explicitly protected. The VM traces and relocates the actual exception and
+encoded-value handle slots, with no root-registration allocation at publication.
+The cached termination exception remains rooted after pending state is cleared.
+`Bun__JSValue__protect` counts protections for exception cells as well as ordinary
+values; protecting an exception retains and relocates its value projection too.
+After clear/take, hosts must protect an exception before the next collection if
+they intend to retain or rethrow it. Final unprotect releases that ownership,
+including a retired sibling realm retained by the exception's managed graph.
 
 The structured exception-stack slice retains frames when an Error or
 DOMException is created, independently of the public formatted stack string.
