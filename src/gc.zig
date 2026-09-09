@@ -2930,6 +2930,12 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     var uncaught_roots = machine.uncaught_exception_roots;
     while (uncaught_roots) |roots| : (uncaught_roots = roots.parent)
         markValue(v, roots.exception.*);
+    var cleanup_roots = machine.finalization_cleanup_roots;
+    while (cleanup_roots) |roots| : (cleanup_roots = roots.parent) {
+        markValue(v, roots.registry);
+        markValue(v, roots.callback);
+        markValue(v, roots.held[0]);
+    }
     var hold_job_roots = machine.current_hold_job_roots;
     while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
         for (roots.jobs) |job| jsthread.traceHoldJobRoot(job, v);
@@ -3095,6 +3101,12 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     var uncaught_roots = machine.uncaught_exception_roots;
     while (uncaught_roots) |roots| : (uncaught_roots = roots.parent)
         gc_relocation.rewriteValueSlot(v, roots.exception);
+    var cleanup_roots = machine.finalization_cleanup_roots;
+    while (cleanup_roots) |roots| : (cleanup_roots = roots.parent) {
+        gc_relocation.rewriteValueSlot(v, &roots.registry);
+        gc_relocation.rewriteValueSlot(v, &roots.callback);
+        gc_relocation.rewriteValueSlot(v, &roots.held[0]);
+    }
     var hold_job_roots = machine.current_hold_job_roots;
     while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
         for (roots.jobs) |job| jsthread.relocateHoldJobRoot(job, v);
@@ -3829,7 +3841,7 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
         gc_relocation.rewriteValueSlot(v, &timer.callback);
         for (timer.args) |*argument| gc_relocation.rewriteValueSlot(v, argument);
     }
-    for (ctx.finalization_cleanup_jobs.items) |*registry|
+    for (ctx.finalization_cleanup_jobs.items[ctx.finalization_cleanup_head..]) |*registry|
         gc_relocation.rewriteRequiredSlot(v, Object, registry);
     for (ctx.c_api_class_prototypes.items) |prototype|
         gc_relocation.rewriteRequiredSlot(v, Object, &prototype.object);
@@ -4209,7 +4221,7 @@ pub const Binding = struct {
             markValue(v, timer.callback);
             for (timer.args) |arg| markValue(v, arg);
         }
-        for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
+        for (ctx.finalization_cleanup_jobs.items[ctx.finalization_cleanup_head..]) |registry| v.mark(registry);
         for (ctx.c_api_class_prototypes.items) |prototype| v.mark(prototype.object);
         for (ctx.c_api_handles.items) |h| {
             // each ref is a `*Boxed` ({ value: Value }), so the pointer aliases `*Value`.

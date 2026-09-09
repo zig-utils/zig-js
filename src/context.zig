@@ -4196,6 +4196,8 @@ pub const Context = struct {
     /// The collector only enqueues registries; callbacks run later from the
     /// normal interpreter checkpoint, outside the collector.
     finalization_cleanup_jobs: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// Shared by nested/peer drains under realm_lock; consumed prefixes are not roots.
+    finalization_cleanup_head: usize = 0,
     /// Monotonic proof bit for zig-gc's optional weak-processing gate. Runtime
     /// constructors publish true before any WeakMap/WeakSet/WeakRef/
     /// FinalizationRegistry state can become observable. It never returns to
@@ -5698,6 +5700,7 @@ pub const Context = struct {
             .timer_keepalive = keepaliveTimers,
             .timer_abandon = abandonTimers,
             .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
+            .finalization_cleanup_head = &self.finalization_cleanup_head,
             .stop_flag = self.stop_flag orelse &self.teardown_stop,
             .watchdog_check_flag = self.watchdog_check_flag,
             .watchdog_deadline_ns = self.watchdog_deadline_ns,
@@ -5999,7 +6002,7 @@ pub const Context = struct {
             self.unhandled_rejections.isEmpty() and
             self.handled_rejections.isEmpty() and
             self.timers.items.len == 0 and
-            self.finalization_cleanup_jobs.items.len == 0 and
+            self.finalization_cleanup_head == self.finalization_cleanup_jobs.items.len and
             self.async_waiters.items.len == 0;
     }
 
@@ -6255,6 +6258,7 @@ pub const Context = struct {
         self.unhandled_rejections.clear();
         self.handled_rejections.clear();
         self.finalization_cleanup_jobs.clearRetainingCapacity();
+        self.finalization_cleanup_head = 0;
         for (self.protected_values.items) |handle| self.gpa.destroy(handle);
         self.protected_values.clearRetainingCapacity();
         self.private_strong_roots.clearRetainingCapacity();
@@ -8891,7 +8895,7 @@ pub const Context = struct {
         // (a no-op outside parallel_js).
         self.realmLock();
         defer self.realmUnlock();
-        for (self.finalization_cleanup_jobs.items) |queued| {
+        for (self.finalization_cleanup_jobs.items[self.finalization_cleanup_head..]) |queued| {
             if (queued == registry) return;
         }
         self.reserveFinalizationCleanupJobsLocked(1) catch return;
@@ -8903,8 +8907,21 @@ pub const Context = struct {
     }
 
     fn reserveFinalizationCleanupJobsLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
-        const spare = self.finalization_cleanup_jobs.capacity - self.finalization_cleanup_jobs.items.len;
+        var spare = self.finalization_cleanup_jobs.capacity - self.finalization_cleanup_jobs.items.len;
         if (spare >= additional) return;
+        // Reuse a consumed prefix before growing, amortizing compaction across
+        // at least as many retired entries. Compacting one slot on each append
+        // would make a long queue quadratic under repeated callback publication.
+        if (self.finalization_cleanup_head != 0 and
+            self.finalization_cleanup_head >= self.finalization_cleanup_jobs.items.len / 2)
+        {
+            const pending = self.finalization_cleanup_jobs.items[self.finalization_cleanup_head..];
+            std.mem.copyForwards(*value.Object, self.finalization_cleanup_jobs.items[0..pending.len], pending);
+            self.finalization_cleanup_jobs.items.len = pending.len;
+            self.finalization_cleanup_head = 0;
+            spare = self.finalization_cleanup_jobs.capacity - pending.len;
+            if (spare >= additional) return;
+        }
         const extra = @max(additional, finalization_cleanup_queue_reserve_granularity);
         try self.finalization_cleanup_jobs.ensureTotalCapacity(self.gpa, self.finalization_cleanup_jobs.items.len + extra);
     }
@@ -43033,4 +43050,275 @@ test "Thread identity remains realm scoped across alternating hosts and Context 
         try std.testing.expectEqual(@as(usize, 0), first.microtasks.reservations);
         try std.testing.expect(first.main_js_thread.?.prop_async_head == null);
     }
+}
+
+test "finalization cleanup reentrant drains retain newly queued registries" {
+    const Host = struct {
+        context: *Context,
+        calls: [4]u8 = @splat(0),
+        count: usize = 0,
+        fn cleanup(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const host: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            const id: u8 = @intFromFloat(args[0].asNum());
+            if (host.count >= host.calls.len) return error.OutOfMemory;
+            host.calls[host.count] = id;
+            host.count += 1;
+            if (id == 1) {
+                const current = host.context.global_object.getOwn("cleanupA").?.asObj();
+                const token = host.context.global_object.getOwn("cleanupToken").?.asObj();
+                if (!current.finRecordUnregister(@ptrCast(token))) return error.OutOfMemory;
+                try machine.drainFinalizationCleanupJobs();
+                // The nested drain exhausts A and B. Work published afterward
+                // must survive the suspended outer drain's queue cursor.
+                const third = host.context.global_object.getOwn("cleanupC").?.asObj();
+                try third.finRecordAppend(machine.arena, .{ .held = Value.num(3), .ready = true });
+                host.context.queueFinalizationRegistryCleanup(third);
+                const first = host.context.global_object.getOwn("cleanupA").?.asObj();
+                try first.finRecordAppend(machine.arena, .{ .held = Value.num(4), .ready = true });
+                host.context.queueFinalizationRegistryCleanup(first);
+            }
+            return Value.undef();
+        }
+    };
+    for ([_]bool{ false, true }) |gc_enabled| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = gc_enabled, .enable_jit = false });
+        defer ctx.destroy();
+        var host = Host{ .context = ctx };
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "cleanupReenter", 1, Host.cleanup);
+        ctx.global_object.getOwn("cleanupReenter").?.asObj().private_data = &host;
+        _ = try ctx.evaluate(
+            \\var cleanupToken = {};
+            \\var cleanupA = new FinalizationRegistry(cleanupReenter);
+            \\var cleanupB = new FinalizationRegistry(cleanupReenter);
+            \\var cleanupC = new FinalizationRegistry(cleanupReenter);
+        );
+        for ([_][]const u8{ "cleanupA", "cleanupB" }, 1..) |name, id| {
+            const registry = ctx.global_object.getOwn(name).?.asObj();
+            try registry.finRecordAppend(ctx.arena(), .{ .held = Value.num(@floatFromInt(id)), .ready = true });
+            ctx.queueFinalizationRegistryCleanup(registry);
+        }
+        const registry = ctx.global_object.getOwn("cleanupA").?.asObj();
+        try registry.finRecordAppend(ctx.arena(), .{
+            .held = Value.num(99),
+            .ready = true,
+            .token = @ptrCast(ctx.global_object.getOwn("cleanupToken").?.asObj()),
+        });
+        _ = try ctx.evaluate("0;");
+        try std.testing.expectEqual(@as(usize, 4), host.count);
+        try std.testing.expectEqualSlices(u8, &.{ 1, 2, 4, 3 }, &host.calls);
+        try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
+    }
+}
+
+test "finalization cleanup reloads registry callback and held value after moving GC" {
+    const Host = struct {
+        context: *Context,
+        calls: usize = 0,
+        moved: bool = false,
+        nested: bool,
+        fn move(host: *@This(), machine: *interp.Interpreter) void {
+            const before_registry = host.context.global_object.getOwn("movingCleanupRegistry").?.asObj();
+            const before_callback = machine.active_native.?;
+            const before_held = host.context.global_object.getOwn("movingCleanupHeld").?.asObj();
+            host.context.gc_scan_native_stack = false;
+            const result = host.context.collectYoungAfterRootValidation(host.context.gc.?);
+            host.moved = result.status == .compacted and before_registry != host.context.global_object.getOwn("movingCleanupRegistry").?.asObj() and before_callback != machine.active_native.? and before_held != host.context.global_object.getOwn("movingCleanupHeld").?.asObj();
+        }
+        fn cleanup(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const host: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            host.calls += 1;
+            if (host.calls == 1) {
+                if (host.nested) try machine.drainFinalizationCleanupJobs() else host.move(machine);
+                // In the nested case the queue has already been cleared. The
+                // suspended outer cleanup still owns its rewritten argument.
+                const expected = host.context.global_object.getOwn("movingCleanupHeld").?.asObj();
+                if (args[0].asObj() != expected) return error.OutOfMemory;
+            } else {
+                if (args[0].asNum() != 2) return error.OutOfMemory;
+                if (host.nested) host.move(machine);
+            }
+            return Value.undef();
+        }
+    };
+    for ([_]bool{ false, true }) |nested| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .heap_limit_bytes = 16 * 1024 * 1024,
+        });
+        defer ctx.destroy();
+        var host = Host{ .context = ctx, .nested = nested };
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "movingCleanup", 1, Host.cleanup);
+        ctx.global_object.getOwn("movingCleanup").?.asObj().private_data = &host;
+        _ = try ctx.evaluate(
+            \\var movingCleanupRegistry = new FinalizationRegistry(movingCleanup);
+            \\var movingCleanupHeld = { alive: 906 };
+        );
+        const registry = ctx.global_object.getOwn("movingCleanupRegistry").?.asObj();
+        try registry.finRecordAppend(ctx.arena(), .{ .held = ctx.global_object.getOwn("movingCleanupHeld").?, .ready = true });
+        try registry.finRecordAppend(ctx.arena(), .{ .held = Value.num(2), .ready = true });
+        ctx.queueFinalizationRegistryCleanup(registry);
+        _ = try ctx.evaluate("0;");
+        try std.testing.expect(host.moved);
+        try std.testing.expectEqual(@as(usize, 2), host.calls);
+        try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
+    }
+}
+
+test "finalization cleanup requeues processed registries with bounded queue storage" {
+    const Host = struct {
+        context: *Context,
+        calls: usize = 0,
+        capacity: usize = 0,
+        fn cleanup(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const host: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            host.calls += 1;
+            if (host.calls < 64) {
+                const name: []const u8 = if (host.calls % 2 == 1) "churnCleanupB" else "churnCleanupA";
+                const registry = host.context.global_object.getOwn(name).?.asObj();
+                try registry.finRecordAppend(machine.arena, .{ .held = Value.undef(), .ready = true });
+                host.context.queueFinalizationRegistryCleanup(registry);
+                host.capacity = @max(host.capacity, host.context.finalization_cleanup_jobs.capacity);
+            }
+            return Value.undef();
+        }
+    };
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var host = Host{ .context = ctx };
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "churnCleanup", 1, Host.cleanup);
+    ctx.global_object.getOwn("churnCleanup").?.asObj().private_data = &host;
+    _ = try ctx.evaluate("var churnCleanupA = new FinalizationRegistry(churnCleanup), churnCleanupB = new FinalizationRegistry(churnCleanup);");
+    const first = ctx.global_object.getOwn("churnCleanupA").?.asObj();
+    try first.finRecordAppend(ctx.arena(), .{ .held = Value.undef(), .ready = true });
+    ctx.queueFinalizationRegistryCleanup(first);
+    const initial_capacity = ctx.finalization_cleanup_jobs.capacity;
+    _ = try ctx.evaluate("0;");
+    try std.testing.expectEqual(@as(usize, 64), host.calls);
+    try std.testing.expectEqual(initial_capacity, host.capacity);
+    try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
+}
+
+test "finalization cleanup never replays a cell after an abrupt Proxy apply getter" {
+    const Host = struct {
+        calls: usize = 0,
+        unavailable: std.testing.FailingAllocator,
+        fn failOnce(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const host: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            host.calls += 1;
+            if (host.calls == 1) {
+                const memory = try host.unavailable.allocator().alloc(u8, 1);
+                host.unavailable.allocator().free(memory);
+            }
+            return Value.undef();
+        }
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false, .bytecode_execution_mode = mode });
+        defer ctx.destroy();
+        var host = Host{ .unavailable = .init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 }) };
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "failCleanupAdmissionOnce", 0, Host.failOnce);
+        ctx.global_object.getOwn("failCleanupAdmissionOnce").?.asObj().private_data = &host;
+        _ = try ctx.evaluate(
+            \\var cleanupGetterCalls = 0, cleanupDelivered = 0;
+            \\var abruptCleanupRegistry = new FinalizationRegistry(new Proxy(function(value) { cleanupDelivered += value; }, {
+            \\    get apply() { cleanupGetterCalls++; failCleanupAdmissionOnce(); return undefined; }
+            \\}));
+        );
+        const registry = ctx.global_object.getOwn("abruptCleanupRegistry").?.asObj();
+        try registry.finRecordAppend(ctx.arena(), .{ .held = Value.num(1), .ready = true });
+        try registry.finRecordAppend(ctx.arena(), .{ .held = Value.num(2), .ready = true });
+        ctx.queueFinalizationRegistryCleanup(registry);
+        try std.testing.expectError(error.OutOfMemory, ctx.evaluate("0;"));
+        try std.testing.expect(host.unavailable.has_induced_failure);
+        try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("cleanupGetterCalls").?.asNum());
+        _ = try ctx.evaluate("0;");
+        try std.testing.expectEqual(@as(f64, 2), ctx.global_object.getOwn("cleanupGetterCalls").?.asNum());
+        try std.testing.expectEqual(@as(f64, 2), ctx.global_object.getOwn("cleanupDelivered").?.asNum());
+        try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
+    }
+}
+
+test "finalization cleanup races ready publication without losing or duplicating records" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    const Host = struct {
+        context: *Context,
+        registry: *value.Object,
+        allocator: std.mem.Allocator,
+        finished: std.atomic.Value(bool) = .init(false),
+        failed: std.atomic.Value(bool) = .init(false),
+        calls: usize = 0,
+        ordered: bool = true,
+        fn publish(host: *@This()) void {
+            const previous = gc_mod.setActiveContext(host.context);
+            defer gc_mod.restoreActiveContext(previous);
+            defer host.finished.store(true, .release);
+            for (1..129) |id| {
+                host.registry.finRecordAppend(host.allocator, .{ .held = Value.num(@floatFromInt(id)), .ready = true }) catch {
+                    host.failed.store(true, .release);
+                    return;
+                };
+                host.context.queueFinalizationRegistryCleanup(host.registry);
+                std.Thread.yield() catch {};
+            }
+        }
+        fn cleanup(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const host: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            host.calls += 1;
+            host.ordered = host.ordered and args[0].asNum() == @as(f64, @floatFromInt(host.calls));
+            std.Thread.yield() catch {};
+            return Value.undef();
+        }
+    };
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "parallelCleanup", 1, Host.cleanup);
+    const registry = (try ctx.evaluate("var parallelCleanupRegistry = new FinalizationRegistry(parallelCleanup); parallelCleanupRegistry;")).asObj();
+    var host = Host{ .context = ctx, .registry = registry, .allocator = ctx.arena() };
+    ctx.global_object.getOwn("parallelCleanup").?.asObj().private_data = &host;
+    // Preallocate backing so the witness isolates the publication/retirement
+    // race, independent of concurrent allocator recovery.
+    for (0..128) |_| try registry.finRecordAppend(ctx.arena(), .{ .held = Value.undef(), .ready = true });
+    while (registry.finRecordTakeReady() != null) {}
+    ctx.queueFinalizationRegistryCleanup(registry);
+    var machine = ctx.interpreter();
+    var unavailable = std.testing.FailingAllocator.init(machine.arena, .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    try machine.drainFinalizationCleanupJobs();
+    const thread = try std.Thread.spawn(.{}, Host.publish, .{&host});
+    var joined = false;
+    defer if (!joined) thread.join();
+    while (!host.finished.load(.acquire)) {
+        try machine.drainFinalizationCleanupJobs();
+        std.Thread.yield() catch {};
+    }
+    thread.join();
+    joined = true;
+    try machine.drainFinalizationCleanupJobs();
+    try std.testing.expect(!host.failed.load(.acquire));
+    try std.testing.expect(!unavailable.has_induced_failure);
+    try std.testing.expect(host.ordered);
+    try std.testing.expectEqual(@as(usize, 128), host.calls);
+    try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
 }

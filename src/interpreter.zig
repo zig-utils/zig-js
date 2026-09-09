@@ -3247,6 +3247,15 @@ pub const UncaughtExceptionRootFrame = struct {
     parent: ?*const UncaughtExceptionRootFrame,
 };
 
+/// Borrowed cleanup state remains precise while a callback collects or enters
+/// another host checkpoint. The argument slice itself must be rewritten.
+pub const FinalizationCleanupRootFrame = struct {
+    registry: Value = Value.undef(),
+    callback: Value = Value.undef(),
+    held: [1]Value = .{Value.undef()},
+    parent: ?*FinalizationCleanupRootFrame,
+};
+
 pub const MicrotaskRootFrame = struct {
     current: ?promise.Microtask,
     pending: []promise.Microtask,
@@ -3497,6 +3506,7 @@ pub const Interpreter = struct {
     /// moving GC before their saved current job is restored.
     outer_microtask_roots: ?*MicrotaskRootFrame = null,
     uncaught_exception_roots: ?*const UncaughtExceptionRootFrame = null,
+    finalization_cleanup_roots: ?*FinalizationCleanupRootFrame = null,
     /// One dynamically nested run-loop task-pump burst. A delivered HoldJob can
     /// re-enter the run loop (including through join/await), so a single slice
     /// would forget the outer burst while it is still globally in flight. The
@@ -3550,6 +3560,7 @@ pub const Interpreter = struct {
     /// ready and enqueues registries; this interpreter drains callbacks at host
     /// checkpoints, outside collection.
     finalization_cleanup_jobs: ?*std.ArrayListUnmanaged(*value.Object) = null,
+    finalization_cleanup_head: ?*usize = null,
     /// Cooperative termination (a worker's `terminate()`): when set and true,
     /// evaluation throws at the next step checkpoint in either engine (the
     /// tree-walker's `eval` and the VM's dispatch loop both poll it every
@@ -11513,35 +11524,56 @@ pub const Interpreter = struct {
     /// constructor callback.
     pub fn drainFinalizationCleanupJobs(self: *Interpreter) EvalError!void {
         const q = self.finalization_cleanup_jobs orelse return;
-        var i: usize = 0;
+        const head = self.finalization_cleanup_head.?;
+        var roots = FinalizationCleanupRootFrame{ .parent = self.finalization_cleanup_roots };
+        self.finalization_cleanup_roots = &roots;
+        defer self.finalization_cleanup_roots = roots.parent;
         while (true) {
-            // `q` is the shared realm queue: the mid-script parallel collector
-            // reads it (and `queueFinalizationRegistryCleanup` appends to it)
-            // under `realm_lock`, so every access to its slice header here must
-            // take the same lock. Read one registry per turn under the lock, then
-            // run its callback UNLOCKED — the callback executes JS that can queue
-            // more jobs (re-entering this drain) or trigger a collection. The
-            // check-and-clear is atomic under the lock so no append is lost.
+            // Nested drains share the cursor. A suspended outer drain must not
+            // skip work appended after an inner drain cleared the queue.
             self.lockRealm();
-            if (i >= q.items.len) {
+            if (head.* >= q.items.len) {
                 q.clearRetainingCapacity();
+                head.* = 0;
                 self.unlockRealm();
                 return;
             }
-            const registry = q.items[i];
-            i += 1;
+            roots.registry = Value.obj(q.items[head.*]);
+            gc_mod.barrierValue(roots.registry);
             self.unlockRealm();
-            if (!registry.behavior.is_finalization_registry) continue;
-            const cb = registry.finalizationCallback();
-            if (!cb.isCallable()) continue;
-            // Pop each ready record (registry-internal lock); run its callback unlocked.
-            while (registry.finRecordTakeReady()) |record| {
-                if (self.callValue(cb, &.{record.held})) |_| {} else |err| {
+            roots.callback = roots.registry.asObj().finalizationCallback();
+            gc_mod.barrierValue(roots.callback);
+            const callable = roots.callback.isCallable();
+            while (true) {
+                // Claim the record or retire this queue entry atomically with
+                // publication. Lock order is realm -> registry; callbacks run
+                // unlocked. A newly queued ready record cannot be skipped in
+                // the gap between an empty registry check and cursor advance.
+                self.lockRealm();
+                const record = if (callable) roots.registry.asObj().finRecordTakeReady() else null;
+                if (record == null) {
+                    // Re-entry may have consumed this registry and published a
+                    // different head. The borrowed root follows relocation.
+                    if (head.* < q.items.len and q.items[head.*] == roots.registry.asObj())
+                        head.* += 1;
+                    self.unlockRealm();
+                    break;
+                }
+                // CleanupFinalizationRegistry (9.12, 3.b-c) removes the cell
+                // before Call. Root publication is infallible; once Call is
+                // admitted even an abrupt completion consumes this cell.
+                roots.held[0] = record.?.held;
+                gc_mod.barrierValue(roots.held[0]);
+                self.unlockRealm();
+                if (self.callValue(roots.callback, &roots.held)) |_| {} else |err| {
                     if (err == error.Throw) {
                         self.exception = Value.undef();
                     } else return err;
                 }
+                roots.held[0] = Value.undef();
             }
+            roots.registry = Value.undef();
+            roots.callback = Value.undef();
         }
     }
 
