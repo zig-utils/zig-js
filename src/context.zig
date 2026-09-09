@@ -13974,6 +13974,44 @@ test "Intl option errors enumerate the legal values as JavaScriptCore does" {
     );
 }
 
+// JavaScriptCore uses ONE constant for every bad-flags shape, and prefixes each
+// pattern failure with `Invalid regular expression: ` plus a specific reason
+// (#902). Only the reasons whose zig-regex error tag maps 1:1 are translated:
+// most tags stand in for up to four different JSC reasons, so emitting a
+// JSC-shaped sentence for them would be confidently wrong. The generic cases
+// below are pinned deliberately, so that if the dependency ever carries a
+// finer reason this test shows exactly which strings should change.
+test "RegExp syntax errors use JavaScriptCore's flags constant and exact reasons" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        // One constant for every flags failure, trailing period included.
+        .{ .source = "new RegExp('a','gg')", .message = "Invalid flags supplied to RegExp constructor." },
+        .{ .source = "new RegExp('a','q')", .message = "Invalid flags supplied to RegExp constructor." },
+        .{ .source = "new RegExp('a','uv')", .message = "Invalid flags supplied to RegExp constructor." },
+        .{ .source = "new RegExp('a','yy')", .message = "Invalid flags supplied to RegExp constructor." },
+        .{ .source = "new RegExp('a',1)", .message = "Invalid flags supplied to RegExp constructor." },
+        // The two pattern reasons whose tag is unambiguous.
+        .{ .source = "new RegExp(')')", .message = "Invalid regular expression: unmatched parentheses" },
+        .{ .source = "new RegExp('a)b')", .message = "Invalid regular expression: unmatched parentheses" },
+        .{ .source = "new RegExp('(a))')", .message = "Invalid regular expression: unmatched parentheses" },
+        .{ .source = "new RegExp('(?<a>x)(?<a>y)')", .message = "Invalid regular expression: duplicate group specifier name" },
+        .{ .source = "new RegExp('(?<a>x)(?<b>y)(?<a>z)')", .message = "Invalid regular expression: duplicate group specifier name" },
+        // Still generic: one zig-regex tag covers several JSC reasons here.
+        .{ .source = "new RegExp('(')", .message = "invalid regular expression" },
+        .{ .source = "new RegExp('[a')", .message = "invalid regular expression" },
+        .{ .source = "new RegExp('a{2,1}')", .message = "invalid regular expression" },
+    };
+    var buffer: [512]u8 = undefined;
+    for (cases) |case| {
+        const probe = try std.fmt.bufPrint(
+            &buffer,
+            "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.message; }} caught",
+            .{case.source},
+        );
+        try expectEvalStr(case.message, probe);
+    }
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

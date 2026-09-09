@@ -12284,10 +12284,10 @@ pub const Interpreter = struct {
         var seen = std.mem.zeroes([128]bool);
         for (flags) |f| {
             if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f])
-                return self.throwError("SyntaxError", "Invalid regular expression flags");
+                return self.throwError("SyntaxError", "Invalid flags supplied to RegExp constructor.");
             seen[f] = true;
         }
-        if (seen['u'] and seen['v']) return self.throwError("SyntaxError", "Invalid regular expression flags");
+        if (seen['u'] and seen['v']) return self.throwError("SyntaxError", "Invalid flags supplied to RegExp constructor.");
     }
 
     fn setRegExpLastIndexValue(self: *Interpreter, o: *value.Object, v: Value) EvalError!void {
@@ -12325,8 +12325,11 @@ pub const Interpreter = struct {
             .ecmascript = true,
         };
         const compiled = try self.arena.create(regex.Regex);
-        compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch
-            return self.throwError("SyntaxError", "invalid regular expression");
+        compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch |err| switch (err) {
+            error.UnmatchedParenthesis => return self.throwError("SyntaxError", "Invalid regular expression: unmatched parentheses"),
+            error.DuplicateGroupName => return self.throwError("SyntaxError", "Invalid regular expression: duplicate group specifier name"),
+            else => return self.throwError("SyntaxError", "invalid regular expression"),
+        };
         const regex_state = try o.ensureRegexState(self.arena);
         regex_state.compiled = @ptrCast(compiled);
         return compiled;
