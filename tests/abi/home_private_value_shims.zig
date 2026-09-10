@@ -1405,6 +1405,16 @@ fn evaluate(context: JSContextRef, source: [*:0]const u8) EncodedValue {
     return EncodedValue.fromRef(result);
 }
 
+fn expectTerminationError(context: JSContextRef, exception: JSValueRef) void {
+    var name: ZigString = .{};
+    var message: ZigString = .{};
+    const encoded = EncodedValue.fromRef(exception);
+    JSC__JSValue__toZigString(getProperty(context, encoded, "name"), &name, context);
+    JSC__JSValue__toZigString(getProperty(context, encoded, "message"), &message, context);
+    if (!zigStringUtf8Equals(name, "Error") or !zigStringUtf8Equals(message, "worker terminated"))
+        fail("watchdog returned a non-termination exception");
+}
+
 fn getProperty(context: JSContextRef, object: EncodedValue, name: [*:0]const u8) EncodedValue {
     const property = JSStringCreateWithUTF8CString(name) orelse fail("property string creation failed");
     defer JSStringRelease(property);
@@ -6923,6 +6933,7 @@ pub fn main() void {
         const loop_result = JSEvaluateScript(watchdog_context, loop_script, null, null, 1, &loop_exception);
         if (loop_result != null or loop_exception == null)
             fail("private watchdog did not abort unbounded evaluation");
+        expectTerminationError(watchdog_context, loop_exception);
         if (!JSC__VM__hasTerminationRequest(watchdog_vm))
             fail("private watchdog abort did not request termination");
         // JSC `Watchdog::hasTimeLimit` stays true after firing and clearing
@@ -6932,6 +6943,15 @@ pub fn main() void {
         JSC__VM__clearExecutionTimeLimit(watchdog_vm);
         if (JSC__VM__hasExecutionTimeLimit(watchdog_vm) or !JSC__VM__hasTerminationRequest(watchdog_vm))
             fail("private watchdog clear semantics mismatch");
+        JSC__VM__clearHasTerminationRequest(watchdog_vm);
+        if (!JSC__JSValue__toBoolean(evaluate(watchdog_context, "var recovered = 0; while (recovered < 4096) recovered++; recovered === 4096")))
+            fail("private watchdog clear did not permit realm reuse");
+        JSC__VM__setExecutionTimeLimit(watchdog_vm, 0.03);
+        loop_exception = null;
+        if (JSEvaluateScript(watchdog_context, loop_script, null, null, 1, &loop_exception) != null or loop_exception == null)
+            fail("private watchdog rearm did not interrupt evaluation");
+        expectTerminationError(watchdog_context, loop_exception);
+        JSC__VM__clearExecutionTimeLimit(watchdog_vm);
         JSC__VM__clearHasTerminationRequest(watchdog_vm);
     }
     JSGlobalContextRelease(watchdog_context);
@@ -6974,6 +6994,7 @@ pub fn main() void {
         const trap_result = JSEvaluateScript(trap_context, trap_script, null, null, 1, &trap_exception);
         if (trap_result != null or trap_exception == null)
             fail("private watchdog trap did not terminate elapsed evaluation");
+        expectTerminationError(trap_context, trap_exception);
         // Whichever half fired first, the host watchdog attributes the abort
         // to the time limit within its nap bound.
         var trap_spins: usize = 0;

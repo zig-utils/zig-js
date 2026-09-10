@@ -20114,22 +20114,25 @@ test "vm: optimizer conditional loop exit converges" {
     // Each fresh activation completes generic and optimizer iterations, OSR
     // reconstructs the current header, then bytecode consumes the request at
     // precisely step 1,024.
-    var stop_requested: std.atomic.Value(bool) = .init(true);
-    var stop_machine = try initTestInterpreter(.{
-        .arena = allocator,
-        .env = &env,
-        .root_shape = root_shape,
-        .jit_owner = &owner,
-        .stop_flag = &stop_requested,
-        .steps = 970,
-    });
-    var stop_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
-    var stop_frame = Frame{ .slots = &stop_slots, .parent = null };
-    var trap_osr_before = optimizer_osr_entries.load(.monotonic);
-    try std.testing.expectError(error.Throw, run(&stop_machine, function_chunk, &stop_frame));
-    try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
-    try std.testing.expect(stop_requested.load(.acquire));
-    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
+    for ([_]bool{ false, true }) |vm_wide| {
+        var stop_requested: std.atomic.Value(bool) = .init(true);
+        var stop_machine = try initTestInterpreter(.{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .jit_owner = &owner,
+            .stop_flag = if (vm_wide) null else &stop_requested,
+            .termination_request_flag = if (vm_wide) &stop_requested else null,
+            .steps = 970,
+        });
+        var stop_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
+        var stop_frame = Frame{ .slots = &stop_slots, .parent = null };
+        const trap_osr_before = optimizer_osr_entries.load(.monotonic);
+        try std.testing.expectError(error.Throw, run(&stop_machine, function_chunk, &stop_frame));
+        try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
+        try std.testing.expect(stop_requested.load(.acquire));
+        try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
+    }
 
     var watchdog_check: std.atomic.Value(bool) = .init(true);
     var watchdog_deadline: std.atomic.Value(u64) = .init(1);
@@ -20146,7 +20149,7 @@ test "vm: optimizer conditional loop exit converges" {
     });
     var watchdog_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
     var watchdog_frame = Frame{ .slots = &watchdog_slots, .parent = null };
-    trap_osr_before = optimizer_osr_entries.load(.monotonic);
+    var trap_osr_before = optimizer_osr_entries.load(.monotonic);
     try std.testing.expectError(error.Throw, run(&watchdog_machine, function_chunk, &watchdog_frame));
     try std.testing.expectEqual(@as(u64, 1024), watchdog_machine.steps);
     try std.testing.expect(!watchdog_check.load(.acquire));

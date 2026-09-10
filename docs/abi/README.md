@@ -810,17 +810,17 @@ deadlock while foreign threads block on a real atomic mutex, and the deprecated
 callback form runs under that hold. The execution-time limit maps
 `JSC::Watchdog` onto a lazily spawned host-watchdog thread per context group
 that naps to the armed monotonic deadline, then raises the shared termination
-request and cooperatively interrupts running evaluation through the documented
-host-watchdog entry point. Arming mirrors the pinned timeout mapping (`+inf` is
-`noTimeLimit`, non-positive values fire at the next watchdog tick, NaN stays
+request. Every sibling's tree-walker, bytecode, quickened, and native execution
+checkpoints poll that request. Arming mirrors the pinned timeout mapping
+(`+inf` is `noTimeLimit`, non-positive values fire at the next watchdog tick, NaN stays
 armed but never fires, finite values saturate instead of overflowing), one
 arming fires at most once, the limit stays reported after firing, and clearing
-never clears an already-requested termination. Per zig-js's documented
-host-watchdog contract the interruption is terminal for the context. The
-fixture covers armed-state sharing across sibling realms, foreign-VM isolation,
-null tolerance, recursive reentry, cross-thread exclusion, and a real 30ms
-interruption of an unbounded loop attributed to the watchdog through the
-termination request.
+never clears an already-requested termination. Explicitly clearing the VM
+request permits realm reuse; a realm's separate permanent teardown stop remains
+terminal and does not stop its siblings. The fixture covers armed-state sharing
+across sibling realms, foreign-VM isolation, null tolerance, recursive reentry, cross-thread exclusion, and a real 30ms
+limit interrupting an unbounded loop with a termination error, followed by
+clear/reuse and rearm. Budget-exhaustion errors do not satisfy that witness.
 
 The process-wide default-timezone boundary mirrors `WTF::setTimeZoneOverride`:
 empty input clears the override, unknown names return false without disturbing

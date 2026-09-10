@@ -5640,6 +5640,11 @@ pub const Interpreter = struct {
                 }
             }
         };
+        // The VM owns this persistent request, independently of a realm's
+        // terminal stop word. A sibling can publish it without setting a trap
+        // bit; keep observing it until the host explicitly clears the request.
+        if (self.termination_request_flag) |requested| if (requested.load(.acquire))
+            return self.throwError("Error", "worker terminated");
     }
 
     /// Every AST node evaluation crosses the same debugger, budget, trap, GIL,

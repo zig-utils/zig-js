@@ -15002,12 +15002,9 @@ fn privateMonotonicNowNs() u64 {
 }
 
 /// Host watchdog behind `JSC::Watchdog`: naps until the armed deadline, then
-/// raises the group's termination request and cooperatively interrupts running
-/// evaluation via `Context.requestTermination` — the thread-safe,
-/// allocation-free entry point context.zig documents for exactly this purpose.
-/// Per that contract the request is terminal for the context; zig-js does not
-/// resume evaluation after a time-limit termination the way JSC allows after
-/// `clearHasTerminationRequest`.
+/// raises the group's persistent request, polled by every sibling's execution
+/// checkpoints. This must not set a Context's permanent teardown stop: the
+/// private VM contract permits reuse after `clearHasTerminationRequest`.
 fn privateExecutionWatchdog(group: *CContextGroup) void {
     const io = agent.engineIo();
     while (!group.watchdog_stop.load(.acquire)) {
@@ -15024,7 +15021,7 @@ fn privateExecutionWatchdog(group: *CContextGroup) void {
         }
         group.watchdog_fired_ns.store(deadline, .release);
         group.termination_requested.store(true, .release);
-        group.primary.requestTermination();
+        agent.interruptWaiters();
     }
 }
 
@@ -36166,4 +36163,116 @@ test "private exception roots publish existing handles without allocation and re
     JSGlobalObject__clearTerminationException(global);
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+}
+
+test "private VM termination is shared across tiers and clearing preserves realm lifetime" {
+    const modes = [_]struct { execution: interp.BytecodeExecutionMode, quickening: bool, jit: bool }{
+        .{ .execution = .tree_walker, .quickening = false, .jit = false },
+        .{ .execution = .required, .quickening = false, .jit = false },
+        .{ .execution = .required, .quickening = true, .jit = false },
+        .{ .execution = .required, .quickening = true, .jit = true },
+    };
+    const source = "var counter = 0; while (counter < 4096) counter++; counter";
+    for (modes) |mode| {
+        const primary = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = mode.jit,
+            .bytecode_execution_mode = mode.execution,
+            .bytecode_binary_quickening = mode.quickening,
+        });
+        const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+        defer JSContextGroupRelease(group_ref);
+        const first = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+        defer JSGlobalContextRelease(first);
+        const second = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+        defer JSGlobalContextRelease(second);
+        const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+        const first_context = ctxForEvaluation(first).?;
+        const second_context = ctxForEvaluation(second).?;
+        JSC__VM__throwError(group_ref, first, EncodedValue.fromInt32(909));
+        const pending = group.pending_exception.?;
+        JSC__VM__notifyNeedTermination(group_ref);
+        for ([_]*Context{ first_context, second_context, primary }) |context| {
+            try std.testing.expectError(error.Throw, context.evaluate(source));
+            try std.testing.expectEqualStrings("worker terminated", context.exception.?.asObj().getOwn("message").?.asStr());
+            try std.testing.expectEqual(pending, group.pending_exception.?);
+            try std.testing.expect(!context.teardown_stop.load(.acquire));
+        }
+        JSC__VM__clearHasTerminationRequest(group_ref);
+        JSGlobalObject__clearException(second);
+        for ([_]*Context{ first_context, second_context, primary }) |context|
+            try std.testing.expectEqual(@as(f64, 4096), (try context.evaluate(source)).asNum());
+
+        // A realm's terminal stop stays local; clearing a VM request cannot
+        // undo it and it cannot terminate a live sibling.
+        first_context.requestTermination();
+        JSC__VM__clearHasTerminationRequest(group_ref);
+        try std.testing.expectError(error.Throw, first_context.evaluate(source));
+        try std.testing.expectEqual(@as(f64, 4096), (try second_context.evaluate(source)).asNum());
+    }
+}
+
+test "private VM termination observes asynchronous requests published during a host call" {
+    const Request = struct {
+        vm: *anyopaque,
+        entered: std.atomic.Value(bool) = .init(false),
+        published: std.atomic.Value(bool) = .init(false),
+        fn run(state: *@This()) void {
+            while (!state.entered.load(.acquire)) std.atomic.spinLoopHint();
+            JSC__VM__notifyNeedTermination(state.vm);
+            state.published.store(true, .release);
+        }
+        fn host(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const state: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            state.entered.store(true, .release);
+            while (!state.published.load(.acquire)) std.atomic.spinLoopHint();
+            return Value.undef();
+        }
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const primary = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+        defer JSContextGroupRelease(group_ref);
+        const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+        defer JSGlobalContextRelease(global);
+        const context = ctxForEvaluation(global).?;
+        var request = Request{ .vm = group_ref };
+        try interp.setNative(context.arena(), context.root_shape, context.global_object, "hostRequest", 0, Request.host);
+        context.global_object.getOwn("hostRequest").?.asObj().private_data = &request;
+        const thread = try std.Thread.spawn(.{}, Request.run, .{&request});
+        defer {
+            request.entered.store(true, .release);
+            thread.join();
+        }
+        try std.testing.expectError(error.Throw, context.evaluate(
+            "hostRequest(); var counter = 0; while (counter < 4096) counter++; counter",
+        ));
+        try std.testing.expect(request.published.load(.acquire));
+        try std.testing.expectEqualStrings("worker terminated", context.exception.?.asObj().getOwn("message").?.asStr());
+        JSC__VM__clearHasTerminationRequest(group_ref);
+        try std.testing.expectEqual(@as(f64, 4096), (try context.evaluate(
+            "counter = 0; while (counter < 4096) counter++; counter",
+        )).asNum());
+    }
+}
+
+test "private VM termination watchdog never sets the owner's permanent stop" {
+    const primary = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    for (0..2) |_| {
+        JSC__VM__setExecutionTimeLimit(group_ref, 0);
+        try std.testing.expect(group.watchdog_thread != null);
+        while (!JSC__VM__hasTerminationRequest(group_ref)) std.atomic.spinLoopHint();
+        JSC__VM__clearExecutionTimeLimit(group_ref);
+        JSC__VM__clearHasTerminationRequest(group_ref);
+        try std.testing.expect(!primary.teardown_stop.load(.acquire));
+        try std.testing.expectEqual(@as(f64, 4096), (try primary.evaluate(
+            "var counter = 0; while (counter < 4096) counter++; counter",
+        )).asNum());
+    }
 }
