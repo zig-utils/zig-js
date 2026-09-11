@@ -6153,7 +6153,7 @@ test "private eval contexts validate exact enclosing names" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var names = PrivateNameMap.init(0x5052_4956_4154_4501);
-    try names.put(allocator, "#outer", "#outer\x001");
+    try names.put(allocator, "#outer", .{ .storage_key = "#outer\x001", .kind = .field });
     const cases = [_]struct { source: []const u8, valid: bool }{
         .{ .source = "this.#outer", .valid = true },
         .{ .source = "() => this.#outer", .valid = true },

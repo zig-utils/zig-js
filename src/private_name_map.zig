@@ -17,9 +17,14 @@ const SecureStringHashContext = struct {
 /// activations, exception handlers, and direct eval.
 pub const PrivateNameMap = struct {
     const Self = @This();
+    pub const Kind = enum { field, method_or_accessor };
+    pub const Binding = struct {
+        storage_key: []const u8,
+        kind: Kind,
+    };
     const Index = std.HashMapUnmanaged(
         []const u8,
-        []const u8,
+        Binding,
         SecureStringHashContext,
         std.hash_map.default_max_load_percentage,
     );
@@ -38,12 +43,22 @@ pub const PrivateNameMap = struct {
         return .{ .context = self.context };
     }
 
-    pub fn put(self: *Self, allocator: std.mem.Allocator, key: []const u8, mapped: []const u8) std.mem.Allocator.Error!void {
-        try self.index.putContext(allocator, key, mapped, self.context);
+    pub fn put(self: *Self, allocator: std.mem.Allocator, key: []const u8, binding: Binding) std.mem.Allocator.Error!void {
+        try self.index.putContext(allocator, key, binding, self.context);
     }
 
     pub fn get(self: *const Self, key: []const u8) ?[]const u8 {
-        return self.index.getContext(key, self.context);
+        return if (self.index.getContext(key, self.context)) |binding| binding.storage_key else null;
+    }
+
+    /// Resolve diagnostics from the evaluation-unique storage key retained in
+    /// rewritten AST/bytecode back to the private element's declaration kind.
+    pub fn kindForStorageKey(self: *const Self, storage_key: []const u8) ?Kind {
+        var entries = self.index.iterator();
+        while (entries.next()) |entry|
+            if (std.mem.eql(u8, entry.value_ptr.storage_key, storage_key))
+                return entry.value_ptr.kind;
+        return null;
     }
 
     pub fn contains(self: *const Self, key: []const u8) bool {
@@ -93,7 +108,10 @@ test "runtime private name maps key placement and preserve clone context" {
             occupied[bucket] = true;
             occupied_count += 1;
         }
-        try keyed.put(allocator, name, try std.fmt.allocPrint(allocator, "private\x00{d}", .{index}));
+        try keyed.put(allocator, name, .{
+            .storage_key = try std.fmt.allocPrint(allocator, "private\x00{d}", .{index}),
+            .kind = if (index % 2 == 0) .field else .method_or_accessor,
+        });
     }
     try std.testing.expect(occupied_count > collision_count / 2);
     for (names.items) |name| try std.testing.expect(keyed.contains(name));
@@ -108,7 +126,7 @@ test "runtime private name maps key placement and preserve clone context" {
 
     var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
     var failed = PrivateNameMap.init(keyed_seed);
-    try std.testing.expectError(error.OutOfMemory, failed.put(unavailable.allocator(), "#first", "private\x001"));
+    try std.testing.expectError(error.OutOfMemory, failed.put(unavailable.allocator(), "#first", .{ .storage_key = "private\x001", .kind = .field }));
     try std.testing.expectEqual(@as(usize, 0), failed.count());
     try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
 }

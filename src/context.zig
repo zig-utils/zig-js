@@ -14012,6 +14012,38 @@ test "RegExp syntax errors use JavaScriptCore's flags constant and exact reasons
     }
 }
 
+test "private brand failures distinguish fields from methods and accessors like JavaScriptCore" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "class C { #x; static read(o) { return o.#x; } } C.read({})", .message = "Cannot access invalid private field" },
+        .{ .source = "class C { #x; static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access invalid private field" },
+        .{ .source = "class C { #x() {} static read(o) { return o.#x; } } C.read({})", .message = "Cannot access private method or acessor" },
+        .{ .source = "class C { #x() {} static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access private method or acessor" },
+        .{ .source = "class C { get #x() { return 1; } static read(o) { return o.#x; } } C.read({})", .message = "Cannot access private method or acessor" },
+        .{ .source = "class C { set #x(v) {} static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access private method or acessor" },
+        // The declaration kind is lexical metadata: nested classes and direct
+        // eval must retain it rather than infer it from the unbranded receiver.
+        .{ .source = "class C { #x() {} static read(o) { class D { read() { return o.#x; } } return new D().read(); } } C.read({})", .message = "Cannot access private method or acessor" },
+        .{ .source = "class C { #x() {} static read(o) { return eval('o.#x'); } } C.read({})", .message = "Cannot access private method or acessor" },
+    };
+    var buffer: [768]u8 = undefined;
+    for (cases) |case| {
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        const tree_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const tree_ctx = try Context.create(std.testing.allocator);
+        defer tree_ctx.destroy();
+        tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+        try std.testing.expectEqualStrings(expected, (try tree_ctx.evaluate(tree_probe)).asStr());
+
+        const vm_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; function* g() {{ {s} }} try {{ g().next(); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const vm_ctx = try Context.create(std.testing.allocator);
+        defer vm_ctx.destroy();
+        vm_ctx.setBytecodeExecutionModeForTesting(.required);
+        try std.testing.expectEqualStrings(expected, (try vm_ctx.evaluate(vm_probe)).asStr());
+    }
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

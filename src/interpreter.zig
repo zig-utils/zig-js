@@ -8474,7 +8474,10 @@ pub const Interpreter = struct {
         map.* = PrivateNameMap.init(seed);
         for (members) |m| {
             if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
-            try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
+            try map.put(self.arena, m.key, .{
+                .storage_key = try self.nextPrivateStorageKey(m.key),
+                .kind = if (m.is_field and !m.is_auto_accessor) .field else .method_or_accessor,
+            });
         }
         std.debug.assert(map.count() != 0);
         // Keep the published map immutable. Its flattened lookup preserves the
@@ -15410,6 +15413,13 @@ pub const Interpreter = struct {
         return self.getPropertyWithReceiverFound(recv, key, recv, null, observation);
     }
 
+    fn throwInvalidPrivateAccess(self: *Interpreter, key: []const u8) EvalError {
+        if (self.current_private_map) |private_map|
+            if (private_map.kindForStorageKey(key) == .method_or_accessor)
+                return self.throwError("TypeError", "Cannot access private method or acessor");
+        return self.throwError("TypeError", "Cannot access invalid private field");
+    }
+
     /// PrivateGet (`this.#x` read). Resolves the PrivateElement on the receiver's
     /// chain: a field/method returns its value; an accessor invokes its getter, or
     /// is a TypeError if it has only a setter; an object that was never branded
@@ -15420,7 +15430,7 @@ pub const Interpreter = struct {
         // instance of the declaring class evaluation, and — for a derived `this` —
         // `super()` has already returned).
         if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
-            return self.throwError("TypeError", "Cannot access invalid private field");
+            return self.throwInvalidPrivateAccess(key);
         var cur: ?*value.Object = recv.asObj();
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
@@ -15442,7 +15452,7 @@ pub const Interpreter = struct {
     /// a TypeError if it has only a getter; an unbranded object is a TypeError.
     fn privateSet(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
         if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
-            return self.throwError("TypeError", "Cannot access invalid private field");
+            return self.throwInvalidPrivateAccess(key);
         const o = recv.asObj();
         var cur: ?*value.Object = o;
         while (cur) |c| {
@@ -15742,7 +15752,7 @@ pub const Interpreter = struct {
                 }
                 // Accessing a private member the object doesn't carry is a brand
                 // violation — a TypeError, not `undefined`.
-                if (value.isPrivateKey(key)) return self.throwError("TypeError", "Cannot access invalid private field");
+                if (value.isPrivateKey(key)) return self.throwInvalidPrivateAccess(key);
                 // Legacy intrinsic gaps may still use a kind constructor fallback,
                 // but an explicit null prototype must terminate lookup exactly.
                 if (std.mem.eql(u8, key, "constructor") and !o.protoExplicitNull()) {
