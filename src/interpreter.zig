@@ -5600,8 +5600,10 @@ pub const Interpreter = struct {
 
     pub fn throwParserSyntaxError(self: *Interpreter, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
         const loc = if (parser) |p| p.errorLocation() else parser_mod.sourceLocationAt(source, 0);
-        if (err == error.UnexpectedToken) if (parser) |p| if (p.last_error_reason) |reason|
-            return self.throwParserSyntaxErrorMessageAt(reason.message(), loc);
+        if (parser) |p| if (p.last_error_reason) |reason| {
+            if (err == reason.parseError())
+                return self.throwParserSyntaxErrorMessageAt(reason.message(), loc);
+        };
         return self.throwParserSyntaxErrorAt(context, loc, err);
     }
 

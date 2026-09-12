@@ -14102,6 +14102,58 @@ test "class diagnostic reasons render prose through eval and Function" {
     );
 }
 
+test "assignment diagnostic reasons preserve early errors and Annex B calls" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "1 = 2", .message = "Left side of assignment is not a reference." },
+        .{ .source = "1 += 2", .message = "Left side of assignment is not a reference." },
+        .{ .source = "1 **= 2", .message = "Left side of assignment is not a reference." },
+        .{ .source = "1 &&= 2", .message = "Left side of assignment is not a reference." },
+        .{ .source = "1 ||= 2", .message = "Left side of assignment is not a reference." },
+        .{ .source = "1 ??= 2", .message = "Left side of assignment is not a reference." },
+        .{ .source = "[1] = []", .message = "Invalid destructuring assignment target." },
+        .{ .source = "({a: 1} = {})", .message = "Invalid destructuring assignment target." },
+        .{ .source = "++1", .message = "Prefix ++ operator applied to value that is not a reference." },
+        .{ .source = "--1", .message = "Prefix -- operator applied to value that is not a reference." },
+        .{ .source = "(1)++", .message = "Postfix ++ operator applied to value that is not a reference." },
+        .{ .source = "(1)--", .message = "Postfix -- operator applied to value that is not a reference." },
+        .{ .source = "var a = {}; a?.x = 1", .message = "Left side of assignment is not a reference." },
+        .{ .source = "var a = {}; ++a?.x", .message = "Prefix ++ operator applied to value that is not a reference." },
+        .{ .source = "var a = {}; a?.x--", .message = "Postfix -- operator applied to value that is not a reference." },
+        .{ .source = "'use strict'; eval = 1", .message = "Cannot modify 'eval' in strict mode." },
+        .{ .source = "'use strict'; arguments += 1", .message = "Cannot modify 'arguments' in strict mode." },
+        .{ .source = "'use strict'; ++eval", .message = "Cannot modify 'eval' in strict mode." },
+        .{ .source = "'use strict'; --arguments", .message = "Cannot modify 'arguments' in strict mode." },
+        .{ .source = "'use strict'; eval++", .message = "'eval' cannot be modified in strict mode." },
+        .{ .source = "'use strict'; arguments--", .message = "'arguments' cannot be modified in strict mode." },
+    };
+    for (cases) |case| {
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, case.source, .{});
+        defer std.testing.allocator.free(encoded);
+        for ([_][]const u8{ "eval", "Function" }) |operation| {
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var caught = ''; try {{ {s}({s}); }} catch (e) {{ if (!(e instanceof SyntaxError)) throw e; caught = e.message; }} caught", .{ operation, encoded });
+            defer std.testing.allocator.free(probe);
+            try expectEvalStr(case.message, probe);
+        }
+    }
+    try expectEvalStr("Return statements are only valid inside functions.",
+        \\try { eval('return 1;'); } catch(e) { var message = e.message; } message
+    );
+    try expectEvalStr("7:8",
+        \\String(Function('return 7;')()) + ':' + (function* () { return 8; })().next().value
+    );
+    try expectEvalStr("SyntaxError:0",
+        \\var effect = 0;
+        \\try { eval('effect = 1; ++1;'); } catch(e) { var result = e.name + ':' + effect; } result
+    );
+    // Sloppy Annex B call targets still execute their call and fail at runtime.
+    // The diagnostic change must not promote them to an early SyntaxError.
+    try expectEvalStr("ReferenceError:1",
+        \\var calls = 0; function target() { calls++; return {}; }
+        \\try { eval('target() = 1'); } catch(e) { var result = e.name + ':' + calls; } result
+    );
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

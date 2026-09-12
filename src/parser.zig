@@ -18,6 +18,17 @@ pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, In
 /// compact ParseError ABI while letting JS boundaries render an actual message
 /// instead of guessing from the token at which parsing happened to stop.
 pub const DiagnosticReason = enum {
+    return_outside_function,
+    invalid_assignment,
+    invalid_destructuring_assignment,
+    invalid_prefix_increment,
+    invalid_prefix_decrement,
+    invalid_postfix_increment,
+    invalid_postfix_decrement,
+    strict_modify_eval,
+    strict_modify_arguments,
+    strict_postfix_eval,
+    strict_postfix_arguments,
     constructor_field,
     private_constructor_field,
     private_constructor_method,
@@ -36,8 +47,32 @@ pub const DiagnosticReason = enum {
     instance_getter_static_setter,
     instance_setter_static_getter,
 
+    pub fn parseError(reason: DiagnosticReason) ParseError {
+        return switch (reason) {
+            .invalid_assignment,
+            .invalid_destructuring_assignment,
+            .invalid_prefix_increment,
+            .invalid_prefix_decrement,
+            .invalid_postfix_increment,
+            .invalid_postfix_decrement,
+            => ParseError.InvalidAssignmentTarget,
+            else => ParseError.UnexpectedToken,
+        };
+    }
+
     pub fn message(reason: DiagnosticReason) []const u8 {
         return switch (reason) {
+            .return_outside_function => "Return statements are only valid inside functions.",
+            .invalid_assignment => "Left side of assignment is not a reference.",
+            .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
+            .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
+            .invalid_prefix_decrement => "Prefix -- operator applied to value that is not a reference.",
+            .invalid_postfix_increment => "Postfix ++ operator applied to value that is not a reference.",
+            .invalid_postfix_decrement => "Postfix -- operator applied to value that is not a reference.",
+            .strict_modify_eval => "Cannot modify 'eval' in strict mode.",
+            .strict_modify_arguments => "Cannot modify 'arguments' in strict mode.",
+            .strict_postfix_eval => "'eval' cannot be modified in strict mode.",
+            .strict_postfix_arguments => "'arguments' cannot be modified in strict mode.",
             .constructor_field => "Cannot declare class field named 'constructor'.",
             .private_constructor_field => "Cannot declare private class field named '#constructor'.",
             .private_constructor_method => "Cannot declare a private method named '#constructor'.",
@@ -600,7 +635,7 @@ pub const Parser = struct {
     fn failWithReasonAt(self: *Parser, reason: DiagnosticReason, offset: usize) ParseError {
         self.last_error_reason = reason;
         self.last_error_offset = offset;
-        return ParseError.UnexpectedToken;
+        return reason.parseError();
     }
 
     pub fn errorLocation(self: *const Parser) SourceLocation {
@@ -2343,7 +2378,7 @@ pub const Parser = struct {
 
     fn parseReturn(self: *Parser) ParseError!*Node {
         // `return` is only valid inside a function body.
-        if (self.fn_depth == 0) return ParseError.UnexpectedToken;
+        if (self.fn_depth == 0) return self.failWithReasonAt(.return_outside_function, self.cur().pos);
         _ = self.advance(); // return
         var arg: ?*Node = null;
         if (!self.hasLineTerminatorBefore(0) and !self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof)) {
@@ -2943,13 +2978,17 @@ pub const Parser = struct {
             // An array/object literal on the LHS is a destructuring pattern.
             const target = switch (left.*) {
                 .identifier, .member, .super_member => left,
-                .call => if (!self.strict and isAnnexBCallAssignmentTarget(left)) left else return ParseError.InvalidAssignmentTarget,
-                .array_lit, .object_lit => try self.litToPattern(left),
-                else => return ParseError.InvalidAssignmentTarget,
+                .call => if (!self.strict and isAnnexBCallAssignmentTarget(left)) left else return self.failWithReasonAt(.invalid_assignment, self.cur().pos),
+                .array_lit, .object_lit => self.litToPattern(left) catch |err| {
+                    if (err == ParseError.InvalidAssignmentTarget)
+                        return self.failWithReasonAt(.invalid_destructuring_assignment, self.tokens[expression_start].pos);
+                    return err;
+                },
+                else => return self.failWithReasonAt(.invalid_assignment, self.cur().pos),
             };
             // Strict mode forbids assigning to `eval`/`arguments`.
             if (self.strict and target.* == .identifier and isEvalOrArguments(target.identifier))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(if (std.mem.eql(u8, target.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens[expression_start].pos);
             // A parenthesized LHS (`(f) = function(){}`) is not an IdentifierRef,
             // so NamedEvaluation does not apply — the function stays anonymous.
             const assign_pos = self.pos;
@@ -2982,9 +3021,9 @@ pub const Parser = struct {
         if (compound) |op| {
             if (left.* != .identifier and left.* != .member and left.* != .super_member and
                 (self.strict or !isAnnexBCallAssignmentTarget(left)))
-                return ParseError.InvalidAssignmentTarget;
+                return self.failWithReasonAt(.invalid_assignment, self.cur().pos);
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(if (std.mem.eql(u8, left.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens[expression_start].pos);
             _ = self.advance();
             const rhs = try self.parseAssignment();
             return self.alloc(.{ .op_assign = .{ .target = left, .op = op, .value = rhs } });
@@ -2998,9 +3037,10 @@ pub const Parser = struct {
             else => null,
         };
         if (logassign) |op| {
-            if (left.* != .identifier and left.* != .member and left.* != .super_member) return ParseError.InvalidAssignmentTarget;
+            if (left.* != .identifier and left.* != .member and left.* != .super_member)
+                return self.failWithReasonAt(.invalid_assignment, self.cur().pos);
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(if (std.mem.eql(u8, left.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens[expression_start].pos);
             // A parenthesized LHS (`(a) ||= function(){}`) is not an IdentifierRef,
             // so NamedEvaluation does not apply (mirrors the plain-`=` check above).
             const assign_pos = self.pos;
@@ -3264,18 +3304,20 @@ pub const Parser = struct {
         }
         if (self.check(.plus_plus) or self.check(.minus_minus)) {
             const inc = self.cur().kind == .plus_plus;
+            const operator_offset = self.cur().pos;
             _ = self.advance();
+            const operand_offset = self.cur().pos;
             const operand = try self.parseUnary();
             // The operand of a prefix `++`/`--` must be a simple assignment
             // target (identifier or member access) — `++import(x)`, `++f()`,
             // `++1` are early SyntaxErrors.
             if (operand.* != .identifier and operand.* != .member and operand.* != .super_member and
                 (self.strict or !isAnnexBCallAssignmentTarget(operand)))
-                return ParseError.InvalidAssignmentTarget;
+                return self.failWithReasonAt(if (inc) .invalid_prefix_increment else .invalid_prefix_decrement, operator_offset);
             // Strict mode forbids updating `eval`/`arguments` (they are not valid
             // assignment targets): `"use strict"; ++eval;` is a SyntaxError.
             if (self.strict and operand.* == .identifier and isEvalOrArguments(operand.identifier))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(if (std.mem.eql(u8, operand.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, operand_offset);
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = true, .target = operand } });
         }
         const t = self.cur();
@@ -3335,16 +3377,16 @@ pub const Parser = struct {
         const e = try self.parsePrimary();
         const m = try self.parseMemberTail(e, start_token);
         if ((self.check(.plus_plus) or self.check(.minus_minus)) and !self.hasLineTerminatorBefore(0)) {
+            const inc = self.cur().kind == .plus_plus;
             // A postfix `++`/`--` target must be a simple assignment target —
             // `import(x)++`, `f()++`, `1++` are early SyntaxErrors.
             if (m.* != .identifier and m.* != .member and m.* != .super_member and
                 (self.strict or !isAnnexBCallAssignmentTarget(m)))
-                return ParseError.InvalidAssignmentTarget;
+                return self.failWithReasonAt(if (inc) .invalid_postfix_increment else .invalid_postfix_decrement, self.cur().pos);
             // Strict mode forbids updating `eval`/`arguments`: `"use strict";
             // eval++;` is a SyntaxError.
             if (self.strict and m.* == .identifier and isEvalOrArguments(m.identifier))
-                return ParseError.UnexpectedToken;
-            const inc = self.cur().kind == .plus_plus;
+                return self.failWithReasonAt(if (std.mem.eql(u8, m.identifier, "eval")) .strict_postfix_eval else .strict_postfix_arguments, self.tokens[start_token].pos);
             _ = self.advance();
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = false, .target = m } });
         }
@@ -6351,6 +6393,35 @@ test "class diagnostic reasons retain declaration offsets and template provenanc
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         const offset = std.mem.lastIndexOf(u8, case.source, case.declaration).?;
         try std.testing.expectEqualDeep(sourceLocationAt(case.source, offset), parser.errorLocation());
+    }
+}
+
+test "assignment diagnostic reasons preserve error tags and operator offsets" {
+    const Case = struct { source: []const u8, reason: DiagnosticReason, marker: []const u8, err: ParseError = ParseError.InvalidAssignmentTarget };
+    const cases = [_]Case{
+        .{ .source = "1 = 2", .reason = .invalid_assignment, .marker = "=" },
+        .{ .source = "1 **= 2", .reason = .invalid_assignment, .marker = "**=" },
+        .{ .source = "1 ??= 2", .reason = .invalid_assignment, .marker = "??=" },
+        .{ .source = "[1] = []", .reason = .invalid_destructuring_assignment, .marker = "[1]" },
+        .{ .source = "({a: 1} = {})", .reason = .invalid_destructuring_assignment, .marker = "{a" },
+        .{ .source = "++1", .reason = .invalid_prefix_increment, .marker = "++" },
+        .{ .source = "--1", .reason = .invalid_prefix_decrement, .marker = "--" },
+        .{ .source = "(1)++", .reason = .invalid_postfix_increment, .marker = "++" },
+        .{ .source = "(1)--", .reason = .invalid_postfix_decrement, .marker = "--" },
+        .{ .source = "`a\r\n${++1}`", .reason = .invalid_prefix_increment, .marker = "++" },
+        .{ .source = "if (true) { return; }", .reason = .return_outside_function, .marker = "return", .err = ParseError.UnexpectedToken },
+        .{ .source = "'use strict'; eval = 1", .reason = .strict_modify_eval, .marker = "eval", .err = ParseError.UnexpectedToken },
+        .{ .source = "'use strict'; ++arguments", .reason = .strict_modify_arguments, .marker = "arguments", .err = ParseError.UnexpectedToken },
+        .{ .source = "'use strict'; eval++", .reason = .strict_postfix_eval, .marker = "eval", .err = ParseError.UnexpectedToken },
+        .{ .source = "'use strict'; arguments--", .reason = .strict_postfix_arguments, .marker = "arguments", .err = ParseError.UnexpectedToken },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, case.source);
+        try std.testing.expectError(case.err, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
     }
 }
 
