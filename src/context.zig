@@ -14055,6 +14055,53 @@ test "private brand failures distinguish fields from methods and accessors like 
     }
 }
 
+test "class diagnostic reasons render prose through eval and Function" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "class C { constructor; }", .message = "Cannot declare class field named 'constructor'." },
+        .{ .source = "class C { #constructor; }", .message = "Cannot declare private class field named '#constructor'." },
+        .{ .source = "class C { #constructor() {} }", .message = "Cannot declare a private method named '#constructor'." },
+        .{ .source = "class C { get #constructor() {} }", .message = "Cannot declare a private accessor named '#constructor'." },
+        .{ .source = "class C { constructor() {} constructor() {} }", .message = "Cannot declare multiple constructors in a single class." },
+        .{ .source = "class C { static prototype; }", .message = "Cannot declare a static field named 'prototype'." },
+        .{ .source = "class C { static prototype() {} }", .message = "Cannot declare a static method named 'prototype'." },
+        .{ .source = "class C { get constructor() {} }", .message = "Cannot declare a getter or setter named 'constructor'." },
+        .{ .source = "class C { async constructor() {} }", .message = "Cannot declare an async method named 'constructor'." },
+        .{ .source = "class C { *constructor() {} }", .message = "Cannot declare a generator method named 'constructor'." },
+        .{ .source = "class C { #x; #x; }", .message = "Cannot declare private field twice." },
+        .{ .source = "class C { #x; #x() {} }", .message = "Cannot declare private method twice." },
+        .{ .source = "class C { #x; get #x() {} }", .message = "Declared private setter with an already used name." },
+        .{ .source = "class C { set #x(v) {} static get #x() {} }", .message = "Cannot declare a private static getter if there is a non-static private setter with used name." },
+        .{ .source = "class C { get #x() {} static set #x(v) {} }", .message = "Cannot declare a private static setter if there is a non-static private getter with used name." },
+        .{ .source = "class C { static set #x(v) {} get #x() {} }", .message = "Cannot declare a private non-static getter if there is a static private setter with used name." },
+        .{ .source = "class C { static get #x() {} set #x(v) {} }", .message = "Cannot declare a private non-static setter if there is a static private getter with used name." },
+        .{ .source = "`a\r\n${class C { constructor; }}`", .message = "Cannot declare class field named 'constructor'." },
+    };
+    for (cases) |case| {
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, case.source, .{});
+        defer std.testing.allocator.free(encoded);
+        for ([_][]const u8{ "eval", "Function" }) |operation| {
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var caught = ''; try {{ {s}({s}); }} catch (e) {{ if (!(e instanceof SyntaxError)) throw e; caught = e.message; }} caught", .{ operation, encoded });
+            defer std.testing.allocator.free(probe);
+            try expectEvalStr(case.message, probe);
+        }
+    }
+    // Location remains structured, non-enumerable metadata; it is not folded
+    // into the JSC-compatible message. CRLF translation names the declaration.
+    try expectEvalStr("2:5:15:false",
+        \\try { eval("class C {\r\n    constructor; }"); }
+        \\catch (e) { var location = e.line + ':' + e.column + ':' + e.byteOffset + ':' + Object.keys(e).includes('line'); }
+        \\location
+    );
+    try expectEvalStr("The superclass is not a constructor.",
+        \\try { class C extends 1 {} } catch (e) { var message = e.message; } message
+    );
+    try expectEvalStr("The value of the superclass's prototype property is not an object or null.",
+        \\function F() {} F.prototype = 1;
+        \\try { class C extends F {} } catch (e) { var message = e.message; } message
+    );
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

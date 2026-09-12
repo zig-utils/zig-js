@@ -5582,6 +5582,10 @@ pub const Interpreter = struct {
             loc.line,
             loc.column,
         }) catch return error.OutOfMemory;
+        return self.throwParserSyntaxErrorMessageAt(message, loc);
+    }
+
+    fn throwParserSyntaxErrorMessageAt(self: *Interpreter, message: []const u8, loc: parser_mod.SourceLocation) EvalError {
         self.exception = try self.makeError("SyntaxError", message);
         const obj = self.exception.asObj();
         try obj.setOwn(self.arena, self.root_shape, "line", Value.num(@floatFromInt(loc.line)));
@@ -5596,6 +5600,8 @@ pub const Interpreter = struct {
 
     pub fn throwParserSyntaxError(self: *Interpreter, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
         const loc = if (parser) |p| p.errorLocation() else parser_mod.sourceLocationAt(source, 0);
+        if (err == error.UnexpectedToken) if (parser) |p| if (p.last_error_reason) |reason|
+            return self.throwParserSyntaxErrorMessageAt(reason.message(), loc);
         return self.throwParserSyntaxErrorAt(context, loc, err);
     }
 
@@ -8543,7 +8549,7 @@ pub const Interpreter = struct {
     pub fn prepareClassHeritage(self: *Interpreter, superclass: Value) EvalError!PreparedClassHeritage {
         if (superclass.isNull()) return .{ .constructor = Value.nul(), .prototype = Value.nul() };
         if (!isConstructorValue(superclass))
-            return self.throwError("TypeError", "class extends value is not a constructor");
+            return self.throwError("TypeError", "The superclass is not a constructor.");
 
         const superclass_root = try self.pushTempRoot(superclass);
         defer self.restoreTempRoots(superclass_root);
@@ -8552,7 +8558,7 @@ pub const Interpreter = struct {
             return .{ .constructor = self.tempRoot(superclass_root, superclass), .prototype = prototype };
         if (prototype.isNull())
             return .{ .constructor = self.tempRoot(superclass_root, superclass), .prototype = Value.nul() };
-        return self.throwError("TypeError", "class heritage's 'prototype' is not an object or null");
+        return self.throwError("TypeError", "The value of the superclass's prototype property is not an object or null.");
     }
 
     pub fn evalClassWithComputedKeys(self: *Interpreter, name: []const u8, inferred_name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8, computed_keys: ?[]const Value) EvalError!Value {

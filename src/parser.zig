@@ -14,6 +14,52 @@ const Node = ast.Node;
 
 pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, InvalidAssignmentTarget };
 
+/// A grammar check records its reason where the violation is known. Keep the
+/// compact ParseError ABI while letting JS boundaries render an actual message
+/// instead of guessing from the token at which parsing happened to stop.
+pub const DiagnosticReason = enum {
+    constructor_field,
+    private_constructor_field,
+    private_constructor_method,
+    private_constructor_accessor,
+    duplicate_constructor,
+    static_prototype_field,
+    static_prototype_method,
+    constructor_accessor,
+    constructor_async,
+    constructor_generator,
+    duplicate_private_field,
+    duplicate_private_method,
+    duplicate_private_accessor,
+    static_getter_instance_setter,
+    static_setter_instance_getter,
+    instance_getter_static_setter,
+    instance_setter_static_getter,
+
+    pub fn message(reason: DiagnosticReason) []const u8 {
+        return switch (reason) {
+            .constructor_field => "Cannot declare class field named 'constructor'.",
+            .private_constructor_field => "Cannot declare private class field named '#constructor'.",
+            .private_constructor_method => "Cannot declare a private method named '#constructor'.",
+            .private_constructor_accessor => "Cannot declare a private accessor named '#constructor'.",
+            .duplicate_constructor => "Cannot declare multiple constructors in a single class.",
+            .static_prototype_field => "Cannot declare a static field named 'prototype'.",
+            .static_prototype_method => "Cannot declare a static method named 'prototype'.",
+            .constructor_accessor => "Cannot declare a getter or setter named 'constructor'.",
+            .constructor_async => "Cannot declare an async method named 'constructor'.",
+            .constructor_generator => "Cannot declare a generator method named 'constructor'.",
+            .duplicate_private_field => "Cannot declare private field twice.",
+            .duplicate_private_method => "Cannot declare private method twice.",
+            // JSC uses "setter" for either duplicate accessor kind.
+            .duplicate_private_accessor => "Declared private setter with an already used name.",
+            .static_getter_instance_setter => "Cannot declare a private static getter if there is a non-static private setter with used name.",
+            .static_setter_instance_getter => "Cannot declare a private static setter if there is a non-static private getter with used name.",
+            .instance_getter_static_setter => "Cannot declare a private non-static getter if there is a static private setter with used name.",
+            .instance_setter_static_getter => "Cannot declare a private non-static setter if there is a static private getter with used name.",
+        };
+    }
+};
+
 pub const SourceLocation = struct {
     byte_offset: usize,
     line: usize,
@@ -442,6 +488,7 @@ pub const Parser = struct {
     /// still returns compact Zig error tags, but embedders can combine this with
     /// `sourceLocationAt` to report useful source diagnostics.
     last_error_offset: ?usize = null,
+    last_error_reason: ?DiagnosticReason = null,
     /// Statement locations accumulated while parsing, including nested function
     /// bodies. Consumers copy these entries into their context-owned registry
     /// before the parser value leaves scope.
@@ -546,7 +593,14 @@ pub const Parser = struct {
 
     fn fail(self: *Parser, err: ParseError) ParseError {
         self.last_error_offset = if (self.pos < self.tokens.len) self.cur().pos else self.source.len;
+        self.last_error_reason = null;
         return err;
+    }
+
+    fn failWithReasonAt(self: *Parser, reason: DiagnosticReason, offset: usize) ParseError {
+        self.last_error_reason = reason;
+        self.last_error_offset = offset;
+        return ParseError.UnexpectedToken;
     }
 
     pub fn errorLocation(self: *const Parser) SourceLocation {
@@ -2060,6 +2114,8 @@ pub const Parser = struct {
         // classic `for (init; cond; update)` if it isn't an iteration form.
         const save = self.pos;
         const statement_location_save = self.statementLocationCheckpoint();
+        const error_offset_save = self.last_error_offset;
+        const error_reason_save = self.last_error_reason;
         var decl_kind: ?ast.DeclKind = null;
         var is_using = false;
         var dispose: u8 = 0; // 1 = `using`, 2 = `await using` (for a for-of head)
@@ -2160,6 +2216,8 @@ pub const Parser = struct {
         // its nodes would create ghost debugger locations and leave the forward
         // source cursor ahead of the real classic-for parse.
         self.restoreStatementLocationCheckpoint(statement_location_save);
+        self.last_error_offset = error_offset_save;
+        self.last_error_reason = error_reason_save;
 
         var init_node: ?*Node = null;
         if (self.match(.semicolon)) {
@@ -3602,7 +3660,11 @@ pub const Parser = struct {
                 sub.module = self.module;
                 sub.eval_private_names = self.eval_private_names;
                 sub.regex_validation_arena = self.regex_validation_arena;
-                node = try self.concatExpr(node, try sub.parseExpression());
+                const expression = sub.parseExpression() catch |err| {
+                    self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
+                    return err;
+                };
+                node = try self.concatExpr(node, expression);
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
                 raw_start = i;
             } else {
@@ -3658,7 +3720,10 @@ pub const Parser = struct {
                 sub.module = self.module;
                 sub.eval_private_names = self.eval_private_names;
                 sub.regex_validation_arena = self.regex_validation_arena;
-                exprs[substitution_index] = try sub.parseExpression();
+                exprs[substitution_index] = sub.parseExpression() catch |err| {
+                    self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
+                    return err;
+                };
                 substitution_index += 1;
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
                 raw_start = i;
@@ -3670,6 +3735,25 @@ pub const Parser = struct {
         cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..], true);
         raws[substitution_index] = raw[raw_start..];
         return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = exprs, .source = source } });
+    }
+
+    fn inheritTemplateDiagnostic(self: *Parser, sub: *const Parser, raw_in: []const u8, expression_start: usize) void {
+        self.last_error_reason = sub.last_error_reason;
+        // Substitution parsers see normalized TRV. Translate the error offset
+        // back over removed CRLF bytes before publishing the enclosing source
+        // position; normalized offsets are not offsets into the original file.
+        const normalized_offset = expression_start + sub.errorLocation().byte_offset;
+        var original_offset: usize = 0;
+        var normalized: usize = 0;
+        while (original_offset < raw_in.len and normalized < normalized_offset) : (normalized += 1) {
+            if (raw_in[original_offset] == '\r' and original_offset + 1 < raw_in.len and raw_in[original_offset + 1] == '\n')
+                original_offset += 2
+            else
+                original_offset += 1;
+        }
+        // Lexer template text is always a slice of this parser's source.
+        const raw_offset = @intFromPtr(raw_in.ptr) - @intFromPtr(self.source.ptr);
+        self.last_error_offset = raw_offset + original_offset;
     }
 
     fn validateTemplateEscape(raw: []const u8, i: usize) ParseError!void {
@@ -4026,11 +4110,16 @@ pub const Parser = struct {
         self.in_class = true;
         defer self.in_class = saved_in_class;
         var members: std.ArrayListUnmanaged(ast.ClassMember) = .empty;
+        // Declaration offsets are needed only for early errors, not by the
+        // runtime AST. Release this parallel inventory with parser scratch.
+        var member_offsets: std.ArrayListUnmanaged(usize) = .empty;
+        defer member_offsets.deinit(self.scratch_allocator);
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.match(.semicolon)) continue; // stray semicolons allowed
             // A class element may carry a leading decorator list (parsed and
             // discarded; decorators precede `static`).
             if (self.check(.at)) try self.parseDecorators();
+            try member_offsets.append(self.scratch_allocator, self.cur().pos);
             var is_static = false;
             // An escaped `static` (`static`) is never the contextual keyword.
             if (isKeyword(self.cur(), "static") and !self.cur().escaped_identifier and self.peekKind(1) != .semicolon and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
@@ -4158,8 +4247,8 @@ pub const Parser = struct {
             }
         }
         try self.expect(.rbrace);
-        try self.checkPrivateNames(members.items);
-        try self.checkClassMemberErrors(members.items, superclass != null);
+        try self.checkPrivateNames(members.items, member_offsets.items);
+        try self.checkClassMemberErrors(members.items, member_offsets.items, superclass != null);
         return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items, .source = self.sourceFrom(start) } });
     }
 
@@ -4171,30 +4260,30 @@ pub const Parser = struct {
     ///     SyntaxError;
     ///   - a `constructor` element that is an accessor, generator, or async
     ///     method is a SyntaxError (the constructor must be a plain method).
-    fn checkClassMemberErrors(self: *Parser, members: []const ast.ClassMember, has_superclass: bool) ParseError!void {
+    fn checkClassMemberErrors(self: *Parser, members: []const ast.ClassMember, offsets: []const usize, has_superclass: bool) ParseError!void {
         // A class may define at most one constructor.
-        var ctor_count: usize = 0;
-        for (members) |m| if (m.is_ctor) {
-            ctor_count += 1;
+        var seen_ctor = false;
+        for (members, offsets) |m, offset| if (m.is_ctor) {
+            if (seen_ctor) return self.failWithReasonAt(.duplicate_constructor, offset);
+            seen_ctor = true;
         };
-        if (ctor_count > 1) return ParseError.UnexpectedToken;
-        for (members) |m| {
+        for (members, offsets) |m, offset| {
             const named = m.key_expr == null and m.key.len > 0;
             const not_private = named and m.key[0] != '#';
             if (m.is_static and not_private and std.mem.eql(u8, m.key, "prototype"))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(if (m.is_field) .static_prototype_field else .static_prototype_method, offset);
             // A field — instance or static — may not be named `constructor`
             // (15.7.1). A non-computed, non-private `constructor` field, however
             // its name is spelled (identifier or string literal), is an error.
             if (m.is_field and not_private and std.mem.eql(u8, m.key, "constructor"))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(.constructor_field, offset);
             if (m.is_field) continue;
             const mf = m.func orelse continue;
             if (mf.* != .function) continue;
             const fnode = mf.function;
             if (!m.is_static and not_private and std.mem.eql(u8, m.key, "constructor") and
                 (m.accessor != .none or fnode.is_generator or fnode.is_async))
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(if (m.accessor != .none) .constructor_accessor else if (fnode.is_async) .constructor_async else .constructor_generator, offset);
             // SuperCall is permitted only in the derived constructor.
             const is_derived_ctor = m.is_ctor and has_superclass;
             if (!is_derived_ctor) {
@@ -4214,12 +4303,13 @@ pub const Parser = struct {
     /// instance). Any other repeat — get/get, set/set, method/method,
     /// field/anything, or a get+set split across static and instance — is a
     /// SyntaxError.
-    fn checkPrivateNames(self: *Parser, members: []const ast.ClassMember) ParseError!void {
+    fn checkPrivateNames(self: *Parser, members: []const ast.ClassMember, offsets: []const usize) ParseError!void {
         var private_count: usize = 0;
-        for (members) |m| {
+        for (members, offsets) |m, offset| {
             if (m.key_expr != null or m.key.len == 0 or m.key[0] != '#') continue;
             // A private name may not be `#constructor` (in any element form).
-            if (std.mem.eql(u8, m.key, "#constructor")) return ParseError.UnexpectedToken;
+            if (std.mem.eql(u8, m.key, "#constructor"))
+                return self.failWithReasonAt(if (m.is_field) .private_constructor_field else if (m.accessor != .none) .private_constructor_accessor else .private_constructor_method, offset);
             private_count += 1;
         }
         if (private_count < 2) return;
@@ -4238,7 +4328,11 @@ pub const Parser = struct {
         }
         std.mem.sort(usize, private, members, struct {
             fn lessThan(all: []const ast.ClassMember, left: usize, right: usize) bool {
-                return std.mem.order(u8, all[left].key, all[right].key) == .lt;
+                return switch (std.mem.order(u8, all[left].key, all[right].key)) {
+                    .lt => true,
+                    .gt => false,
+                    .eq => left < right,
+                };
             }
         }.lessThan);
 
@@ -4250,7 +4344,6 @@ pub const Parser = struct {
             {}
             const group_len = group_end - group_start;
             if (group_len > 1) {
-                if (group_len != 2) return ParseError.UnexpectedToken;
                 const previous = members[private[group_start]];
                 const current = members[private[group_start + 1]];
                 // A complementary get/set pair at the same placement is the only
@@ -4258,10 +4351,30 @@ pub const Parser = struct {
                 const pair = ((current.accessor == .get and previous.accessor == .set) or
                     (current.accessor == .set and previous.accessor == .get)) and
                     current.is_static == previous.is_static and !current.is_field and !previous.is_field;
-                if (!pair) return ParseError.UnexpectedToken;
+                if (!pair) return self.failWithReasonAt(privateCollisionReason(previous, current), offsets[private[group_start + 1]]);
+                if (group_len > 2) {
+                    const third_index = private[group_start + 2];
+                    // Both halves have already been declared. Any third use
+                    // collides with an existing declaration of its own kind.
+                    const third = members[third_index];
+                    return self.failWithReasonAt(privateCollisionReason(third, third), offsets[third_index]);
+                }
             }
             group_start = group_end;
         }
+    }
+
+    fn privateCollisionReason(previous: ast.ClassMember, current: ast.ClassMember) DiagnosticReason {
+        if (current.is_field) return .duplicate_private_field;
+        if (current.accessor == .none) return .duplicate_private_method;
+        const complementary = (current.accessor == .get and previous.accessor == .set) or
+            (current.accessor == .set and previous.accessor == .get);
+        if (complementary and current.is_static != previous.is_static) {
+            return if (current.is_static)
+                if (current.accessor == .get) .static_getter_instance_setter else .static_setter_instance_getter
+            else if (current.accessor == .get) .instance_getter_static_setter else .instance_setter_static_getter;
+        }
+        return .duplicate_private_accessor;
     }
 
     /// Whether the (eval) program's top-level declarations bind the name
@@ -6201,6 +6314,43 @@ test "parser enforces private name declaration collisions" {
     for (rejected) |source| {
         var parser = try Parser.init(arena.allocator(), source);
         try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+}
+
+test "class diagnostic reasons retain declaration offsets and template provenance" {
+    const Case = struct { source: []const u8, reason: DiagnosticReason, declaration: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "class C { constructor; }", .reason = .constructor_field, .declaration = "constructor" },
+        .{ .source = "class C { static 'constructor'; }", .reason = .constructor_field, .declaration = "static" },
+        .{ .source = "class C { #constructor; }", .reason = .private_constructor_field, .declaration = "#constructor" },
+        .{ .source = "class C { #constructor() {} }", .reason = .private_constructor_method, .declaration = "#constructor" },
+        .{ .source = "class C { get #constructor() {} }", .reason = .private_constructor_accessor, .declaration = "get #constructor" },
+        .{ .source = "class C { constructor() {}\n  constructor() {} }", .reason = .duplicate_constructor, .declaration = "constructor" },
+        .{ .source = "class C { static prototype; }", .reason = .static_prototype_field, .declaration = "static" },
+        .{ .source = "class C { static prototype() {} }", .reason = .static_prototype_method, .declaration = "static" },
+        .{ .source = "class C { get constructor() {} }", .reason = .constructor_accessor, .declaration = "get constructor" },
+        .{ .source = "class C { async constructor() {} }", .reason = .constructor_async, .declaration = "async constructor" },
+        .{ .source = "class C { *constructor() {} }", .reason = .constructor_generator, .declaration = "*constructor" },
+        .{ .source = "class C { #x() {} #x; }", .reason = .duplicate_private_field, .declaration = "#x" },
+        .{ .source = "class C { #x; #x() {} }", .reason = .duplicate_private_method, .declaration = "#x" },
+        .{ .source = "class C { get #x() {} get #x() {} }", .reason = .duplicate_private_accessor, .declaration = "get #x" },
+        .{ .source = "class C { set #x(v) {} static get #x() {} }", .reason = .static_getter_instance_setter, .declaration = "static" },
+        .{ .source = "class C { get #x() {} static set #x(v) {} }", .reason = .static_setter_instance_getter, .declaration = "static" },
+        .{ .source = "class C { static set #x(v) {} get #x() {} }", .reason = .instance_getter_static_setter, .declaration = "get #x" },
+        .{ .source = "class C { static get #x() {} set #x(v) {} }", .reason = .instance_setter_static_getter, .declaration = "set #x" },
+        .{ .source = "class C { get #x() {} set #x(v) {} #x; }", .reason = .duplicate_private_field, .declaration = "#x" },
+        .{ .source = "`a\r\n${class C { constructor; }}`", .reason = .constructor_field, .declaration = "constructor" },
+        .{ .source = "tag`a\r\n${class C { #constructor; }}`", .reason = .private_constructor_field, .declaration = "#constructor" },
+        .{ .source = "`a${tag`b\r\n${class C { constructor; }}`}`", .reason = .constructor_field, .declaration = "constructor" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        const offset = std.mem.lastIndexOf(u8, case.source, case.declaration).?;
+        try std.testing.expectEqualDeep(sourceLocationAt(case.source, offset), parser.errorLocation());
     }
 }
 
