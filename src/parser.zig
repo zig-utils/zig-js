@@ -563,15 +563,20 @@ pub const Parser = struct {
     }
 
     pub fn initWithScratchDiagnostic(arena: std.mem.Allocator, scratch_allocator: std.mem.Allocator, source: []const u8, diagnostic: *?SourceLocation) ParseError!Parser {
-        diagnostic.* = null;
-        var lx = lex.Lexer.init(arena, source);
         var list: std.ArrayListUnmanaged(Token) = .empty;
+        return initWithTokenStorage(arena, scratch_allocator, source, arena, &list, diagnostic);
+    }
+
+    fn initWithTokenStorage(arena: std.mem.Allocator, scratch_allocator: std.mem.Allocator, source: []const u8, token_allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(Token), diagnostic: *?SourceLocation) ParseError!Parser {
+        diagnostic.* = null;
+        list.clearRetainingCapacity();
+        var lx = lex.Lexer.init(arena, source);
         while (true) {
             const t = lx.next() catch |err| {
                 diagnostic.* = sourceLocationAt(source, lx.errorOffset());
                 return err;
             };
-            try list.append(arena, t);
+            try list.append(token_allocator, t);
             if (t.kind == .eof) break;
         }
         return .{
@@ -3742,8 +3747,9 @@ pub const Parser = struct {
         return cooked;
     }
 
-    fn templateSubparser(self: *Parser, source: []const u8) ParseError!Parser {
-        var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, source);
+    fn templateSubparser(self: *Parser, source: []const u8, tokens: *std.ArrayListUnmanaged(Token)) ParseError!Parser {
+        var ignored: ?SourceLocation = null;
+        var sub = try initWithTokenStorage(self.arena, self.scratch_allocator, source, self.scratch_allocator, tokens, &ignored);
         sub.shared_secure_hash_state = self.secureHashState();
         // TemplateSubstitution is an Expression in the enclosing function, not
         // a function boundary. Keep its grammar context and borrowed usage sinks;
@@ -3767,6 +3773,11 @@ pub const Parser = struct {
         const raw = try normalizeTemplateRaw(self.arena, raw_in);
         if (std.mem.indexOfScalar(u8, raw, '$') == null)
             return self.concatStr(null, (try self.cookTemplateQuasi(raw, false)).?);
+        // Token structs are consumed while parsing each substitution; AST and
+        // decoded payload slices remain arena-owned. Reuse capacity across
+        // siblings, with a distinct scratch list for every nested template.
+        var substitution_tokens: std.ArrayListUnmanaged(Token) = .empty;
+        defer substitution_tokens.deinit(self.scratch_allocator);
         var node: ?*Node = null;
         var raw_start: usize = 0;
         var i: usize = 0;
@@ -3780,7 +3791,7 @@ pub const Parser = struct {
                 node = try self.concatStr(node, (try self.cookTemplateQuasi(raw[raw_start..i], false)).?);
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
-                var sub = try self.templateSubparser(raw[expr_start..expr_end]);
+                var sub = try self.templateSubparser(raw[expr_start..expr_end], &substitution_tokens);
                 const expression = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
                     return err;
@@ -3814,6 +3825,8 @@ pub const Parser = struct {
         const cooked = try self.arena.alloc(?[]const u8, substitution_count + 1);
         const raws = try self.arena.alloc([]const u8, substitution_count + 1);
         const exprs = try self.arena.alloc(*Node, substitution_count);
+        var substitution_tokens: std.ArrayListUnmanaged(Token) = .empty;
+        defer substitution_tokens.deinit(self.scratch_allocator);
         // A quasi that holds an invalid escape has an `undefined` cooked value
         // (tolerated in a tagged template); track that per quasi and flush null.
         var substitution_index: usize = 0;
@@ -3829,7 +3842,7 @@ pub const Parser = struct {
                 raws[substitution_index] = raw[raw_start..i];
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
-                var sub = try self.templateSubparser(raw[expr_start..expr_end]);
+                var sub = try self.templateSubparser(raw[expr_start..expr_end], &substitution_tokens);
                 exprs[substitution_index] = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
                     return err;
@@ -5966,6 +5979,65 @@ test "parser preserves raw and cooked template quasis across substitutions" {
     try std.testing.expectEqual(@as(?[]const u8, null), invalid_template.cooked[0]);
     try std.testing.expectEqualStrings("bad\\u{110000}", invalid_template.raw[0]);
     try std.testing.expectEqualStrings("ok", invalid_template.cooked[1].?);
+}
+
+test "template token storage reuses one scratch allocation across siblings" {
+    for ([_][]const u8{ "tag`${1}${2}${3}${4}`", "`${1}${2}${3}${4}`" }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
+        var parser = try Parser.initWithScratch(arena.allocator(), scratch.allocator(), source);
+        _ = try parser.parseProgram();
+        try std.testing.expectEqual(@as(usize, 1), scratch.allocations);
+        try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
+    }
+    for ([_][]const u8{ "tag`plain`", "`plain`" }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var parser = try Parser.initWithScratch(arena.allocator(), scratch.allocator(), source);
+        _ = try parser.parseProgram();
+        try std.testing.expectEqual(@as(usize, 0), scratch.allocations);
+    }
+}
+
+test "template token storage does not own decoded AST payloads or function source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "tag`a${'\\u0061'}b${\\u0062}c${function f(){return 'c';}}d${tag`n${'\\u0064'}`}e${1+2+3+4+5+6+7+8+9+10}`";
+    var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parser = try Parser.initWithScratch(arena.allocator(), scratch.allocator(), source);
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
+    const expressions = program.program[0].expr_stmt.tagged_template.exprs;
+    try std.testing.expectEqualStrings("a", expressions[0].string);
+    try std.testing.expectEqualStrings("b", expressions[1].identifier);
+    try std.testing.expectEqualStrings("function f(){return 'c';}", expressions[2].function.source);
+    try std.testing.expectEqualStrings("c", expressions[2].function.body.block[0].return_stmt.?.string);
+    try std.testing.expectEqualStrings("d", expressions[3].tagged_template.exprs[0].string);
+    try std.testing.expectEqual(ast.BinaryOp.add, expressions[4].binary.op);
+}
+
+test "template token storage releases scratch on syntax failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parser = try Parser.initWithScratch(arena.allocator(), scratch.allocator(), "tag`${1}${({get x(é){}})}`");
+    try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
+    try std.testing.expectEqualStrings("Unexpected identifier 'é'. getter functions must have no parameters.", try parser.diagnosticMessage(arena.allocator(), parser.last_error_reason.?));
+}
+
+test "template token storage growth and nesting propagate scratch allocation failures" {
+    const Probe = struct {
+        fn run(scratch: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var parser = try Parser.initWithScratch(arena.allocator(), scratch, "tag`${1}${1+2+3+4+5+6+7+8+9+10}${tag`${'\\u0061'}`}`");
+            _ = try parser.parseProgram();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "parser fills exact tagged template arrays across nested substitutions" {
