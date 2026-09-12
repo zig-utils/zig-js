@@ -8,7 +8,7 @@ import { competingEvidenceProcesses, MINIMUM_PROCESS_CPU_OCCUPANCY, processCpuOc
 declare const __dirname: string;
 declare const __filename: string;
 export const ROOT = __dirname === "tools" ? "." : __dirname.slice(0, __dirname.lastIndexOf("/tools"));
-export const DEFAULT_SCHEMA = `${ROOT}/docs/.data/performance-attribution-schema-v3.json`;
+export const DEFAULT_SCHEMA = `${ROOT}/docs/.data/performance-attribution-schema-v4.json`;
 export const DEFAULT_LIFECYCLE_PROFILE = `${ROOT}/docs/.data/context-lifecycle-profile-v1.json`;
 const REVISION_RE = /^[0-9a-f]{40}$/;
 const SHARED_MEASUREMENT_OVERLAY_PATHS = [
@@ -49,6 +49,21 @@ export function validateDirectBinaryRevisions(logicalParent: string, logicalCand
   requireValue(parentBinaryRevision === parentRevision, "direct parent binary revision does not match the logical parent");
   requireValue(candidateBinaryRevision === candidateRevision, "direct candidate binary revision does not match the logical candidate");
   return [parentBinaryRevision, candidateBinaryRevision];
+}
+
+export function validateBinaryProvenance(mode: string, logicalParent: string, logicalCandidate: string, parentBinary: string, candidateBinary: string, source: string, repository = ROOT, overlayPaths = SHARED_MEASUREMENT_OVERLAY_PATHS): [string, string, string[]] {
+  requireValue(mode === "direct" || mode === "shared_measurement_overlay", "binary provenance mode must be direct or shared_measurement_overlay");
+  requireValue(source.length > 0 && !source.startsWith("/") && source.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."), "workload source must be a safe repository-relative path");
+  if (mode === "shared_measurement_overlay") {
+    requireValue(resolveRevision(parentBinary, repository) !== resolveRevision(logicalParent, repository) && resolveRevision(candidateBinary, repository) !== resolveRevision(logicalCandidate, repository), "shared measurement overlay requires two overlay revisions");
+  }
+  const revisions = mode === "direct"
+    ? validateDirectBinaryRevisions(logicalParent, logicalCandidate, parentBinary, candidateBinary, repository)
+    : validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentBinary, candidateBinary, repository, overlayPaths);
+  const parentSource = revisionBlob(revisions[0], source, repository), candidateSource = revisionBlob(revisions[1], source, repository);
+  requireValue(parentSource === candidateSource, "binary workload source blob drift");
+  requireValue(commandOutput(["git", "-C", repository, "hash-object", "--", source], "") === parentSource, "working-tree workload source differs from binary revisions");
+  return [revisions[0], revisions[1], mode === "direct" ? [] : overlayPaths];
 }
 
 export function parseBenchmark(stdout: string, expectedMode: string, expectedWorkload: string, lanes: number, jobs: number): [string, number, number] {
@@ -308,7 +323,7 @@ export function render(artifact: any): string {
   const metadata = artifact.metadata, summary = artifact.summary, efficiency = summary.efficiency;
   const memoryRows = ["peak_rss_bytes", "retained_rss_bytes", "allocations", "allocated_bytes"].map((metric) => [metric, measuredMetricSummary(artifact.samples, metric)] as const).filter((entry) => entry[1] !== null).map(([metric, value]) => `| \`${metric}\` | ${value.parent_median} | ${value.candidate_median} | ${value.candidate_over_parent.toFixed(4)}x | ${(value.parent_rsd * 100).toFixed(2)}% | ${(value.candidate_rsd * 100).toFixed(2)}% |`);
   const qualityBoundary = metadata.minimum_measured_boundary_cpu_occupancy !== undefined ? `every measured invocation used at least ${(metadata.minimum_measured_boundary_cpu_occupancy * 100).toFixed(0)}% CPU occupancy; complete-process occupancy remains diagnostic` : `every complete process used at least ${(metadata.minimum_process_cpu_occupancy * 100).toFixed(0)}% CPU occupancy`;
-  const binaryProvenance = metadata.parent_binary_revision ? [`- parent binary revision: \`${metadata.parent_binary_revision}\``, `- candidate binary revision: \`${metadata.candidate_binary_revision}\``, `- shared measurement overlay: ${metadata.shared_measurement_overlay_paths.map((path: string) => `\`${path}\``).join(", ")}`] : [];
+  const binaryProvenance = metadata.parent_binary_revision ? [...(metadata.binary_provenance ? [`- binary provenance: \`${metadata.binary_provenance}\``] : []), `- parent binary revision: \`${metadata.parent_binary_revision}\``, `- candidate binary revision: \`${metadata.candidate_binary_revision}\``, `- shared measurement overlay: ${metadata.binary_provenance === "direct" ? "none (direct builds)" : metadata.shared_measurement_overlay_paths.map((path: string) => `\`${path}\``).join(", ")}`] : [];
   const replayContract = metadata.allocation_replay_contract ? [`- allocation replay signature: \`${metadata.allocation_replay_contract.profile_id}\` from \`${metadata.allocation_replay_contract.path}\` (\`${metadata.allocation_replay_contract.sha256}\`)`] : [];
   return [
     `# Exact-parent performance A/B — ${metadata.workload} (${metadata.mode}, ${metadata.lanes} lane(s))`, "",
@@ -399,7 +414,19 @@ export function selfTest(): void {
   const thermalDrift = syntheticSamples([100, 101], [99, 100], schema); thermalDrift[0].metrics.thermal_state.value = "nominal->fair"; requireValue(summarize(thermalDrift, schema, "quiet_reference").status === "blocked_efficiency_evidence", "thermal drift must block reference publication"); requireValue(summarize(thermalDrift, schema, "diagnostic").status === "diagnostic_only", "thermal drift must remain diagnostic off reference hosts");
   const cacheRequired = summarize(syntheticSamples([100, 101], [99, 100], schema), schema, "quiet_reference", ["cache_traffic"]); requireValue(cacheRequired.status === "blocked_efficiency_evidence" && JSON.stringify(cacheRequired.efficiency.unmet_metrics) === '["cache_misses"]', "unavailable cache evidence must block a cache-traffic publication");
   const samples = syntheticSamples([100, 101], [99, 100], schema), metadata: any = {}; for (const field of schema.required_metadata) metadata[field] = "test"; Object.assign(metadata, { parent_revision: "a".repeat(40), candidate_revision: "b".repeat(40), candidate_first_parent: "a".repeat(40), parent_binary_revision: "c".repeat(40), candidate_binary_revision: "d".repeat(40), shared_measurement_overlay_paths: ["bench/fixture.zig"], zig_gc_revision: "e".repeat(40), zig_regex_revision: "f".repeat(40), workload_source_sha256: "1".repeat(64), parent_binary_sha256: "2".repeat(64), candidate_binary_sha256: "3".repeat(64), host_class: "diagnostic", material_change_categories: ["cpu_work"], mode: "single", workload: "representative_json", lanes: 1, jobs: 2200, expected_checksum: 324952086, samples: 2, timed_boundary: "test boundary" });
+  metadata.binary_provenance = "shared_measurement_overlay";
   const artifact = { schema_version: schema.schema_version, profile_id: schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, schema, "diagnostic") }; validateArtifact(artifact, schema);
+  const direct = JSON.parse(JSON.stringify(artifact));
+  Object.assign(direct.metadata, { binary_provenance: "direct", parent_binary_revision: metadata.parent_revision, candidate_binary_revision: metadata.candidate_revision, shared_measurement_overlay_paths: [] });
+  validateArtifact(direct, schema);
+  const missingMode = JSON.parse(JSON.stringify(direct)); delete missingMode.metadata.binary_provenance; expectFailure(() => validateArtifact(missingMode, schema), "metadata missing binary_provenance");
+  const forgedDirect = JSON.parse(JSON.stringify(direct)); forgedDirect.metadata.candidate_binary_revision = "9".repeat(40); expectFailure(() => validateArtifact(forgedDirect, schema), "direct binary revision drift");
+  const directOverlay = JSON.parse(JSON.stringify(direct)); directOverlay.metadata.shared_measurement_overlay_paths = ["bench/fixture.zig"]; expectFailure(() => validateArtifact(directOverlay, schema), "must not declare an overlay");
+  const mixedMode = JSON.parse(JSON.stringify(artifact)); mixedMode.metadata.parent_binary_revision = metadata.parent_revision; expectFailure(() => validateArtifact(mixedMode, schema), "requires two overlay revisions");
+  const legacySchema = loadSchema(`${ROOT}/docs/.data/performance-attribution-schema-v3.json`);
+  const legacy = JSON.parse(JSON.stringify(artifact)); legacy.schema_version = 3; legacy.profile_id = legacySchema.profile_id; delete legacy.metadata.binary_provenance;
+  validateArtifact(legacy, legacySchema);
+  legacy.metadata.shared_measurement_overlay_paths = []; expectFailure(() => validateArtifact(legacy, legacySchema), "overlay path inventory is invalid");
   const invalidBinaryRevision = JSON.parse(JSON.stringify(artifact)); invalidBinaryRevision.metadata.parent_binary_revision = "not-a-revision"; expectFailure(() => validateArtifact(invalidBinaryRevision, schema), "invalid parent_binary_revision");
   const unsafeOverlayPath = JSON.parse(JSON.stringify(artifact)); unsafeOverlayPath.metadata.shared_measurement_overlay_paths = ["../fixture.zig"]; expectFailure(() => validateArtifact(unsafeOverlayPath, schema), "overlay path is unsafe");
   validateSampleQuality(samples); const invalidQuality = JSON.parse(JSON.stringify(samples)); invalidQuality[0].quality.measured_boundary_cpu_occupancy = 0.59; expectFailure(() => validateSampleQuality(invalidQuality), "below the publication threshold");
@@ -412,11 +439,23 @@ export function selfTest(): void {
     const logicalParent = resolveRevision("HEAD~2", directory), logicalCandidate = resolveRevision("HEAD~1", directory);
     requireValue(JSON.stringify(validateExactParent(logicalParent, logicalCandidate, directory)) === JSON.stringify([logicalParent, logicalCandidate]), "fixture exact parent did not validate");
     requireValue(JSON.stringify(validateDirectBinaryRevisions(logicalParent, logicalCandidate, logicalParent, logicalCandidate, directory)) === JSON.stringify([logicalParent, logicalCandidate]), "direct binary revisions did not validate");
+    requireValue(JSON.stringify(validateBinaryProvenance("direct", logicalParent, logicalCandidate, logicalParent, logicalCandidate, "inherited.txt", directory)) === JSON.stringify([logicalParent, logicalCandidate, []]), "direct provenance did not validate");
+    expectFailure(() => validateBinaryProvenance("unknown", logicalParent, logicalCandidate, logicalParent, logicalCandidate, "inherited.txt", directory), "binary provenance mode must be");
+    expectFailure(() => validateBinaryProvenance("direct", logicalParent, logicalCandidate, logicalParent, logicalCandidate, "../inherited.txt", directory), "safe repository-relative path");
+    expectFailure(() => validateBinaryProvenance("direct", logicalParent, logicalCandidate, logicalParent, logicalCandidate, "tracked.txt", directory), "binary workload source blob drift");
+    writeText(inheritedOverlay, "uncommitted workload drift\n");
+    expectFailure(() => validateBinaryProvenance("direct", logicalParent, logicalCandidate, logicalParent, logicalCandidate, "inherited.txt", directory), "working-tree workload source differs");
+    writeText(inheritedOverlay, "shared inherited overlay\n");
     expectFailure(() => validateDirectBinaryRevisions(logicalParent, logicalCandidate, logicalCandidate, logicalCandidate, directory), "direct parent binary revision does not match");
     expectFailure(() => validateExactParent(logicalParent, resolveRevision("HEAD", directory), directory), "not requested exact parent");
     checked(["git", "-C", directory, "checkout", "-qb", "parent-overlay", logicalParent], "create parent overlay fixture"); writeText(overlay, "shared overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage parent overlay"); checked(["git", "-C", directory, "commit", "-qm", "parent overlay"], "commit parent overlay"); const parentOverlay = resolveRevision("HEAD", directory);
     checked(["git", "-C", directory, "checkout", "-qb", "candidate-overlay", logicalCandidate], "create candidate overlay fixture"); writeText(overlay, "shared overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage candidate overlay"); checked(["git", "-C", directory, "commit", "-qm", "candidate overlay"], "commit candidate overlay"); const candidateOverlay = resolveRevision("HEAD", directory);
     requireValue(JSON.stringify(validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateOverlay, directory, ["inherited.txt", "overlay.txt"])) === JSON.stringify([parentOverlay, candidateOverlay]), "partially inherited shared measurement overlay fixture did not validate");
+    requireValue(JSON.stringify(validateBinaryProvenance("shared_measurement_overlay", logicalParent, logicalCandidate, parentOverlay, candidateOverlay, "inherited.txt", directory, ["inherited.txt", "overlay.txt"])) === JSON.stringify([parentOverlay, candidateOverlay, ["inherited.txt", "overlay.txt"]]), "explicit overlay provenance did not validate");
+    expectFailure(() => validateBinaryProvenance("direct", logicalParent, logicalCandidate, parentOverlay, candidateOverlay, "inherited.txt", directory), "direct parent binary revision does not match");
+    expectFailure(() => validateBinaryProvenance("shared_measurement_overlay", logicalParent, logicalCandidate, logicalParent, logicalCandidate, "inherited.txt", directory), "requires two overlay revisions");
+    expectFailure(() => validateBinaryProvenance("shared_measurement_overlay", logicalParent, logicalCandidate, parentOverlay, logicalCandidate, "inherited.txt", directory), "requires two overlay revisions");
+    expectFailure(() => validateBinaryProvenance("shared_measurement_overlay", logicalParent, logicalCandidate, logicalParent, candidateOverlay, "inherited.txt", directory), "requires two overlay revisions");
     expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateOverlay, directory, ["inherited.txt"]), "changed an undeclared path");
     expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, candidateOverlay, candidateOverlay, directory, ["inherited.txt", "overlay.txt"]), "parent binary revision is not a one-commit child");
     checked(["git", "-C", directory, "checkout", "-qb", "candidate-drift", logicalCandidate], "create mismatched candidate overlay fixture"); writeText(overlay, "different overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage mismatched overlay"); checked(["git", "-C", directory, "commit", "-qm", "candidate overlay drift"], "commit mismatched overlay"); const candidateDrift = resolveRevision("HEAD", directory);
@@ -460,6 +499,7 @@ function publishRow(parentBinary: string, candidateBinary: string, row: BatchRow
     ...(options.allocation_replay_mode ? { allocation_replay_mode: options.allocation_replay_mode } : {}),
     ...(replayContract ? { allocation_replay_contract: { schema_version: replayContract.schema_version, profile_id: replayContract.profile_id, path: options.allocation_replay_contract, sha256: sha256File(options.allocation_replay_contract) } } : {}),
     ...(identities.schema.schema_version >= 3 ? { parent_binary_revision: identities.parent_binary_revision, candidate_binary_revision: identities.candidate_binary_revision, shared_measurement_overlay_paths: identities.shared_measurement_overlay_paths } : {}),
+    ...(identities.schema.schema_version >= 4 ? { binary_provenance: identities.binary_provenance } : {}),
   };
   const artifact = { schema_version: identities.schema.schema_version, profile_id: identities.schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, identities.schema, options.host_class, identities.material_categories) };
   validateArtifact(artifact, identities.schema);
@@ -473,6 +513,7 @@ function main(): void {
   const raw = process.argv.slice(2); if (raw.length === 1 && raw[0] === "--self-test") { selfTest(); return; }
   const positional: string[] = [], options: any = { candidate_revision: "HEAD", lanes: 1, samples: 7, host_class: "diagnostic", schema: DEFAULT_SCHEMA };
   const names: any = { "--parent-revision": "parent_revision", "--candidate-revision": "candidate_revision", "--parent-binary-revision": "parent_binary_revision", "--candidate-binary-revision": "candidate_binary_revision", "--source": "source", "--mode": "mode", "--workload": "workload", "--jobs": "jobs", "--lanes": "lanes", "--expected-checksum": "expected_checksum", "--samples": "samples", "--host-class": "host_class", "--material-change": "material_change", "--timed-boundary": "timed_boundary", "--allocation-replay-mode": "allocation_replay_mode", "--allocation-replay-contract": "allocation_replay_contract", "--batch": "batch", "--schema": "schema", "--raw-out": "raw_out", "--markdown-out": "markdown_out" };
+  names["--binary-provenance"] = "binary_provenance";
   for (let index = 0; index < raw.length; index += 1) { if (!raw[index].startsWith("--")) positional.push(raw[index]); else { requireValue(names[raw[index]] && index + 1 < raw.length, `unknown or incomplete argument: ${raw[index]}`); const key = names[raw[index]], value = raw[++index]; options[key] = ["jobs", "lanes", "expected_checksum", "samples"].includes(key) ? Number(value) : value; } }
   requireValue(positional.length === 2, "usage: exact-parent-regression.ts PARENT_RUNNER CANDIDATE_RUNNER [options]");
   for (const field of ["parent_revision", "source", "mode", "timed_boundary"]) requireValue(options[field] !== undefined, `missing required option: ${field}`);
@@ -496,7 +537,11 @@ function main(): void {
   const binaryOptionsPresent = options.parent_binary_revision !== undefined || options.candidate_binary_revision !== undefined;
   requireValue(!binaryOptionsPresent || (options.parent_binary_revision !== undefined && options.candidate_binary_revision !== undefined), "parent and candidate binary revisions must be provided together");
   let parentBinaryRevision: string | undefined, candidateBinaryRevision: string | undefined, sharedMeasurementOverlayPaths: string[] | undefined;
-  if (schema.schema_version >= 3) {
+  requireValue(schema.schema_version >= 4 || options.binary_provenance === undefined, "explicit binary provenance requires schema v4 or later");
+  if (schema.schema_version >= 4) {
+    requireValue(binaryOptionsPresent, "schema v4 requires parent and candidate binary revisions");
+    [parentBinaryRevision, candidateBinaryRevision, sharedMeasurementOverlayPaths] = validateBinaryProvenance(options.binary_provenance, parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision, options.source);
+  } else if (schema.schema_version >= 3) {
     requireValue(binaryOptionsPresent, "schema v3 requires parent and candidate binary revisions");
     [parentBinaryRevision, candidateBinaryRevision] = validateSharedMeasurementOverlay(parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision);
     sharedMeasurementOverlayPaths = SHARED_MEASUREMENT_OVERLAY_PATHS;
@@ -505,6 +550,7 @@ function main(): void {
   }
   for (const repository of [ROOT, `${ROOT}/../zig-gc`, `${ROOT}/../zig-regex`]) requireClean(repository);
   const identities = { schema, parent_revision: parentRevision, candidate_revision: candidateRevision, parent_binary_revision: parentBinaryRevision, candidate_binary_revision: candidateBinaryRevision, shared_measurement_overlay_paths: sharedMeasurementOverlayPaths, zig_gc_revision: repositoryRevision(`${ROOT}/../zig-gc`), zig_regex_revision: repositoryRevision(`${ROOT}/../zig-regex`), zig_version: commandOutput(["zig", "version"]), os: commandOutput(["uname", "-a"]), hardware: `${commandOutput(["uname", "-m"])}; ${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}`, material_categories: materialCategories, workload_source_sha256: sha256File(options.source), parent_binary_sha256: sha256File(positional[0]), candidate_binary_sha256: sha256File(positional[1]) };
+  if (schema.schema_version >= 4) Object.assign(identities, { binary_provenance: options.binary_provenance });
   for (const row of rows) publishRow(positional[0], positional[1], row, options, identities);
   if (batchMode) console.log(`OK exact-parent batch: ${rows.length}/${rows.length} rows published serially`);
 }

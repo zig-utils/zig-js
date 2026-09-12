@@ -1,0 +1,50 @@
+{
+  "schema_version": 34,
+  "matrix_id": "zig-js-representative-v34",
+  "status": "frozen",
+  "frozen_date": "2026-09-12",
+  "owner_issue": 914,
+  "history_policy": "This version hash-inherits every V33 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, native runner, and publication ruling. It changes no scored row or production engine behavior. It versions explicit direct versus shared-overlay binary provenance and re-pins only the corresponding evidence schemas and validators. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v33",
+    "path": "docs/.data/representative-benchmark-matrix-v33.json",
+    "sha256": "a46a59d6d1a9631e0c9d32ebe4625d7d447acd3311138bc26adc2c70b4f3dd64",
+    "inherit": [
+      "compatibility_panel", "engines", "lanes", "protocol", "modes", "acceptance",
+      "required_families", "implemented_families", "deferred_families", "additional_panels",
+      "tier_attribution", "pending_metric_panels", "completed_metric_panels",
+      "instrumentation_overhead_integration", "context_lifecycle_integration",
+      "no_jit_integration", "string_indexing_integration"
+    ]
+  },
+  "change": "Adds attribution-v4 and growth-v4 with an explicit provenance mode. Direct binary revisions must equal the logical revisions and carry no overlay paths. Shared overlays retain one-commit ancestry, non-empty symmetric changes, the complete frozen path inventory, and effective blob equality. Both modes verify identical workload-source blobs in both binary revisions and the current checkout. Version 1 through 3 artifacts retain their original rules; no dummy overlay commits or schema downgrades are needed for new direct-build experiments.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "1172e37aaf04054729b7d43e7e8e759ed69dd0665f40895417499335a90a32d9",
+    "attribution_schema": {
+      "path": "docs/.data/performance-attribution-schema-v4.json",
+      "sha256": "dcf15638e4098e42ecf3793a9c26d67537287de111937b0e30412fec59d5da60"
+    },
+    "attribution_validator": {
+      "path": "tools/performance-attribution.ts",
+      "sha256": "4215226cf713cf7e48148229b2e49673320ace156a0d9df9d65d077044f21ce7"
+    },
+    "algorithmic_growth_schema": {
+      "path": "docs/.data/algorithmic-growth-schema-v4.json",
+      "sha256": "257ed49dd5f491b9631261a5f26088d69386760fc4385daad60f4dc8a5b9eb2a"
+    },
+    "algorithmic_growth_validator": {
+      "path": "tools/algorithmic-growth.ts",
+      "sha256": "bdbca221616a83ba671adc042b3be85a916835c97df83eca1c4bdd88cdf0284c"
+    },
+    "binary_provenance": "explicit_schema_v4_direct_or_shared_measurement_overlay",
+    "binary_provenance_profiles": {
+      "schema_v2": "declared_binary_revisions_equal_logical_revisions",
+      "schema_v3": "identical_one_commit_measurement_overlay_with_symmetric_inherited_blobs",
+      "schema_v4": "explicit_direct_or_identical_one_commit_measurement_overlay",
+      "partial_assertions": "refuse"
+    },
+    "workload_source_identity": "identical_git_blob_in_both_binary_revisions_and_current_checkout",
+    "publication_boundary": "V34 preserves every V33 timing, efficiency, cleanliness, checksum, serial-child, process-classification, native-runner, and mixed-tier allocation-replay gate. New exact-parent and growth artifacts require explicit direct or shared-overlay provenance. Missing, mixed, stale, or ambiguous identities are refused. Historical artifact contracts and all scored workload definitions remain unchanged."
+  }
+}

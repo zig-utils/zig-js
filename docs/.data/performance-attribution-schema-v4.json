@@ -1,0 +1,15 @@
+{
+  "schema_version": 4,
+  "profile_id": "zig-js-performance-attribution-v4",
+  "owner_issue": 914,
+  "history_policy": "Version 4 inherits all metrics, sample-quality and regression guards from version 3. It adds explicit direct versus shared-measurement-overlay provenance without reinterpreting version 1, 2 or 3 artifacts.",
+  "base_schema": "performance-attribution-schema-v3.json",
+  "required_metadata_append": ["binary_provenance"],
+  "quality_policy": {
+    "occupancy_scope": "declared_timed_boundary",
+    "minimum_cpu_occupancy": 0.6,
+    "complete_process_occupancy": "diagnostic_only",
+    "binary_provenance": "explicit_direct_or_identical_one-commit_measurement_overlay",
+    "legacy_validation": "Versions 1 through 3 retain their original provenance and quality contracts."
+  }
+}

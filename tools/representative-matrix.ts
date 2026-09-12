@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v33.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v34.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 33, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 34, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,33 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 33),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 34),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 34) {
+    requireValue(child.tier_attribution === undefined, "v34 must inherit the scored attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v34 changes exact-parent integration only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v34 must inherit completed panel inventory unchanged");
+    requireValue(child.exact_parent_integration && typeof child.exact_parent_integration === "object", "v34 must replace the exact-parent integration");
+    for (const name of ["instrumentation_overhead_integration", "context_lifecycle_integration", "no_jit_integration", "string_indexing_integration"])
+      requireValue(child[name] === undefined, `v34 must inherit ${name} unchanged`);
+    const exactParent = { ...inherited.exact_parent_integration, ...child.exact_parent_integration };
+    const merged = {
+      ...inherited,
+      ...child,
+      exact_parent_integration: exactParent,
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: { ...inherited.completed_metric_panels.efficiency_thermal, scored_integration: exactParent },
+      },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 33) {
     requireValue(child.tier_attribution && typeof child.tier_attribution === "object", "v33 must replace the attribution contract");
@@ -239,7 +259,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 33, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 34, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -370,11 +390,17 @@ export function validate(manifest: any, root = ROOT): void {
         requireValue(efficiency.scored_integration.binary_provenance === "identical_one-commit_measurement_overlay", "V25 binary provenance policy drift");
       if (manifest.schema_version >= 27) {
         const profiles = efficiency.scored_integration.binary_provenance_profiles;
-        requireValue(efficiency.scored_integration.binary_provenance === "schema_v2_direct_or_schema_v3_identical_one_commit_measurement_overlay", "V27 binary provenance policy drift");
+        const provenancePolicy = manifest.schema_version >= 34 ? "explicit_schema_v4_direct_or_shared_measurement_overlay" : "schema_v2_direct_or_schema_v3_identical_one_commit_measurement_overlay";
+        requireValue(efficiency.scored_integration.binary_provenance === provenancePolicy, "V27 binary provenance policy drift");
         const schemaV3 = manifest.schema_version >= 31
           ? "identical_one_commit_measurement_overlay_with_symmetric_inherited_blobs"
           : "identical_one_commit_measurement_overlay";
         requireValue(profiles && profiles.schema_v2 === "declared_binary_revisions_equal_logical_revisions" && profiles.schema_v3 === schemaV3 && profiles.partial_assertions === "refuse", "V27 binary provenance profile drift");
+        if (manifest.schema_version >= 34) {
+          requireValue(profiles.schema_v4 === "explicit_direct_or_identical_one_commit_measurement_overlay", "V34 binary provenance profile drift");
+          requireValue(efficiency.scored_integration.workload_source_identity === "identical_git_blob_in_both_binary_revisions_and_current_checkout", "V34 workload source identity drift");
+          requireValue(efficiency.scored_integration.attribution_schema.path === "docs/.data/performance-attribution-schema-v4.json" && efficiency.scored_integration.algorithmic_growth_schema.path === "docs/.data/algorithmic-growth-schema-v4.json", "V34 evidence schema selection drift");
+        }
         if (manifest.schema_version >= 31) {
           const overlay = efficiency.scored_integration.shared_measurement_overlay;
           requireValue(overlay && overlay.path_surface === "complete_frozen_inventory" && overlay.changed_subset === "same_nonempty_subset_on_parent_and_candidate" && overlay.effective_blobs === "identical_across_parent_and_candidate" && overlay.undeclared_changes === "refuse", "V31 shared measurement overlay policy drift");

@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v33.json`. V33 hash-inherits every V32 workload, representation, width, quick/full/publication job count, checksum, execution mode, scored operation, timing boundary, occupancy rule, native runner, mixed-tier replay signature, and publication ruling. It changes no scored row: the native Shape request/hit/miss/writer-yield map is restored to the fail-closed attribution inventory, phase deltas, checkpoint artifacts, and generated shared-realm report. Historical artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v34.json`. V34 hash-inherits every V33 workload, representation, width, quick/full/publication job count, checksum, execution mode, scored operation, timing boundary, occupancy rule, native runner, mixed-tier replay signature, and attribution counter. It changes no scored row: new exact-parent evidence explicitly distinguishes direct builds from shared measurement overlays, with versioned schemas and pinned validators. Historical artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -783,6 +783,8 @@ tool refuses a dirty tracked zig-js, zig-gc, or zig-regex worktree.
 ```sh
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/exact-parent-regression.ts /path/to/parent-runner /path/to/candidate-runner \
   --parent-revision HEAD^ --candidate-revision HEAD \
+  --binary-provenance direct \
+  --parent-binary-revision HEAD^ --candidate-binary-revision HEAD \
   --source bench/representative_comparison.js \
   --mode single --workload representative_json --jobs 2200 --lanes 1 \
   --material-change cpu_work \
@@ -816,6 +818,17 @@ delta records 1,428,928 to 1,417,728 Context backing allocations and
 `diagnostic`; the artifact closes the measurement-contract boundary and makes
 no throughput claim.
 
+The default [attribution-v4 contract](.data/performance-attribution-schema-v4.json)
+requires an explicit `--binary-provenance direct` or
+`--binary-provenance shared_measurement_overlay`. Direct builds must name binary
+revisions equal to their logical engine revisions and declare no overlay paths.
+Both modes verify that the repository-relative `--source` has the same Git blob
+in both binary revisions and in the current checkout. Binary hashes, clean
+dependencies, exact first-parent identity, alternating samples, checksum checks,
+and all existing quality gates remain required. Mixed or missing provenance is
+rejected; direct builds do not need dummy overlay commits. Version 1–3 artifacts
+retain their original validation rules.
+
 Schema-v3 binary provenance records the complete frozen measurement surface,
 not a demand for dummy edits. A logical parent/candidate pair may already
 inherit some effective overlay blobs. Both one-commit binary revisions must
@@ -848,10 +861,11 @@ gate behavior without executing reference-host measurements.
 The additive algorithmic-growth profile began with the immutable
 [`algorithmic-growth-schema-v1.json`](.data/algorithmic-growth-schema-v1.json).
 New collections use
-[`algorithmic-growth-schema-v3.json`](.data/algorithmic-growth-schema-v3.json),
-which additionally attests byte-identical one-commit measurement overlays for
-the exact logical engine revisions. The profile owns compiler-classifier
-changes whose optimized timed boundary is too short for stable wall, cycle, or
+[`algorithmic-growth-schema-v4.json`](.data/algorithmic-growth-schema-v4.json),
+which consumes attribution-v4 inputs and requires the same explicit direct or
+shared-overlay provenance across every width. Version 3 continues to attest
+byte-identical one-commit measurement overlays for historical inputs. The profile
+owns compiler-classifier changes whose optimized timed boundary is too short for stable wall, cycle, or
 energy measurement while the exact parent grows superlinearly. It does not
 relax or replace the ordinary exact-parent profile. Each input remains a
 complete `exact_parent_ab` artifact with every wall, CPU, RSS, allocation,

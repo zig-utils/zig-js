@@ -27,7 +27,7 @@ export function loadSchema(path = DEFAULT_SCHEMA): any { const schema = material
 
 export function validateSchema(schema: any): void {
   const version = schema.schema_version;
-  requireValue(version === 1 || version === 2 || version === 3, "unsupported attribution schema");
+  requireValue(version === 1 || version === 2 || version === 3 || version === 4, "unsupported attribution schema");
   requireValue(schema.profile_id === `zig-js-performance-attribution-v${version}`, "unexpected profile id");
   if (version === 2) {
     requireValue(schema.owner_issue === 768 && schema.base_schema === "performance-attribution-schema-v1.json", "attribution-v2 lineage drift");
@@ -38,6 +38,11 @@ export function validateSchema(schema: any): void {
     requireValue(schema.owner_issue === 768 && schema.base_schema === "performance-attribution-schema-v2.json", "attribution-v3 lineage drift");
     requireValue(JSON.stringify(schema.required_metadata_append) === '["parent_binary_revision","candidate_binary_revision","shared_measurement_overlay_paths"]', "attribution-v3 metadata extension drift");
     requireValue(schema.quality_policy?.occupancy_scope === "declared_timed_boundary" && schema.quality_policy?.minimum_cpu_occupancy === 0.6 && schema.quality_policy?.complete_process_occupancy === "diagnostic_only" && schema.quality_policy?.binary_provenance === "identical_one-commit_measurement_overlay", "attribution-v3 quality policy drift");
+  }
+  if (version === 4) {
+    requireValue(schema.owner_issue === 914 && schema.base_schema === "performance-attribution-schema-v3.json", "attribution-v4 lineage drift");
+    requireValue(JSON.stringify(schema.required_metadata_append) === '["binary_provenance"]', "attribution-v4 metadata extension drift");
+    requireValue(schema.quality_policy?.occupancy_scope === "declared_timed_boundary" && schema.quality_policy?.minimum_cpu_occupancy === 0.6 && schema.quality_policy?.complete_process_occupancy === "diagnostic_only" && schema.quality_policy?.binary_provenance === "explicit_direct_or_identical_one-commit_measurement_overlay", "attribution-v4 quality policy drift");
   }
   requireValue(sameSet(Object.keys(schema.metric_states || {}), ALLOWED_STATES), "metric state inventory drift");
   const identity = ["variant", "pair_sample", "order", "engine", "mode", "workload", "lanes", "jobs", "checksum"];
@@ -134,7 +139,17 @@ export function validateArtifact(artifact: any, schema: any): void {
   if (schema.schema_version >= 3) {
     for (const field of ["parent_binary_revision", "candidate_binary_revision"]) requireValue(isHex(metadata[field], 40), `exact-parent metadata has invalid ${field}`);
     const overlayPaths = metadata.shared_measurement_overlay_paths;
-    requireValue(Array.isArray(overlayPaths) && overlayPaths.length > 0 && unique(overlayPaths), "exact-parent measurement overlay path inventory is invalid");
+    requireValue(Array.isArray(overlayPaths) && unique(overlayPaths), "exact-parent measurement overlay path inventory is invalid");
+    if (schema.schema_version >= 4) {
+      requireValue(["direct", "shared_measurement_overlay"].includes(metadata.binary_provenance), "exact-parent binary provenance mode is invalid");
+      if (metadata.binary_provenance === "direct") {
+        requireValue(metadata.parent_binary_revision === metadata.parent_revision && metadata.candidate_binary_revision === metadata.candidate_revision, "exact-parent direct binary revision drift");
+        requireValue(overlayPaths.length === 0, "exact-parent direct provenance must not declare an overlay");
+      } else {
+        requireValue(metadata.parent_binary_revision !== metadata.parent_revision && metadata.candidate_binary_revision !== metadata.candidate_revision, "exact-parent overlay provenance requires two overlay revisions");
+        requireValue(overlayPaths.length > 0, "exact-parent measurement overlay path inventory is invalid");
+      }
+    } else requireValue(overlayPaths.length > 0, "exact-parent measurement overlay path inventory is invalid");
     requireValue(overlayPaths.every((path: any) => typeof path === "string" && path.split("/").every((segment: string) => segment.length > 0 && segment !== "." && segment !== "..")), "exact-parent measurement overlay path is unsafe");
     requireValue(JSON.stringify(overlayPaths) === JSON.stringify(overlayPaths.slice().sort()), "exact-parent measurement overlay paths are not canonical");
   }
