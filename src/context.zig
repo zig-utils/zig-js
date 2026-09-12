@@ -14194,6 +14194,39 @@ test "accessor parameter grammar reports JavaScriptCore tokens before body fault
     );
 }
 
+test "template function context preserves new target arguments and direct eval across tiers" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "function F(){ this.value = `${new.target === F}`; } var result = new F().value;", .expected = "true" },
+        .{ .source = "function F(){ this.value = String.raw`${new.target === F}`; } var result = new F().value;", .expected = "true" },
+        .{ .source = "function f(){ return `${new.target}`; } var result = f();", .expected = "undefined" },
+        .{ .source = "function F(){ this.read = () => `${new.target === F}`; } var result = new F().read();", .expected = "true" },
+        .{ .source = "function F(){ this.value = `${`nested ${new.target === F}`}`; } var result = new F().value;", .expected = "nested true" },
+        .{ .source = "function f(a){ return `${arguments[0]}`; } var result = f(7);", .expected = "7" },
+        .{ .source = "function f(a){ return String.raw`${arguments[0]}`; } var result = f(7);", .expected = "7" },
+        .{ .source = "function f(a){ return `${(() => arguments[0])()}`; } var result = f(7);", .expected = "7" },
+        .{ .source = "function f(a){ return `${eval('a')}`; } var result = f(7);", .expected = "7" },
+        .{ .source = "function f(){ `${eval('var local = 7')}`; return local; } var result = String(f());", .expected = "7" },
+        .{ .source = "function f(){ String.raw`${eval('var local = 7')}`; return local; } var result = String(f());", .expected = "7" },
+        .{ .source = "function f(a = `${eval('1')}`){ var a; return a; } var result = f();", .expected = "1" },
+        .{ .source = "function* f(a){ yield `${arguments[0]}`; } var result = f(7).next().value;", .expected = "7" },
+        .{ .source = "function F(){ this.value = `${(function inner(a){ return `${new.target}:${arguments[0]}`; })(9)}`; } var result = new F().value;", .expected = "undefined:9" },
+        .{ .source = "class C { static { this.value = `${new.target}`; } } var result = C.value;", .expected = "undefined" },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = false,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        errdefer std.debug.print("template context ({s}): {s}\n", .{ @tagName(mode), case.source });
+        _ = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, try (try ctx.evaluate("result")).asWtf8(ctx.arena()));
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    };
+}
+
 test "template substitution finalization prevents invalid code from executing" {
     const invalid = [_][]const u8{
         "`x${({__proto__: null, __proto__: {}})}`",

@@ -3742,6 +3742,27 @@ pub const Parser = struct {
         return cooked;
     }
 
+    fn templateSubparser(self: *Parser, source: []const u8) ParseError!Parser {
+        var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, source);
+        sub.shared_secure_hash_state = self.secureHashState();
+        // TemplateSubstitution is an Expression in the enclosing function, not
+        // a function boundary. Keep its grammar context and borrowed usage sinks;
+        // nested ordinary functions still replace those sinks, while arrows
+        // retain the appropriate lexical ownership. Statement/label state stays
+        // local to the new parser because a substitution cannot contain a break.
+        sub.in_generator = self.in_generator;
+        sub.in_async = self.in_async;
+        sub.in_class = self.in_class;
+        sub.strict = self.strict;
+        sub.module = self.module;
+        sub.new_target_depth = self.new_target_depth;
+        sub.current_arguments_use = self.current_arguments_use;
+        sub.current_direct_eval_use = self.current_direct_eval_use;
+        sub.eval_private_names = self.eval_private_names;
+        sub.regex_validation_arena = self.regex_validation_arena;
+        return sub;
+    }
+
     fn parseTemplate(self: *Parser, raw_in: []const u8) ParseError!*Node {
         const raw = try normalizeTemplateRaw(self.arena, raw_in);
         if (std.mem.indexOfScalar(u8, raw, '$') == null)
@@ -3759,18 +3780,7 @@ pub const Parser = struct {
                 node = try self.concatStr(node, (try self.cookTemplateQuasi(raw[raw_start..i], false)).?);
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
-                var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
-                sub.shared_secure_hash_state = self.secureHashState();
-                // A `${ }` substitution inherits the enclosing parsing context, so
-                // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
-                // template in a generator/async/class/strict/module body.
-                sub.in_generator = self.in_generator;
-                sub.in_async = self.in_async;
-                sub.in_class = self.in_class;
-                sub.strict = self.strict;
-                sub.module = self.module;
-                sub.eval_private_names = self.eval_private_names;
-                sub.regex_validation_arena = self.regex_validation_arena;
+                var sub = try self.templateSubparser(raw[expr_start..expr_end]);
                 const expression = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
                     return err;
@@ -3819,18 +3829,7 @@ pub const Parser = struct {
                 raws[substitution_index] = raw[raw_start..i];
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
-                var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
-                sub.shared_secure_hash_state = self.secureHashState();
-                // A `${ }` substitution inherits the enclosing parsing context, so
-                // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
-                // template in a generator/async/class/strict/module body.
-                sub.in_generator = self.in_generator;
-                sub.in_async = self.in_async;
-                sub.in_class = self.in_class;
-                sub.strict = self.strict;
-                sub.module = self.module;
-                sub.eval_private_names = self.eval_private_names;
-                sub.regex_validation_arena = self.regex_validation_arena;
+                var sub = try self.templateSubparser(raw[expr_start..expr_end]);
                 exprs[substitution_index] = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
                     return err;
@@ -5395,6 +5394,40 @@ test "parser derives arguments use in the active ordinary function scope" {
 
     const expression_decl = program.program[8].var_decl.init orelse return error.TestUnexpectedResult;
     try std.testing.expect(expression_decl.* == .function and expression_decl.function.uses_arguments);
+}
+
+test "template function context preserves usage ownership and eval phase" {
+    const cases = [_]struct { source: []const u8, arguments: bool = false, parameter_eval: bool = false, body_eval: bool = false }{
+        .{ .source = "function f() { return `${arguments[0]}`; }", .arguments = true },
+        .{ .source = "function f() { return tag`${arguments[0]}`; }", .arguments = true },
+        .{ .source = "function f() { return `${`nested ${arguments[0]}`}`; }", .arguments = true },
+        .{ .source = "function f() { return `${(() => arguments[0])()}`; }", .arguments = true },
+        .{ .source = "function f() { return `${function inner(){ return arguments[0] + eval('1'); }}`; }" },
+        .{ .source = "function f() { return `${eval('1')}`; }", .body_eval = true },
+        .{ .source = "function f() { return tag`${eval('1')}`; }", .body_eval = true },
+        .{ .source = "function f(a = `${eval('1')}`) { return a; }", .parameter_eval = true },
+        .{ .source = "function f(a = tag`${eval('1')}`) { return `${eval('a')}`; }", .parameter_eval = true, .body_eval = true },
+        .{ .source = "function f(a = `${(() => eval('1'))()}`) { return a; }", .parameter_eval = true },
+        .{ .source = "function f() { return `${eval?.('1')}`; }" },
+        .{ .source = "function f() { return `${(0,eval)('1')}`; }" },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        const program = try if (module) parser.parseModule() else parser.parseProgram();
+        const function = program.program[0].func_decl;
+        try std.testing.expectEqual(case.arguments, function.uses_arguments);
+        try std.testing.expectEqual(case.parameter_eval, function.uses_direct_eval_in_parameters);
+        try std.testing.expectEqual(case.body_eval, function.uses_direct_eval_in_body);
+        try std.testing.expectEqual(case.parameter_eval or case.body_eval, function.uses_direct_eval);
+    };
+    for ([_][]const u8{ "`${new.target}`", "tag`${new.target}`", "(() => `${new.target}`)()" }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
 }
 
 test "parser distinguishes parameter-phase direct eval structurally" {
