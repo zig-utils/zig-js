@@ -18,6 +18,12 @@ pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, In
 /// compact ParseError ABI while letting JS boundaries render an actual message
 /// instead of guessing from the token at which parsing happened to stop.
 pub const DiagnosticReason = enum {
+    getter_parameters,
+    setter_parameters,
+    setter_parameter_pattern,
+    unexpected_end_of_script,
+    duplicate_proto,
+    template_expression_tail,
     return_outside_function,
     invalid_assignment,
     invalid_destructuring_assignment,
@@ -49,6 +55,7 @@ pub const DiagnosticReason = enum {
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
+            .unexpected_end_of_script => ParseError.ExpectedToken,
             .invalid_assignment,
             .invalid_destructuring_assignment,
             .invalid_prefix_increment,
@@ -62,6 +69,12 @@ pub const DiagnosticReason = enum {
 
     pub fn message(reason: DiagnosticReason) []const u8 {
         return switch (reason) {
+            .getter_parameters => "getter functions must have no parameters.",
+            .setter_parameters => "setter functions must have one parameter.",
+            .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
+            .unexpected_end_of_script => "Unexpected end of script",
+            .duplicate_proto => "Attempted to redefine __proto__ property.",
+            .template_expression_tail => "Expected a closing '}' following an expression in template literal.",
             .return_outside_function => "Return statements are only valid inside functions.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
@@ -93,6 +106,11 @@ pub const DiagnosticReason = enum {
             .instance_setter_static_getter => "Cannot declare a private non-static setter if there is a static private getter with used name.",
         };
     }
+};
+
+const DiagnosticToken = struct {
+    kind: enum { identifier, keyword, number, string, token },
+    text: []const u8,
 };
 
 pub const SourceLocation = struct {
@@ -478,7 +496,7 @@ pub const Parser = struct {
     /// which is an early error for a real object literal but legal when the object
     /// is refined to a pattern (where `__proto__` is just a property key).
     /// Same lifecycle as `pending_cover_inits`.
-    pending_proto_dup: SecureIdentityMapUnmanaged(void) = .{},
+    pending_proto_dup: SecureIdentityMapUnmanaged(usize) = .{},
     /// Expression nodes that were wrapped in parentheses, keyed by node address
     /// so the mark is true pointer identity rather than any structural hashing.
     /// A parenthesized
@@ -524,6 +542,7 @@ pub const Parser = struct {
     /// `sourceLocationAt` to report useful source diagnostics.
     last_error_offset: ?usize = null,
     last_error_reason: ?DiagnosticReason = null,
+    last_error_token: ?DiagnosticToken = null,
     /// Statement locations accumulated while parsing, including nested function
     /// bodies. Consumers copy these entries into their context-owned registry
     /// before the parser value leaves scope.
@@ -629,13 +648,40 @@ pub const Parser = struct {
     fn fail(self: *Parser, err: ParseError) ParseError {
         self.last_error_offset = if (self.pos < self.tokens.len) self.cur().pos else self.source.len;
         self.last_error_reason = null;
+        self.last_error_token = null;
         return err;
     }
 
     fn failWithReasonAt(self: *Parser, reason: DiagnosticReason, offset: usize) ParseError {
         self.last_error_reason = reason;
+        self.last_error_token = null;
         self.last_error_offset = offset;
         return reason.parseError();
+    }
+
+    fn failWithTokenReason(self: *Parser, reason: DiagnosticReason) ParseError {
+        const token = self.cur();
+        if (token.kind == .eof) return self.failWithReasonAt(.unexpected_end_of_script, token.pos);
+        const err = self.failWithReasonAt(reason, token.pos);
+        self.last_error_token = .{
+            .kind = switch (token.kind) {
+                .identifier => if (isReservedWord(token.text)) .keyword else .identifier,
+                .number => .number,
+                .string => .string,
+                else => .token,
+            },
+            // Preserve the raw spelling, including identifier escapes and string
+            // quotes. The source has the same lifetime as the parser diagnostic.
+            .text = self.source[token.pos..token.end],
+        };
+        return err;
+    }
+
+    pub fn diagnosticMessage(self: *const Parser, allocator: std.mem.Allocator, reason: DiagnosticReason) std.mem.Allocator.Error![]const u8 {
+        const token = self.last_error_token orelse return reason.message();
+        const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
+        const quote = if (token.kind == .string) "" else "'";
+        return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. {s}", .{ noun, quote, token.text, quote, reason.message() });
     }
 
     pub fn errorLocation(self: *const Parser) SourceLocation {
@@ -926,8 +972,21 @@ pub const Parser = struct {
         try self.checkPrivateUsesInProgram(stmts.items);
         // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
         // early error.
-        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return self.fail(ParseError.UnexpectedToken);
+        try self.checkPendingCoverErrors();
         return self.alloc(.{ .program = stmts.items });
+    }
+
+    fn checkPendingCoverErrors(self: *Parser) ParseError!void {
+        if (self.pending_cover_inits.count() > 0) return self.fail(ParseError.UnexpectedToken);
+        // Object Initializer early errors are deferred until cover grammar has
+        // been refined: repeated __proto__ keys are legal in assignment patterns.
+        // Pick the first remaining violation, not hash-table iteration order.
+        var duplicate_offset: ?usize = null;
+        var offsets = self.pending_proto_dup.index.valueIterator();
+        while (offsets.next()) |offset| {
+            duplicate_offset = @min(duplicate_offset orelse offset.*, offset.*);
+        }
+        if (duplicate_offset) |offset| return self.failWithReasonAt(.duplicate_proto, offset);
     }
 
     /// Early-error check (13.2.1.1 et al.): a scope's lexically-declared names
@@ -1435,7 +1494,7 @@ pub const Parser = struct {
             try stmts.append(self.arena, try self.parseModuleItem());
         }
         try self.checkModuleEarlyErrors(stmts.items);
-        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return self.fail(ParseError.UnexpectedToken);
+        try self.checkPendingCoverErrors();
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -2151,6 +2210,7 @@ pub const Parser = struct {
         const statement_location_save = self.statementLocationCheckpoint();
         const error_offset_save = self.last_error_offset;
         const error_reason_save = self.last_error_reason;
+        const error_token_save = self.last_error_token;
         var decl_kind: ?ast.DeclKind = null;
         var is_using = false;
         var dispose: u8 = 0; // 1 = `using`, 2 = `await using` (for a for-of head)
@@ -2253,6 +2313,7 @@ pub const Parser = struct {
         self.restoreStatementLocationCheckpoint(statement_location_save);
         self.last_error_offset = error_offset_save;
         self.last_error_reason = error_reason_save;
+        self.last_error_token = error_token_save;
 
         var init_node: ?*Node = null;
         if (self.match(.semicolon)) {
@@ -2455,9 +2516,21 @@ pub const Parser = struct {
 
     /// Parse `(p1, p2 = default, ...rest)` into a slice of parameters.
     fn parseParamList(self: *Parser) ParseError![]const ast.Param {
+        return self.parseParamListForAccessor(.none);
+    }
+
+    fn parseParamListForAccessor(self: *Parser, accessor: ast.AccessorKind) ParseError![]const ast.Param {
         try self.expect(.lparen);
+        // MethodDefinition / PropertySetParameterList: a getter has no
+        // parameters and a setter has one FormalParameter, not FormalParameters.
+        // Validate here: a later AST arity check loses trailing commas and may
+        // diagnose a body error before the invalid parameter list.
+        if (accessor == .get and !self.check(.rparen)) return self.failWithTokenReason(.getter_parameters);
+        if (accessor == .set and self.check(.rparen)) return self.failWithTokenReason(.setter_parameters);
         var params: std.ArrayListUnmanaged(ast.Param) = .empty;
         while (!self.check(.rparen) and !self.check(.eof)) {
+            if (accessor == .set and (self.check(.ellipsis) or self.check(.comma)))
+                return self.failWithTokenReason(.setter_parameter_pattern);
             const is_rest = self.match(.ellipsis);
             // Destructuring parameter: `function f({a}, [b])`, and rest
             // destructuring: `function f(...[a], ...{a})` (no default allowed
@@ -2467,6 +2540,7 @@ pub const Parser = struct {
                 const default = if (!is_rest and self.match(.assign)) try self.parseAssignment() else null;
                 try params.append(self.arena, .{ .name = "", .pattern = pat, .default = default, .is_rest = is_rest });
                 if (is_rest) break; // a rest parameter must be last
+                if (accessor == .set and !self.check(.rparen)) return self.failWithTokenReason(.setter_parameters);
                 if (!self.match(.comma)) break;
                 continue;
             }
@@ -2477,8 +2551,10 @@ pub const Parser = struct {
             if (!is_rest and self.match(.assign)) default = try self.parseAssignment();
             try params.append(self.arena, .{ .name = p.text, .default = default, .is_rest = is_rest });
             if (is_rest) break; // a rest parameter must be last
+            if (accessor == .set and !self.check(.rparen)) return self.failWithTokenReason(.setter_parameters);
             if (!self.match(.comma)) break;
         }
+        if (accessor != .none and self.check(.eof)) return self.failWithTokenReason(.setter_parameters);
         try self.expect(.rparen);
         return params.items;
     }
@@ -2494,6 +2570,10 @@ pub const Parser = struct {
     /// inherit), so `yield`/`await` is an ordinary identifier in its parameters
     /// again. (Arrows, which DO inherit, use parseParamList directly instead.)
     fn parseFunctionParamList(self: *Parser, is_gen: bool, is_async: bool) ParseError![]const ast.Param {
+        return self.parseFunctionParamListForAccessor(is_gen, is_async, .none);
+    }
+
+    fn parseFunctionParamListForAccessor(self: *Parser, is_gen: bool, is_async: bool, accessor: ast.AccessorKind) ParseError![]const ast.Param {
         const saved_async = self.in_async;
         const saved_gen = self.in_generator;
         self.new_target_depth += 1;
@@ -2504,7 +2584,7 @@ pub const Parser = struct {
             self.in_generator = saved_gen;
             self.new_target_depth -= 1;
         }
-        const params = try self.parseParamList();
+        const params = try self.parseParamListForAccessor(accessor);
         if (is_gen or is_async) {
             const saved_allow = self.scan_allow_arguments;
             const saved_fy = self.scan_forbid_yield;
@@ -2548,17 +2628,6 @@ pub const Parser = struct {
 
     fn isAnnexBCallAssignmentTarget(node: *const Node) bool {
         return node.* == .call;
-    }
-
-    /// A getter takes no parameters; a setter takes exactly one (non-rest)
-    /// parameter. Otherwise it's a SyntaxError. `func` is a `.function` node.
-    fn validateAccessor(func: *Node, kind: ast.AccessorKind) ParseError!void {
-        const params = func.function.params;
-        switch (kind) {
-            .get => if (params.len != 0) return ParseError.UnexpectedToken,
-            .set => if (params.len != 1 or params[0].is_rest) return ParseError.UnexpectedToken,
-            .none => {},
-        }
     }
 
     /// Strict-mode early errors on a formal parameter list: a parameter named
@@ -3702,7 +3771,7 @@ pub const Parser = struct {
                 sub.module = self.module;
                 sub.eval_private_names = self.eval_private_names;
                 sub.regex_validation_arena = self.regex_validation_arena;
-                const expression = sub.parseExpression() catch |err| {
+                const expression = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
                     return err;
                 };
@@ -3762,7 +3831,7 @@ pub const Parser = struct {
                 sub.module = self.module;
                 sub.eval_private_names = self.eval_private_names;
                 sub.regex_validation_arena = self.regex_validation_arena;
-                exprs[substitution_index] = sub.parseExpression() catch |err| {
+                exprs[substitution_index] = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
                     return err;
                 };
@@ -3779,8 +3848,19 @@ pub const Parser = struct {
         return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = exprs, .source = source } });
     }
 
+    fn parseTemplateExpression(self: *Parser) ParseError!*Node {
+        const expression = try self.parseExpression();
+        // A TemplateSubstitution contains one complete Expression. This parser
+        // owns the extracted substitution, so neither trailing tokens nor cover
+        // early errors can be left for the enclosing Program/Module to inspect.
+        if (!self.check(.eof)) return self.failWithTokenReason(.template_expression_tail);
+        try self.checkPendingCoverErrors();
+        return expression;
+    }
+
     fn inheritTemplateDiagnostic(self: *Parser, sub: *const Parser, raw_in: []const u8, expression_start: usize) void {
         self.last_error_reason = sub.last_error_reason;
+        self.last_error_token = sub.last_error_token;
         // Substitution parsers see normalized TRV. Translate the error offset
         // back over removed CRLF bytes before publishing the enclosing source
         // position; normalized offsets are not offsets into the original file.
@@ -3883,7 +3963,8 @@ pub const Parser = struct {
         self.no_in = false;
         defer self.no_in = saved_no_in;
         var has_cover_init = false;
-        var proto_colon_count: u32 = 0;
+        var seen_proto_colon = false;
+        var duplicate_proto_offset: ?usize = null;
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             // Spread property `{ ...expr }`.
@@ -3906,7 +3987,7 @@ pub const Parser = struct {
                 const key_expr = try self.parseAssignment();
                 try self.expect(.rbracket);
                 if (self.check(.lparen)) {
-                    const fnode = try self.parseMethodTail("", gen_method, async_method, member_start);
+                    const fnode = try self.parseMethodTail("", gen_method, async_method, member_start, .none);
                     try props.append(self.arena, .{ .key_expr = key_expr, .value = fnode });
                 } else {
                     try self.expect(.colon);
@@ -3924,8 +4005,7 @@ pub const Parser = struct {
                 // A private name (`#x`) is only a valid member name in a class
                 // body, never in an object literal accessor (`({ get #x(){} })`).
                 if (pn.key.len > 0 and pn.key[0] == '#') return ParseError.UnexpectedToken;
-                const func = try self.parseMethodTail(pn.key, false, false, member_start);
-                try validateAccessor(func, kind);
+                const func = try self.parseMethodTail(pn.key, false, false, member_start, kind);
                 try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
                 if (!self.match(.comma)) break;
                 continue;
@@ -3947,7 +4027,7 @@ pub const Parser = struct {
             var is_proto_colon = false;
             if (self.check(.lparen)) {
                 // Method shorthand `{ m(args) { ... } }` -> a function value.
-                val = try self.parseMethodTail(key, gen_method, async_method, member_start);
+                val = try self.parseMethodTail(key, gen_method, async_method, member_start, .none);
             } else if (gen_method or async_method) {
                 // A `*`/`async` modifier must introduce a method (a `(params){…}`
                 // must follow the name): `({ *foo })`, `({ async async })` are
@@ -3957,7 +4037,8 @@ pub const Parser = struct {
                 // `__proto__: value` (identifier or string key, not computed) is a
                 // prototype setter; two of them in one literal is an early error.
                 if (std.mem.eql(u8, key, "__proto__")) {
-                    proto_colon_count += 1;
+                    if (seen_proto_colon and duplicate_proto_offset == null) duplicate_proto_offset = key_tok.pos;
+                    seen_proto_colon = true;
                     is_proto_colon = true;
                 }
                 val = try self.parseAssignment();
@@ -3992,7 +4073,7 @@ pub const Parser = struct {
         for (props.items) |p| try self.checkMethodNoSuperCall(p.value);
         const node = try self.alloc(.{ .object_lit = props.items });
         if (has_cover_init) try self.pending_cover_inits.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
-        if (proto_colon_count >= 2) try self.pending_proto_dup.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
+        if (duplicate_proto_offset) |offset| try self.pending_proto_dup.put(self.arena, self.secureHashState(), @intFromPtr(node), offset);
         return node;
     }
 
@@ -4234,8 +4315,7 @@ pub const Parser = struct {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const apn = try self.parsePropertyName();
-                const func = try self.parseMethodTail(apn.key, false, false, member_start);
-                try validateAccessor(func, kind);
+                const func = try self.parseMethodTail(apn.key, false, false, member_start, kind);
                 try members.append(self.arena, .{ .key = apn.key, .key_expr = apn.expr, .func = func, .is_static = is_static, .accessor = kind });
                 continue;
             }
@@ -4252,7 +4332,7 @@ pub const Parser = struct {
             const pn = try self.parsePropertyName();
             if (self.check(.lparen)) {
                 // Method.
-                const func = try self.parseMethodTail(pn.key, gen_method, async_method, member_start);
+                const func = try self.parseMethodTail(pn.key, gen_method, async_method, member_start, .none);
                 const is_ctor = !is_static and !gen_method and !async_method and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
             } else {
@@ -4831,7 +4911,7 @@ pub const Parser = struct {
 
     /// Parse `(params) { body }` after a method name, returning a function node.
     /// `is_gen` marks a generator method (`*m() {}`).
-    fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
+    fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize, accessor: ast.AccessorKind) ParseError!*Node {
         var uses_arguments = false;
         var uses_direct_eval = false;
         var uses_direct_eval_in_parameters = false;
@@ -4844,7 +4924,7 @@ pub const Parser = struct {
             self.current_arguments_use = saved_arguments_use;
             self.current_direct_eval_use = saved_direct_eval_use;
         }
-        const params = try self.parseFunctionParamList(is_gen, is_async);
+        const params = try self.parseFunctionParamListForAccessor(is_gen, is_async, accessor);
         self.current_direct_eval_use = &uses_direct_eval_in_body;
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
@@ -6423,6 +6503,76 @@ test "assignment diagnostic reasons preserve error tags and operator offsets" {
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
     }
+}
+
+test "accessor parameter grammar retains the actual offending token" {
+    const Case = struct { source: []const u8, reason: DiagnosticReason, marker: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "({get x(a) { return ++1; }})", .reason = .getter_parameters, .marker = "a)" },
+        .{ .source = "({get x({a}) {}})", .reason = .getter_parameters, .marker = "{a}" },
+        .{ .source = "({get x(\\u0061) {}})", .reason = .getter_parameters, .marker = "\\u0061" },
+        .{ .source = "({set x() {}})", .reason = .setter_parameters, .marker = ")" },
+        .{ .source = "({set x(a,) {}})", .reason = .setter_parameters, .marker = "," },
+        .{ .source = "({set x({a},) {}})", .reason = .setter_parameters, .marker = "," },
+        .{ .source = "class C { static set x(a,b) {} }", .reason = .setter_parameters, .marker = "," },
+        .{ .source = "class C { set #x(...a) {} }", .reason = .setter_parameter_pattern, .marker = "..." },
+        .{ .source = "`a\r\n${({get x(é) {}})}`", .reason = .getter_parameters, .marker = "é" },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, if (module) parser.parseModule() else parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expect(parser.last_error_token != null);
+    };
+    for ([_][]const u8{
+        "({get x() {}, set x(a) {}})",
+        "({set x({a,b} = {}) {}})",
+        "({set x([a,...b]) {}})",
+        "class C { static set #x({a} = {}) {} }",
+        "function f(a,) {} ({m(a,) {}}); class C { m(a,) {} }",
+    }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        _ = try parser.parseProgram();
+    }
+}
+
+test "template substitution finalization rejects pending cover errors and trailing tokens" {
+    const Case = struct { source: []const u8, reason: ?DiagnosticReason, marker: ?[]const u8 = null };
+    const cases = [_]Case{
+        .{ .source = "`x${({__proto__: null, '__proto__': {}})}`", .reason = .duplicate_proto, .marker = "'__proto__'" },
+        .{ .source = "String.raw`x${({__proto__: null, '__proto__': {}})}`", .reason = .duplicate_proto, .marker = "'__proto__'" },
+        .{ .source = "`x\r\n${`y${({__proto__: null, '__proto__': {}})}`}`", .reason = .duplicate_proto, .marker = "'__proto__'" },
+        .{ .source = "`x${({a = 1})}`", .reason = null },
+        .{ .source = "String.raw`x${({a = 1})}`", .reason = null },
+        .{ .source = "`x${1 2}`", .reason = .template_expression_tail, .marker = "2" },
+        .{ .source = "String.raw`x${1; 2}`", .reason = .template_expression_tail, .marker = ";" },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, if (module) parser.parseModule() else parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason);
+        if (case.marker) |marker| try std.testing.expectEqual(std.mem.indexOf(u8, case.source, marker).?, parser.errorLocation().byte_offset);
+    };
+    for ([_][]const u8{
+        "var a,b; `x${({__proto__: a, __proto__: b} = {})}`",
+        "var a; `x${({a = 1} = {})}`",
+        "var a; String.raw`x${({a = 1} = {})}`",
+        "`x${({['__proto__']: 1, ['__proto__']: 2})}`",
+        "`x${1,2}`",
+        "String.raw`x${`y${(1,2)}`}`",
+    }) |source| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        _ = try if (module) parser.parseModule() else parser.parseProgram();
+    };
 }
 
 test "parser reports private name validation scratch exhaustion" {

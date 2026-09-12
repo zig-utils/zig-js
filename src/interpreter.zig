@@ -5602,7 +5602,7 @@ pub const Interpreter = struct {
         const loc = if (parser) |p| p.errorLocation() else parser_mod.sourceLocationAt(source, 0);
         if (parser) |p| if (p.last_error_reason) |reason| {
             if (err == reason.parseError())
-                return self.throwParserSyntaxErrorMessageAt(reason.message(), loc);
+                return self.throwParserSyntaxErrorMessageAt(try p.diagnosticMessage(self.arena, reason), loc);
         };
         return self.throwParserSyntaxErrorAt(context, loc, err);
     }

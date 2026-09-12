@@ -14154,6 +14154,83 @@ test "assignment diagnostic reasons preserve early errors and Annex B calls" {
     );
 }
 
+test "accessor parameter grammar reports JavaScriptCore tokens before body faults" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "({get x(a) { return ++1; }})", .message = "Unexpected identifier 'a'. getter functions must have no parameters." },
+        .{ .source = "({get x(\\u0061) {}})", .message = "Unexpected identifier '\\u0061'. getter functions must have no parameters." },
+        .{ .source = "({get x(é) {}})", .message = "Unexpected identifier 'é'. getter functions must have no parameters." },
+        .{ .source = "({get x({a}) {}})", .message = "Unexpected token '{'. getter functions must have no parameters." },
+        .{ .source = "({get x(1) {}})", .message = "Unexpected number '1'. getter functions must have no parameters." },
+        .{ .source = "({get x(\"a\") {}})", .message = "Unexpected string literal \"a\". getter functions must have no parameters." },
+        .{ .source = "({get x(null) {}})", .message = "Unexpected keyword 'null'. getter functions must have no parameters." },
+        .{ .source = "({set x() {}})", .message = "Unexpected token ')'. setter functions must have one parameter." },
+        .{ .source = "({set x(a,) {}})", .message = "Unexpected token ','. setter functions must have one parameter." },
+        .{ .source = "({set x({a},) {}})", .message = "Unexpected token ','. setter functions must have one parameter." },
+        .{ .source = "({set x(...a) { return ++1; }})", .message = "Unexpected token '...'. Expected a parameter pattern or a ')' in parameter list." },
+        .{ .source = "class C { static get x(a) {} }", .message = "Unexpected identifier 'a'. getter functions must have no parameters." },
+        .{ .source = "class C { set #x(a,b) {} }", .message = "Unexpected token ','. setter functions must have one parameter." },
+        .{ .source = "`x\r\n${({get x(a) {}})}`", .message = "Unexpected identifier 'a'. getter functions must have no parameters." },
+    };
+    for (cases) |case| {
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, case.source, .{});
+        defer std.testing.allocator.free(encoded);
+        for ([_][]const u8{ "eval", "Function" }) |operation| {
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var caught = ''; try {{ {s}({s}); }} catch (e) {{ if (!(e instanceof SyntaxError)) throw e; caught = e.message; }} caught", .{ operation, encoded });
+            defer std.testing.allocator.free(probe);
+            const ctx = try Context.create(std.testing.allocator);
+            defer ctx.destroy();
+            const actual = try ctx.evaluate(probe);
+            try std.testing.expectEqualStrings(case.message, try actual.asWtf8(ctx.arena()));
+        }
+    }
+    try expectEvalStr("3:6",
+        \\var seen = 0; var o = {set x({a} = {a:3}) {seen = a}, get x() {return seen}};
+        \\o.x = undefined; var first = o.x; o.x = {a:6}; first + ':' + o.x
+    );
+    try expectEvalStr("SyntaxError:0",
+        \\var effect = 0; try { eval('effect = 1; ({set x(a,) {}})'); }
+        \\catch(e) { var result = e.name + ':' + effect; } result
+    );
+}
+
+test "template substitution finalization prevents invalid code from executing" {
+    const invalid = [_][]const u8{
+        "`x${({__proto__: null, __proto__: {}})}`",
+        "String.raw`x${({__proto__: null, __proto__: {}})}`",
+        "`x${({a = 1})}`",
+        "String.raw`x${({a = 1})}`",
+        "`x${1 2}`",
+        "String.raw`x${1 2}`",
+        "`x${1; 2}`",
+        "String.raw`x${1; 2}`",
+        "`x${`y${({__proto__: null, __proto__: {}})}`}`",
+    };
+    for (invalid) |source| {
+        const with_effect = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{source});
+        defer std.testing.allocator.free(with_effect);
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, with_effect, .{});
+        defer std.testing.allocator.free(encoded);
+        for ([_][]const u8{ "eval", "Function" }) |operation| {
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, result = ''; try {{ {s}({s}); }} catch(e) {{ result = e.name + ':' + effect; }} result", .{ operation, encoded });
+            defer std.testing.allocator.free(probe);
+            try expectEvalStr("SyntaxError:0", probe);
+        }
+    }
+    try expectEvalStr("14:4:2",
+        \\var a, b; var first = `${({__proto__: a, __proto__: b} = {['__proto__']:7}), a+b}`;
+        \\var second = String.raw`${({a = 4} = {}), a}`;
+        \\first + ':' + second + ':' + `${1,2}`
+    );
+    try expectEvalStr("Attempted to redefine __proto__ property.",
+        \\try { eval("`x${({__proto__: null, __proto__: {}})}`"); }
+        \\catch(e) { var message = e.message; } message
+    );
+    try expectEvalStr("Unexpected number '2'. Expected a closing '}' following an expression in template literal.",
+        \\try { eval("`x${1 2}`"); } catch(e) { var message = e.message; } message
+    );
+}
+
 test "JSON.parse names the syntax fault the way JavaScriptCore does" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{
