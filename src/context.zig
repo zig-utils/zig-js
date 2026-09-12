@@ -14015,16 +14015,25 @@ test "RegExp syntax errors use JavaScriptCore's flags constant and exact reasons
 test "private brand failures distinguish fields from methods and accessors like JavaScriptCore" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{
-        .{ .source = "class C { #x; static read(o) { return o.#x; } } C.read({})", .message = "Cannot access invalid private field" },
-        .{ .source = "class C { #x; static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access invalid private field" },
-        .{ .source = "class C { #x() {} static read(o) { return o.#x; } } C.read({})", .message = "Cannot access private method or acessor" },
-        .{ .source = "class C { #x() {} static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access private method or acessor" },
-        .{ .source = "class C { get #x() { return 1; } static read(o) { return o.#x; } } C.read({})", .message = "Cannot access private method or acessor" },
-        .{ .source = "class C { set #x(v) {} static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access private method or acessor" },
+        .{ .source = "class C { #x; static read(o) { return o.#x; } } C.read({})", .message = "Cannot access invalid private field (evaluating 'o.#x')" },
+        .{ .source = "class C { #x; static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access invalid private field (evaluating 'o.#x = 1')" },
+        .{ .source = "class C { #x() {} static read(o) { return o.#x; } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        .{ .source = "class C { #x() {} static read(o) { return o.#x(); } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        .{ .source = "class C { #x() {} static read(o) { return o.#x?.(); } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        .{ .source = "class C { #x() {} static read(o) { return o.#x`tag`; } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        .{ .source = "class C { #x() {} static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access private method or acessor (evaluating 'o.#x = 1')" },
+        .{ .source = "class C { get #x() { return 1; } static read(o) { return o.#x; } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        .{ .source = "class C { set #x(v) {} static write(o) { o.#x = 1; } } C.write({})", .message = "Cannot access private method or acessor (evaluating 'o.#x = 1')" },
+        .{ .source = "class C { #x; static update(o) { return o.#x++; } } C.update({})", .message = "Cannot access invalid private field (evaluating 'o.#x')" },
+        .{ .source = "class C { #x; static update(o) { return o.#x += 1; } } C.update({})", .message = "Cannot access invalid private field (evaluating 'o.#x')" },
         // The declaration kind is lexical metadata: nested classes and direct
         // eval must retain it rather than infer it from the unbranded receiver.
-        .{ .source = "class C { #x() {} static read(o) { class D { read() { return o.#x; } } return new D().read(); } } C.read({})", .message = "Cannot access private method or acessor" },
-        .{ .source = "class C { #x() {} static read(o) { return eval('o.#x'); } } C.read({})", .message = "Cannot access private method or acessor" },
+        .{ .source = "class C { #x() {} static read(o) { class D { read() { return o.#x; } } return new D().read(); } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        .{ .source = "class C { #x() {} static read(o) { return eval('o.#x'); } } C.read({})", .message = "Cannot access private method or acessor (evaluating 'o.#x')" },
+        // Warm the static method past the optimizing-tier threshold before the
+        // failing call. Native property operations must retain the VM site and
+        // must not mistake private slots for ordinary shape-cache entries.
+        .{ .source = "class C { #x; static read(o) { return o.#x; } } var c = new C(); for (var i = 0; i < 50; i++) C.read(c); C.read({})", .message = "Cannot access invalid private field (evaluating 'o.#x')" },
     };
     var buffer: [768]u8 = undefined;
     for (cases) |case| {
@@ -14037,10 +14046,12 @@ test "private brand failures distinguish fields from methods and accessors like 
         try std.testing.expectEqualStrings(expected, (try tree_ctx.evaluate(tree_probe)).asStr());
 
         const vm_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; function* g() {{ {s} }} try {{ g().next(); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
-        const vm_ctx = try Context.create(std.testing.allocator);
-        defer vm_ctx.destroy();
-        vm_ctx.setBytecodeExecutionModeForTesting(.required);
-        try std.testing.expectEqualStrings(expected, (try vm_ctx.evaluate(vm_probe)).asStr());
+        for ([_]bool{ false, true }) |enable_jit| {
+            const vm_ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = enable_jit });
+            defer vm_ctx.destroy();
+            vm_ctx.setBytecodeExecutionModeForTesting(.required);
+            try std.testing.expectEqualStrings(expected, (try vm_ctx.evaluate(vm_probe)).asStr());
+        }
     }
 }
 

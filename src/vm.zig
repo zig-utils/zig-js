@@ -4336,6 +4336,11 @@ fn nativeGetPropertyAtSite(
 ) EvalError!Value {
     if (object_value.isNull() or object_value.isUndefined())
         return interp.throwNotAnObject(vm, object_value, site);
+    // Private fields share the named-property opcodes after class-name
+    // rewriting, but their brand and descriptor checks are not ordinary shape
+    // guards. Keep them out of the native inline cache just as runChunk does.
+    if (value.isPrivateKey(name))
+        return vm.getPropertyAtSite(object_value, name, site);
     if (object_value.isObject()) {
         const object = object_value.asObj();
         try vm.checkRestricted(object);
@@ -4356,7 +4361,7 @@ fn nativeGetPropertyAtSite(
             }
         }
     }
-    return vm.getProperty(object_value, name);
+    return vm.getPropertyAtSite(object_value, name, site);
 }
 
 fn nativeSetProperty(
@@ -4379,6 +4384,14 @@ fn nativeSetPropertyAtSite(
 ) EvalError!Value {
     if (object_value.isNull() or object_value.isUndefined())
         return interp.throwNotAnObject(vm, object_value, site);
+    // A matching shape does not prove a private brand, nor does a raw slot
+    // store preserve private accessor semantics. Always use PrivateSet.
+    if (value.isPrivateKey(name)) {
+        const value_root = try vm.pushTempRoot(value_word);
+        defer vm.restoreTempRoots(value_root);
+        try vm.setMemberAtSite(object_value, name, value_word, site);
+        return vm.tempRoot(value_root, value_word);
+    }
     if (object_value.isObject()) {
         const object = object_value.asObj();
         try vm.checkRestricted(object);
@@ -4399,7 +4412,7 @@ fn nativeSetPropertyAtSite(
     }
     const value_root = try vm.pushTempRoot(value_word);
     defer vm.restoreTempRoots(value_root);
-    try vm.setMember(object_value, name, value_word);
+    try vm.setMemberAtSite(object_value, name, value_word, site);
     return vm.tempRoot(value_root, value_word);
 }
 
@@ -9060,7 +9073,7 @@ fn runChunk(
                     return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
-                const result = try vm.getProperty(obj, name);
+                const result = try vm.getPropertyAtSite(obj, name, vmEvaluationSite(chunk, ip));
                 optimizer_delta.observeValue(optimizerProfileKind(result));
                 try stack.append(stack_alloc, result);
             },
@@ -9070,6 +9083,12 @@ fn runChunk(
                     return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = chunk.names.items[inst.a];
+                if (value.isPrivateKey(name)) {
+                    const result = try vm.getPropertyAtSite(obj, name, vmEvaluationSite(chunk, ip));
+                    optimizer_delta.observeValue(optimizerProfileKind(result));
+                    try stack.append(stack_alloc, result);
+                    continue;
+                }
                 var result: Value = undefined;
                 fast: {
                     // Inline cache: plain (non-array) objects with a shape and
@@ -9357,7 +9376,7 @@ fn runChunk(
                     return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
-                try stack.append(stack_alloc, try nativeSetProperty(vm, null, obj, name, v));
+                try stack.append(stack_alloc, try nativeSetPropertyAtSite(vm, null, obj, name, v, vmEvaluationSite(chunk, ip)));
             },
             .set_prop => {
                 var v = stack.pop().?;
@@ -9366,6 +9385,10 @@ fn runChunk(
                     return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = chunk.names.items[inst.a];
+                if (value.isPrivateKey(name)) {
+                    try stack.append(stack_alloc, try nativeSetPropertyAtSite(vm, null, obj, name, v, vmEvaluationSite(chunk, ip)));
+                    continue;
+                }
                 fast: {
                     // Inline cache hits only update an existing slot; adding a
                     // property transitions the shape, so it goes the slow path.
@@ -9392,7 +9415,7 @@ fn runChunk(
                             }
                         }
                     }
-                    v = try nativeSetProperty(vm, null, obj, name, v);
+                    v = try nativeSetPropertyAtSite(vm, null, obj, name, v, vmEvaluationSite(chunk, ip));
                 }
                 try stack.append(stack_alloc, v); // assignment yields the value
             },

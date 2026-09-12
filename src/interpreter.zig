@@ -6024,12 +6024,12 @@ pub const Interpreter = struct {
                         std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable
                     else
                         try self.keyOf(kv);
-                    break :blk try self.getProperty(obj, key);
+                    break :blk try self.getPropertyAtSite(obj, key, .{ .source = m.source });
                 }
                 if (obj.isNull() or obj.isUndefined()) {
                     return throwNotAnObject(self, obj, .{ .source = m.source });
                 }
-                break :blk try self.getProperty(obj, m.property);
+                break :blk try self.getPropertyAtSite(obj, m.property, .{ .source = m.source });
             },
             .optional_chain => |inner| self.eval(inner) catch |e|
                 if (e == error.OptShortCircuit) Value.undef() else return e,
@@ -7161,7 +7161,7 @@ pub const Interpreter = struct {
             return if (self.is_super)
                 machine.getPropertyWithReceiver(base, property, machine.tempRoot(self.receiver_root, self.receiver))
             else
-                machine.getProperty(base, property);
+                machine.getPropertyAtSite(base, property, .{ .source = self.source });
         }
 
         fn put(self: RootedPropertyReference, machine: *Interpreter, rhs: Value, numeric_fastpath: bool) EvalError!void {
@@ -7179,7 +7179,7 @@ pub const Interpreter = struct {
                     if (machine.strict) return machine.throwSetFailed(base, property);
                 }
             } else {
-                try machine.setMember(base, property, rhs);
+                try machine.setMemberAtSite(base, property, rhs, .{ .source = self.source });
             }
         }
     };
@@ -7370,12 +7370,12 @@ pub const Interpreter = struct {
             if (current_recv.isNull() or current_recv.isUndefined())
                 return throwNotAnObject(self, current_recv, .{ .source = member.source });
             const key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else member.property;
-            const update = try self.prepareNumericUpdate(try self.getProperty(self.tempRoot(recv_root, recv), key), inc);
+            const update = try self.prepareNumericUpdate(try self.getPropertyAtSite(self.tempRoot(recv_root, recv), key, .{ .source = member.source }), inc);
             defer update.deinit(self);
             // Re-encode a primitive key after GetValue/ToNumeric: no user coercion is
             // repeated, and neither a moved receiver nor key storage is reused.
             const store_key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else member.property;
-            try self.setMember(self.tempRoot(recv_root, recv), store_key, update.result(self, true));
+            try self.setMemberAtSite(self.tempRoot(recv_root, recv), store_key, update.result(self, true), .{ .source = member.source });
             return update.result(self, prefix);
         }
         if (target.* == .super_member) {
@@ -9177,13 +9177,13 @@ pub const Interpreter = struct {
             const recv = recv_opt.?;
             const key = try self.memberKey(m.property, m.computed);
             if (optional) {
-                const method = try self.getProperty(recv, key);
+                const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
                 return self.callValueWithThisAtSite(method, try self.evalArgs(arg_nodes), recv, site);
             }
             // Evaluate the MemberExpression's Get before its Arguments. Keep the
             // resolved value so an accessor/proxy is observed exactly once.
-            const method = try self.getProperty(recv, key);
+            const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
             const args = try self.evalArgs(arg_nodes);
             return self.callResolvedMethod(recv, key, method, args, site);
         }
@@ -9208,14 +9208,14 @@ pub const Interpreter = struct {
             const key = if (kv) |k| try self.keyOf(k) else m.property;
             // `recv.m?.(...)`: short-circuit if the method itself is nullish.
             if (optional) {
-                const method = try self.getProperty(recv, key);
+                const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
                 return self.callValueWithThisAtSite(method, try self.evalArgs(arg_nodes), recv, site);
             }
             // Evaluate the MemberExpression's Get before its Arguments (ECMA-262
             // EvaluateCall), then retain that exact reference through argument
             // expansion. Re-reading here would duplicate getters/proxy traps.
-            const method = try self.getProperty(recv, key);
+            const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
             const args = try self.evalArgs(arg_nodes);
             return self.callResolvedMethod(recv, key, method, args, site);
         }
@@ -9320,7 +9320,7 @@ pub const Interpreter = struct {
                     return throwNotAnObject(self, recv, .{ .source = m.source });
                 }
                 const key = if (key_value) |key_primitive| try self.keyOf(key_primitive) else m.property;
-                callee = try self.getProperty(recv, key);
+                callee = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
                 receiver = recv;
             },
             .super_member => |m| {
@@ -15403,6 +15403,14 @@ pub const Interpreter = struct {
         return self.getPropertyWithReceiverFound(recv, key, recv, null, null);
     }
 
+    pub fn getPropertyAtSite(self: *Interpreter, recv: Value, key: []const u8, site: EvaluationSite) EvalError!Value {
+        if (value.isPrivateKey(key)) {
+            if (recv.isObject()) try self.checkRestricted(recv.asObj());
+            return self.privateGetAtSite(recv, key, site);
+        }
+        return self.getProperty(recv, key);
+    }
+
     pub fn getPropertyObserved(
         self: *Interpreter,
         recv: Value,
@@ -15413,11 +15421,17 @@ pub const Interpreter = struct {
         return self.getPropertyWithReceiverFound(recv, key, recv, null, observation);
     }
 
-    fn throwInvalidPrivateAccess(self: *Interpreter, key: []const u8) EvalError {
-        if (self.current_private_map) |private_map|
+    fn throwInvalidPrivateAccess(self: *Interpreter, key: []const u8, site: EvaluationSite) EvalError {
+        const message = if (self.current_private_map) |private_map|
             if (private_map.kindForStorageKey(key) == .method_or_accessor)
-                return self.throwError("TypeError", "Cannot access private method or acessor");
-        return self.throwError("TypeError", "Cannot access invalid private field");
+                "Cannot access private method or acessor"
+            else
+                "Cannot access invalid private field"
+        else
+            "Cannot access invalid private field";
+        if (site.resolve()) |source|
+            return self.throwErrorFmt("TypeError", "{s} (evaluating '{s}')", .{ message, source });
+        return self.throwError("TypeError", message);
     }
 
     /// PrivateGet (`this.#x` read). Resolves the PrivateElement on the receiver's
@@ -15426,11 +15440,15 @@ pub const Interpreter = struct {
     /// with the name is a TypeError ("did not declare it"). Private fields are own
     /// properties of an instance; methods/accessors live on the home object.
     fn privateGet(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+        return self.privateGetAtSite(recv, key, .none);
+    }
+
+    fn privateGetAtSite(self: *Interpreter, recv: Value, key: []const u8, site: EvaluationSite) EvalError!Value {
         // Brand check: the receiver must carry this private name (it is a proper
         // instance of the declaring class evaluation, and — for a derived `this` —
         // `super()` has already returned).
         if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
-            return self.throwInvalidPrivateAccess(key);
+            return self.throwInvalidPrivateAccess(key, site);
         var cur: ?*value.Object = recv.asObj();
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
@@ -15451,8 +15469,12 @@ pub const Interpreter = struct {
     /// a method is non-writable (TypeError); an accessor invokes its setter, or is
     /// a TypeError if it has only a getter; an unbranded object is a TypeError.
     fn privateSet(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+        return self.privateSetAtSite(recv, key, v, .none);
+    }
+
+    fn privateSetAtSite(self: *Interpreter, recv: Value, key: []const u8, v: Value, site: EvaluationSite) EvalError!void {
         if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
-            return self.throwInvalidPrivateAccess(key);
+            return self.throwInvalidPrivateAccess(key, site);
         const o = recv.asObj();
         var cur: ?*value.Object = o;
         while (cur) |c| {
@@ -15752,7 +15774,7 @@ pub const Interpreter = struct {
                 }
                 // Accessing a private member the object doesn't carry is a brand
                 // violation — a TypeError, not `undefined`.
-                if (value.isPrivateKey(key)) return self.throwInvalidPrivateAccess(key);
+                if (value.isPrivateKey(key)) return self.throwInvalidPrivateAccess(key, .none);
                 // Legacy intrinsic gaps may still use a kind constructor fallback,
                 // but an explicit null prototype must terminate lookup exactly.
                 if (std.mem.eql(u8, key, "constructor") and !o.protoExplicitNull()) {
@@ -16482,6 +16504,14 @@ pub const Interpreter = struct {
         if (!try self.setMemberResult(recv, key, v, recv)) {
             if (self.strict) return self.throwSetFailed(recv, key);
         }
+    }
+
+    pub fn setMemberAtSite(self: *Interpreter, recv: Value, key: []const u8, v: Value, site: EvaluationSite) EvalError!void {
+        if (value.isPrivateKey(key)) {
+            if (recv.isObject()) try self.checkRestricted(recv.asObj());
+            return self.privateSetAtSite(recv, key, v, site);
+        }
+        return self.setMember(recv, key, v);
     }
 
     /// OrdinarySetWithOwnDescriptor's receiver branch retains both operands
