@@ -9037,15 +9037,22 @@ pub const Interpreter = struct {
             const saved_home_value = if (saved_home) |object| Value.obj(object) else Value.nul();
             const saved_home_root = try self.pushTempRoot(saved_home_value);
             const saved_fi = self.in_field_initializer;
+            const saved_eval_new_target = self.direct_eval_new_target_allowed;
             defer {
                 self.this_value = self.tempRoot(saved_this_root, saved_this);
                 const home_value = self.tempRoot(saved_home_root, saved_home_value);
                 self.home_object = if (home_value.isNull()) null else home_value.asObj();
                 self.in_field_initializer = saved_fi;
+                self.direct_eval_new_target_allowed = saved_eval_new_target;
             }
             self.this_value = class_val;
             self.home_object = class_obj;
             self.in_field_initializer = true;
+            // ClassFieldDefinitionEvaluation creates an initializer function
+            // called by DefineField. Direct eval inherits that function scope,
+            // even at global scope; in_field_initializer supplies undefined for
+            // new.target. Arrows capture the permission before it is restored.
+            self.direct_eval_new_target_allowed = true;
             // DefineField order: evaluate the initializer FIRST, then
             // PrivateFieldAdd (brand + extensibility check) — so a static private
             // field whose initializer seals the class object makes its own add throw.

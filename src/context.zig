@@ -14278,6 +14278,46 @@ test "static blocks isolate new target and preserve direct eval context across t
     }
 }
 
+test "static fields preserve direct eval new target context across tiers" {
+    const cases = [_][]const u8{
+        "class C { static x = eval('new.target'); } C.x === undefined",
+        "class C { static x = eval(\"eval('new.target')\"); } C.x === undefined",
+        "class C { static x = (() => eval('new.target'))(); } C.x === undefined",
+        "class C { static x = () => eval('new.target'); } C.x() === undefined",
+        "class C { static #x = eval('new.target'); static get() { return C.#x; } } C.get() === undefined",
+        "class C { x = eval('new.target'); } new C().x === undefined",
+        "class C { x = () => eval('new.target'); } new C().x() === undefined",
+        "function Outer() { class C { static x = eval('new.target'); } this.ok = C.x === undefined && new.target === Outer; } new Outer().ok",
+        "function Outer() { class C { static x = () => eval('new.target'); } this.f = C.x; } new Outer().f() === undefined",
+        "class C { static x = function F() { return new.target; }; } new C.x() === C.x",
+        "function Outer() { class C { static [eval('new.target') === Outer ? 'ok' : 'bad'] = 1; } this.ok = C.ok === 1; } new Outer().ok",
+        "class C { static x = (() => { try { (0,eval)('new.target'); } catch(e) { return e instanceof SyntaxError; } })(); } C.x",
+        "function Outer() { try { class C { static x = (() => { throw 1; })(); } } catch(e) {} this.ok = eval('new.target') === Outer; } new Outer().ok",
+        "class C { static x = eval('new.target'); } try { eval('new.target'); false; } catch(e) { e instanceof SyntaxError; }",
+        "try { class C { static x = (() => { eval('new.target'); throw 1; })(); } } catch(e) {} try { eval('new.target'); false; } catch(e) { e instanceof SyntaxError; }",
+        "var effect = false; try { class C { static x = eval('effect = true; arguments'); } } catch(e) { e instanceof SyntaxError && !effect; }",
+        "var effect = false; try { class C { static x = eval('effect = true; super()'); } } catch(e) { e instanceof SyntaxError && !effect; }",
+        "var effect = false; try { class C { static [eval('effect = true; new.target')] = 1; } } catch(e) { e instanceof SyntaxError && !effect; }",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |source| {
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, source, .{});
+            defer std.testing.allocator.free(encoded);
+            // Indirect eval starts each case in global scope rather than lending
+            // the test harness's function permission to a broken initializer.
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "String((0, eval)({s}))", .{encoded});
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("static field new.target ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expectEqualStrings("true", try (try ctx.evaluate(probe)).asWtf8(ctx.arena()));
+        }
+    }
+}
+
 test "template function context preserves new target arguments and direct eval across tiers" {
     const cases = [_]struct { source: []const u8, expected: []const u8 }{
         .{ .source = "function F(){ this.value = `${new.target === F}`; } var result = new F().value;", .expected = "true" },
