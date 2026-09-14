@@ -14244,6 +14244,50 @@ test "new target diagnostics preserve eval boundaries and early errors across ti
     }
 }
 
+test "pattern early errors prevent execution across tiers" {
+    const invalid = [_][]const u8{
+        "class C { static { if (false) { let [x = await 0] = []; } } }",
+        "class C { static { if (false) { let {[await 0]: x} = {}; } } }",
+        "class C { static { for (let [x = await 0] of []) {} } }",
+        "class C { static { try {} catch ([x = await 0]) {} } }",
+        "class C { x = () => { let [x = arguments] = []; }; }",
+        "class C { x = () => { let {[arguments]: x} = {}; }; }",
+        "class C { x = () => { try {} catch ([x = arguments]) {} }; }",
+        "async function f([x = await 0]) {}",
+        "function* f({[yield 0]: x}) {}",
+        "const f = async ([x = await 0]) => x;",
+        "class C extends Object { m() { let [x = super()] = []; } }",
+        "function f([x = super.value]) {}",
+        "class C { static { if (false) { let [x = (a ||= await 0)] = []; } } }",
+        "function* f([x = import(yield 0)]) {}",
+        "class C { x = () => { let [x = (a ??= arguments)] = []; }; }",
+        "class C extends Object { m([x = import(super())]) {} }",
+        "async function f([x = import('x', {with: {type: await 0}})]) {}",
+        "class C { static { if (false) { for await (const x of []) {} } } }",
+        "class C { static { if (false) { await using x = null; } } }",
+        "class C { static { if (false) { for (await using x of []) {} } } }",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (invalid) |source| {
+            const guarded = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{source});
+            defer std.testing.allocator.free(guarded);
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, guarded, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, result = false; try {{ eval({s}); }} catch(e) {{ result = e instanceof SyntaxError && effect === 0; }} result", .{encoded});
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("pattern early error ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expect((try ctx.evaluate(probe)).toBoolean());
+        }
+        const valid = "class C { x = function ([x = arguments.length] = []) { return x; }; } new C().x() === 0";
+        try std.testing.expect((try ctx.evaluate(valid)).toBoolean());
+    }
+}
+
 test "private deletion errors precede evaluation across tiers" {
     const invalid = [_][]const u8{
         "class C { #x; m(o) { delete o.#x; } }",
