@@ -28,6 +28,7 @@ pub const DiagnosticReason = enum {
     new_target_outside_function,
     new_target_in_global_arrow,
     new_target_invalid_identifier,
+    private_field_delete,
     invalid_assignment,
     invalid_destructuring_assignment,
     invalid_prefix_increment,
@@ -82,6 +83,7 @@ pub const DiagnosticReason = enum {
             .new_target_outside_function => "new.target is only valid inside functions or static blocks.",
             .new_target_in_global_arrow => "new.target is not valid inside arrow functions in global code.",
             .new_target_invalid_identifier => "\"new.\" can only be followed with target.",
+            .private_field_delete => "Cannot delete private field.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
             .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
@@ -690,6 +692,8 @@ pub const Parser = struct {
 
     pub fn diagnosticMessage(self: *const Parser, allocator: std.mem.Allocator, reason: DiagnosticReason) std.mem.Allocator.Error![]const u8 {
         const token = self.last_error_token orelse return reason.message();
+        if (reason == .private_field_delete)
+            return std.fmt.allocPrint(allocator, "Cannot delete private field {s}.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
         return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. {s}", .{ noun, quote, token.text, quote, reason.message() });
@@ -3407,10 +3411,15 @@ pub const Parser = struct {
             const operand = try self.parseUnary();
             // Strict mode: `delete` of an unqualified identifier is a SyntaxError.
             if (self.strict and operand.* == .identifier) return ParseError.UnexpectedToken;
-            // `delete` of a private member reference (`delete obj.#x`, even when
-            // parenthesized) is always an early SyntaxError.
-            if (operand.* == .member and operand.member.property.len > 0 and operand.member.property[0] == '#')
-                return ParseError.UnexpectedToken;
+            // ECMA-262 13.5.1.1 includes private OptionalChain references. Only
+            // unwrap the chain boundary: a public outer property, call result,
+            // or comma-expression value is not itself a private reference.
+            const reference = if (operand.* == .optional_chain) operand.optional_chain else operand;
+            if (reference.* == .member and reference.member.property.len > 0 and reference.member.property[0] == '#') {
+                const err = self.failWithReasonAt(.private_field_delete, t.pos);
+                self.last_error_token = .{ .kind = .token, .text = reference.member.property };
+                return err;
+            }
             try self.rejectExponentAfterUnary();
             if (operand.* == .member) {
                 operand.member.source = self.sourceFrom(delete_start);
@@ -6332,6 +6341,52 @@ test "parser validates module label early errors" {
 
     var labeled_block_continue = try Parser.init(arena.allocator(), "label: { while (false) { continue label; } }");
     try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
+}
+
+test "parser private deletion rejects optional references and retains diagnostics" {
+    const invalid = [_]struct { source: []const u8, name: []const u8 }{
+        .{ .source = "class C { #x; m(o) { delete o.#x; } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { delete ((o.#x)); } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { delete o?.#x; } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { delete ((o?.#x)); } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { delete o?.child.#x; } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { delete o?.['child'].#x; } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { delete o?.().#x; } }", .name = "#x" },
+        .{ .source = "class C { static #x; static { delete this?.#x; } }", .name = "#x" },
+        .{ .source = "class C { #x; m() { delete null?.#x; } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { return `x${delete o?.#x}`; } }", .name = "#x" },
+        .{ .source = "class C { #x; m(o) { return `x\r\n${tag`y\r\n${delete o?.#x}`}`; } }", .name = "#x" },
+        .{ .source = "class C { #é; m(o) { delete o?.#é; } }", .name = "#é" },
+        .{ .source = "class C { #x; m(o) { delete o?.#\\u0078; } }", .name = "#x" },
+    };
+    for (invalid) |case| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, case.source);
+        errdefer std.debug.print("private deletion source: {s}\n", .{case.source});
+        try std.testing.expectError(ParseError.UnexpectedToken, if (module) parser.parseModule() else parser.parseProgram());
+        try std.testing.expectEqual(DiagnosticReason.private_field_delete, parser.last_error_reason.?);
+        try std.testing.expectEqualStrings(case.name, parser.last_error_token.?.text);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Cannot delete private field {s}.", .{case.name});
+        try std.testing.expectEqualStrings(expected, try parser.diagnosticMessage(arena.allocator(), parser.last_error_reason.?));
+        try std.testing.expectEqualDeep(sourceLocationAt(case.source, std.mem.indexOf(u8, case.source, "delete").?), parser.errorLocation());
+    };
+    const valid = [_][]const u8{
+        "class C { #x() {} m(o) { delete o?.#x(); } }",
+        "class C { #x() {} m(o) { delete o.#x?.(); } }",
+        "class C { #x; m(o) { delete o?.#x.public; } }",
+        "class C { #x; m(o) { delete o?.#x['public']; } }",
+        "class C { #x; m(o) { delete (0, o?.#x); } }",
+        "class C { #x; m(o) { delete o?.[o.#x]; } }",
+        "class C { m(o) { delete o?.['#x']; } }",
+        "class C { m(o) { delete o?.public; } }",
+    };
+    for (valid) |source| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        _ = if (module) try parser.parseModule() else try parser.parseProgram();
+    };
 }
 
 test "parser rejects top-level new target" {

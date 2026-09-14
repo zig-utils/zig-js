@@ -14244,6 +14244,55 @@ test "new target diagnostics preserve eval boundaries and early errors across ti
     }
 }
 
+test "private deletion errors precede evaluation across tiers" {
+    const invalid = [_][]const u8{
+        "class C { #x; m(o) { delete o.#x; } }",
+        "class C { #x; m(o) { delete ((o.#x)); } }",
+        "class C { #x; m(o) { delete o?.#x; } }",
+        "class C { #x; m(o) { delete ((o?.#x)); } }",
+        "class C { #x; m(o) { delete o?.child.#x; } }",
+        "class C { #x; m(o) { delete o?.['child'].#x; } }",
+        "class C { #x; m(o) { delete o?.().#x; } }",
+        "class C { static #x; static { delete this?.#x; } }",
+        "class C { #x; m() { delete null?.#x; } }",
+        "class C { #x; m(o) { return `x${delete o?.#x}`; } }",
+        "class C { #x; m(o) { return `x\r\n${tag`y\r\n${delete o?.#x}`}`; } }",
+    };
+    const valid = [_][]const u8{
+        "class C { #x = { p: 1 }; m() { return delete this?.#x.p && !('p' in this.#x); } } new C().m()",
+        "class C { #x = { p: 1 }; m() { return delete this?.#x['p'] && !('p' in this.#x); } } new C().m()",
+        "class C { #x() { this.called = true; } m() { return delete this?.#x() && this.called; } } new C().m()",
+        "class C { #x() { this.called = true; } m() { return delete this.#x?.() && this.called; } } new C().m()",
+        "class C { #x = 1; m() { return delete (0, this?.#x) && this.#x === 1; } } new C().m()",
+        "class C { #x = 'p'; m() { this.p = 1; return delete this?.[this.#x] && !('p' in this); } } new C().m()",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (invalid) |source| {
+            const guarded = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{source});
+            defer std.testing.allocator.free(guarded);
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, guarded, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, result = 'accepted'; try {{ eval({s}); }} catch(e) {{ if (!(e instanceof SyntaxError)) throw e; result = e.message + ':' + effect; }} result", .{encoded});
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("private deletion ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expectEqualStrings("Cannot delete private field #x.:0", try (try ctx.evaluate(probe)).asWtf8(ctx.arena()));
+        }
+        for (valid) |source| {
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, source, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "eval({s})", .{encoded});
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("valid private deletion ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expect((try ctx.evaluate(probe)).toBoolean());
+        }
+    }
+}
+
 test "malformed new target diagnostics are early errors across tiers" {
     const cases = [_]struct { source: []const u8, spelling: []const u8 }{
         .{ .source = "new.other;", .spelling = "other" },
