@@ -14194,6 +14194,40 @@ test "accessor parameter grammar reports JavaScriptCore tokens before body fault
     );
 }
 
+test "static blocks isolate new target and preserve direct eval context across tiers" {
+    const cases = [_][]const u8{
+        "class C { static { this.value = eval('typeof new.target'); } } C.value",
+        "class C { static { this.value = eval(\"eval('typeof new.target')\"); } } C.value",
+        "class C { static { this.read = () => eval('typeof new.target'); } } C.read()",
+        "var seen; function F() { class C { static { seen = typeof new.target; } } if (new.target !== F) throw Error('caller binding lost'); } new F(); seen",
+        "var seen; function F() { try { class C { static { seen = typeof new.target; throw 1; } } } catch (_) {} if (new.target !== F) throw Error('caller binding lost on throw'); } new F(); seen",
+        "var read; function F() { class C { static { read = () => typeof new.target; } } } new F(); read()",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |source| {
+            // Each eval has its own lexical declarations; the Context is reused
+            // to exercise restoration after both normal and abrupt block exits.
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, source, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "eval({s})", .{encoded});
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("static block new.target ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expectEqualStrings("undefined", try (try ctx.evaluate(probe)).asWtf8(ctx.arena()));
+        }
+        try std.testing.expectEqualStrings("SyntaxError:SyntaxError", try (try ctx.evaluate(
+            \\var inside = '', outside = '';
+            \\class C { static { try { (0, eval)('new.target'); } catch(e) { inside = e.name; } } }
+            \\try { eval('new.target'); } catch(e) { outside = e.name; }
+            \\inside + ':' + outside
+        )).asWtf8(ctx.arena()));
+    }
+}
+
 test "template function context preserves new target arguments and direct eval across tiers" {
     const cases = [_]struct { source: []const u8, expected: []const u8 }{
         .{ .source = "function F(){ this.value = `${new.target === F}`; } var result = new F().value;", .expected = "true" },

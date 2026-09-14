@@ -8993,6 +8993,9 @@ pub const Interpreter = struct {
                 const saved_this = self.this_value;
                 const saved_this_root = try self.pushTempRoot(saved_this);
                 defer self.restoreTempRoots(saved_this_root);
+                const saved_new_target = self.new_target;
+                const saved_new_target_root = try self.pushTempRoot(saved_new_target);
+                const saved_eval_new_target = self.direct_eval_new_target_allowed;
                 const saved_home = self.home_object;
                 const saved_home_value = if (saved_home) |object| Value.obj(object) else Value.nul();
                 const saved_home_root = try self.pushTempRoot(saved_home_value);
@@ -9001,12 +9004,19 @@ pub const Interpreter = struct {
                 defer self.restoreTempEnvRoots(saved_env_root);
                 defer {
                     self.this_value = self.tempRoot(saved_this_root, saved_this);
+                    self.new_target = self.tempRoot(saved_new_target_root, saved_new_target);
+                    self.direct_eval_new_target_allowed = saved_eval_new_target;
                     const home_value = self.tempRoot(saved_home_root, saved_home_value);
                     self.home_object = if (home_value.isNull()) null else home_value.asObj();
                     self.env = self.tempEnvRoot(saved_env_root, saved_env);
                 }
                 self.this_value = class_val;
                 self.home_object = class_obj;
+                // ClassStaticBlockDefinitionEvaluation creates a non-lexical
+                // function invoked with Call, not Construct. Its own new.target
+                // is undefined, including through arrows and direct PerformEval.
+                self.new_target = Value.undef();
+                self.direct_eval_new_target_allowed = true;
                 // A `static {}` block is its own function-like scope: it gets a
                 // fresh variable environment so its `var` declarations stay local
                 // (each block, and the outer scope, are independent).
