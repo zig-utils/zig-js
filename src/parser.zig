@@ -25,6 +25,8 @@ pub const DiagnosticReason = enum {
     duplicate_proto,
     template_expression_tail,
     return_outside_function,
+    new_target_outside_function,
+    new_target_in_global_arrow,
     invalid_assignment,
     invalid_destructuring_assignment,
     invalid_prefix_increment,
@@ -76,6 +78,8 @@ pub const DiagnosticReason = enum {
             .duplicate_proto => "Attempted to redefine __proto__ property.",
             .template_expression_tail => "Expected a closing '}' following an expression in template literal.",
             .return_outside_function => "Return statements are only valid inside functions.",
+            .new_target_outside_function => "new.target is only valid inside functions or static blocks.",
+            .new_target_in_global_arrow => "new.target is not valid inside arrow functions in global code.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
             .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
@@ -3592,7 +3596,10 @@ pub const Parser = struct {
             // `target` is a contextual keyword here — it may not be escaped
             // (`new.target` is a SyntaxError).
             if (m.kind != .identifier or m.escaped_identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
-            if (self.new_target_depth == 0) return ParseError.UnexpectedToken;
+            // Keep the NewTarget early error attached to its own token. A
+            // template subparser translates this offset to the original source.
+            if (self.new_target_depth == 0)
+                return self.failWithReasonAt(if (self.fn_depth > 0) .new_target_in_global_arrow else .new_target_outside_function, self.tokens[new_start_token].pos);
             return self.alloc(.new_target_expr);
         }
         const parenthesized_callee = self.check(.lparen);
@@ -6350,6 +6357,50 @@ test "parser rejects top-level new target" {
     var static_block = try Parser.init(arena.allocator(), "class C { static { new.target; } }");
     const static_prog = try static_block.parseProgram();
     try std.testing.expectEqual(@as(usize, 1), static_prog.program.len);
+}
+
+test "new target diagnostics retain the rejection context and original source position" {
+    const invalid = [_][]const u8{
+        "new.target;",
+        "\r\n  new.target;",
+        "() => new.target;",
+        "(x = new.target) => x;",
+        "`x${new.target}`",
+        "tag`x\r\n${new.target}`",
+        "`x\r\n${tag`y\r\n${new.target}`}`",
+        "function f() {} new.target;",
+        "class C { static {} } new.target;",
+    };
+    for (invalid) |source| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        try std.testing.expectError(ParseError.UnexpectedToken, if (module) parser.parseModule() else parser.parseProgram());
+        const reason: DiagnosticReason = if (std.mem.eql(u8, source, "() => new.target;")) .new_target_in_global_arrow else .new_target_outside_function;
+        try std.testing.expectEqual(reason, parser.last_error_reason.?);
+        try std.testing.expectEqualDeep(sourceLocationAt(source, std.mem.indexOf(u8, source, "new.target").?), parser.errorLocation());
+    };
+    // The contextual identifier check precedes the permission check: a typo or
+    // escaped spelling is not the valid NewTarget grammar in an invalid scope.
+    for ([_][]const u8{ "new.other;", "new.\\u0074arget;", "function f() { new.\\u0074arget; }" }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expect(parser.last_error_reason != .new_target_outside_function);
+    }
+    for ([_][]const u8{
+        "function f() { return new.target; }",
+        "function f(x = new.target) { return () => new.target; }",
+        "({ m() { return tag`x${new.target}`; } });",
+        "class C { m() { return `x${new.target}`; } static { `x${new.target}`; } }",
+        "function f() { return `x${tag`y\r\n${new.target}`}`; }",
+    }) |source| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        _ = if (module) try parser.parseModule() else try parser.parseProgram();
+    };
 }
 
 test "parser validates module string export names" {

@@ -14194,6 +14194,56 @@ test "accessor parameter grammar reports JavaScriptCore tokens before body fault
     );
 }
 
+test "new target diagnostics preserve eval boundaries and early errors across tiers" {
+    const message = "new.target is only valid inside functions or static blocks.";
+    const arrow_message = "new.target is not valid inside arrow functions in global code.";
+    const invalid = [_][]const u8{
+        "new.target;",
+        "() => new.target;",
+        "(x = new.target) => x;",
+        "`x${new.target}`",
+        "String.raw`x\r\n${new.target}`",
+        "`x\r\n${String.raw`y\r\n${new.target}`}`",
+        "function f() {} new.target;",
+        "class C { static {} } new.target;",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (invalid) |source| for ([_][]const u8{ "eval", "(0, eval)" }) |operation| {
+            const guarded_source = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{source});
+            defer std.testing.allocator.free(guarded_source);
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, guarded_source, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, result = ''; try {{ {s}({s}); }} catch(e) {{ if (!(e instanceof SyntaxError)) throw e; result = e.message + ':' + effect; }} result", .{ operation, encoded });
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("new.target diagnostic ({s}, {s}): {s}\n", .{ @tagName(mode), operation, source });
+            const expected = if (std.mem.eql(u8, source, "() => new.target;")) arrow_message ++ ":0" else message ++ ":0";
+            try std.testing.expectEqualStrings(expected, try (try ctx.evaluate(probe)).asWtf8(ctx.arena()));
+        };
+        // Direct eval in a function is valid; indirect eval must neither inherit
+        // that permission nor pass it on to a nested direct eval in global code.
+        try std.testing.expectEqualStrings(message, try (try ctx.evaluate(
+            \\function f() { try { return (0, eval)("new.target"); } catch(e) { return e.message; } } f()
+        )).asWtf8(ctx.arena()));
+        try std.testing.expectEqualStrings(message, try (try ctx.evaluate(
+            \\function f() { return (0, eval)("try { eval('new.target'); } catch(e) { e.message; }"); } f()
+        )).asWtf8(ctx.arena()));
+        try std.testing.expectEqualStrings("true:undefined:undefined", try (try ctx.evaluate(
+            \\function F() { this.value = eval('new.target === F'); }
+            \\class C { static { this.value = eval('typeof new.target'); } }
+            \\new F().value + ':' + Function('return typeof new.target')() + ':' + C.value
+        )).asWtf8(ctx.arena()));
+        try std.testing.expectEqualStrings("2:3:6:false", try (try ctx.evaluate(
+            \\var location = ''; try { eval("`x\r\n${new.target}`"); }
+            \\catch(e) { location = e.line + ':' + e.column + ':' + e.byteOffset + ':' + Object.keys(e).includes('line'); } location
+        )).asWtf8(ctx.arena()));
+    }
+}
+
 test "static blocks isolate new target and preserve direct eval context across tiers" {
     const cases = [_][]const u8{
         "class C { static { this.value = eval('typeof new.target'); } } C.value",
