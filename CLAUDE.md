@@ -274,7 +274,9 @@ will be reverted by the next run and can silently desync a release gate.
   subtree, before → after; say "no regressions" only when you actually measured
   it. Docs-only commits say `flips 0 test262 cases`.
 - **No `Co-Authored-By` or other trailers.** This overrides the default trailer
-  instruction. Author as `Chris <chrisbreuer93@gmail.com>`.
+  instruction. Use the user's configured Git identity (`git config user.name`
+  and `git config user.email`), not another contributor's identity. Confirm the
+  scope before rewriting authorship of already-pushed commits.
 - **Do not commit `reference/webkit-249/threads-tests/*` or `docs/threads/*`**
   unless that is explicitly the change you were asked to make — a separate actor
   edits and stages those concurrently. Stage explicit paths (`git commit <paths>`
