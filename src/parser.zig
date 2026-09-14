@@ -27,6 +27,7 @@ pub const DiagnosticReason = enum {
     return_outside_function,
     new_target_outside_function,
     new_target_in_global_arrow,
+    new_target_invalid_identifier,
     invalid_assignment,
     invalid_destructuring_assignment,
     invalid_prefix_increment,
@@ -80,6 +81,7 @@ pub const DiagnosticReason = enum {
             .return_outside_function => "Return statements are only valid inside functions.",
             .new_target_outside_function => "new.target is only valid inside functions or static blocks.",
             .new_target_in_global_arrow => "new.target is not valid inside arrow functions in global code.",
+            .new_target_invalid_identifier => "\"new.\" can only be followed with target.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
             .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
@@ -3592,10 +3594,13 @@ pub const Parser = struct {
         if (self.in_async and isKeyword(self.cur(), "await")) return ParseError.UnexpectedToken;
         // `new.target` meta-property.
         if (self.match(.dot)) {
-            const m = self.advance();
+            const m = self.cur();
             // `target` is a contextual keyword here — it may not be escaped
-            // (`new.target` is a SyntaxError).
-            if (m.kind != .identifier or m.escaped_identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
+            // (`new.\u0074arget` is not the NewTarget grammar).
+            if (m.kind == .identifier and (m.escaped_identifier or !std.mem.eql(u8, m.text, "target")))
+                return self.failWithTokenReason(.new_target_invalid_identifier);
+            _ = self.advance();
+            if (m.kind != .identifier) return ParseError.UnexpectedToken;
             // Keep the NewTarget early error attached to its own token. A
             // template subparser translates this offset to the original source.
             if (self.new_target_depth == 0)
@@ -6357,6 +6362,29 @@ test "parser rejects top-level new target" {
     var static_block = try Parser.init(arena.allocator(), "class C { static { new.target; } }");
     const static_prog = try static_block.parseProgram();
     try std.testing.expectEqual(@as(usize, 1), static_prog.program.len);
+}
+
+test "new target invalid identifier diagnostics preserve spelling and source position" {
+    const cases = [_]struct { source: []const u8, spelling: []const u8 }{
+        .{ .source = "new.other;", .spelling = "other" },
+        .{ .source = "new.\\u0074arget;", .spelling = "\\u0074arget" },
+        .{ .source = "function f() { new.t\\u0061rget; }", .spelling = "t\\u0061rget" },
+        .{ .source = "new.é;", .spelling = "é" },
+        .{ .source = "tag`x\r\n${new.\\u0074arget}`", .spelling = "\\u0074arget" },
+        .{ .source = "`x\r\n${tag`y\r\n${new.other}`}`", .spelling = "other" },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |module| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, if (module) parser.parseModule() else parser.parseProgram());
+        try std.testing.expectEqual(DiagnosticReason.new_target_invalid_identifier, parser.last_error_reason.?);
+        try std.testing.expectEqualStrings(case.spelling, parser.last_error_token.?.text);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Unexpected identifier '{s}'. \"new.\" can only be followed with target.", .{case.spelling});
+        try std.testing.expectEqualStrings(expected, try parser.diagnosticMessage(arena.allocator(), parser.last_error_reason.?));
+        const offset = std.mem.indexOf(u8, case.source, "new.").? + "new.".len;
+        try std.testing.expectEqualDeep(sourceLocationAt(case.source, offset), parser.errorLocation());
+    };
 }
 
 test "new target diagnostics retain the rejection context and original source position" {

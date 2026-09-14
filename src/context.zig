@@ -14244,6 +14244,36 @@ test "new target diagnostics preserve eval boundaries and early errors across ti
     }
 }
 
+test "malformed new target diagnostics are early errors across tiers" {
+    const cases = [_]struct { source: []const u8, spelling: []const u8 }{
+        .{ .source = "new.other;", .spelling = "other" },
+        .{ .source = "new.\\u0074arget;", .spelling = "\\u0074arget" },
+        .{ .source = "function f() { new.t\\u0061rget; }", .spelling = "t\\u0061rget" },
+        .{ .source = "new.é;", .spelling = "é" },
+        .{ .source = "tag`x\r\n${new.\\u0074arget}`", .spelling = "\\u0074arget" },
+        .{ .source = "`x\r\n${tag`y\r\n${new.other}`}`", .spelling = "other" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            const guarded = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{case.source});
+            defer std.testing.allocator.free(guarded);
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, guarded, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, result = ''; try {{ eval({s}); }} catch(e) {{ if (!(e instanceof SyntaxError)) throw e; result = e.message + ':' + effect; }} result", .{encoded});
+            defer std.testing.allocator.free(probe);
+            const expected = try std.fmt.allocPrint(std.testing.allocator, "Unexpected identifier '{s}'. \"new.\" can only be followed with target.:0", .{case.spelling});
+            defer std.testing.allocator.free(expected);
+            errdefer std.debug.print("malformed new.target ({s}): {s}\n", .{ @tagName(mode), case.source });
+            try std.testing.expectEqualStrings(expected, try (try ctx.evaluate(probe)).asWtf8(ctx.arena()));
+        }
+    }
+}
+
 test "static blocks isolate new target and preserve direct eval context across tiers" {
     const cases = [_][]const u8{
         "class C { static { this.value = eval('typeof new.target'); } } C.value",
