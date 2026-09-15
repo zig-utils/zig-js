@@ -14244,6 +14244,53 @@ test "new target diagnostics preserve eval boundaries and early errors across ti
     }
 }
 
+test "class query early errors precede execution across tiers" {
+    const invalid = [_][]const u8{
+        "class C extends super() {}",
+        "class C extends super.Object {}",
+        "class C { [super()]() {} }",
+        "class C { [super.key]() {} }",
+        "function f() { return class extends super.Object {}; }",
+        "class C extends Object { m() { return class extends super() {}; } }",
+        "async function f(x = class extends (await Object) {}) {}",
+        "async function f(x = class { [await 0]() {} }) {}",
+        "function* f(x = class extends (yield Object) {}) {}",
+        "function* f(x = class { [yield 0]() {} }) {}",
+    };
+    const valid = [_][]const u8{
+        "class C extends Object { constructor() { const D = class extends (super(), Object) {}; } } new C() instanceof C",
+        "const p = {key: 'ok'}, o = {__proto__: p, m() { return class { [super.key]() { return 42; } }; }}; new (o.m())().ok() === 42",
+        "class B { get value() { return 42; } } class C extends B { x = super.value; } new C().x === 42",
+        "class C extends Object { static { this.x = super.name; } } C.x === 'Object'",
+        "function f() { return class extends Object { constructor() { super(); } }; } const C = f(); new C() instanceof C",
+        "function f() { return class { [arguments[0]]() { return arguments[0]; } }; } const C = f('m'); new C().m(42) === 42",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (invalid) |source| {
+            const guarded = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{source});
+            defer std.testing.allocator.free(guarded);
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, guarded, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, rejected = 0; try {{ eval({s}); }} catch(e) {{ if (e instanceof SyntaxError && effect === 0) rejected++; }} " ++
+                "try {{ Function({s}); }} catch(e) {{ if (e instanceof SyntaxError && effect === 0) rejected++; }} rejected === 2", .{ encoded, encoded });
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("class query early error ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expect((try ctx.evaluate(probe)).toBoolean());
+        }
+        for (valid) |source| {
+            const scoped = try std.fmt.allocPrint(std.testing.allocator, "{{ {s} }}", .{source});
+            defer std.testing.allocator.free(scoped);
+            errdefer std.debug.print("valid class query ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expect((try ctx.evaluate(scoped)).toBoolean());
+        }
+    }
+}
+
 test "arrow lexical early errors precede execution across tiers" {
     const invalid = [_][]const u8{
         "class C { static { const f = () => arguments; } }",

@@ -478,11 +478,6 @@ pub const Parser = struct {
     /// `super` at all (a direct eval from a field initializer leaves this false,
     /// since `super.prop` is permitted there).
     scan_forbid_super_property: bool = false,
-    /// When true, `scanSuperAndArgs` descends into the eagerly evaluated pieces
-    /// of nested class expressions (heritage, computed names, field initializers,
-    /// and static blocks). Global/method scans leave this false so a class body
-    /// remains its own syntactic context.
-    scan_descend_class_expr: bool = false,
     /// When true, `scanSuperAndArgs` flags a YieldExpression — used to enforce
     /// the early error "FormalParameters of a generator must not contain a
     /// YieldExpression" (e.g. `function* g(a = yield) {}`).
@@ -4294,13 +4289,8 @@ pub const Parser = struct {
                 const block = try self.parseBlock();
                 // No super()/arguments, and no AwaitExpression (ContainsAwait).
                 const saved_fa = self.scan_forbid_await;
-                const saved_class_scan = self.scan_descend_class_expr;
                 self.scan_forbid_await = true;
-                self.scan_descend_class_expr = true;
-                defer {
-                    self.scan_forbid_await = saved_fa;
-                    self.scan_descend_class_expr = saved_class_scan;
-                }
+                defer self.scan_forbid_await = saved_fa;
                 for (block.block) |s| try self.scanSuperAndArgs(s);
                 try self.checkLexicalDupes(block.block, true); // own lexical scope
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
@@ -4359,9 +4349,6 @@ pub const Parser = struct {
                 // Early error (15.7.1): a field Initializer may not contain a
                 // SuperCall or an `arguments` reference.
                 if (init_expr) |ie| {
-                    const saved_class_scan = self.scan_descend_class_expr;
-                    self.scan_descend_class_expr = true;
-                    defer self.scan_descend_class_expr = saved_class_scan;
                     try self.scanSuperAndArgs(ie);
                 }
                 try members.append(self.arena, .{
@@ -4535,18 +4522,16 @@ pub const Parser = struct {
     /// these eval contexts), plus an `arguments` reference (when
     /// `!allow_arguments`, e.g. a direct eval inside a class field initializer)
     /// and/or a SuperProperty (when `forbid_super_property`, e.g. an indirect
-    /// eval, which is global code). Recurses into arrow bodies but stops at
-    /// ordinary functions/classes, matching the static `Contains` semantics.
+    /// eval, which is global code). Recurses into arrows and class heritage/
+    /// computed names, but not ordinary functions or nested method bodies.
     /// Returns error.UnexpectedToken on a violation (the caller maps it to a
     /// SyntaxError *before* any of the eval'd code runs).
     pub fn scanEvalContext(self: *Parser, stmts: []const *Node, allow_arguments: bool, forbid_super_property: bool) ParseError!void {
         self.scan_allow_arguments = allow_arguments;
         self.scan_forbid_super_property = forbid_super_property;
-        self.scan_descend_class_expr = !allow_arguments and !forbid_super_property;
         defer {
             self.scan_allow_arguments = false;
             self.scan_forbid_super_property = false;
-            self.scan_descend_class_expr = false;
         }
         for (stmts) |s| try self.scanSuperAndArgs(s);
     }
@@ -4606,9 +4591,9 @@ pub const Parser = struct {
     /// unless `scan_allow_arguments` is set — an `arguments` reference. Used for
     /// two early errors: a class field Initializer may contain neither (15.7.1),
     /// and a method body other than a derived constructor may not contain a
-    /// SuperCall. Conservative — recurses through operators and *arrow* bodies
-    /// (which bind neither) but stops at ordinary functions/classes (which have
-    /// their own bindings), so it never rejects valid code.
+    /// SuperCall. Each query follows its own function/class boundary: arrows
+    /// inherit lexical bindings, class heritage/computed names use the outer
+    /// context, and nested methods/initializers have their own super bindings.
     fn scanSuperAndArgs(self: *Parser, node: *Node) ParseError!void {
         switch (node.*) {
             .obj_pattern, .arr_pattern => try self.scanSuperAndArgsInPattern(node),
@@ -4710,10 +4695,32 @@ pub const Parser = struct {
                 try self.scanSuperAndArgsInParams(f.params);
                 try self.scanSuperAndArgs(f.body);
             },
-            .class_expr => |c| if (self.scan_descend_class_expr) {
+            .class_expr => |c| {
+                // ECMA-262 8.5.1 Contains and 8.5.2 ComputedPropertyContains:
+                // heritage and computed names belong to the enclosing query,
+                // even when the class's methods/initializers are boundaries.
                 if (c.superclass) |sc| try self.scanSuperAndArgs(sc);
                 for (c.members) |m| {
                     if (m.key_expr) |key_expr| try self.scanSuperAndArgs(key_expr);
+                }
+                if (self.scan_allow_arguments) return;
+                // 15.7.9 ContainsArguments also visits fields and static blocks,
+                // but must not carry the outer super/await/yield bans with it.
+                const saved_call = self.scan_forbid_super_call;
+                const saved_prop = self.scan_forbid_super_property;
+                const saved_await = self.scan_forbid_await;
+                const saved_yield = self.scan_forbid_yield;
+                self.scan_forbid_super_call = false;
+                self.scan_forbid_super_property = false;
+                self.scan_forbid_await = false;
+                self.scan_forbid_yield = false;
+                defer {
+                    self.scan_forbid_super_call = saved_call;
+                    self.scan_forbid_super_property = saved_prop;
+                    self.scan_forbid_await = saved_await;
+                    self.scan_forbid_yield = saved_yield;
+                }
+                for (c.members) |m| {
                     if (m.field_init) |field_init| try self.scanSuperAndArgs(field_init);
                     if (m.static_block) |static_block| try self.scanSuperAndArgs(static_block);
                 }
@@ -6399,6 +6406,62 @@ test "parser validates module label early errors" {
 
     var labeled_block_continue = try Parser.init(arena.allocator(), "label: { while (false) { continue label; } }");
     try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
+}
+
+test "parser class queries visit heritage and keys with independent body boundaries" {
+    const invalid = [_][]const u8{
+        "class C extends super() {}",
+        "class C extends super.Object {}",
+        "class C { [super()]() {} }",
+        "class C { [super.key]() {} }",
+        "function f() { return class extends super.Object {}; }",
+        "class C extends Object { m() { return class extends super() {}; } }",
+        "async function f(x = class extends (await Object) {}) {}",
+        "async function f(x = class { [await 0]() {} }) {}",
+        "function* f(x = class extends (yield Object) {}) {}",
+        "function* f(x = class { [yield 0]() {} }) {}",
+        "class C { x = class extends arguments.X {}; }",
+        "class C { x = class { [arguments]() {} }; }",
+        "class C { static { const D = class { [arguments]() {} }; } }",
+        "class C { static { const D = class { static { const f = () => arguments; } }; } }",
+    };
+    const valid = [_][]const u8{
+        "class C extends Object { constructor() { const D = class extends (super(), Object) {}; } }",
+        "({ m() { return class { [super.key]() {} }; } });",
+        "async function f() { return class extends (await Object) {}; }",
+        "function* f() { return class { [yield 0]() {} }; }",
+        "function f() { return class extends Object { constructor() { super(); } }; }",
+        "class C { static { const D = class extends Object { constructor() { super(); } }; } }",
+        "function f() { return class { x = super.value; }; }",
+        "function f() { return class { static { super.name; } }; }",
+        "class C { static { const D = class extends Object { constructor() { super(); } x = super.value; static { super.name; } }; } }",
+        "async function f(x = class { field = async () => await 1; static { const g = async () => await 1; } }) {}",
+        "function* f(x = class { *m() { yield 1; } }) {}",
+        "function f() { return class { [arguments[0]]() { return arguments[0]; } }; }",
+    };
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, source: []const u8, module: bool) ParseError!void {
+            var parser = try Parser.initWithScratch(allocator, std.testing.allocator, source);
+            const program = if (module) try parser.parseModule() else try parser.parseProgram();
+            // Context's Script/Module validation additionally enforces the
+            // global lexical super boundary after the shared parse.
+            try parser.scanEvalContext(program.program, true, true);
+        }
+    };
+    for ([_]bool{ false, true }) |module| {
+        for (invalid) |source| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            errdefer std.debug.print("invalid class query: {s}\n", .{source});
+            try std.testing.expectError(ParseError.UnexpectedToken, Check.run(arena.allocator(), source, module));
+        }
+        for (valid) |source| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            errdefer std.debug.print("valid class query: {s}\n", .{source});
+            try Check.run(arena.allocator(), source, module);
+        }
+    }
 }
 
 test "parser arrow boundaries keep lexical and suspension queries independent" {
