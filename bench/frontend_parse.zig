@@ -247,6 +247,22 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_512")) return 512;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_4096")) return 4096;
@@ -944,6 +960,84 @@ fn privateNestedSource(allocator: std.mem.Allocator, width: usize, shape: Privat
     return source.items;
 }
 
+/// #928 workloads. `checkLexicalDupes` collects VarDeclaredNames across the
+/// WHOLE subtree at every lexical scope, and `recurseScope` re-enters it for
+/// each nested block -- so a chain of blocks that each declare something
+/// lexical re-walks the remaining subtree once per level. These rows freeze
+/// that shape and the controls that isolate each factor, before any fix.
+const LexicalScanShape = enum {
+    /// Growth: N nested blocks, each declaring a lexical name, with N `var`
+    /// declarations at the bottom. Every level re-collects the same N var
+    /// names, so the arena takes N*N insertions for an O(N) source.
+    nested_lets,
+    /// Control: the same nesting and the same vars with NO lexical declaration
+    /// at any level, so `seen.count() > 0` is false and the var scan never
+    /// runs. Isolates "nesting is expensive" from "re-scanning is expensive".
+    no_lexical,
+    /// Control: ONE block holding all N lexical names and all N vars. The scan
+    /// runs once over the whole set rather than N times.
+    flat,
+    /// Control: N sibling blocks, each with its own lexical name and its own
+    /// var. The scan runs N times, but each over a constant-size subtree --
+    /// this is the shape that separates scan COUNT from scan DEPTH.
+    wide,
+};
+
+fn lexicalScanShape(name: []const u8) ?LexicalScanShape {
+    if (std.mem.startsWith(u8, name, "representative_frontend_lexical_scan_nested_lets_")) return .nested_lets;
+    if (std.mem.startsWith(u8, name, "representative_frontend_lexical_scan_no_lexical_")) return .no_lexical;
+    if (std.mem.startsWith(u8, name, "representative_frontend_lexical_scan_flat_")) return .flat;
+    if (std.mem.startsWith(u8, name, "representative_frontend_lexical_scan_wide_")) return .wide;
+    return null;
+}
+
+fn lexicalScanSource(allocator: std.mem.Allocator, width: usize, shape: LexicalScanShape) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    switch (shape) {
+        .wide => {
+            // Sibling scopes: the enclosing level declares nothing lexical, so
+            // its own scan is skipped and each block scans only its own pair.
+            for (0..width) |index| {
+                try source.appendSlice(allocator, try std.fmt.allocPrint(
+                    allocator,
+                    "{{ let a{d}; var v{d}; }}\n",
+                    .{ index, index },
+                ));
+            }
+        },
+        .flat => {
+            try source.appendSlice(allocator, "{\n");
+            for (0..width) |index|
+                try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "let a{d};", .{index}));
+            for (0..width) |index|
+                try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "var v{d};", .{index}));
+            try source.appendSlice(allocator, "\n}\n");
+        },
+        .nested_lets, .no_lexical => {
+            // The lexical name is what arms the scan; `no_lexical` keeps the
+            // identical block chain and var payload without it.
+            for (0..width) |index| {
+                if (shape == .nested_lets) {
+                    try source.appendSlice(allocator, try std.fmt.allocPrint(
+                        allocator,
+                        "{{ let a{d};",
+                        .{index},
+                    ));
+                } else {
+                    try source.appendSlice(allocator, "{");
+                }
+            }
+            // The vars sit at the bottom so every enclosing level collects all
+            // of them: that product is the growth being measured.
+            for (0..width) |index|
+                try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "var v{d};", .{index}));
+            for (0..width) |_| try source.appendSlice(allocator, "}");
+            try source.append(allocator, '\n');
+        },
+    }
+    return source.items;
+}
+
 fn privateClassSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     try source.appendSlice(allocator, "class PrivateWidth {");
@@ -1612,6 +1706,70 @@ fn validateClassFrameCompileProgram(
     }
 }
 
+/// #928: prove the parse really built the block shape being measured, so a
+/// growth row cannot silently degenerate into a cheaper program.
+///
+/// `nested_lets` at width N is `{ let a0; { let a1; ... { let aN-1; var v0;
+/// ... var vN-1; } ... } }`: every level but the last holds its `let` plus the
+/// next block, and the innermost holds its `let` plus all N vars.
+/// `no_lexical` is the same chain with the `let`s removed.
+fn validateLexicalScanProgram(program: anytype, width: usize, shape: LexicalScanShape) !usize {
+    if (program.* != .program or width == 0) return error.InvalidProgram;
+    switch (shape) {
+        .wide => {
+            if (program.program.len != width) return error.InvalidProgram;
+            var checksum = program.program.len;
+            for (program.program, 0..) |stmt, index| {
+                if (stmt.* != .block or stmt.block.len != 2) return error.InvalidProgram;
+                if (!isNamedDecl(stmt.block[0], "let", "a", index)) return error.InvalidProgram;
+                if (!isNamedDecl(stmt.block[1], "var", "v", index)) return error.InvalidProgram;
+                checksum += stmt.block.len;
+            }
+            return checksum;
+        },
+        .flat => {
+            if (program.program.len != 1) return error.InvalidProgram;
+            const block = program.program[0];
+            if (block.* != .block or block.block.len != width * 2) return error.InvalidProgram;
+            for (block.block[0..width], 0..) |stmt, index|
+                if (!isNamedDecl(stmt, "let", "a", index)) return error.InvalidProgram;
+            for (block.block[width..], 0..) |stmt, index|
+                if (!isNamedDecl(stmt, "var", "v", index)) return error.InvalidProgram;
+            return block.block.len + 1;
+        },
+        .nested_lets, .no_lexical => {
+            const lets = shape == .nested_lets;
+            // Statements per level: the optional `let`, plus one nested block.
+            const inner_count: usize = if (lets) 2 else 1;
+            if (program.program.len != 1) return error.InvalidProgram;
+            var node = program.program[0];
+            for (0..width - 1) |level| {
+                if (node.* != .block or node.block.len != inner_count) return error.InvalidProgram;
+                if (lets and !isNamedDecl(node.block[0], "let", "a", level)) return error.InvalidProgram;
+                node = node.block[inner_count - 1];
+            }
+            // Innermost: the last `let` (if any) followed by every var.
+            const tail_count: usize = width + (inner_count - 1);
+            if (node.* != .block or node.block.len != tail_count) return error.InvalidProgram;
+            if (lets and !isNamedDecl(node.block[0], "let", "a", width - 1)) return error.InvalidProgram;
+            for (node.block[inner_count - 1 ..], 0..) |stmt, index|
+                if (!isNamedDecl(stmt, "var", "v", index)) return error.InvalidProgram;
+            return width + tail_count;
+        },
+    }
+}
+
+/// `kind_name` is the DeclKind tag spelled out, because this file reaches the
+/// AST only through `anytype` -- `js` does not re-export the node types.
+fn isNamedDecl(node: anytype, comptime kind_name: []const u8, prefix: []const u8, index: usize) bool {
+    if (node.* != .var_decl) return false;
+    const decl = node.var_decl;
+    if (!std.mem.eql(u8, @tagName(decl.kind), kind_name)) return false;
+    if (!std.mem.startsWith(u8, decl.name, prefix)) return false;
+    const parsed = std.fmt.parseUnsigned(usize, decl.name[prefix.len..], 10) catch return false;
+    return parsed == index;
+}
+
 fn parseOnce(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -1632,6 +1790,8 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (lexicalScanShape(workload)) |shape|
+        return validateLexicalScanProgram(program, try workloadWidth(workload), shape);
     if (bindingHashCompileShape(workload)) |shape|
         return validateBindingHashCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (classFrameCompileShape(workload)) |shape|
@@ -2058,6 +2218,7 @@ pub fn main(init: std.process.Init) !void {
     const binding_inventory_compile_shape = bindingInventoryCompileShape(workload);
     const binding_hash_compile_shape = bindingHashCompileShape(workload);
     const private_nested_shape = privateNestedShape(workload);
+    const lexical_scan_shape = lexicalScanShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
     const source = if (binding_hash_compile_shape) |shape|
         try bindingHashCompileSource(init.arena.allocator(), width, shape)
@@ -2099,6 +2260,8 @@ pub fn main(init: std.process.Init) !void {
         try moduleSource(init.arena.allocator(), width)
     else if (isTaggedSubstitutionWorkload(workload))
         try taggedSubstitutionSource(init.arena.allocator(), width)
+    else if (lexical_scan_shape) |shape|
+        try lexicalScanSource(init.arena.allocator(), width, shape)
     else if (private_nested_shape) |shape|
         try privateNestedSource(init.arena.allocator(), width, shape)
     else if (private_name_workload)
@@ -2154,7 +2317,7 @@ pub fn main(init: std.process.Init) !void {
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (private_nested_shape != null or binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (lexical_scan_shape != null or private_nested_shape != null or binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
