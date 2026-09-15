@@ -6989,6 +6989,56 @@ test "parser validates class private name uses" {
     try std.testing.expectEqual(@as(usize, 1), nested_prog.program.len);
 }
 
+test "parser lexical and var early errors span nested block scopes" {
+    // #928 baseline, recorded before any change to the subtree var scan in
+    // `checkLexicalDupes`. Every case was confirmed against another engine
+    // first, so this pins observed behaviour rather than a reading of the
+    // spec. A `var` conflicts with the LexicallyDeclaredNames of every block
+    // enclosing it up to the nearest function boundary -- which is exactly the
+    // set a single scoped map with rollback would hold at that point.
+    const invalid = [_][]const u8{
+        "{ var x; let x; }",
+        // `var` hoists out of nested blocks, so it reaches the outer `let`.
+        "{ let x; { var x; } }",
+        "{ let x; { { var x; } } }",
+        "function f() { let x; { var x; } }",
+        // The whole switch is one lexical scope spanning every case.
+        "switch (0) { case 1: let x; break; case 2: var x; }",
+        "{ let x; try { var x; } catch (e) {} }",
+        "{ let x; try {} catch (e) { var x; } }",
+        "{ let x; for (var x of []) ; }",
+        "{ const x = 1; { var x; } }",
+        // A label is not a scope boundary for this early error.
+        "{ let x; lbl: { var x; } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+
+    const valid = [_][]const u8{
+        // Sibling scopes never see each other's names.
+        "{ let x; } { var x; }",
+        "{ { var x; } { let x; } }",
+        // A function or arrow body stops `var` from hoisting further out.
+        "{ let x; function f() { var x; } }",
+        "{ let x; (() => { var x; }); }",
+        // Shadowing, and a `var` that is declared OUTSIDE the block holding
+        // the lexical name -- the asymmetry a naive scan gets wrong.
+        "{ let x; { let x; } }",
+        "{ var x; { let x; } }",
+        "{ let a; { let b; { var v; } } }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+}
+
 test "parser private name scoping isolates siblings and descendants" {
     // #926 baseline, recorded before any change to the inherited-name copy in
     // `checkPrivateNameUses`. Every case here was first confirmed against
