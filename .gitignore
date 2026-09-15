@@ -14,3 +14,6 @@ pantry.lock
 .claude/worktrees
 /.zig-global-cache
 .codex/worktrees
+
+# transient per-session agent scratch (worktrees, in-flight patches)
+.pending-agent-work
