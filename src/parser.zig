@@ -311,6 +311,15 @@ fn SecureStringMapUnmanaged(comptime Value: type) type {
             return self.index.containsContext(key, context);
         }
 
+        /// Reads the published context like `contains` rather than deriving a
+        /// candidate: a map with no published context holds no entries, so
+        /// there is nothing to remove and no reason to mint a key for the
+        /// attempt. Returns whether the key was present.
+        fn remove(self: *Self, key: []const u8) bool {
+            const context = self.state.context orelse return false;
+            return self.index.removeContext(key, context);
+        }
+
         fn count(self: *const Self) usize {
             return self.index.count();
         }
@@ -5004,25 +5013,62 @@ pub const Parser = struct {
     fn checkPrivateUsesInProgram(self: *Parser, stmts: []const *Node) ParseError!void {
         var declared = self.secureStringMap(void);
         for (stmts) |stmt| try self.checkPrivateUsesInNode(&declared, stmt);
+        // Each class extends this map in place and unwinds on the way out, so
+        // anything left here is a scope that failed to roll back.
+        std.debug.assert(declared.count() == 0);
     }
 
     fn checkPrivateNameUses(
         self: *Parser,
-        inherited: *SecureStringMapUnmanaged(void),
+        declared: *SecureStringMapUnmanaged(void),
         members: []const ast.ClassMember,
     ) ParseError!void {
-        var declared = self.secureStringMap(void);
-        var it = inherited.iterator();
-        while (it.next()) |entry| try declared.put(self.arena, entry.key_ptr.*, {});
+        // #926: extend the enclosing environment in place and unwind it, rather
+        // than copying every inherited name into a fresh per-class map. The
+        // copy made a linear source quadratic in time AND in retained arena
+        // bytes -- N nested classes over N inherited names performed N*N
+        // insertions that the arena never released. `requirePrivateName` only
+        // ever asks `contains`, so an undo log is observationally identical to
+        // the copy.
+        //
+        // Shadowing falls out of insert-if-absent for free: a name an ancestor
+        // already declared is not inserted here, so it is not removed here
+        // either, and it correctly outlives this class. Inserting
+        // unconditionally would make an inner `#x` delete the outer one.
+        var added: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (added.items) |name| _ = declared.remove(name);
+            added.deinit(self.scratch_allocator);
+        }
+        // Counted first so the undo log is reserved to the exact number of
+        // private declarations: reserving `members.len` charged every class an
+        // allocation, including the common one that declares no private name
+        // at all and therefore never records an undo.
+        var private_declarations: usize = 0;
         for (members) |member| {
-            if (member.key_expr == null and isPrivateNameText(member.key))
-                try declared.put(self.arena, member.key, {});
+            if (member.key_expr == null and isPrivateNameText(member.key)) private_declarations += 1;
+        }
+        // Reserved before the first insertion so recording an insertion cannot
+        // fail after the name is already visible: a half-recorded insertion
+        // would leak the name to later siblings as a missing SyntaxError.
+        if (private_declarations != 0)
+            try added.ensureTotalCapacity(self.scratch_allocator, private_declarations);
+        for (members) |member| {
+            if (member.key_expr == null and isPrivateNameText(member.key)) {
+                // A legal accessor pair declares the same name twice, so the
+                // second `get`/`set` member must not record a second undo.
+                const result = try declared.getOrPut(self.arena, member.key);
+                if (!result.found_existing) {
+                    result.value_ptr.* = {};
+                    added.appendAssumeCapacity(member.key);
+                }
+            }
         }
         for (members) |member| {
-            if (member.key_expr) |key_expr| try self.checkPrivateUsesInNode(&declared, key_expr);
-            if (member.func) |func| try self.checkPrivateUsesInNode(&declared, func);
-            if (member.field_init) |field_init| try self.checkPrivateUsesInNode(&declared, field_init);
-            if (member.static_block) |static_block| try self.checkPrivateUsesInNode(&declared, static_block);
+            if (member.key_expr) |key_expr| try self.checkPrivateUsesInNode(declared, key_expr);
+            if (member.func) |func| try self.checkPrivateUsesInNode(declared, func);
+            if (member.field_init) |field_init| try self.checkPrivateUsesInNode(declared, field_init);
+            if (member.static_block) |static_block| try self.checkPrivateUsesInNode(declared, static_block);
         }
     }
 
@@ -6961,6 +7007,19 @@ test "parser private name scoping isolates siblings and descendants" {
         // An inner class's heritage is checked in the enclosing environment,
         // which already holds the outer names.
         "class Outer { #x; m() { return class extends (this.#x) {}; } }",
+        // The shadowed outer name must still resolve in a LATER member, after
+        // the shadowing class has closed. An undo log that removed the name
+        // unconditionally rather than only when it inserted would break here.
+        "class A { #x; m() { class B { #x; } } n() { return this.#x; } }",
+        // A legal accessor pair declares one name across two members, so an
+        // undo log must record it once, not twice.
+        "class C { get #x() { return 1; } set #x(v) {} m() { return this.#x; } }",
+        "class Outer { #x; m() { class I { get #x() {} set #x(v) {} } } n() { return this.#x; } }",
+        // Reached through static blocks, a template substitution and a default
+        // parameter value -- separate traversal arms into a nested class.
+        "class Outer { #x; static { const a = class { m() { return this.#x; } }; } static { const b = class { m() { return this.#x; } }; } }",
+        "class Outer { #x; a = class { m() { return `${this.#x}`; } }; }",
+        "class Outer { #x; m(f = class { g() { return this.#x; } }) { return f; } }",
     };
     for (valid) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -6980,6 +7039,12 @@ test "parser private name scoping isolates siblings and descendants" {
         // the extends expression is checked before they are added.
         "class C extends class { x = this.#foo; } { #foo; }",
         "class A { m() { return class B { #b; }; } n(o) { return #b in o; } }",
+        // The same reach-in arms as the valid block above, but with nothing
+        // declaring the name -- each must still be rejected.
+        "class Outer { m() { class I { get #x() {} set #x(v) {} } } n() { return this.#x; } }",
+        "class Outer { static { const a = class { #y; }; } static { const b = class { m() { return this.#y; } }; } }",
+        "class Outer { a = class { #y; }; b = class { m() { return `${this.#y}`; } }; }",
+        "class Outer { m(f = class { #y; }) { return this.#y; } }",
     };
     for (invalid) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
