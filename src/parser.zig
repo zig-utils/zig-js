@@ -470,6 +470,9 @@ pub const Parser = struct {
     /// early error. Set true to scan only for SuperCall (e.g. a method body,
     /// where `arguments` is legal).
     scan_allow_arguments: bool = false,
+    /// Parameter Contains Await/Yield queries must not impose a SuperCall ban;
+    /// the enclosing function/method/field validates its own lexical super use.
+    scan_forbid_super_call: bool = true,
     /// When true, `scanSuperAndArgs` also flags a SuperProperty (`super.x`) —
     /// used to validate indirect-eval code, which is global and may contain no
     /// `super` at all (a direct eval from a field initializer leaves this false,
@@ -2601,18 +2604,7 @@ pub const Parser = struct {
         }
         const params = try self.parseParamListForAccessor(accessor);
         if (is_gen or is_async) {
-            const saved_allow = self.scan_allow_arguments;
-            const saved_fy = self.scan_forbid_yield;
-            const saved_fa = self.scan_forbid_await;
-            self.scan_allow_arguments = true; // only Yield/AwaitExpression is the concern here
-            self.scan_forbid_yield = is_gen;
-            self.scan_forbid_await = is_async;
-            defer {
-                self.scan_allow_arguments = saved_allow;
-                self.scan_forbid_yield = saved_fy;
-                self.scan_forbid_await = saved_fa;
-            }
-            try self.scanSuperAndArgsInParams(params);
+            try self.forbidYieldAwaitInParams(params, is_gen, is_async);
         }
         return params;
     }
@@ -3040,18 +3032,7 @@ pub const Parser = struct {
             // its parameter defaults is an early error: `function* g(){ (x =
             // yield) => {}; }`.
             if (self.in_generator or self.in_async or self.module) {
-                const sa = self.scan_allow_arguments;
-                const sy = self.scan_forbid_yield;
-                const sfa = self.scan_forbid_await;
-                self.scan_allow_arguments = true;
-                self.scan_forbid_yield = self.in_generator;
-                self.scan_forbid_await = self.in_async or self.module;
-                defer {
-                    self.scan_allow_arguments = sa;
-                    self.scan_forbid_yield = sy;
-                    self.scan_forbid_await = sfa;
-                }
-                try self.scanSuperAndArgsInParams(params);
+                try self.forbidYieldAwaitInParams(params, self.in_generator, self.in_async or self.module);
             }
             return self.parseArrowBody(params, false, start, uses_direct_eval_in_parameters);
         }
@@ -3209,15 +3190,7 @@ pub const Parser = struct {
         self.in_async = true;
         defer self.in_async = saved_async;
         const params = try self.parseParamList();
-        const saved_allow = self.scan_allow_arguments;
-        const saved_fa = self.scan_forbid_await;
-        self.scan_allow_arguments = true;
-        self.scan_forbid_await = true;
-        defer {
-            self.scan_allow_arguments = saved_allow;
-            self.scan_forbid_await = saved_fa;
-        }
-        try self.scanSuperAndArgsInParams(params);
+        try self.forbidYieldAwaitInParams(params, self.in_generator, true);
         return params;
     }
 
@@ -4578,6 +4551,24 @@ pub const Parser = struct {
         for (stmts) |s| try self.scanSuperAndArgs(s);
     }
 
+    fn forbidYieldAwaitInParams(self: *Parser, params: []const ast.Param, forbid_yield: bool, forbid_await: bool) ParseError!void {
+        const saved_args = self.scan_allow_arguments;
+        const saved_call = self.scan_forbid_super_call;
+        const saved_yield = self.scan_forbid_yield;
+        const saved_await = self.scan_forbid_await;
+        self.scan_allow_arguments = true;
+        self.scan_forbid_super_call = false;
+        self.scan_forbid_yield = forbid_yield;
+        self.scan_forbid_await = forbid_await;
+        defer {
+            self.scan_allow_arguments = saved_args;
+            self.scan_forbid_super_call = saved_call;
+            self.scan_forbid_yield = saved_yield;
+            self.scan_forbid_await = saved_await;
+        }
+        try self.scanSuperAndArgsInParams(params);
+    }
+
     fn scanSuperAndArgsInParams(self: *Parser, params: []const ast.Param) ParseError!void {
         for (params) |param| {
             if (param.pattern) |pattern| try self.scanSuperAndArgsInPattern(pattern);
@@ -4622,7 +4613,10 @@ pub const Parser = struct {
         switch (node.*) {
             .obj_pattern, .arr_pattern => try self.scanSuperAndArgsInPattern(node),
             .identifier => |name| if (!self.scan_allow_arguments and std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
-            .super_call => return ParseError.UnexpectedToken,
+            .super_call => |args| {
+                if (self.scan_forbid_super_call) return ParseError.UnexpectedToken;
+                for (args) |arg| try self.scanSuperAndArgs(arg);
+            },
             .unary => |u| try self.scanSuperAndArgs(u.operand),
             .delete_expr => |t| try self.scanSuperAndArgs(t),
             .update => |u| try self.scanSuperAndArgs(u.target),
@@ -4699,8 +4693,21 @@ pub const Parser = struct {
             // arrow params' defaults and body. Ordinary functions/classes have
             // their own bindings and are not descended into.
             .function => |f| if (f.is_arrow) {
+                // ECMA-262 8.5.1 Contains stops Await/Yield queries at the
+                // entire arrow, while lexical SuperCall/SuperProperty queries
+                // and 15.7.9 ContainsArguments cross both params and body.
+                // Each arrow's own parameter early errors are checked during
+                // parsing, independently of this enclosing query.
+                if (self.scan_allow_arguments and !self.scan_forbid_super_call and !self.scan_forbid_super_property) return;
+                const saved_await = self.scan_forbid_await;
+                const saved_yield = self.scan_forbid_yield;
+                self.scan_forbid_await = false;
+                self.scan_forbid_yield = false;
+                defer {
+                    self.scan_forbid_await = saved_await;
+                    self.scan_forbid_yield = saved_yield;
+                }
                 try self.scanSuperAndArgsInParams(f.params);
-                if (self.scan_forbid_await or self.scan_forbid_yield) return;
                 try self.scanSuperAndArgs(f.body);
             },
             .class_expr => |c| if (self.scan_descend_class_expr) {
@@ -6392,6 +6399,67 @@ test "parser validates module label early errors" {
 
     var labeled_block_continue = try Parser.init(arena.allocator(), "label: { while (false) { continue label; } }");
     try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
+}
+
+test "parser arrow boundaries keep lexical and suspension queries independent" {
+    const invalid = [_][]const u8{
+        "class C { static { const f = () => arguments; } }",
+        "class C { static { const f = async () => arguments; } }",
+        "class C { static { const f = () => () => arguments; } }",
+        "class C { static { const f = () => { let [x = arguments] = []; }; } }",
+        "class C { static { const f = () => ({[arguments]: 1}); } }",
+        "class C { static { const f = () => { try {} catch ([x = arguments]) {} }; } }",
+        "class C { static { const f = (x = arguments) => x; } }",
+        "class C { static { const f = async (x = () => arguments) => x; } }",
+        "class C extends Object { static { const f = () => super(); } }",
+        "class C extends Object { static { const f = async () => super(); } }",
+        "class C extends Object { static { const f = () => () => super(); } }",
+        "class C extends Object { static { const f = async (x = () => super()) => x; } }",
+        "class C extends Object { m() { return async (x = () => super()) => x; } }",
+        "function f() { return async (x = () => super.name) => x; }",
+        "class C { static { const f = async () => await 1; if (false) { for await (const x of []) {} } } }",
+        "class C { static { const f = async () => await 1; if (false) { await using x = null; } } }",
+        "async function f(x = super(await 1)) {}",
+        "function* f(x = super(yield 1)) {}",
+        "class C extends Object { constructor(f = async (x = super(await 1)) => x) {} }",
+        "function* f() { const g = async (x = yield 1) => x; }",
+    };
+    const valid = [_][]const u8{
+        "class C { static { const f = function () { return arguments; }; } }",
+        "class C { static { const f = function () { return () => arguments; }; } }",
+        "class C { static { const f = async () => await 1; } }",
+        "class C { static { const f = () => async () => await 1; } }",
+        "class C { static { const f = async () => { for await (const x of []) {} }; } }",
+        "class C { static { const f = async () => { await using x = null; }; } }",
+        "class C extends Object { static { const f = () => super.name; } }",
+        "class C extends Object { constructor() { const f = () => super(); f(); } }",
+        "class C extends Object { constructor(f = async (x = () => super()) => x) {} }",
+        "class C extends Object { constructor(f = async (x = () => super.name) => x) {} }",
+        "class C extends Object { constructor(f = async (x = super()) => x) {} }",
+        "class C extends Object { constructor() { return (async (x = () => () => super()) => x); } }",
+        "class C extends Object { async m(x = () => super.name) {} }",
+        "class C extends Object { *m(x = () => super.name) {} }",
+        "class C { field = async () => await 1; }",
+        "async function f(x = async () => await 1) {}",
+        "function* f(x = function* () { yield 1; }) {}",
+        "class C { static { const f = () => ({arguments: 1}); } }",
+    };
+    for ([_]bool{ false, true }) |module| {
+        for (invalid) |source| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+            errdefer std.debug.print("invalid arrow boundary: {s}\n", .{source});
+            try std.testing.expectError(ParseError.UnexpectedToken, if (module) parser.parseModule() else parser.parseProgram());
+        }
+        for (valid) |source| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+            errdefer std.debug.print("valid arrow boundary: {s}\n", .{source});
+            _ = if (module) try parser.parseModule() else try parser.parseProgram();
+        }
+    }
 }
 
 test "parser early errors traverse pattern expressions without crossing function boundaries" {
