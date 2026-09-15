@@ -14244,6 +14244,50 @@ test "new target diagnostics preserve eval boundaries and early errors across ti
     }
 }
 
+test "module super early errors precede entry and dependency execution" {
+    const invalid = [_][]const u8{
+        "super.x;",
+        "super();",
+        "export default super.x;",
+        "export const x = super.x;",
+        "export class C extends super.Object {}",
+        "const f = () => super.x;",
+    };
+    const valid = [_][]const u8{
+        "export default class C extends Object { constructor() { super(); } } if (!(new C() instanceof C)) throw 1;",
+        "const p = {x:42}; export const o = {__proto__:p, m() { return super.x; }}; if (o.m() !== 42) throw 1;",
+        "const f = () => class extends Object {m() { return super.toString; }}; if (typeof new (f())().m() !== 'function') throw 1;",
+        "export function f() { return new.target; } if (f() !== undefined) throw 1;",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (invalid) |source| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            _ = try ctx.evaluate("globalThis.moduleEffect = 0");
+            const guarded = try std.fmt.allocPrint(std.testing.allocator, "globalThis.moduleEffect = 1; {s}", .{source});
+            defer std.testing.allocator.free(guarded);
+            errdefer std.debug.print("module super early error ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expectError(error.UnexpectedToken, evaluateModuleWithFixturesInContext(ctx, guarded, &.{}));
+            try std.testing.expect((try ctx.evaluate("moduleEffect === 0")).toBoolean());
+            const fixtures = [_]ModuleFixture{.{ .path = "bad.js", .source = guarded }};
+            try std.testing.expectError(error.UnexpectedToken, evaluateModuleWithFixturesInContext(ctx, "import './bad.js'; globalThis.moduleEffect = 2;", &fixtures));
+            try std.testing.expect((try ctx.evaluate("moduleEffect === 0")).toBoolean());
+        }
+        for (valid) |source| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            errdefer std.debug.print("valid module super ({s}): {s}\n", .{ @tagName(mode), source });
+            try evaluateModuleWithFixturesInContext(ctx, source, &.{});
+        }
+    }
+}
+
 test "query coverage early errors precede execution across tiers" {
     const invalid = [_][]const u8{
         "class C { m() { label: this.#missing; } }",

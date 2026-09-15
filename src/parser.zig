@@ -1430,6 +1430,10 @@ pub const Parser = struct {
         for (stmts) |stmt| try checkLocalExportedBindings(stmt, &lexical, &vars);
         for (stmts) |stmt| try self.recurseScope(stmt);
         try self.checkPrivateUsesInProgram(stmts);
+        // ModuleBody's early errors reject Contains `super` at the module
+        // boundary, including arrows and exported expressions. Keep this in
+        // the parser: module loading need not pass through Script evaluation.
+        try self.scanEvalContext(stmts, true, true);
     }
 
     fn wtf8SurrogateAt(s: []const u8, i: usize) ?u16 {
@@ -4768,6 +4772,10 @@ pub const Parser = struct {
                 try self.scanSuperAndArgs(fo.body);
             },
             .labeled_stmt => |l| try self.scanSuperAndArgs(l.body),
+            .export_decl => |e| {
+                if (e.declaration) |decl| try self.scanSuperAndArgs(decl);
+                if (e.default_expr) |expr| try self.scanSuperAndArgs(expr);
+            },
             .with_stmt => |w| {
                 // Contains follows both children: a with environment does not
                 // introduce a lexical super/arguments binding boundary.
@@ -6417,6 +6425,41 @@ test "parser validates module label early errors" {
 
     var labeled_block_continue = try Parser.init(arena.allocator(), "label: { while (false) { continue label; } }");
     try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
+}
+
+test "parser module super queries include exports and preserve own bindings" {
+    const invalid = [_][]const u8{
+        "super.x;",
+        "super();",
+        "export default super.x;",
+        "export const x = super.x;",
+        "export class C extends super.Object {}",
+        "const f = () => super.x;",
+        "export default () => super.x;",
+        "export const {x = super.x} = {};",
+    };
+    const valid = [_][]const u8{
+        "export default class C extends Object { constructor() { super(); } }",
+        "export const o = {m() { return super.x; }};",
+        "const f = () => class {m() { return super.x; }};",
+        "export function f() { return new.target; }",
+        "export default function () { return {m() { return super.x; }}; }",
+        "export class C extends Object { field = super.x; static { super.name; } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        errdefer std.debug.print("invalid module super: {s}\n", .{source});
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseModule());
+    }
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        errdefer std.debug.print("valid module super: {s}\n", .{source});
+        _ = try parser.parseModule();
+    }
 }
 
 test "parser query coverage includes labels logical assignments and with" {
