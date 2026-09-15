@@ -226,6 +226,27 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_unicode_identifiers_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_unicode_identifiers_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_unicode_identifiers_4096")) return 4096;
+    // #926: nested private-name growth. The inherited copies land in the parse
+    // arena and are never released mid-parse, so retention grows as N^2 too:
+    // 297 MB at 2048 for a 98 KB source. The rows stop there because 4096 would
+    // retain ~1.2 GB -- wide enough to show the curve, narrow enough to stay
+    // inside the memory cap.
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_4096")) return 4096;
@@ -847,6 +868,79 @@ fn unicodeIdentifierSource(allocator: std.mem.Allocator, width: usize) ![]const 
         try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
     }
     try source.appendSlice(allocator, "){\"use strict\";return 7;}");
+    return source.items;
+}
+
+/// #926 workloads. `checkPrivateNameUses` copies every inherited private name
+/// into a fresh map for each nested class, so breadth of nested classes and the
+/// inherited-name count multiply. These rows freeze that shape and the controls
+/// that isolate each factor; they are added before any parser change.
+const PrivateNestedShape = enum {
+    /// Growth: N inherited names AND N sibling inner classes. Both factors move.
+    siblings,
+    /// Control: N inherited names, ONE inner class. Isolates the name count:
+    /// exactly one copy of N, so it stays linear.
+    single_inner,
+    /// Control: N sibling inner classes, ZERO inherited names. Isolates breadth:
+    /// N copies of nothing, so it stays linear. This is the shape that separates
+    /// "nesting is expensive" from "copying the inherited set is expensive".
+    no_inherited,
+    /// Growth, NOT a control: N inherited names nested N deep rather than N
+    /// wide. A chain copies a growing set once per level, and 1+2+...+N is
+    /// quadratic too -- it separates depth from breadth but not linear from
+    /// quadratic. Measured at half the siblings constant, as N^2/2 predicts.
+    deep,
+};
+
+fn privateNestedShape(name: []const u8) ?PrivateNestedShape {
+    if (std.mem.startsWith(u8, name, "representative_frontend_private_nested_siblings_")) return .siblings;
+    if (std.mem.startsWith(u8, name, "representative_frontend_private_nested_single_inner_")) return .single_inner;
+    if (std.mem.startsWith(u8, name, "representative_frontend_private_nested_no_inherited_")) return .no_inherited;
+    if (std.mem.startsWith(u8, name, "representative_frontend_private_nested_deep_")) return .deep;
+    return null;
+}
+
+fn privateNestedSource(allocator: std.mem.Allocator, width: usize, shape: PrivateNestedShape) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    if (shape == .deep) {
+        // One chain: each level declares a name and opens another class.
+        for (0..width) |index| {
+            try source.appendSlice(allocator, try std.fmt.allocPrint(
+                allocator,
+                "class D{d} {{ #n{d}; m() {{ return ",
+                .{ index, index },
+            ));
+        }
+        try source.appendSlice(allocator, "0");
+        for (0..width) |_| try source.appendSlice(allocator, "; } }");
+        try source.append(allocator, ';');
+        return source.items;
+    }
+    try source.appendSlice(allocator, "class Outer {");
+    const declared: usize = if (shape == .no_inherited) 0 else width;
+    for (0..declared) |index| {
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "#n{d};", .{index}));
+    }
+    const inner: usize = if (shape == .single_inner) 1 else width;
+    for (0..inner) |index| {
+        // Each inner class expression re-enters checkPrivateNameUses with the
+        // enclosing declared set. The body references an inherited name where
+        // one exists, so the use-check walks it rather than short-circuiting.
+        if (shape == .no_inherited) {
+            try source.appendSlice(allocator, try std.fmt.allocPrint(
+                allocator,
+                "f{d} = class {{ g() {{ return 0; }} }};",
+                .{index},
+            ));
+        } else {
+            try source.appendSlice(allocator, try std.fmt.allocPrint(
+                allocator,
+                "f{d} = class {{ g() {{ return this.#n0; }} }};",
+                .{index},
+            ));
+        }
+    }
+    try source.appendSlice(allocator, "}");
     return source.items;
 }
 
@@ -1741,6 +1835,47 @@ fn parseOnce(
         if (text.len != try workloadWidth(workload)) return error.InvalidProgram;
         return validatedDecimalBigIntChecksum(text);
     }
+    if (privateNestedShape(workload)) |shape| {
+        // #926: prove the parse really built the nested shape being measured,
+        // so a growth row cannot silently degenerate into a cheaper program.
+        if (declaration.* != .var_decl) return error.InvalidProgram;
+        const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
+        if (init_expr.* != .class_expr) return error.InvalidProgram;
+        const width = try workloadWidth(workload);
+        const members = init_expr.class_expr.members;
+        if (shape == .deep) {
+            // One `#nK` field plus the method carrying the next level.
+            if (members.len != 2) return error.InvalidProgram;
+            if (!members[0].is_field or !std.mem.eql(u8, members[0].key, "#n0")) return error.InvalidProgram;
+            if (members[1].func == null or !std.mem.eql(u8, members[1].key, "m")) return error.InvalidProgram;
+            return members.len + width;
+        }
+        const declared: usize = if (shape == .no_inherited) 0 else width;
+        const inner: usize = if (shape == .single_inner) 1 else width;
+        if (members.len != declared + inner) return error.InvalidProgram;
+        var checksum = members.len;
+        for (members[0..declared], 0..) |member, index| {
+            if (!member.is_field or member.key_expr != null or
+                member.key.len < "#n".len or !std.mem.eql(u8, member.key[0.."#n".len], "#n"))
+                return error.InvalidProgram;
+            if (try std.fmt.parseUnsigned(usize, member.key["#n".len..], 10) != index)
+                return error.InvalidProgram;
+            checksum += member.key.len;
+        }
+        for (members[declared..], 0..) |member, index| {
+            if (!member.is_field or member.key_expr != null or
+                member.key.len < "f".len or member.key[0] != 'f') return error.InvalidProgram;
+            if (try std.fmt.parseUnsigned(usize, member.key["f".len..], 10) != index)
+                return error.InvalidProgram;
+            // Each sibling must actually be a class expression: that is the
+            // node that re-enters checkPrivateNameUses with the inherited set.
+            const field_init = member.field_init orelse return error.InvalidProgram;
+            if (field_init.* != .class_expr) return error.InvalidProgram;
+            if (field_init.class_expr.members.len != 1) return error.InvalidProgram;
+            checksum += member.key.len + field_init.class_expr.members.len;
+        }
+        return checksum;
+    }
     if (isPrivateNameWorkload(workload)) {
         if (declaration.* != .var_decl) return error.InvalidProgram;
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
@@ -1922,6 +2057,7 @@ pub fn main(init: std.process.Init) !void {
     const tdz_compile_shape = tdzCompileShape(workload);
     const binding_inventory_compile_shape = bindingInventoryCompileShape(workload);
     const binding_hash_compile_shape = bindingHashCompileShape(workload);
+    const private_nested_shape = privateNestedShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
     const source = if (binding_hash_compile_shape) |shape|
         try bindingHashCompileSource(init.arena.allocator(), width, shape)
@@ -1963,6 +2099,8 @@ pub fn main(init: std.process.Init) !void {
         try moduleSource(init.arena.allocator(), width)
     else if (isTaggedSubstitutionWorkload(workload))
         try taggedSubstitutionSource(init.arena.allocator(), width)
+    else if (private_nested_shape) |shape|
+        try privateNestedSource(init.arena.allocator(), width, shape)
     else if (private_name_workload)
         try privateClassSource(
             init.arena.allocator(),
@@ -2016,7 +2154,7 @@ pub fn main(init: std.process.Init) !void {
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (private_nested_shape != null or binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;

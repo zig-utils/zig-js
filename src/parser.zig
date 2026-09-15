@@ -6943,6 +6943,52 @@ test "parser validates class private name uses" {
     try std.testing.expectEqual(@as(usize, 1), nested_prog.program.len);
 }
 
+test "parser private name scoping isolates siblings and descendants" {
+    // #926 baseline, recorded before any change to the inherited-name copy in
+    // `checkPrivateNameUses`. Every case here was first confirmed against
+    // JavaScriptCore, so a scoped fix that keeps them passing keeps the
+    // observable semantics: a nested class sees its ancestors' names, shadows
+    // them by redeclaring, and never sees a sibling's or a descendant's.
+    const valid = [_][]const u8{
+        "class Outer { #x; a = class { m() { return this.#x; } }; }",
+        // Redeclaring shadows rather than collides, and the sibling that does
+        // not redeclare still binds the outer name -- the two inner classes
+        // must not end up sharing one mutable set.
+        "class Outer { #x; a = class { #x; m() { return this.#x; } }; b = class { m() { return this.#x; } }; }",
+        // Every level of a chain sees all of its ancestors, by use and by brand.
+        "class A { #a; m() { return class B { #b; n() { return class C { p(o) { return this.#a + this.#b + (#a in o); } }; } }; } }",
+        "class Outer { #x; a = class { m(o) { return #x in o; } }; }",
+        // An inner class's heritage is checked in the enclosing environment,
+        // which already holds the outer names.
+        "class Outer { #x; m() { return class extends (this.#x) {}; } }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        const program = try parser.parseProgram();
+        try std.testing.expectEqual(@as(usize, 1), program.program.len);
+    }
+
+    const invalid = [_][]const u8{
+        // A name declared in an earlier sibling is out of scope in a later one.
+        "class Outer { a = class { #y; }; b = class { m() { return this.#y; } }; }",
+        "class Outer { a = class { #y; }; b = class { m(o) { return #y in o; } }; }",
+        // A nested class's own names do not leak back out to the enclosing one.
+        "class Outer { a = class { #y; }; m() { return this.#y; } }",
+        // A class's own names are not in scope for its own heritage clause:
+        // the extends expression is checked before they are added.
+        "class C extends class { x = this.#foo; } { #foo; }",
+        "class A { m() { return class B { #b; }; } n(o) { return #b in o; } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+}
+
 test "parser private constructor members preserve lexical name validation" {
     const valid = [_][]const u8{
         "class C { #Ctor; make() { return new this.#Ctor(); } }",

@@ -118,7 +118,7 @@ zig build build-feedback-test   # validate build-feedback evidence parsing only
 ```bash
 zig build test-parallel         # ALWAYS use this for a full local run
 zig build test -Dtest-filter=<substr>   # focused; runtime filter reuses the linked binary
-zig build test-frontend -Dtest-filter=<substr> # smaller parser/evaluator probe
+zig build test-frontend -Dtest-filter=<substr> # curated case list, NOT src/ `test` blocks
 zig build test -Dtsan=true      # ThreadSanitizer
 ```
 
@@ -135,9 +135,30 @@ Any edit under `src/` relinks the test artifact — budget ~4–6 min per build,
 ~8–10 min per filtered probe cycle. Prefer **one instrumentation pass that
 answers several questions** over several narrow ones.
 
+**A `src/` edit forces a cold relink of the unit artifact, and that link step
+peaks the process tree around 3.1 GB** — 3073 MB at the default `-j`, 3089 MB at
+`-j2`, 3084 MB via `test-parallel -Dunit-jobs=1`. Concurrency flags do not move
+it, because the peak is one step. For work confined to one module, compile that
+module as its own test root instead; it links only what the module imports:
+
+```bash
+zig test --dep regex --dep gc -Mroot=src/parser.zig \
+  -Mregex=../zig-regex/src/root.zig -Mgc=../zig-gc/src/root.zig -lc \
+  --test-filter <substr>          # peaks ~307 MB, names each test it ran
+```
+
+This is a focused probe, not a substitute for the integration gate: it sees only
+the `test` blocks reachable from that root, and CI still runs the full suite.
+Read the `N/M <name>...OK` lines — a filter that matches nothing exits non-zero
+with `NoMatchingCases`, but a filter that matches the *wrong* tests exits 0.
+
 `test-frontend` uses a smaller production-module executable for focused parser
 and evaluator work. It exercises representative accepted and rejected programs;
-the combined unit suite remains the integration gate.
+the combined unit suite remains the integration gate. Its cases are the arrays
+in [`tools/focused_engine_tests.zig`](tools/focused_engine_tests.zig), *not* the
+`test` blocks under `src/` — so `-Dtest-filter` selects from that list, and a
+filter naming a `src/` test fails with `NoMatchingCases`. Add a case there, or
+use `zig build test -Dtest-filter=` for a `test` block.
 
 ### Conformance
 
