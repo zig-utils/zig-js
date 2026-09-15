@@ -14244,6 +14244,49 @@ test "new target diagnostics preserve eval boundaries and early errors across ti
     }
 }
 
+test "query coverage early errors precede execution across tiers" {
+    const invalid = [_][]const u8{
+        "class C { m() { label: this.#missing; } }",
+        "class C { m() { let x; x ||= this.#missing; } }",
+        "class C { m() { this.#missing &&= 1; } }",
+        "class C { m() { let x; x ??= this.#missing; } }",
+        "with ({}) { super.x; }",
+        "with ({}) { super(); }",
+        "function f() { with ({}) { super.x; } }",
+    };
+    const valid = [_][]const u8{
+        "class C { #x = 42; m() { label: { return this.#x; } } } new C().m() === 42",
+        "class C { #x; m() { this.#x ||= 1; this.#x &&= 42; this.#x ??= 0; return this.#x; } } new C().m() === 42",
+        "class C { #x = 42; m() { let a; a ??= () => this.#x; return a(); } } new C().m() === 42",
+        "function f() { with ({x:42}) { return x; } } f() === 42",
+        "const p = {x:42}, o = {__proto__:p, m() { with ({x:0}) { return (() => super.x)(); } }}; o.m() === 42",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (invalid) |source| {
+            const guarded = try std.fmt.allocPrint(std.testing.allocator, "effect = 1; {s}", .{source});
+            defer std.testing.allocator.free(guarded);
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, guarded, .{});
+            defer std.testing.allocator.free(encoded);
+            const probe = try std.fmt.allocPrint(std.testing.allocator, "var effect = 0, rejected = 0; try {{ eval({s}); }} catch(e) {{ if (e instanceof SyntaxError && effect === 0) rejected++; }} " ++
+                "try {{ Function({s}); }} catch(e) {{ if (e instanceof SyntaxError && effect === 0) rejected++; }} rejected === 2", .{ encoded, encoded });
+            defer std.testing.allocator.free(probe);
+            errdefer std.debug.print("query coverage early error ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expect((try ctx.evaluate(probe)).toBoolean());
+        }
+        for (valid) |source| {
+            const scoped = try std.fmt.allocPrint(std.testing.allocator, "{{ {s} }}", .{source});
+            defer std.testing.allocator.free(scoped);
+            errdefer std.debug.print("valid query coverage ({s}): {s}\n", .{ @tagName(mode), source });
+            try std.testing.expect((try ctx.evaluate(scoped)).toBoolean());
+        }
+    }
+}
+
 test "class query early errors precede execution across tiers" {
     const invalid = [_][]const u8{
         "class C extends super() {}",

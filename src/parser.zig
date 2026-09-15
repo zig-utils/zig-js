@@ -4675,8 +4675,8 @@ pub const Parser = struct {
             .array_lit => |items| for (items) |item| try self.scanSuperAndArgs(item),
             // Arrow functions do NOT bind their own `arguments`/`super`, so a
             // `super()`/`arguments` inside one is still the field's — recurse into
-            // arrow params' defaults and body. Ordinary functions/classes have
-            // their own bindings and are not descended into.
+            // arrow params' defaults and body. Ordinary functions have their own
+            // bindings; class subexpressions use the separate boundary below.
             .function => |f| if (f.is_arrow) {
                 // ECMA-262 8.5.1 Contains stops Await/Yield queries at the
                 // entire arrow, while lexical SuperCall/SuperProperty queries
@@ -4768,6 +4768,12 @@ pub const Parser = struct {
                 try self.scanSuperAndArgs(fo.body);
             },
             .labeled_stmt => |l| try self.scanSuperAndArgs(l.body),
+            .with_stmt => |w| {
+                // Contains follows both children: a with environment does not
+                // introduce a lexical super/arguments binding boundary.
+                try self.scanSuperAndArgs(w.obj);
+                try self.scanSuperAndArgs(w.body);
+            },
             .try_stmt => |t| {
                 try self.scanSuperAndArgs(t.block);
                 if (t.catch_param) |param| try self.scanSuperAndArgsInPattern(param);
@@ -4781,10 +4787,8 @@ pub const Parser = struct {
                     for (cs.body) |s| try self.scanSuperAndArgs(s);
                 }
             },
-            // .func_decl and any other node: stop. Nested ordinary functions and
-            // class bodies have their own `arguments`/`super`; descending outside
-            // the explicit class-expression scan mode could only produce false
-            // positives.
+            // .func_decl and leaf nodes: stop. Ordinary functions are lexical
+            // boundaries; class children are handled explicitly above.
             else => {},
         }
     }
@@ -4864,6 +4868,12 @@ pub const Parser = struct {
                 try self.checkPrivateUsesInNode(declared, a.value);
             },
             .op_assign => |a| {
+                try self.checkPrivateUsesInNode(declared, a.target);
+                try self.checkPrivateUsesInNode(declared, a.value);
+            },
+            .logical_assign => |a| {
+                // AllPrivateIdentifiersValid visits even the short-circuited
+                // RHS; validation is static, not conditional on evaluation.
                 try self.checkPrivateUsesInNode(declared, a.target);
                 try self.checkPrivateUsesInNode(declared, a.value);
             },
@@ -4961,6 +4971,7 @@ pub const Parser = struct {
                 try self.checkPrivateUsesInNode(declared, stmt.obj);
                 try self.checkPrivateUsesInNode(declared, stmt.body);
             },
+            .labeled_stmt => |stmt| try self.checkPrivateUsesInNode(declared, stmt.body),
             .export_decl => |e| {
                 if (e.declaration) |decl| try self.checkPrivateUsesInNode(declared, decl);
                 if (e.default_expr) |expr| try self.checkPrivateUsesInNode(declared, expr);
@@ -6406,6 +6417,60 @@ test "parser validates module label early errors" {
 
     var labeled_block_continue = try Parser.init(arena.allocator(), "label: { while (false) { continue label; } }");
     try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
+}
+
+test "parser query coverage includes labels logical assignments and with" {
+    const invalid = [_][]const u8{
+        "class C { m() { label: this.#missing; } }",
+        "class C { m() { label: { this.#missing; } } }",
+        "class C { m() { let x; x ||= this.#missing; } }",
+        "class C { m() { let x; x &&= this.#missing; } }",
+        "class C { m() { let x; x ??= this.#missing; } }",
+        "class C { m() { this.#missing ||= 1; } }",
+        "class C { m() { this.#missing &&= 1; } }",
+        "class C { m() { this.#missing ??= 1; } }",
+        "with ({}) { super.x; }",
+        "with ({}) { super(); }",
+        "with (super.x) {}",
+        "function f() { with ({}) { super.x; } }",
+    };
+    const valid = [_][]const u8{
+        "class C { #x; m() { label: this.#x; } }",
+        "class C { #x; m() { this.#x ||= 1; this.#x &&= 2; this.#x ??= 3; } }",
+        "class C { #x; m() { let a; a ??= () => this.#x; } }",
+        "class C { m() { label: { class D { #x; m() { return this.#x; } } } } }",
+    };
+    for ([_]bool{ false, true }) |module| {
+        for (invalid) |source| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+            const parsed = if (module) parser.parseModule() else parser.parseProgram();
+            if (parsed) |program| {
+                try std.testing.expectError(ParseError.UnexpectedToken, parser.scanEvalContext(program.program, true, true));
+            } else |err| try std.testing.expectEqual(ParseError.UnexpectedToken, err);
+        }
+        for (valid) |source| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+            const program = if (module) try parser.parseModule() else try parser.parseProgram();
+            try parser.scanEvalContext(program.program, true, true);
+        }
+    }
+    // With is permitted only in sloppy code. A method supplies super to its
+    // contained arrow even while the arrow resolves ordinary names via with.
+    for ([_][]const u8{
+        "function f() { with ({x: 1}) { x; } }",
+        "({ m() { with ({}) { return () => super.x; } } });",
+        "with ({}) { const C = class extends Object { constructor() { super(); } }; }",
+    }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        const program = try parser.parseProgram();
+        try parser.scanEvalContext(program.program, true, true);
+    }
 }
 
 test "parser class queries visit heritage and keys with independent body boundaries" {
