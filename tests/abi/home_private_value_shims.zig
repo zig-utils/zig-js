@@ -1406,8 +1406,8 @@ fn evaluate(context: JSContextRef, source: [*:0]const u8) EncodedValue {
 }
 
 fn expectTerminationError(context: JSContextRef, exception: JSValueRef) void {
-    var name: ZigString = .{};
-    var message: ZigString = .{};
+    var name: ZigString = .{ .tagged_ptr = 0, .len = 0 };
+    var message: ZigString = .{ .tagged_ptr = 0, .len = 0 };
     const encoded = EncodedValue.fromRef(exception);
     JSC__JSValue__toZigString(getProperty(context, encoded, "name"), &name, context);
     JSC__JSValue__toZigString(getProperty(context, encoded, "message"), &message, context);
