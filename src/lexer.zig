@@ -1,5 +1,6 @@
 const std = @import("std");
 const regex = @import("regex");
+const stack_scan = @import("stack_scan.zig");
 
 pub const TokenKind = enum {
     eof,
@@ -99,7 +100,10 @@ pub const Token = struct {
     template_substitutions: usize = 0,
 };
 
-pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory };
+/// `StackExhausted` is a resource failure like `OutOfMemory`, not a grammar
+/// error: source nested deeper than the native stack allows (#936). Boundaries
+/// report it as `RangeError: Maximum call stack size exceeded.`.
+pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory, StackExhausted };
 
 /// A single-pass JavaScript tokenizer for the v1 expression/statement subset.
 /// String escapes are decoded into freshly allocated buffers in `arena`.
@@ -113,6 +117,8 @@ pub const Lexer = struct {
     prev_text: []const u8 = "",
     last_identifier_escaped: bool = false,
     last_error_offset: ?usize = null,
+    /// Depth of `lexTemplate` recursion through nested template literals.
+    template_depth: usize = 0,
     /// A stack of brace kinds (true = object literal `{`, false = block `{`), to
     /// resolve the `}`-then-`/` ambiguity: `{…} / x` divides an object literal,
     /// whereas a block `}` allows a regex.
@@ -132,10 +138,16 @@ pub const Lexer = struct {
     at_line_start: bool = true,
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
+        // Nesting guards probe this thread's stack bounds, and lexing is the
+        // first phase to recurse over source nesting. Registering here keeps
+        // them effective on every path, including parses that never run
+        // through an evaluation entry point (#936). Idempotent per thread.
+        stack_scan.registerThreadBounds();
         return .{ .src = src, .arena = arena };
     }
 
     pub fn initOptions(arena: std.mem.Allocator, src: []const u8, html_comments: bool) Lexer {
+        stack_scan.registerThreadBounds(); // see `init`
         return .{ .src = src, .arena = arena, .html_comments = html_comments };
     }
 
@@ -986,7 +998,13 @@ pub const Lexer = struct {
                         last_sig = '"';
                     },
                     '`' => {
-                        _ = try self.lexTemplate(); // nested template (recurses)
+                        // Nested template (recurses): guarded, because a source
+                        // of nested template literals is otherwise bounded only
+                        // by the native stack.
+                        self.template_depth += 1;
+                        defer self.template_depth -= 1;
+                        if (stack_scan.nestingExhausted(self.template_depth)) return error.StackExhausted;
+                        _ = try self.lexTemplate();
                         last_sig = '`';
                     },
                     '/' => {

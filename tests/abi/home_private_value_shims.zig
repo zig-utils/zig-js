@@ -2974,6 +2974,32 @@ pub fn main() void {
         &module_exception,
     ) != .undefined or module_exception == .empty or !JSC__JSValue__isAnyError(module_exception))
         fail("private module parse rejection/out-parameter mismatch");
+
+    // Source nested deeper than the native stack allows is a resource limit,
+    // not a grammar error: the rejection carries the RangeError that runaway
+    // recursion raises (#936).
+    const deep_module_depth = 200_000;
+    const deep_module_source = std.heap.page_allocator.alloc(u8, deep_module_depth * 2 + 1) catch fail("private deep module allocation failed");
+    defer std.heap.page_allocator.free(deep_module_source);
+    @memset(deep_module_source[0..deep_module_depth], '(');
+    deep_module_source[deep_module_depth] = '1';
+    @memset(deep_module_source[deep_module_depth + 1 ..], ')');
+    const deep_module_origin = "/virtual/private-936-deep.js";
+    module_exception = .empty;
+    if (JSC__JSModuleLoader__evaluate(
+        context,
+        deep_module_source.ptr,
+        deep_module_source.len,
+        deep_module_origin.ptr,
+        deep_module_origin.len,
+        null,
+        0,
+        .undefined,
+        &module_exception,
+    ) != .undefined or module_exception == .empty or
+        !JSC__JSValue__isStrictEqual(getProperty(context, module_exception, "name"), evaluate(context, "'RangeError'"), context) or
+        !JSC__JSValue__isStrictEqual(getProperty(context, module_exception, "message"), evaluate(context, "'Maximum call stack size exceeded.'"), context))
+        fail("private module nesting exhaustion rejection mismatch");
     module_exception = .empty;
     if (JSC__JSModuleLoader__evaluate(context, null, 1, null, 0, null, 0, .undefined, &module_exception) != .undefined or
         module_exception == .empty or !JSC__JSValue__isAnyError(module_exception))

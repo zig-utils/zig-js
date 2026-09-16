@@ -5575,7 +5575,25 @@ pub const Interpreter = struct {
     /// Raise a SyntaxError for parser failures with a best-effort source
     /// location. `context` names the embedding operation ("eval", "Function",
     /// etc.); source-bearing APIs can layer richer filenames on top separately.
+    /// An eval early-error scan over the parsed program failed. Its failures are
+    /// the SyntaxError `message` names, except running out of stack (#936) or
+    /// memory, which are not grammar errors.
+    fn evalScanFailed(self: *Interpreter, err: parser_mod.ParseError, message: []const u8) EvalError {
+        return switch (err) {
+            error.StackExhausted => self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+            error.OutOfMemory => error.OutOfMemory,
+            else => self.throwError("SyntaxError", message),
+        };
+    }
+
     pub fn throwParserSyntaxErrorAt(self: *Interpreter, context: []const u8, loc: parser_mod.SourceLocation, err: anyerror) EvalError {
+        // Source nested deeper than the native stack allows is a resource
+        // limit, not a grammar error (#936). Report it the way runaway call
+        // recursion is reported -- the same RangeError, raised past WebAssembly
+        // handlers like any other stack exhaustion. Both `throwParserSyntaxError`
+        // and the lexer failures from `Parser.init*` arrive here.
+        if (err == error.StackExhausted)
+            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded.");
         const message = std.fmt.allocPrint(self.arena, "{s}: {s} at {d}:{d}", .{
             context,
             @errorName(err),
@@ -22005,23 +22023,28 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // nested class/method is unaffected.
     if (prog.* == .program) {
         if (!self.direct_eval_call) {
-            parser.scanEvalContext(prog.program, true, true) catch
-                return self.throwError("SyntaxError", "eval: 'super' is only valid inside a method");
+            parser.scanEvalContext(prog.program, true, true) catch |err|
+                return self.evalScanFailed(err, "eval: 'super' is only valid inside a method");
         } else if (self.in_field_initializer) {
-            parser.scanEvalContext(prog.program, false, false) catch
-                return self.throwError("SyntaxError", "eval: 'super()'/'arguments' not allowed in a field initializer");
+            parser.scanEvalContext(prog.program, false, false) catch |err|
+                return self.evalScanFailed(err, "eval: 'super()'/'arguments' not allowed in a field initializer");
         } else if (self.home_object == null) {
-            parser.scanEvalContext(prog.program, true, true) catch
-                return self.throwError("SyntaxError", "eval: 'super' is only valid inside a method");
+            parser.scanEvalContext(prog.program, true, true) catch |err|
+                return self.evalScanFailed(err, "eval: 'super' is only valid inside a method");
         } else if (!self.in_derived_ctor) {
-            parser.scanEvalContext(prog.program, true, false) catch
-                return self.throwError("SyntaxError", "eval: 'super()' is only valid inside a derived constructor");
+            parser.scanEvalContext(prog.program, true, false) catch |err|
+                return self.evalScanFailed(err, "eval: 'super()' is only valid inside a derived constructor");
         }
         // A direct eval in a non-arrow function's parameter scope may not declare
         // `arguments` (the parameter environment already binds the arguments
         // object) — an early error before any eval'd code runs.
         if (self.direct_eval_call and self.in_param_expr) {
-            if (parser.evalDeclaresArguments(prog.program) catch false)
+            const declares_arguments = parser.evalDeclaresArguments(prog.program) catch |err| switch (err) {
+                error.StackExhausted => return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+                error.OutOfMemory => return error.OutOfMemory,
+                else => false,
+            };
+            if (declares_arguments)
                 return self.throwError("SyntaxError", "eval: cannot declare 'arguments' in a parameter expression");
         }
     }
@@ -26857,8 +26880,12 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 if (callee.nativeRealm()) |realm| self.env = @ptrCast(@alignCast(realm));
             }
             if (kind == .generator or kind == .async_generator) {
-                const has_yield = dynamicGeneratorParamsContainYield(self.arena, params.items) catch
-                    return self.throwError("SyntaxError", "Function: invalid parameters or body");
+                const has_yield = dynamicGeneratorParamsContainYield(self.arena, params.items) catch |err| switch (err) {
+                    // Resource limits, not grammar errors (#936).
+                    error.StackExhausted => return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return self.throwError("SyntaxError", "Function: invalid parameters or body"),
+                };
                 if (has_yield) return self.throwError("SyntaxError", "Function: invalid parameters or body");
             }
             // `)` on its own line (matching the assembled source below) so a

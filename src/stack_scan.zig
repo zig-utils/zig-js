@@ -323,6 +323,73 @@ pub fn nearLimit(margin: usize) bool {
     return sp <= limit +| margin;
 }
 
+/// Recursion over source nesting shallower than this never probes the stack,
+/// so ordinary code pays one comparison per level (#934).
+pub const nesting_check_floor: usize = 32;
+
+/// Stack held in reserve when a walker refuses to recurse deeper: enough to
+/// unwind and raise the error. Matches the interpreter's call guard, with the
+/// same wider margin for ThreadSanitizer's larger frames.
+pub const nesting_redzone: usize = if (builtin.sanitize_thread) 1 << 20 else 1 << 18;
+
+/// Past the floor a walker probes only at multiples of this depth, because the
+/// probe reads a thread-local. A walker descends one level at a time, so it
+/// passes every multiple on the way down and runs fewer levels unprobed than
+/// the floor already allows.
+pub const nesting_probe_interval: usize = 8;
+
+comptime {
+    std.debug.assert(std.math.isPowerOfTwo(nesting_probe_interval));
+    std.debug.assert(nesting_check_floor % nesting_probe_interval == 0);
+    std.debug.assert(conservative_nesting_depth % nesting_probe_interval == 0);
+}
+
+/// Where this thread's stack bounds are unknown, the depth a walker stops at
+/// instead of probing. Sized so even a Debug build on a 1 MiB stack -- the
+/// smallest default a supported host gives a thread -- stops before
+/// overflowing, since nothing else protects it there.
+pub const conservative_nesting_depth: usize = 256;
+
+/// Whether a walker already `depth` levels into a recursion that follows source
+/// nesting must stop before the native stack overflows (#934). Deeply nested
+/// source segfaulted the process; walkers use this to fail with
+/// `error.StackExhausted` instead, which JavaScript sees as the same catchable
+/// `RangeError` as runaway call recursion.
+///
+/// The probe is the stack pointer against this thread's real bounds, not a
+/// fixed depth, because the stack a level costs varies by walker, by build mode
+/// and by thread: a fixed limit safe for all of them would reject valid code.
+pub fn nestingExhausted(depth: usize) bool {
+    if (depth < nesting_check_floor or depth & (nesting_probe_interval - 1) != 0) return false;
+    const limit = if (supported) os_stack_limit else 0;
+    if (limit == 0) return depth >= conservative_nesting_depth;
+    return currentSp() <= limit +| nesting_redzone;
+}
+
+/// Bytes a walker may descend below the frame that began it where this
+/// thread's stack bounds are unknown: the byte form of
+/// `conservative_nesting_depth`, for walkers that compare stack addresses
+/// rather than count levels.
+pub const conservative_nesting_bytes: usize = 1 << 18;
+
+/// The stack address at or below which a recursive walker on this thread must
+/// stop descending: the stack limit plus `nesting_redzone`. A walker reads it
+/// once when it begins, so each level costs one comparison with
+/// `stackAddress()` instead of a thread-local read. Without known bounds the
+/// floor sits `conservative_nesting_bytes` below the caller. Only meaningful on
+/// the thread that computed it.
+pub fn nestingStackFloor() usize {
+    registerThreadBounds();
+    const limit = if (supported) os_stack_limit else 0;
+    if (limit != 0) return limit +| nesting_redzone;
+    return stackAddress() -| conservative_nesting_bytes;
+}
+
+/// The current stack position, comparable with `nestingStackFloor()`.
+pub inline fn stackAddress() usize {
+    return if (supported) currentSp() else @frameAddress();
+}
+
 /// Whether `nearLimit` can actually protect this thread — i.e. the target is
 /// supported and the OS stack bounds were registered. When false, the native
 /// stack-pointer probe is blind, so the caller must fall back to a conservative

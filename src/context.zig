@@ -9650,6 +9650,8 @@ pub const Context = struct {
             self.exception.?
         else if (err == error.Throw and !machine.exception.isUndefined())
             machine.exception
+        else if (err == error.StackExhausted)
+            try machine.makeError("RangeError", "Maximum call stack size exceeded.")
         else
             try machine.makeError("SyntaxError", "Cannot load or evaluate module");
         self.exception = null;
@@ -9781,7 +9783,7 @@ pub const Context = struct {
             .source = owned_source,
             .items = items,
             .env = env,
-            .has_tla = moduleItemsHaveTopLevelAwait(items),
+            .has_tla = try moduleItemsHaveTopLevelAwait(items, 0),
         };
         try self.putModuleCache(cache, m.path, m);
 
@@ -9801,95 +9803,96 @@ pub const Context = struct {
         return m;
     }
 
-    fn moduleItemsHaveTopLevelAwait(items: []const *ast.Node) bool {
-        for (items) |item| if (nodeHasTopLevelAwait(item)) return true;
+    fn moduleItemsHaveTopLevelAwait(items: []const *ast.Node, depth: usize) error{StackExhausted}!bool {
+        for (items) |item| if (try nodeHasTopLevelAwait(item, depth)) return true;
         return false;
     }
 
     /// A left-deep chain checked without recursing per link (#935). The
     /// predicate is pure, so the order of the checks cannot change the answer.
-    fn chainHasTopLevelAwait(top: *const ast.Node) bool {
+    fn chainHasTopLevelAwait(top: *const ast.Node, depth: usize) error{StackExhausted}!bool {
         var link = top;
         while (true) {
-            if (nodeHasTopLevelAwait(ast.chainRight(link))) return true;
+            if (try nodeHasTopLevelAwait(ast.chainRight(link), depth + 1)) return true;
             const left = ast.chainLeft(link);
-            if (!ast.isChainLink(left)) return nodeHasTopLevelAwait(left);
+            if (!ast.isChainLink(left)) return nodeHasTopLevelAwait(left, depth + 1);
             link = left;
         }
     }
 
-    fn nodeHasTopLevelAwait(node: *const ast.Node) bool {
+    fn nodeHasTopLevelAwait(node: *const ast.Node, depth: usize) error{StackExhausted}!bool {
+        if (stack_scan.nestingExhausted(depth)) return error.StackExhausted;
         return switch (node.*) {
             .await_expr => true,
             .function, .func_decl => false,
             .class_expr => |c| blk: {
-                if (c.superclass) |sc| if (nodeHasTopLevelAwait(sc)) break :blk true;
-                for (c.members) |m| if (m.key_expr) |ke| if (nodeHasTopLevelAwait(ke)) break :blk true;
+                if (c.superclass) |sc| if (try nodeHasTopLevelAwait(sc, depth + 1)) break :blk true;
+                for (c.members) |m| if (m.key_expr) |ke| if (try nodeHasTopLevelAwait(ke, depth + 1)) break :blk true;
                 break :blk false;
             },
-            .unary => |u| nodeHasTopLevelAwait(u.operand),
-            .delete_expr => |d| nodeHasTopLevelAwait(d),
-            .update => |u| nodeHasTopLevelAwait(u.target),
-            .binary, .logical, .sequence => chainHasTopLevelAwait(node),
-            .assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
-            .op_assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
-            .logical_assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
-            .conditional => |c| nodeHasTopLevelAwait(c.cond) or nodeHasTopLevelAwait(c.consequent) or nodeHasTopLevelAwait(c.alternate),
-            .import_call => |ic| nodeHasTopLevelAwait(ic.specifier) or (ic.options != null and nodeHasTopLevelAwait(ic.options.?)),
+            .unary => |u| try nodeHasTopLevelAwait(u.operand, depth + 1),
+            .delete_expr => |d| try nodeHasTopLevelAwait(d, depth + 1),
+            .update => |u| try nodeHasTopLevelAwait(u.target, depth + 1),
+            .binary, .logical, .sequence => (try chainHasTopLevelAwait(node, depth)),
+            .assign => |a| (try nodeHasTopLevelAwait(a.target, depth + 1)) or (try nodeHasTopLevelAwait(a.value, depth + 1)),
+            .op_assign => |a| (try nodeHasTopLevelAwait(a.target, depth + 1)) or (try nodeHasTopLevelAwait(a.value, depth + 1)),
+            .logical_assign => |a| (try nodeHasTopLevelAwait(a.target, depth + 1)) or (try nodeHasTopLevelAwait(a.value, depth + 1)),
+            .conditional => |c| (try nodeHasTopLevelAwait(c.cond, depth + 1)) or (try nodeHasTopLevelAwait(c.consequent, depth + 1)) or (try nodeHasTopLevelAwait(c.alternate, depth + 1)),
+            .import_call => |ic| (try nodeHasTopLevelAwait(ic.specifier, depth + 1)) or (ic.options != null and (try nodeHasTopLevelAwait(ic.options.?, depth + 1))),
             .call => |c| blk: {
-                if (nodeHasTopLevelAwait(c.callee)) break :blk true;
-                for (c.args) |arg| if (nodeHasTopLevelAwait(arg)) break :blk true;
+                if (try nodeHasTopLevelAwait(c.callee, depth + 1)) break :blk true;
+                for (c.args) |arg| if (try nodeHasTopLevelAwait(arg, depth + 1)) break :blk true;
                 break :blk false;
             },
             .new_expr => |n| blk: {
-                if (nodeHasTopLevelAwait(n.callee)) break :blk true;
-                for (n.args) |arg| if (nodeHasTopLevelAwait(arg)) break :blk true;
+                if (try nodeHasTopLevelAwait(n.callee, depth + 1)) break :blk true;
+                for (n.args) |arg| if (try nodeHasTopLevelAwait(arg, depth + 1)) break :blk true;
                 break :blk false;
             },
             .tagged_template => |t| blk: {
-                if (nodeHasTopLevelAwait(t.tag)) break :blk true;
-                for (t.exprs) |expr| if (nodeHasTopLevelAwait(expr)) break :blk true;
+                if (try nodeHasTopLevelAwait(t.tag, depth + 1)) break :blk true;
+                for (t.exprs) |expr| if (try nodeHasTopLevelAwait(expr, depth + 1)) break :blk true;
                 break :blk false;
             },
-            .member => |m| nodeHasTopLevelAwait(m.object) or (m.computed != null and nodeHasTopLevelAwait(m.computed.?)),
-            .super_member => |m| m.computed != null and nodeHasTopLevelAwait(m.computed.?),
-            .optional_chain => |c| nodeHasTopLevelAwait(c),
+            .member => |m| (try nodeHasTopLevelAwait(m.object, depth + 1)) or (m.computed != null and (try nodeHasTopLevelAwait(m.computed.?, depth + 1))),
+            .super_member => |m| m.computed != null and (try nodeHasTopLevelAwait(m.computed.?, depth + 1)),
+            .optional_chain => |c| try nodeHasTopLevelAwait(c, depth + 1),
             .object_lit => |props| blk: {
                 for (props) |p| {
-                    if (p.key_expr) |ke| if (nodeHasTopLevelAwait(ke)) break :blk true;
-                    if (nodeHasTopLevelAwait(p.value)) break :blk true;
+                    if (p.key_expr) |ke| if (try nodeHasTopLevelAwait(ke, depth + 1)) break :blk true;
+                    if (try nodeHasTopLevelAwait(p.value, depth + 1)) break :blk true;
                 }
                 break :blk false;
             },
             .array_lit => |items| blk: {
-                for (items) |item| if (nodeHasTopLevelAwait(item)) break :blk true;
+                for (items) |item| if (try nodeHasTopLevelAwait(item, depth + 1)) break :blk true;
                 break :blk false;
             },
-            .spread => |s| nodeHasTopLevelAwait(s),
-            .var_decl => |d| d.init != null and nodeHasTopLevelAwait(d.init.?),
-            .destructure_decl => |d| nodeHasTopLevelAwait(d.init),
-            .return_stmt => |r| r != null and nodeHasTopLevelAwait(r.?),
-            .throw_stmt => |t| nodeHasTopLevelAwait(t),
-            .expr_stmt => |e| nodeHasTopLevelAwait(e),
-            .block => |stmts| moduleItemsHaveTopLevelAwait(stmts),
-            .decl_group => |stmts| moduleItemsHaveTopLevelAwait(stmts),
-            .if_stmt => |i| nodeHasTopLevelAwait(i.cond) or nodeHasTopLevelAwait(i.consequent) or (i.alternate != null and nodeHasTopLevelAwait(i.alternate.?)),
-            .while_stmt => |w| nodeHasTopLevelAwait(w.cond) or nodeHasTopLevelAwait(w.body),
-            .do_while_stmt => |d| nodeHasTopLevelAwait(d.body) or nodeHasTopLevelAwait(d.cond),
-            .for_stmt => |f| (f.init != null and nodeHasTopLevelAwait(f.init.?)) or (f.cond != null and nodeHasTopLevelAwait(f.cond.?)) or (f.update != null and nodeHasTopLevelAwait(f.update.?)) or nodeHasTopLevelAwait(f.body),
-            .for_in => |f| nodeHasTopLevelAwait(f.target) or (f.var_init != null and nodeHasTopLevelAwait(f.var_init.?)) or nodeHasTopLevelAwait(f.iterable) or nodeHasTopLevelAwait(f.body),
+            .spread => |s| try nodeHasTopLevelAwait(s, depth + 1),
+            .var_decl => |d| d.init != null and (try nodeHasTopLevelAwait(d.init.?, depth + 1)),
+            .destructure_decl => |d| try nodeHasTopLevelAwait(d.init, depth + 1),
+            .return_stmt => |r| r != null and (try nodeHasTopLevelAwait(r.?, depth + 1)),
+            .throw_stmt => |t| try nodeHasTopLevelAwait(t, depth + 1),
+            .expr_stmt => |e| try nodeHasTopLevelAwait(e, depth + 1),
+            .block => |stmts| (try moduleItemsHaveTopLevelAwait(stmts, depth + 1)),
+            .decl_group => |stmts| (try moduleItemsHaveTopLevelAwait(stmts, depth + 1)),
+            .if_stmt => |i| (try nodeHasTopLevelAwait(i.cond, depth + 1)) or (try nodeHasTopLevelAwait(i.consequent, depth + 1)) or (i.alternate != null and (try nodeHasTopLevelAwait(i.alternate.?, depth + 1))),
+            .while_stmt => |w| (try nodeHasTopLevelAwait(w.cond, depth + 1)) or (try nodeHasTopLevelAwait(w.body, depth + 1)),
+            .do_while_stmt => |d| (try nodeHasTopLevelAwait(d.body, depth + 1)) or (try nodeHasTopLevelAwait(d.cond, depth + 1)),
+            .for_stmt => |f| (f.init != null and (try nodeHasTopLevelAwait(f.init.?, depth + 1))) or (f.cond != null and (try nodeHasTopLevelAwait(f.cond.?, depth + 1))) or (f.update != null and (try nodeHasTopLevelAwait(f.update.?, depth + 1))) or (try nodeHasTopLevelAwait(f.body, depth + 1)),
+            .for_in => |f| (try nodeHasTopLevelAwait(f.target, depth + 1)) or (f.var_init != null and (try nodeHasTopLevelAwait(f.var_init.?, depth + 1))) or (try nodeHasTopLevelAwait(f.iterable, depth + 1)) or (try nodeHasTopLevelAwait(f.body, depth + 1)),
             .switch_stmt => |sw| blk: {
-                if (nodeHasTopLevelAwait(sw.disc)) break :blk true;
+                if (try nodeHasTopLevelAwait(sw.disc, depth + 1)) break :blk true;
                 for (sw.cases) |case| {
-                    if (case.@"test") |t| if (nodeHasTopLevelAwait(t)) break :blk true;
-                    for (case.body) |body| if (nodeHasTopLevelAwait(body)) break :blk true;
+                    if (case.@"test") |t| if (try nodeHasTopLevelAwait(t, depth + 1)) break :blk true;
+                    for (case.body) |body| if (try nodeHasTopLevelAwait(body, depth + 1)) break :blk true;
                 }
                 break :blk false;
             },
-            .try_stmt => |t| nodeHasTopLevelAwait(t.block) or (t.catch_param != null and nodeHasTopLevelAwait(t.catch_param.?)) or (t.catch_block != null and nodeHasTopLevelAwait(t.catch_block.?)) or (t.finally_block != null and nodeHasTopLevelAwait(t.finally_block.?)),
-            .labeled_stmt => |l| nodeHasTopLevelAwait(l.body),
-            .with_stmt => |w| nodeHasTopLevelAwait(w.obj) or nodeHasTopLevelAwait(w.body),
-            .export_decl => |e| (e.declaration != null and nodeHasTopLevelAwait(e.declaration.?)) or (e.default_expr != null and nodeHasTopLevelAwait(e.default_expr.?)),
+            .try_stmt => |t| (try nodeHasTopLevelAwait(t.block, depth + 1)) or (t.catch_param != null and (try nodeHasTopLevelAwait(t.catch_param.?, depth + 1))) or (t.catch_block != null and (try nodeHasTopLevelAwait(t.catch_block.?, depth + 1))) or (t.finally_block != null and (try nodeHasTopLevelAwait(t.finally_block.?, depth + 1))),
+            .labeled_stmt => |l| try nodeHasTopLevelAwait(l.body, depth + 1),
+            .with_stmt => |w| (try nodeHasTopLevelAwait(w.obj, depth + 1)) or (try nodeHasTopLevelAwait(w.body, depth + 1)),
+            .export_decl => |e| (e.declaration != null and (try nodeHasTopLevelAwait(e.declaration.?, depth + 1))) or (e.default_expr != null and (try nodeHasTopLevelAwait(e.default_expr.?, depth + 1))),
             else => false,
         };
     }
@@ -9986,7 +9989,7 @@ pub const Context = struct {
             .var_decl => |v| try m.exports.put(a, self.root_shape, v.name, .{ .local = v.name }),
             .destructure_decl => |dd| {
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                try modulePatternBoundNames(a, dd.pattern, &names);
+                try modulePatternBoundNames(a, dd.pattern, &names, 0);
                 for (names.items) |name| try m.exports.put(a, self.root_shape, name, .{ .local = name });
             },
             .decl_group => |group| for (group) |g| try declaredExportNames(self, m, g),
@@ -9994,16 +9997,17 @@ pub const Context = struct {
         }
     }
 
-    fn modulePatternBoundNames(a: std.mem.Allocator, node: *const ast.Node, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    fn modulePatternBoundNames(a: std.mem.Allocator, node: *const ast.Node, out: *std.ArrayListUnmanaged([]const u8), depth: usize) !void {
+        if (stack_scan.nestingExhausted(depth)) return error.StackExhausted;
         switch (node.*) {
             .identifier => |name| try out.append(a, name),
             .obj_pattern => |p| {
-                for (p.props) |prop| try modulePatternBoundNames(a, prop.target, out);
-                if (p.rest) |rest| try modulePatternBoundNames(a, rest, out);
+                for (p.props) |prop| try modulePatternBoundNames(a, prop.target, out, depth + 1);
+                if (p.rest) |rest| try modulePatternBoundNames(a, rest, out, depth + 1);
             },
             .arr_pattern => |p| {
-                for (p.elems) |elem| if (elem.target) |target| try modulePatternBoundNames(a, target, out);
-                if (p.rest) |rest| try modulePatternBoundNames(a, rest, out);
+                for (p.elems) |elem| if (elem.target) |target| try modulePatternBoundNames(a, target, out, depth + 1);
+                if (p.rest) |rest| try modulePatternBoundNames(a, rest, out, depth + 1);
             },
             else => {},
         }
@@ -10179,7 +10183,7 @@ pub const Context = struct {
             .var_decl => |v| if (v.kind != .@"var") m.env.put(v.name, tdz) catch {},
             .destructure_decl => |d| if (d.kind != .@"var") {
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                modulePatternBoundNames(self.arena(), d.pattern, &names) catch return;
+                modulePatternBoundNames(self.arena(), d.pattern, &names, 0) catch return;
                 for (names.items) |name| m.env.put(name, tdz) catch {};
             },
             .decl_group => |g| for (g) |s| self.instantiateLexical(m, s),
@@ -10800,30 +10804,30 @@ pub const Context = struct {
         const src = host.load(host.ctx, referrer, specifier, &dep_path) orelse
             return self.dynImportFail(machine, "Cannot resolve module specifier");
         const dep = if (isSyntheticModuleType(module_type))
-            self.loadSyntheticModule(dep_path, src, module_type, cache) catch return self.surfaceFail(machine)
+            self.loadSyntheticModule(dep_path, src, module_type, cache) catch |err| return self.surfaceFail(machine, err)
         else
-            self.loadModule(dep_path, src, host, cache) catch return self.surfaceFail(machine);
-        self.linkModule(dep) catch return self.surfaceFail(machine);
+            self.loadModule(dep_path, src, host, cache) catch |err| return self.surfaceFail(machine, err);
+        self.linkModule(dep) catch |err| return self.surfaceFail(machine, err);
         // `import.defer(x)`: resolve the promise with the deferred namespace
         // without evaluating — evaluation is triggered lazily on first access.
         if (std.mem.eql(u8, phase, "defer")) {
-            self.evalDeferredAsyncDependencies(machine, dep) catch return self.surfaceFail(machine);
-            const dns = self.deferredNamespaceObject(dep) catch return self.surfaceFail(machine);
+            self.evalDeferredAsyncDependencies(machine, dep) catch |err| return self.surfaceFail(machine, err);
+            const dns = self.deferredNamespaceObject(dep) catch |err| return self.surfaceFail(machine, err);
             out.* = Value.obj(dns);
             return .success;
         }
-        self.evalModule(machine, dep) catch return self.surfaceFail(machine);
+        self.evalModule(machine, dep) catch |err| return self.surfaceFail(machine, err);
         if (!dep.evaluated) {
-            const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
+            const ns = self.namespaceObject(dep) catch |err| return self.surfaceFail(machine, err);
             if (capability) |cap| {
-                self.appendModuleNamespaceWaiter(dep, cap, ns) catch return self.surfaceFail(machine);
+                self.appendModuleNamespaceWaiter(dep, cap, ns) catch |err| return self.surfaceFail(machine, err);
                 return .pending;
             }
-            out.* = self.moduleNamespaceAfterCompletion(machine, dep, ns) catch return self.surfaceFail(machine);
+            out.* = self.moduleNamespaceAfterCompletion(machine, dep, ns) catch |err| return self.surfaceFail(machine, err);
             return .success;
         }
-        const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
-        self.fillNamespace(machine, dep, ns) catch return self.surfaceFail(machine);
+        const ns = self.namespaceObject(dep) catch |err| return self.surfaceFail(machine, err);
+        self.fillNamespace(machine, dep, ns) catch |err| return self.surfaceFail(machine, err);
         out.* = Value.obj(ns);
         return .success;
     }
@@ -10839,9 +10843,12 @@ pub const Context = struct {
     }
 
     /// A load/link/eval step already threw; surface its reason for rejection.
-    fn surfaceFail(self: *Context, machine: *interp.Interpreter) interp.DynamicImportResult {
+    fn surfaceFail(self: *Context, machine: *interp.Interpreter, err: anyerror) interp.DynamicImportResult {
         if (self.exception) |ex| {
             machine.exception = ex;
+        } else if (err == error.StackExhausted) {
+            // A module nested deeper than the native stack allows (#936).
+            machine.throwUncatchableError("RangeError", "Maximum call stack size exceeded.") catch {};
         } else {
             machine.throwError("SyntaxError", "Cannot parse module") catch {};
         }

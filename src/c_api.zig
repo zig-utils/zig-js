@@ -17002,6 +17002,13 @@ fn setDiagnosticField(ctx: *Context, obj: *Object, name: []const u8, field_value
     try obj.setAttr(ctx.arena(), name, .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
+fn makeEvaluationError(ctx: *Context, name: []const u8, message: []const u8) !Value {
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    return machine.makeError(name, message);
+}
+
 fn makeEvaluationSyntaxError(
     ctx: *Context,
     message: []const u8,
@@ -17063,6 +17070,13 @@ fn evaluationExceptionValue(ctx: *Context, err: anyerror, source_url: JSStringRe
     defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(ctx.arena());
     defer _ = strcell.setActiveArena(sa_saved);
+    // Deeply nested source is a stack-exhaustion RangeError, not a SyntaxError,
+    // matching how the engine reports runaway recursion (#936).
+    if (err == error.StackExhausted) {
+        const message = "Maximum call stack size exceeded.";
+        return makeEvaluationError(ctx, "RangeError", message) catch
+            (Value.strAlloc(ctx.arena(), "RangeError: " ++ message) catch Value.staticStr("OutOfMemory"));
+    }
     if (isEvaluationParseError(err)) {
         if (ctx.last_evaluation_diagnostic) |loc| {
             const source_name = evaluationSourceName(source_url);

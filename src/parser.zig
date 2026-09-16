@@ -7,6 +7,7 @@ const Shape = @import("shape.zig").Shape;
 const regex = @import("regex");
 const regexp_compat = @import("regexp_compat.zig");
 const PrivateNameMap = @import("private_name_map.zig").PrivateNameMap;
+const stack_scan = @import("stack_scan.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -476,6 +477,10 @@ pub const Parser = struct {
     /// Depth of syntax contexts where `new.target` is allowed. Ordinary
     /// functions/methods introduce one; arrows only inherit an outer one.
     new_target_depth: u32 = 0,
+    /// The stack address below which parsing and the analysis walks over the
+    /// finished tree stop recursing (#936). Read once, on the thread that
+    /// creates the parser, so each level pays one comparison.
+    stack_floor: usize,
     /// True when parsing a Module (via `parseModule`): top-level `import` and
     /// `export` declarations are recognized, and the body is implicitly strict.
     module: bool = false,
@@ -605,6 +610,7 @@ pub const Parser = struct {
             .scratch_allocator = scratch_allocator,
             .source = source,
             .html_comment_offset = lx.htmlCommentOffset(),
+            .stack_floor = stack_scan.nestingStackFloor(),
         };
     }
 
@@ -1159,6 +1165,7 @@ pub const Parser = struct {
     /// not into nested functions/classes. Block-level function declarations are
     /// *not* collected (they are lexical to their block per the static semantics).
     fn collectVarNames(self: *Parser, node: *Node, out: *SecureStringMapUnmanaged(void)) ParseError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |d| if (d.kind == .@"var" and d.name.len > 0) try out.put(self.arena, d.name, {}),
             .destructure_decl => |d| if (d.kind == .@"var") try self.putPatternVarNames(d.pattern, out),
@@ -1280,6 +1287,7 @@ pub const Parser = struct {
     /// (a `for` head, a declaration group) go through `checkDeclVarNames`, which
     /// does not open scopes -- so neither reach is widened.
     fn recurseScope(self: *Parser, node: *Node, scope: *LexicalScope) ParseError!void {
+        try self.checkNesting();
         switch (node.*) {
             // A nested block is a new lexical scope. Its vars still hoist, and they
             // are still seen: `checkLexicalDupes` walks the block with this scope's
@@ -1478,6 +1486,7 @@ pub const Parser = struct {
         out: *std.ArrayListUnmanaged([]const u8),
         pattern: *Node,
     ) ParseError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .identifier => |name| try out.append(self.arena, name),
             .obj_pattern => |p| {
@@ -1888,7 +1897,16 @@ pub const Parser = struct {
         return self.advance().text;
     }
 
+    /// Recursion that follows source nesting checks here first (#936). Deeply
+    /// nested source overflowed the native stack and killed the process; below
+    /// `stack_floor` this fails with `error.StackExhausted` instead, which
+    /// JavaScript sees as a catchable `RangeError`.
+    inline fn checkNesting(self: *const Parser) ParseError!void {
+        if (stack_scan.stackAddress() <= self.stack_floor) return error.StackExhausted;
+    }
+
     fn parseStatement(self: *Parser) ParseError!*Node {
+        try self.checkNesting();
         const token = self.cur();
         const is_debugger = token.kind == .identifier and
             std.mem.eql(u8, token.text, "debugger") and !token.escaped_identifier;
@@ -2103,6 +2121,7 @@ pub const Parser = struct {
     /// Convert an array/object *literal* on the LHS of `=` into a destructuring
     /// pattern (the cover-grammar reinterpretation).
     fn litToPattern(self: *Parser, node: *Node) ParseError!*Node {
+        try self.checkNesting();
         // A parenthesized array/object literal can't be a destructuring target.
         if (self.isParenWrapped(node)) return ParseError.InvalidAssignmentTarget;
         switch (node.*) {
@@ -2163,6 +2182,7 @@ pub const Parser = struct {
     }
 
     fn exprToTarget(self: *Parser, node: *Node) ParseError!*Node {
+        try self.checkNesting();
         return switch (node.*) {
             .identifier => {
                 if (self.isForbiddenBindingName(node.identifier)) return ParseError.UnexpectedToken;
@@ -2181,6 +2201,7 @@ pub const Parser = struct {
 
     /// A binding target: an identifier or a nested object/array pattern.
     fn parseBindingTarget(self: *Parser) ParseError!*Node {
+        try self.checkNesting();
         if (self.check(.lbrace)) return self.parseObjectPattern();
         if (self.check(.lbracket)) return self.parseArrayPattern();
         const name = self.advance();
@@ -2449,7 +2470,16 @@ pub const Parser = struct {
         // is an identifier, a destructuring pattern, or (assignment form) a
         // member expression. Parse a target, then require `in`/`of`; otherwise
         // rewind to `save` and parse a classic `for(;;)`.
-        if (!classic_using_of_decl and !classic_async_of_arrow) if (self.tryForTarget(decl_kind) catch null) |target| {
+        // A head that does not parse as a target is retried as a classic
+        // `for(;;)` below, but running out of stack or memory is not a parse
+        // failure: retrying repeats the same descent (at every enclosing head,
+        // so the work doubles per level) and a `for await` head would report it
+        // as a SyntaxError (#936).
+        const for_target = if (classic_using_of_decl or classic_async_of_arrow) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
+            error.StackExhausted, error.OutOfMemory => return err,
+            else => null,
+        };
+        if (for_target) |target| {
             var var_init: ?*Node = null;
             if (!self.strict and decl_kind != null and decl_kind.? == .@"var" and target.* == .identifier and self.match(.assign)) {
                 const saved_no_in = self.no_in;
@@ -2488,7 +2518,7 @@ pub const Parser = struct {
                     .dispose = dispose,
                 } });
             }
-        };
+        }
         if (is_await) return ParseError.UnexpectedToken;
         self.pos = save; // not an iteration form — rewind and parse a classic for
         // Discard locations for function bodies reached while refining the cover
@@ -3136,6 +3166,7 @@ pub const Parser = struct {
     }
 
     fn parseAssignment(self: *Parser) ParseError!*Node {
+        try self.checkNesting();
         // `yield` is an AssignmentExpression-level production inside generators.
         if (self.in_generator and isKeyword(self.cur(), "yield")) return self.parseYield();
         // Async arrows: `async x => ...` and `async (a, b) => ...`. (`async` here
@@ -3472,6 +3503,21 @@ pub const Parser = struct {
         };
     }
 
+    /// The right operand of a binary operator. Only this recursion follows the
+    /// source (`2 ** 2 ** …` is right-associative), so the nesting check sits
+    /// here rather than on every operand the expression parser visits (#936).
+    fn parseBinaryOperand(self: *Parser, min_bp: u8) ParseError!*Node {
+        try self.checkNesting();
+        return self.parseBinary(min_bp);
+    }
+
+    /// The operand of a prefix operator, which nests once per operator
+    /// (`!!!…x`). Guarded here for the same reason as `parseBinaryOperand`.
+    fn parseUnaryOperand(self: *Parser) ParseError!*Node {
+        try self.checkNesting();
+        return self.parseUnary();
+    }
+
     fn parseBinary(self: *Parser, min_bp: u8) ParseError!*Node {
         // `#field in obj`: a private name is a valid primary only as the LHS of
         // `in` (a private brand check) — a RelationalExpression (bp 7). It can't
@@ -3506,7 +3552,7 @@ pub const Parser = struct {
             // `&&`/`||` — parse the right side above the logical level so an
             // unparenthesized `a ?? b && c` leaves `&& c` for the loop to reject.
             const next_min: u8 = if (info.logical == .nullish) 3 else if (info.right_assoc) info.bp else info.bp + 1;
-            const right = try self.parseBinary(next_min);
+            const right = try self.parseBinaryOperand(next_min);
             if (info.logical) |lop| {
                 left = try self.alloc(.{ .logical = .{ .op = lop, .left = left, .right = right } });
             } else {
@@ -3522,7 +3568,7 @@ pub const Parser = struct {
         // identifier is then rejected as a reserved reference in its context).
         if (self.in_async and !self.cur().escaped_identifier and isKeyword(self.cur(), "await")) {
             _ = self.advance();
-            const operand = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseUnary();
+            const operand = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseUnaryOperand();
             try self.rejectExponentAfterUnary();
             return self.alloc(.{ .await_expr = .{ .argument = operand } });
         }
@@ -3531,7 +3577,7 @@ pub const Parser = struct {
             const operator_offset = self.cur().pos;
             _ = self.advance();
             const operand_offset = self.cur().pos;
-            const operand = try self.parseUnary();
+            const operand = try self.parseUnaryOperand();
             // The operand of a prefix `++`/`--` must be a simple assignment
             // target (identifier or member access) — `++import(x)`, `++f()`,
             // `++1` are early SyntaxErrors.
@@ -3548,7 +3594,7 @@ pub const Parser = struct {
         if (isKeyword(t, "delete")) {
             const delete_start = self.pos;
             _ = self.advance();
-            const operand = try self.parseUnary();
+            const operand = try self.parseUnaryOperand();
             // Strict mode: `delete` of an unqualified identifier is a SyntaxError.
             if (self.strict and operand.* == .identifier) return ParseError.UnexpectedToken;
             // ECMA-262 13.5.1.1 includes private OptionalChain references. Only
@@ -3582,7 +3628,7 @@ pub const Parser = struct {
         };
         if (op) |o| {
             _ = self.advance();
-            const operand = try self.parseUnary();
+            const operand = try self.parseUnaryOperand();
             try self.rejectExponentAfterUnary();
             return self.alloc(.{ .unary = .{ .op = o, .operand = operand } });
         }
@@ -3738,6 +3784,7 @@ pub const Parser = struct {
     /// (the first `(...)` is the constructor's argument list). Any trailing
     /// `.prop` / call chain is handled by the enclosing `parseMemberTail`.
     fn parseNew(self: *Parser) ParseError!*Node {
+        try self.checkNesting();
         const new_start_token = self.pos;
         _ = self.advance(); // new
         if (self.in_async and isKeyword(self.cur(), "await")) return ParseError.UnexpectedToken;
@@ -3923,6 +3970,11 @@ pub const Parser = struct {
         sub.strict = self.strict;
         sub.module = self.module;
         sub.new_target_depth = self.new_target_depth;
+        // A substitution's parser recurses on top of this one's stack. Where
+        // the thread's bounds are unknown its own floor would be measured from
+        // this deeper frame, granting a fresh allowance at every nested
+        // template, so it keeps the floor of the parse that created it.
+        sub.stack_floor = self.stack_floor;
         sub.current_arguments_use = self.current_arguments_use;
         sub.current_direct_eval_use = self.current_direct_eval_use;
         sub.eval_private_names = self.eval_private_names;
@@ -3951,7 +4003,7 @@ pub const Parser = struct {
                 // Flush the literal run so far, then parse the substitution.
                 node = try self.concatStr(node, (try self.cookTemplateQuasi(raw[raw_start..i], false)).?);
                 const expr_start = i + 2;
-                const expr_end = substEnd(raw, expr_start);
+                const expr_end = try substEnd(raw, expr_start, 0);
                 var sub = try self.templateSubparser(raw[expr_start..expr_end], &substitution_tokens);
                 const expression = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
@@ -4002,7 +4054,7 @@ pub const Parser = struct {
                 cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..i], true);
                 raws[substitution_index] = raw[raw_start..i];
                 const expr_start = i + 2;
-                const expr_end = substEnd(raw, expr_start);
+                const expr_end = try substEnd(raw, expr_start, 0);
                 var sub = try self.templateSubparser(raw[expr_start..expr_end], &substitution_tokens);
                 exprs[substitution_index] = sub.parseTemplateExpression() catch |err| {
                     self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
@@ -4374,6 +4426,8 @@ pub const Parser = struct {
     }
 
     fn parseClassExpr(self: *Parser) ParseError!*Node {
+        // `class extends class extends …` nests through the heritage clause.
+        try self.checkNesting();
         const start = self.pos;
         _ = self.advance(); // class
         // A class body (computed names, field initializers, method bodies) is
@@ -4752,6 +4806,7 @@ pub const Parser = struct {
     /// IdentifierReferences; assignment member targets still evaluate their
     /// object/key expressions. Preserve the owning scan's function boundaries.
     fn scanSuperAndArgsInPattern(self: *Parser, pattern: *Node) ParseError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .identifier => {},
             .obj_pattern => |p| {
@@ -4790,6 +4845,7 @@ pub const Parser = struct {
     }
 
     fn scanSuperAndArgs(self: *Parser, node: *Node) ParseError!void {
+        try self.checkNesting();
         switch (node.*) {
             .obj_pattern, .arr_pattern => try self.scanSuperAndArgsInPattern(node),
             .identifier => |name| if (!self.scan_allow_arguments and std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
@@ -5001,6 +5057,7 @@ pub const Parser = struct {
         declared: *SecureStringMapUnmanaged(void),
         pattern: *Node,
     ) ParseError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .obj_pattern => |p| for (p.props) |prop| {
                 if (prop.key_expr) |key_expr| try self.checkPrivateUsesInNode(declared, key_expr);
@@ -5047,6 +5104,7 @@ pub const Parser = struct {
         declared: *SecureStringMapUnmanaged(void),
         node: *Node,
     ) ParseError!void {
+        try self.checkNesting();
         switch (node.*) {
             .identifier => |name| try self.requirePrivateName(declared, name),
             .unary => |u| try self.checkPrivateUsesInNode(declared, u.operand),
@@ -5429,7 +5487,9 @@ fn substRegexAllowed(last: u8) bool {
     };
 }
 
-fn substEnd(raw: []const u8, start: usize) usize {
+/// `template_depth` counts nested template literals, each of which recurses here.
+fn substEnd(raw: []const u8, start: usize, template_depth: usize) error{StackExhausted}!usize {
+    if (stack_scan.nestingExhausted(template_depth)) return error.StackExhausted;
     var depth: usize = 1;
     var i = start;
     var last_sig: u8 = 0; // last significant byte — drives regex-vs-division
@@ -5468,7 +5528,7 @@ fn substEnd(raw: []const u8, start: usize) usize {
                     }
                     if (raw[i] == '`') break;
                     if (raw[i] == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                        const inner = substEnd(raw, i + 2);
+                        const inner = try substEnd(raw, i + 2, template_depth + 1);
                         i = if (inner < raw.len) inner else raw.len - 1;
                     }
                 }
@@ -7209,6 +7269,79 @@ test "parser lexical and var early errors span nested block scopes" {
         defer arena.deinit();
         var parser = try Parser.init(arena.allocator(), source);
         _ = try parser.parseProgram();
+    }
+}
+
+fn parseForNestingTest(allocator: std.mem.Allocator, source: []const u8) ParseError!void {
+    // Lexing runs inside `init`, so template nesting can be refused there.
+    var parser = try Parser.init(allocator, source);
+    _ = try parser.parseProgram();
+}
+
+fn nestedSource(allocator: std.mem.Allocator, shape: NestingShape, depth: usize) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(allocator, shape.prefix);
+    for (0..depth) |level| {
+        // Labels must differ at every level: a nested duplicate is itself an
+        // early error, which would hide what this test measures.
+        if (shape.numbered_label) {
+            try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "l{d}: ", .{level}));
+        } else try out.appendSlice(allocator, shape.open);
+    }
+    try out.appendSlice(allocator, shape.core);
+    for (0..depth) |_| try out.appendSlice(allocator, shape.close);
+    try out.appendSlice(allocator, shape.suffix);
+    return out.items;
+}
+
+const NestingShape = struct {
+    prefix: []const u8 = "",
+    open: []const u8 = "",
+    core: []const u8,
+    close: []const u8 = "",
+    suffix: []const u8 = "",
+    numbered_label: bool = false,
+};
+
+test "parser refuses source nested deeper than the stack allows" {
+    // #936: each shape below followed a recursion that segfaulted the process
+    // once nested deeply enough. The guard probes the real stack pointer, so a
+    // depth far past any stack is refused as `error.StackExhausted`, while the
+    // same shape at an ordinary depth still parses: the limit is the stack,
+    // not a fixed nesting count.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const shapes = [_]NestingShape{
+        .{ .open = "(", .core = "1", .close = ")" }, // expressions via parseAssignment
+        .{ .open = "[", .core = "1", .close = "]" }, // array literals
+        .{ .open = "({a:", .core = "1", .close = "})" }, // object literals
+        .{ .open = "!", .core = "1" }, // parseUnaryOperand
+        .{ .open = "delete ", .core = "x" }, // parseUnaryOperand through `delete`
+        .{ .prefix = "async function f() { ", .open = "await ", .core = "1", .suffix = " }" }, // and through `await`
+        .{ .open = "2**", .core = "2" }, // parseBinaryOperand's right-associative loop
+        .{ .open = "new ", .core = "X" }, // parseNew
+        .{ .open = "x=>", .core = "1" }, // arrow bodies
+        .{ .prefix = "x = ", .open = "class extends ", .core = "Object", .close = "{}" }, // class heritage
+        .{ .open = "{", .core = "", .close = "}" }, // parseStatement through blocks
+        .{ .open = "if (1) ", .core = ";" }, // statements without blocks
+        .{ .core = ";", .numbered_label = true }, // labelled statements
+        .{ .prefix = "var ", .open = "[", .core = "x", .close = "]", .suffix = " = [];" }, // binding patterns
+        .{ .open = "[", .core = "x", .close = "]", .suffix = " = [];" }, // assignment patterns via litToPattern
+        .{ .open = "`${", .core = "1", .close = "}`" }, // nested templates: lexer, substEnd, sub-parsers
+        // A for-in/of head that fails as a target is retried as a classic head;
+        // exhaustion inside it must propagate, not trigger the retry.
+        .{ .prefix = "async function f() { for await (a[", .open = "(", .core = "1", .close = ")", .suffix = "] of []); }" },
+        .{ .open = "for (a[function () { ", .core = "0;", .close = " }()] of []);" },
+    };
+    for (shapes) |shape| {
+        const shallow = try nestedSource(a, shape, 64);
+        parseForNestingTest(a, shallow) catch |err| {
+            std.debug.print("64-deep shape `{s}{s}` should parse, got {s}\n", .{ shape.prefix, shape.open, @errorName(err) });
+            return err;
+        };
+        const deep = try nestedSource(a, shape, 200_000);
+        try std.testing.expectError(error.StackExhausted, parseForNestingTest(a, deep));
     }
 }
 

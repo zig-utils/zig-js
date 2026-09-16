@@ -205,6 +205,37 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        // #936: source nested deeper than the stack allows segfaulted the
+        // process during lexing or parsing. It must instead raise the same
+        // catchable RangeError as runaway recursion -- JavaScriptCore reports
+        // deeply nested source exactly this way, message included -- while an
+        // ordinary depth still runs and a real syntax error stays a SyntaxError.
+        .name = "deeply nested source raises a catchable RangeError",
+        .source =
+        \\function nest(open, core, close, n) { return open.repeat(n) + core + close.repeat(n); }
+        \\function exhausted(run) {
+        \\  try { run(); return false; }
+        \\  catch (e) { return e instanceof RangeError && e.message === "Maximum call stack size exceeded."; }
+        \\}
+        \\var n = 200000;
+        \\var parens = exhausted(function () { (0, eval)(nest("(", "1", ")", n)); });
+        \\var arrays = exhausted(function () { (0, eval)(nest("[", "1", "]", n)); });
+        \\// eval returns early for source made only of empty blocks, so give the innermost block a statement.
+        \\var blocks = exhausted(function () { (0, eval)(nest("{", "0;", "}", n)); });
+        \\var unary = exhausted(function () { (0, eval)("!".repeat(n) + "1"); });
+        \\var templates = exhausted(function () { (0, eval)(nest("`${", "1", "}`", n)); });
+        \\var constructed = exhausted(function () { Function(nest("(", "1", ")", n)); });
+        \\var forAwaitHead = exhausted(function () { (0, eval)("async function f() { for await (a[" + nest("(", "1", ")", n) + "] of []); }"); });
+        \\var generatorParams = exhausted(function () { Object.getPrototypeOf(function* () {}).constructor("a = " + nest("`${", "1", "}`", n), ""); });
+        \\var asyncGeneratorParams = exhausted(function () { Object.getPrototypeOf(async function* () {}).constructor("a = " + nest("`${", "1", "}`", n), ""); });
+        \\var shallow = (0, eval)(nest("(", "7", ")", 300)) === 7 && (0, eval)(nest("`${", "7", "}`", 300)) === "7";
+        \\var syntax = (function () { try { (0, eval)("(("); return false; } catch (e) { return e instanceof SyntaxError; } })();
+        \\// One bit per check, so a failure names the shape that regressed.
+        \\[parens, arrays, blocks, unary, templates, constructed, forAwaitHead, generatorParams, asyncGeneratorParams, shallow, syntax].reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 2047,
+    },
+    .{
         // #935: the parser builds left-associative chains in a loop, and a
         // template literal desugars to two links per substitution, so a flat
         // source hands evaluation a spine as long as its operand count. Every
