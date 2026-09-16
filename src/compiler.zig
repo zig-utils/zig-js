@@ -283,6 +283,17 @@ const FnScope = struct {
     may_extend_environment: bool = false,
     names: SecureStringMapUnmanaged(SlotBinding),
     lexical_scopes: std.ArrayListUnmanaged(*SecureStringMapUnmanaged(SlotBinding)) = .empty,
+    /// How many open `lexical_scopes` bind each name (#932). `get` consults it
+    /// before probing those scopes: a name no open scope binds cannot be found
+    /// there. Without it, every lookup of a function-level name -- including
+    /// every activation temp -- was hashed once per enclosing block, so N
+    /// nested destructuring catches compiled in quadratic time.
+    ///
+    /// Counts only ever over-approximate. They rise before a binding is
+    /// inserted and fall only when its scope is popped, so a skipped probe is
+    /// always one that would have missed. Created on first use from
+    /// `hash_state`, so it keeps the same keyed hashing as the scopes.
+    lexical_name_counts: ?SecureStringMapUnmanaged(u32) = null,
     /// Parallel to `lexical_scopes`: true only for the scope introduced by a
     /// lone catch BindingIdentifier. Direct eval needs the Environment Record
     /// identity to apply Annex B.3.5 without weakening destructuring catches.
@@ -346,7 +357,9 @@ const FnScope = struct {
     }
 
     fn popLexicalScope(self: *FnScope) void {
-        _ = self.lexical_scopes.pop();
+        const bindings = self.lexical_scopes.pop().?;
+        var names = bindings.keyIterator();
+        while (names.next()) |name| self.forgetLexicalName(name.*);
         _ = self.lexical_scope_is_catch_param.pop();
         _ = self.lexical_scope_environment_depth.pop();
     }
@@ -362,9 +375,28 @@ const FnScope = struct {
         return self.lexical_scopes.items[self.lexical_scopes.items.len - 1];
     }
 
+    /// Counted before the binding is inserted: an over-count only costs a
+    /// probe, while an under-count would let `get` skip a scope that binds
+    /// the name and resolve it somewhere else.
+    fn noteLexicalName(self: *FnScope, arena: std.mem.Allocator, name: []const u8) CompileError!void {
+        if (self.lexical_name_counts == null) self.lexical_name_counts = .{ .state = self.hash_state };
+        const entry = try self.lexical_name_counts.?.getOrPut(arena, name);
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+    }
+
+    fn forgetLexicalName(self: *FnScope, name: []const u8) void {
+        const counts = if (self.lexical_name_counts) |*counts| counts else unreachable;
+        // Every key in a lexical scope was counted when it was inserted.
+        const count = counts.getPtr(name) orelse unreachable;
+        count.* -= 1;
+    }
+
     fn addLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!u32 {
         const bindings = self.currentLexicalScope();
         if (bindings.get(name)) |binding| return binding.slot;
+        try self.noteLexicalName(arena, name);
+        errdefer self.forgetLexicalName(name);
         return self.addBinding(arena, bindings, name, true, immutable, false);
     }
 
@@ -382,6 +414,8 @@ const FnScope = struct {
     fn addEnvironmentLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!void {
         const bindings = self.currentLexicalScope();
         if (bindings.contains(name)) return;
+        try self.noteLexicalName(arena, name);
+        errdefer self.forgetLexicalName(name);
         try bindings.put(arena, name, .{
             .slot = 0,
             .lexical = true,
@@ -392,14 +426,27 @@ const FnScope = struct {
     }
 
     fn get(self: *const FnScope, name: []const u8) ?SlotBinding {
-        var index = self.lexical_scopes.items.len;
-        while (index > 0) {
-            index -= 1;
-            if (self.lexical_scopes.items[index].get(name)) |binding| return binding;
+        if (self.bindsLexically(name)) {
+            var index = self.lexical_scopes.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (self.lexical_scopes.items[index].get(name)) |binding| return binding;
+            }
+        } else if (std.debug.runtime_safety) {
+            // The skip is only sound while the counts cover every insertion.
+            // Re-probe in safe builds -- exactly the cost `get` always paid
+            // before #932 -- so a missed insertion path fails here, loudly.
+            for (self.lexical_scopes.items) |scope| std.debug.assert(!scope.contains(name));
         }
         if (self.names.get(name)) |binding| return binding;
         if (self.parameter_names) |parameters| return parameters.get(name);
         return null;
+    }
+
+    fn bindsLexically(self: *const FnScope, name: []const u8) bool {
+        const counts = self.lexical_name_counts orelse return false;
+        const count = counts.get(name) orelse return false;
+        return count != 0;
     }
 
     fn getParameter(self: *const FnScope, name: []const u8) ?SlotBinding {
