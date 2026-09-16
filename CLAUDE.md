@@ -367,7 +367,44 @@ or CI breaks. Several PR-249 cases are roughly 20× slower with the GIL off —
 
 ---
 
-## 11. Where to read next
+## 11. Autonomous runs
+
+For long unattended sessions the work queue is **issue #933** — read it first,
+work it top to bottom, and tick items only against its definition of done.
+Conversation context gets summarized on long runs; this file and that issue do
+not, so rules that must survive live here.
+
+Each rule below exists because breaking it cost real time:
+
+- **A background watch must exit when its job ends.** `tail -f log | grep` never
+  exits, so the watch outlives the job and the task list shows work "running"
+  that finished long ago. Poll the log in a loop and `exit` on the terminal
+  marker, the guard's `peak`/`exceeded` line, or a failure marker.
+- **Execute a static claim before filing it.** A reviewer reading code, human or
+  agent, reports what the code *appears* to do. Run the program against node and
+  against zig-js first; an issue filed from a reading has had to be corrected.
+- **Compare against a before binary.** Copy `zig-out/bin/test262` aside before the
+  rebuild, or build the old parser into a separate prefix, and run both. Matching
+  pass counts only prove no regression when both sides have 0 failures; with
+  failures present, a regression can hide behind an unrelated gain.
+- **Never edit a file while a gate is compiling it.** Snapshot it and point any
+  reviewer at the snapshot, so nothing reads or ships a half-swapped version.
+- **Measure a performance claim, including "this is linear."** Reasoning about
+  complexity has been wrong in both directions here. `test262 --eval` executes
+  the program; wrap a parse-only probe in `function __never(){ … }` so runtime
+  loops and errors cannot pollute the result.
+- **Top-level benchmarks cannot see function-body effects.** A growth workload
+  should include a variant wrapped in a function before its conclusion is
+  generalized.
+- **Pick the oracle per question.** node decides plain-ES syntax validity; the
+  `home-tool` JavaScriptCore backend decides error-message text but rejects some
+  valid programs (private accessor declarations, at least).
+- **Batch commits by change, not by step** — a fix, its pinned tests and its doc
+  updates belong in one commit.
+- **Stop and hand off anything in #933's "Blocked on a human" list** rather than
+  choosing for the user.
+
+## 12. Where to read next
 
 | Question | File |
 | --- | --- |
