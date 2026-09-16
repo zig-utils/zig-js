@@ -1031,7 +1031,10 @@ pub const Parser = struct {
         // generator function — is rigid: any same-name collision is an error.
         // Two *plain* function declarations in a sloppy block are allowed
         // (Annex B.3.3), so a collision is reported only when a rigid one is
-        // involved — which keeps the check free of false positives.
+        // involved — which keeps the rigid rule free of false positives. That
+        // holds only if the caller classifies the scope correctly: a scope whose
+        // top-level functions are var-scoped must pass `funcs_lexical = false`
+        // (#929 was a static block passing `true`).
         var seen = self.secureStringMap(bool);
         for (stmts) |s| {
             switch (s.*) {
@@ -4437,9 +4440,18 @@ pub const Parser = struct {
                 for (block.block) |s| try self.scanSuperAndArgs(s);
                 // Own lexical scope, and its own var scope: nothing opened by the
                 // enclosing class body's context is visible to a `var` in here.
+                //
+                // `funcs_lexical = false`: a ClassStaticBlockStatementList takes
+                // its names from TopLevelLexicallyDeclaredNames and
+                // TopLevelVarDeclaredNames, exactly as a FunctionBody does, so a
+                // top-level function declaration here is VAR-scoped. Treating it
+                // as lexical -- and, under the block's forced strictness, as rigid
+                // -- rejected valid code (#929): `var f; function f(){}` and two
+                // plain `function f(){}`. Functions in blocks NESTED inside the
+                // static block are still lexical and still rigid.
                 var lexical_scope = self.lexicalScope();
                 defer lexical_scope.undo.deinit(self.scratch_allocator);
-                try self.checkLexicalDupes(block.block, true, &lexical_scope);
+                try self.checkLexicalDupes(block.block, false, &lexical_scope);
                 lexical_scope.assertBalanced();
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
@@ -7171,6 +7183,57 @@ test "parser lexical and var early errors span nested block scopes" {
         defer arena.deinit();
         var parser = try Parser.init(arena.allocator(), source);
         _ = try parser.parseProgram();
+    }
+}
+
+test "parser class static blocks scope top-level functions as var declarations" {
+    // #929. A ClassStaticBlockStatementList takes its names from
+    // TopLevelLexicallyDeclaredNames / TopLevelVarDeclaredNames, exactly as a
+    // FunctionBody does, so its top-level function declarations are VAR-scoped.
+    // The parser used to check it as an ordinary block, where those functions
+    // are lexical and -- under the block's forced strictness -- rigid, and
+    // rejected valid code. test262 only asserts the error direction for static
+    // blocks, so this test is the only gate on the valid direction. Every case
+    // was confirmed against another engine before being written down.
+    const valid = [_][]const u8{
+        "class C { static { var f; function f(){} } }",
+        "class C { static { function f(){} function f(){} } }",
+        // All hoistable declaration kinds are var-scoped here, not just plain functions.
+        "class C { static { async function f(){} async function f(){} } }",
+        "class C { static { function* f(){} async function* f(){} } }",
+        // A var hoisting out of a nested block, or bound by a pattern.
+        "class C { static { function f(){} { var f; } } }",
+        "class C { static { var {f} = {}; function f(){} } }",
+        // Each static block, including one in a nested class, is its own var scope.
+        "class C { static { function f(){} } static { var f; function f(){} } }",
+        "class C { static { let f; class D { static { var f; function f(){} } } } }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+
+    const invalid = [_][]const u8{
+        // A lexical declaration still collides with any var-scoped name.
+        "class C { static { let f; var f; } }",
+        "class C { static { let f; function f(){} } }",
+        "class C { static { function f(){} let f; } }",
+        "class C { static { const f = 0; async function f(){} } }",
+        "class C { static { function f(){} class f {} } }",
+        "class C { static { let f; if (1) { var f; } else {} } }",
+        // Only the static block's TOP LEVEL changed: a function in a block nested
+        // inside it is still lexical, and still rigid under strict mode.
+        "class C { static { { function f(){} function f(){} } } }",
+        "class C { static { { async function f(){} function f(){} } } }",
+        "class C { static { { function f(){} var f; } } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
     }
 }
 
