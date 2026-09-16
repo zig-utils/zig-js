@@ -1308,7 +1308,7 @@ pub const Parser = struct {
             .labeled_stmt => |l| try self.recurseScope(l.body, scope),
             .try_stmt => |t| {
                 try self.recurseScope(t.block, scope);
-                if (t.catch_block) |c| try self.recurseScope(c, scope);
+                if (t.catch_block) |c| try self.recurseCatchBlock(t.catch_param, c, scope);
                 if (t.finally_block) |fb| try self.recurseScope(fb, scope);
             },
             .switch_stmt => |sw| {
@@ -1326,6 +1326,32 @@ pub const Parser = struct {
             .expr_stmt => |e| try self.recurseScope(e, scope),
             else => {},
         }
+    }
+
+    /// Catch (14.15.1): a CatchParameter's BoundNames must not occur in its
+    /// Block's VarDeclaredNames. Annex B.3.4 lifts that for a plain
+    /// BindingIdentifier -- `catch (e) { var e; }` is legal -- so only a
+    /// destructuring parameter opens its names here (#931).
+    ///
+    /// Done in this walk rather than at parse time in `checkCatchClause`: that
+    /// would walk the whole catch block per clause, and nested destructuring
+    /// catches would re-walk each other -- the #928 quadratic again. Opening the
+    /// names in the shared scope instead tests each `var` once, and inherits the
+    /// right function boundary for free: a `var` in a function nested in the
+    /// catch block does not conflict. It also sees through an inner plain
+    /// catch: in `catch ([e]) { try {} catch (e) { var e; } }` the `var` is
+    /// allowed by the inner clause but still hoists into the outer one's block.
+    fn recurseCatchBlock(self: *Parser, param: ?*Node, block: *Node, scope: *LexicalScope) ParseError!void {
+        const pattern = param orelse return self.recurseScope(block, scope);
+        if (pattern.* == .identifier) return self.recurseScope(block, scope);
+        scope.depth += 1;
+        defer scope.depth -= 1;
+        const mark = scope.undo.items.len;
+        defer self.closeLexicalScope(scope, mark);
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, pattern);
+        for (names.items) |name| try self.openLexicalName(scope, name);
+        try self.recurseScope(block, scope);
     }
 
     /// The declaration arms of `collectVarNames`, for children the scope
@@ -7184,6 +7210,64 @@ test "parser lexical and var early errors span nested block scopes" {
         var parser = try Parser.init(arena.allocator(), source);
         _ = try parser.parseProgram();
     }
+}
+
+test "parser destructuring catch parameters reject a same-named var" {
+    // #931. A CatchParameter's BoundNames must not occur in its Block's
+    // VarDeclaredNames; Annex B.3.4 lifts that only for a plain
+    // BindingIdentifier. Every case was confirmed against another engine first.
+    const invalid = [_][]const u8{
+        "try {} catch ([e]) { var e; }",
+        "try {} catch ({e}) { var e; }",
+        "try {} catch ({a: e}) { var e; }",
+        "try {} catch ([e = 1]) { var e; }",
+        "try {} catch ([...e]) { var e; }",
+        "try {} catch ([e, f]) { var f; }",
+        // The var still counts from a nested block, a statement position or a loop head.
+        "try {} catch ([e]) { { var e; } }",
+        "try {} catch ([e]) { if (1) var e; }",
+        "try {} catch ([e]) { lbl: var e; }",
+        "try {} catch ([e]) { switch (0) { case 0: var e; } }",
+        "try {} catch ([e]) { for (var e;;) break; }",
+        "try {} catch ([e]) { for (var e in {}); }",
+        "try {} catch ([e]) { for (var e of []); }",
+        // An inner plain catch allows its own `var e`, but that var still hoists
+        // into the outer destructuring parameter's block.
+        "try {} catch ([e]) { try {} catch (e) { var e; } }",
+        "try {} catch ([e]) { try {} catch ([x]) { var e; } }",
+        "class C { static { try {} catch ([e]) { var e; } } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+
+    const valid = [_][]const u8{
+        // The Annex B relaxation for a plain identifier, in every var form.
+        "try {} catch (e) { var e; }",
+        "try {} catch (e) { for (var e;;) break; }",
+        "try {} catch (e) { for (var e in {}); }",
+        "try {} catch (e) { for (var e of []); }",
+        // A var inside a nested function does not hoist into the catch block.
+        "try {} catch ([e]) { function f(){ var e; } }",
+        "try {} catch ([e]) { (function(){ var e; }); }",
+        // The parameter is scoped to the catch block alone.
+        "try {} catch ([e]) {} var e;",
+        "try {} catch ([e]) {} finally { var e; }",
+        "try {} catch ([e]) { var x; }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+    // Deliberately absent: `(function(){ try {} catch ([e]) { var e; } })();`
+    // is also a SyntaxError, but this check runs in the lexical walk, which does
+    // not yet reach function bodies nested in expressions. That reach gap is
+    // shared by every lexical/var early error and is tracked as #930.
 }
 
 test "parser class static blocks scope top-level functions as var declarations" {
