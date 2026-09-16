@@ -306,6 +306,11 @@ fn SecureStringMapUnmanaged(comptime Value: type) type {
             return self.index.getContext(key, context);
         }
 
+        fn getPtr(self: *Self, key: []const u8) ?*Value {
+            const context = self.state.context orelse return null;
+            return self.index.getPtrContext(key, context);
+        }
+
         fn contains(self: *const Self, key: []const u8) bool {
             const context = self.state.context orelse return false;
             return self.index.containsContext(key, context);
@@ -990,7 +995,10 @@ pub const Parser = struct {
             try stmts.append(self.arena, try self.parseStatement());
         }
         // Early error: no duplicate lexically-declared names in a scope.
-        try self.checkLexicalDupes(stmts.items, false);
+        var lexical_scope = self.lexicalScope();
+        defer lexical_scope.undo.deinit(self.scratch_allocator);
+        try self.checkLexicalDupes(stmts.items, false, &lexical_scope);
+        lexical_scope.assertBalanced();
         try self.checkPrivateUsesInProgram(stmts.items);
         // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
         // early error.
@@ -1018,7 +1026,7 @@ pub const Parser = struct {
     /// block/switch scope (where a function declaration is lexical) and false for
     /// a function-body/script top level (where it is var-scoped). Incomplete
     /// traversal only misses errors; it never produces a false positive.
-    fn checkLexicalDupes(self: *Parser, stmts: []const *Node, funcs_lexical: bool) ParseError!void {
+    fn checkLexicalDupes(self: *Parser, stmts: []const *Node, funcs_lexical: bool, scope: *LexicalScope) ParseError!void {
         // name → is the declaration "rigid"? A let/const/class — or an async/
         // generator function — is rigid: any same-name collision is an error.
         // Two *plain* function declarations in a sloppy block are allowed
@@ -1053,22 +1061,29 @@ pub const Parser = struct {
         // Early error (Block 14.2.1, Script 16.1.1, FunctionBody 15.2.1): a scope's
         // LexicallyDeclaredNames must not intersect its VarDeclaredNames — e.g.
         // `{ var f; const f }` or `let x; { var x; }`. Var names hoist out of nested
-        // blocks/control-flow (but not functions), so collect them across the
-        // subtree. At a function/script scope, top-level function declarations are
-        // themselves var-scoped, so they participate too.
-        if (seen.count() > 0) {
-            var var_names = self.secureStringMap(void);
-            for (stmts) |s| try self.collectVarNames(s, &var_names);
-            if (!funcs_lexical) for (stmts) |s| {
-                if (s.* == .func_decl and s.func_decl.name.len > 0)
-                    try var_names.put(self.arena, s.func_decl.name, {});
-            };
-            var it = seen.iterator();
-            while (it.next()) |entry| {
-                if (var_names.contains(entry.key_ptr.*)) return ParseError.UnexpectedToken;
-            }
-        }
-        for (stmts) |s| try self.recurseScope(s);
+        // blocks/control-flow (but not functions).
+        //
+        // #928: this used to re-collect the var names of the WHOLE subtree at every
+        // scope, so a chain of blocks each declaring something lexical re-walked
+        // the remaining subtree once per level into the never-released arena --
+        // quadratic in time and retained memory from linear source. It now opens
+        // this scope's lexical names in one shared map and tests each `var` as the
+        // walk reaches it. A `var` conflicts with exactly the lexical names of the
+        // scopes enclosing it up to its var scope, which is what that map holds at
+        // that moment, so every conflict the subtree scan found is still found.
+        scope.depth += 1;
+        defer scope.depth -= 1;
+        const mark = scope.undo.items.len;
+        defer self.closeLexicalScope(scope, mark);
+        var it = seen.iterator();
+        while (it.next()) |entry| try self.openLexicalName(scope, entry.key_ptr.*);
+        // At a function/script scope, top-level function declarations are
+        // themselves var-scoped, so they take the var side of the check.
+        if (!funcs_lexical) for (stmts) |s| {
+            if (s.* == .func_decl and s.func_decl.name.len > 0)
+                try self.checkVarAgainstLexical(scope, s.func_decl.name);
+        };
+        for (stmts) |s| try self.recurseScope(s, scope);
     }
 
     /// Early error (15.2.1 etc.): no element of a function's parameter BoundNames
@@ -1253,46 +1268,158 @@ pub const Parser = struct {
     }
 
     /// Descend into a statement's nested scopes, running `checkLexicalDupes` at
-    /// each new lexical scope.
-    fn recurseScope(self: *Parser, node: *Node) ParseError!void {
+    /// each new lexical scope, and test every `var` against the lexical names
+    /// currently open.
+    ///
+    /// This walk replaced two: the old scope descent, and the per-scope
+    /// `collectVarNames` subtree scan. Where the two reached different children
+    /// the union is taken arm by arm, and the children only the var scan reached
+    /// (a `for` head, a declaration group) go through `checkDeclVarNames`, which
+    /// does not open scopes -- so neither reach is widened.
+    fn recurseScope(self: *Parser, node: *Node, scope: *LexicalScope) ParseError!void {
         switch (node.*) {
-            .block => |b| try self.checkLexicalDupes(b, true),
-            .if_stmt => |i| {
-                try self.recurseScope(i.consequent);
-                if (i.alternate) |a| try self.recurseScope(a);
+            // A nested block is a new lexical scope. Its vars still hoist, and they
+            // are still seen: `checkLexicalDupes` walks the block with this scope's
+            // names left open beneath its own.
+            .block => |b| try self.checkLexicalDupes(b, true, scope),
+            .var_decl => |d| {
+                if (d.kind == .@"var") try self.checkVarAgainstLexical(scope, d.name);
+                if (d.init) |ini| try self.recurseScope(ini, scope);
             },
-            .while_stmt => |w| try self.recurseScope(w.body),
-            .do_while_stmt => |w| try self.recurseScope(w.body),
-            .for_stmt => |f| try self.recurseScope(f.body),
-            .for_in => |f| try self.recurseScope(f.body),
-            .labeled_stmt => |l| try self.recurseScope(l.body),
+            .destructure_decl => |d| if (d.kind == .@"var") try self.checkPatternVarNames(d.pattern, scope),
+            .decl_group => |g| for (g) |d2| try self.checkDeclVarNames(d2, scope),
+            .if_stmt => |i| {
+                try self.recurseScope(i.consequent, scope);
+                if (i.alternate) |a| try self.recurseScope(a, scope);
+            },
+            .while_stmt => |w| try self.recurseScope(w.body, scope),
+            .do_while_stmt => |w| try self.recurseScope(w.body, scope),
+            .for_stmt => |f| {
+                if (f.init) |ini| try self.checkDeclVarNames(ini, scope);
+                try self.recurseScope(f.body, scope);
+            },
+            .for_in => |f| {
+                if (f.decl_kind) |k| if (k == .@"var") try self.checkPatternVarNames(f.target, scope);
+                try self.recurseScope(f.body, scope);
+            },
+            .labeled_stmt => |l| try self.recurseScope(l.body, scope),
             .try_stmt => |t| {
-                try self.recurseScope(t.block);
-                if (t.catch_block) |c| try self.recurseScope(c);
-                if (t.finally_block) |fb| try self.recurseScope(fb);
+                try self.recurseScope(t.block, scope);
+                if (t.catch_block) |c| try self.recurseScope(c, scope);
+                if (t.finally_block) |fb| try self.recurseScope(fb, scope);
             },
             .switch_stmt => |sw| {
                 // The whole switch is one lexical (block) scope spanning all cases.
                 var combined: std.ArrayListUnmanaged(*Node) = .empty;
                 for (sw.cases) |cs| try combined.appendSlice(self.arena, cs.body);
-                try self.checkLexicalDupes(combined.items, true);
+                try self.checkLexicalDupes(combined.items, true, scope);
             },
-            .func_decl => |fnode| try self.recurseFnBody(fnode),
+            .func_decl => |fnode| try self.recurseFnBody(fnode, scope),
+            .function => |fnode| try self.recurseFnBody(fnode, scope),
             // A class/function used as an initializer carries its own body scopes.
-            .var_decl => |d| if (d.init) |ini| try self.recurseScope(ini),
-            .function => |fnode| try self.recurseFnBody(fnode),
             .class_expr => |c| for (c.members) |m| {
-                if (m.func) |mf| if (mf.* == .function) try self.recurseFnBody(mf.function);
+                if (m.func) |mf| if (mf.* == .function) try self.recurseFnBody(mf.function, scope);
             },
-            .expr_stmt => |e| try self.recurseScope(e),
+            .expr_stmt => |e| try self.recurseScope(e, scope),
             else => {},
         }
     }
 
+    /// The declaration arms of `collectVarNames`, for children the scope
+    /// descent never followed. Tests var names only and opens no scope, so a
+    /// class or function nested in a `for` head or a declaration group keeps
+    /// exactly the reach it had.
+    fn checkDeclVarNames(self: *Parser, node: *Node, scope: *const LexicalScope) ParseError!void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind == .@"var") try self.checkVarAgainstLexical(scope, d.name),
+            .destructure_decl => |d| if (d.kind == .@"var") try self.checkPatternVarNames(d.pattern, scope),
+            .decl_group => |g| for (g) |d2| try self.checkDeclVarNames(d2, scope),
+            else => {},
+        }
+    }
+
+    fn checkPatternVarNames(self: *Parser, pattern: *Node, scope: *const LexicalScope) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, pattern);
+        for (names.items) |n| try self.checkVarAgainstLexical(scope, n);
+    }
+
     /// A function body is a fresh function scope: its top-level function
     /// declarations are var-scoped (not lexical), so `funcs_lexical = false`.
-    fn recurseFnBody(self: *Parser, fnode: *ast.FunctionNode) ParseError!void {
-        if (fnode.body.* == .block) try self.checkLexicalDupes(fnode.body.block, false);
+    /// It is also a fresh VAR scope, so lexical names opened by enclosing
+    /// functions must stop matching: `{ let x; function f() { var x; } }` is legal.
+    fn recurseFnBody(self: *Parser, fnode: *ast.FunctionNode, scope: *LexicalScope) ParseError!void {
+        if (fnode.body.* != .block) return;
+        const saved_var_base = scope.var_base;
+        scope.var_base = scope.depth + 1;
+        defer scope.var_base = saved_var_base;
+        try self.checkLexicalDupes(fnode.body.block, false, scope);
+    }
+
+    /// Lexical names currently open for the var/lexical early error (#928),
+    /// threaded as a parameter rather than held on `Parser`: the map carries a
+    /// `*SecureHashState`, and `Parser` is returned by value with its shared
+    /// hash state assigned after `init`, so a map captured at construction would
+    /// dangle.
+    const LexicalScope = struct {
+        /// name -> depth of the innermost open scope declaring it lexically.
+        names: SecureStringMapUnmanaged(usize),
+        /// Restores a shadowed name's outer depth instead of deleting it, since
+        /// one name may be open at several depths at once.
+        undo: std.ArrayListUnmanaged(Undo) = .empty,
+        depth: usize = 0,
+        /// Depth at which the current var scope began. A lexical name shallower
+        /// than this belongs to an enclosing function, and a `var` here must not
+        /// match it.
+        var_base: usize = 1,
+
+        const Undo = struct { name: []const u8, previous: ?usize };
+
+        /// Every scope a walk opens is closed on the way out, so a finished walk
+        /// leaves nothing open: anything left is a scope that failed to unwind.
+        fn assertBalanced(self: *const LexicalScope) void {
+            std.debug.assert(self.undo.items.len == 0);
+            std.debug.assert(self.names.count() == 0);
+            std.debug.assert(self.depth == 0 and self.var_base == 1);
+        }
+    };
+
+    fn lexicalScope(self: *Parser) LexicalScope {
+        return .{ .names = self.secureStringMap(usize) };
+    }
+
+    fn openLexicalName(self: *Parser, scope: *LexicalScope, name: []const u8) ParseError!void {
+        if (name.len == 0) return;
+        const previous = scope.names.get(name);
+        // Reserve the undo record first, so recording it cannot fail after the
+        // name is already visible to vars in this scope.
+        try scope.undo.ensureUnusedCapacity(self.scratch_allocator, 1);
+        try scope.names.put(self.arena, name, scope.depth);
+        scope.undo.appendAssumeCapacity(.{ .name = name, .previous = previous });
+    }
+
+    fn closeLexicalScope(self: *Parser, scope: *LexicalScope, mark: usize) void {
+        _ = self;
+        while (scope.undo.items.len > mark) {
+            const entry = scope.undo.pop().?;
+            if (entry.previous) |depth| {
+                // Scopes close LIFO, so a name that was open when this scope
+                // shadowed it is still open now. A missing key would mean the
+                // invariant broke and a later conflict could go silently
+                // unreported, so it is not tolerated. Restoring cannot allocate.
+                const slot = scope.names.getPtr(entry.name) orelse unreachable;
+                slot.* = depth;
+            } else {
+                _ = scope.names.remove(entry.name);
+            }
+        }
+    }
+
+    fn checkVarAgainstLexical(self: *Parser, scope: *const LexicalScope, name: []const u8) ParseError!void {
+        _ = self;
+        if (name.len == 0) return;
+        const depth = scope.names.get(name) orelse return;
+        if (depth >= scope.var_base) return ParseError.UnexpectedToken;
     }
 
     fn addModuleLexicalName(
@@ -1437,7 +1564,10 @@ pub const Parser = struct {
             try self.collectExportedNames(&exported, stmt);
         }
         for (stmts) |stmt| try checkLocalExportedBindings(stmt, &lexical, &vars);
-        for (stmts) |stmt| try self.recurseScope(stmt);
+        var lexical_scope = self.lexicalScope();
+        defer lexical_scope.undo.deinit(self.scratch_allocator);
+        for (stmts) |stmt| try self.recurseScope(stmt, &lexical_scope);
+        lexical_scope.assertBalanced();
         try self.checkPrivateUsesInProgram(stmts);
         // ModuleBody's early errors reject Contains `super` at the module
         // boundary, including arrows and exported expressions. Keep this in
@@ -4305,7 +4435,12 @@ pub const Parser = struct {
                 self.scan_forbid_await = true;
                 defer self.scan_forbid_await = saved_fa;
                 for (block.block) |s| try self.scanSuperAndArgs(s);
-                try self.checkLexicalDupes(block.block, true); // own lexical scope
+                // Own lexical scope, and its own var scope: nothing opened by the
+                // enclosing class body's context is visible to a `var` in here.
+                var lexical_scope = self.lexicalScope();
+                defer lexical_scope.undo.deinit(self.scratch_allocator);
+                try self.checkLexicalDupes(block.block, true, &lexical_scope);
+                lexical_scope.assertBalanced();
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
             }
