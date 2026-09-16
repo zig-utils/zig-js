@@ -205,6 +205,43 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        // #935: the parser builds left-associative chains in a loop, and a
+        // template literal desugars to two links per substitution, so a flat
+        // source hands evaluation a spine as long as its operand count. Every
+        // chain below overflowed the native stack before evaluation walked
+        // spines iteratively; other engines run them. Each is evaluated with
+        // and without a `let` declaration, which changes how the script is
+        // admitted to bytecode, and both results must agree.
+        .name = "long flat expression chains evaluate in order",
+        .source =
+        \\function chain(op, term, n) { var parts = []; for (var i = 0; i < n; i++) parts.push(term); return parts.join(op); }
+        \\function both(src) {
+        \\  var plain = (0, eval)(src);
+        \\  var lexical = (0, eval)("let chainPolicyProbe = 0; " + src);
+        \\  return Object.is(plain, lexical) ? plain : "tiers disagree";
+        \\}
+        \\var n = 20000;
+        \\var sum = both(chain("+", "1", n)) === n;
+        \\var text = both("(" + chain("+", "'a'", n) + ").length") === n;
+        \\var template = both("`" + "${1}".repeat(10000) + "`.length") === 10000;
+        \\var conj = both(chain("&&", "1", n)) === 1;
+        \\var disj = both(chain("||", "0", n)) === 0;
+        \\var coalesce = both(chain("??", "null", n)) === null;
+        \\var comma = both("(" + chain(",", "7", n) + ")") === 7;
+        \\var compare = both(chain("<", "1", n)) === false; // 1<1 is false, false<1 is true: alternates, n-1 odd
+        \\var trace = [];
+        \\function t(v) { trace.push(v); return v; }
+        \\trace = []; var order = both("t(1) + t(2) - t(3) * t(4) + t(5)") === 1 + 2 - 12 + 5 && trace.join() === "1,2,3,4,5,1,2,3,4,5";
+        \\trace = []; var shortAnd = both("t(1) && t(0) && t(3)") === 0 && trace.join() === "1,0,1,0";
+        \\trace = []; var shortOr = both("t(0) || t(2) || t(3)") === 2 && trace.join() === "0,2,0,2";
+        \\trace = []; var shortNull = both("t(null) ?? t(5) ?? t(6)") === 5 && trace.join() === ",5,,5";
+        \\trace = []; var sequence = both("(t(1), t(2), t(3))") === 3 && trace.join() === "1,2,3,1,2,3";
+        \\var brand = both("class P { #x; static has(o) { return #x in o && #x in o && true; } } P.has(new P())") === true;
+        \\sum && text && template && conj && disj && coalesce && comma && compare && order && shortAnd && shortOr && shortNull && sequence && brand ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "UTF-16 string search predicates BMP positions",
         .source =
         \\let bmp = "éa";

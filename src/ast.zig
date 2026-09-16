@@ -406,3 +406,88 @@ pub const ExportEntry = struct {
     imported: []const u8 = "",
     exported: []const u8,
 };
+
+/// Whether `node` is a link in a left-associative chain: a binary, logical or
+/// comma node. The parser builds `a + b + c` in a loop, and a template literal
+/// desugars to two `+` links per substitution, so a flat source can carry a
+/// chain as long as its operand count (#935).
+pub fn isChainLink(node: *const Node) bool {
+    return switch (node.*) {
+        .binary, .logical, .sequence => true,
+        else => false,
+    };
+}
+
+pub fn chainLeft(link: *const Node) *Node {
+    return switch (link.*) {
+        .binary => |b| b.left,
+        .logical => |l| l.left,
+        .sequence => |s| s.first,
+        else => unreachable,
+    };
+}
+
+pub fn chainRight(link: *const Node) *Node {
+    return switch (link.*) {
+        .binary => |b| b.right,
+        .logical => |l| l.right,
+        .sequence => |s| s.second,
+        else => unreachable,
+    };
+}
+
+/// The links of a left-deep chain, recorded top-down without recursing and
+/// then yielded bottom-up (#935). A walker that recursed "left, then right"
+/// once per link overflowed the native stack on long flat chains. Bottom-up
+/// is exactly the order such a walk reaches each link's right operand after
+/// finishing everything to its left, so a walker that visits the leftmost
+/// operand and then each popped link's right operand preserves its visit
+/// order -- and with it the first error it reports, the order it mutates, and
+/// the order it copies.
+///
+/// The first links live in a fixed array, so ordinary chains allocate nothing.
+/// A function holding a spine is marked `noinline` so that array can never be
+/// folded into the frame of the recursive walker calling it, whatever the
+/// optimizer decides -- that frame is paid once per level of genuine nesting.
+pub fn ChainSpine(comptime NodePtr: type) type {
+    return struct {
+        const Self = @This();
+        const inline_capacity = 16;
+
+        inline_links: [inline_capacity]NodePtr = undefined,
+        inline_len: usize = 0,
+        spilled: std.ArrayListUnmanaged(NodePtr) = .empty,
+
+        pub fn push(self: *Self, allocator: std.mem.Allocator, link: NodePtr) std.mem.Allocator.Error!void {
+            if (self.inline_len < inline_capacity) {
+                self.inline_links[self.inline_len] = link;
+                self.inline_len += 1;
+            } else {
+                try self.spilled.append(allocator, link);
+            }
+        }
+
+        /// Record every link from `top` down and return the leftmost operand.
+        pub fn collect(self: *Self, allocator: std.mem.Allocator, top: NodePtr) std.mem.Allocator.Error!NodePtr {
+            var link = top;
+            while (true) {
+                try self.push(allocator, link);
+                const left = chainLeft(link);
+                if (!isChainLink(left)) return left;
+                link = left;
+            }
+        }
+
+        /// The next link bottom-up: the deepest links were recorded last.
+        pub fn pop(self: *Self) ?NodePtr {
+            if (self.spilled.pop()) |link| return link;
+            if (self.inline_len == 0) return null;
+            self.inline_len -= 1;
+            return self.inline_links[self.inline_len];
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.spilled.deinit(allocator);
+        }
+    };
+}

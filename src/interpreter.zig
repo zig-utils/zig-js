@@ -5748,9 +5748,12 @@ pub const Interpreter = struct {
                 break :blk Value.boolVal(true);
             },
             .update => |u| try self.evalUpdate(u.inc, u.prefix, u.target),
-            .binary => |b| try self.evalBinary(b.op, b.left, b.right),
-            .logical => |l| try self.evalLogical(l.op, l.left, l.right),
-            .sequence => |s| blk: {
+            // A chain longer than one link is walked iteratively (#935). A single
+            // link keeps the direct path, so genuinely nested expressions pay no
+            // extra frame size for the spine buffer.
+            .binary => |b| if (isEvalChainLink(b.left)) try self.evalChain(node) else try self.evalBinary(b.op, b.left, b.right),
+            .logical => |l| if (isEvalChainLink(l.left)) try self.evalChain(node) else try self.evalLogical(l.op, l.left, l.right),
+            .sequence => |s| if (isEvalChainLink(s.first)) try self.evalChain(node) else blk: {
                 _ = try self.eval(s.first);
                 break :blk try self.eval(s.second);
             },
@@ -8164,24 +8167,23 @@ pub const Interpreter = struct {
         try self.rewritePrivateNamesInNode(f.body, map);
     }
 
+    /// A left-deep chain rewritten without recursing per link (#935), in the
+    /// same order the recursive form visited it.
+    noinline fn rewritePrivateNamesInChain(self: *Interpreter, top: *Node, map: *const PrivateNameMap) EvalError!void {
+        const scratch = self.scratch_allocator orelse self.arena;
+        var spine: ast.ChainSpine(*Node) = .{};
+        defer spine.deinit(scratch);
+        try self.rewritePrivateNamesInNode(try spine.collect(scratch, top), map);
+        while (spine.pop()) |link| try self.rewritePrivateNamesInNode(ast.chainRight(link), map);
+    }
+
     fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *const PrivateNameMap) EvalError!void {
         switch (node.*) {
             .identifier => |name| node.* = .{ .identifier = remapPrivateName(map, name) },
             .unary => |u| try self.rewritePrivateNamesInNode(u.operand, map),
             .delete_expr => |n| try self.rewritePrivateNamesInNode(n, map),
             .update => |u| try self.rewritePrivateNamesInNode(u.target, map),
-            .binary => |b| {
-                try self.rewritePrivateNamesInNode(b.left, map);
-                try self.rewritePrivateNamesInNode(b.right, map);
-            },
-            .logical => |l| {
-                try self.rewritePrivateNamesInNode(l.left, map);
-                try self.rewritePrivateNamesInNode(l.right, map);
-            },
-            .sequence => |s| {
-                try self.rewritePrivateNamesInNode(s.first, map);
-                try self.rewritePrivateNamesInNode(s.second, map);
-            },
+            .binary, .logical, .sequence => try self.rewritePrivateNamesInChain(node, map),
             .assign => |a| {
                 try self.rewritePrivateNamesInNode(a.target, map);
                 try self.rewritePrivateNamesInNode(a.value, map);
@@ -8385,16 +8387,38 @@ pub const Interpreter = struct {
     /// Deep-copy an AST subtree (string/number leaves share their immutable
     /// payloads; every node gets a fresh allocation so a later rewrite mutates
     /// only this copy). Exhaustive — the compiler flags any unhandled variant.
+    /// Copy a left-deep chain without recursing per link (#935). Children are
+    /// copied in the recursive form's order -- the leftmost operand, then each
+    /// link's right operand bottom-up -- and each link's copy is built once
+    /// both of its operands exist.
+    noinline fn deepCopyChain(self: *Interpreter, top: *const Node) EvalError!*Node {
+        const scratch = self.scratch_allocator orelse self.arena;
+        var spine: ast.ChainSpine(*const Node) = .{};
+        defer spine.deinit(scratch);
+        var copy = try self.deepCopyNode(try spine.collect(scratch, top));
+        while (spine.pop()) |link| {
+            const right = try self.deepCopyNode(ast.chainRight(link));
+            const n = try self.arena.create(Node);
+            n.* = switch (link.*) {
+                .binary => |b| .{ .binary = .{ .op = b.op, .left = copy, .right = right } },
+                .logical => |l| .{ .logical = .{ .op = l.op, .left = copy, .right = right } },
+                .sequence => .{ .sequence = .{ .first = copy, .second = right } },
+                else => unreachable,
+            };
+            copy = n;
+        }
+        return copy;
+    }
+
     fn deepCopyNode(self: *Interpreter, node: *const Node) EvalError!*Node {
+        if (ast.isChainLink(node)) return self.deepCopyChain(node);
         const n = try self.arena.create(Node);
         n.* = switch (node.*) {
             .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .identifier, .break_stmt, .continue_stmt, .import_decl, .import_meta => node.*,
             .unary => |u| .{ .unary = .{ .op = u.op, .operand = try self.deepCopyNode(u.operand) } },
             .delete_expr => |x| .{ .delete_expr = try self.deepCopyNode(x) },
             .update => |u| .{ .update = .{ .inc = u.inc, .prefix = u.prefix, .target = try self.deepCopyNode(u.target) } },
-            .binary => |b| .{ .binary = .{ .op = b.op, .left = try self.deepCopyNode(b.left), .right = try self.deepCopyNode(b.right) } },
-            .logical => |l| .{ .logical = .{ .op = l.op, .left = try self.deepCopyNode(l.left), .right = try self.deepCopyNode(l.right) } },
-            .sequence => |s| .{ .sequence = .{ .first = try self.deepCopyNode(s.first), .second = try self.deepCopyNode(s.second) } },
+            .binary, .logical, .sequence => unreachable, // copied by deepCopyChain
             .assign => |a| .{ .assign = .{ .target = try self.deepCopyNode(a.target), .value = try self.deepCopyNode(a.value) } },
             .op_assign => |a| .{ .op_assign = .{ .target = try self.deepCopyNode(a.target), .op = a.op, .value = try self.deepCopyNode(a.value) } },
             .logical_assign => |a| .{ .logical_assign = .{ .target = try self.deepCopyNode(a.target), .op = a.op, .value = try self.deepCopyNode(a.value) } },
@@ -21095,6 +21119,67 @@ pub const Interpreter = struct {
         const primitive = try self.toNumericPrimitive(v);
         if (primitive.isObject() and primitive.asObj().is_bigint) return primitive;
         return Value.num(try self.toNumberV(primitive));
+    }
+
+    /// Evaluate a left-deep chain of binary, logical and comma links without
+    /// recursing down its left spine (#935). The parser builds `a + b + c` in a
+    /// loop, and a template literal desugars to two links per substitution, so
+    /// an 8 KB template or a long generated concatenation handed evaluation a
+    /// spine thousands of links deep. Recursing once per link overflowed the
+    /// native stack on programs other engines run.
+    ///
+    /// Behaviour matches the recursive form exactly. Each link below `top`
+    /// crosses `beginNodeEvaluation` top-down before any operand runs, just as
+    /// nested `eval` calls would, so the step budget, debugger stops, traps and
+    /// GC safepoints land where they did. Then the leftmost operand is evaluated
+    /// and each link folds in its right operand bottom-up: the same
+    /// left-to-right order, with `&&`, `||` and `??` still skipping theirs.
+    /// `top` itself was already entered by the `eval` that dispatched here.
+    noinline fn evalChain(self: *Interpreter, top: *const Node) EvalError!Value {
+        const scratch = self.scratch_allocator orelse self.arena;
+        var spine: ast.ChainSpine(*const Node) = .{};
+        defer spine.deinit(scratch);
+        var link = top;
+        while (true) {
+            try spine.push(scratch, link);
+            const left = ast.chainLeft(link);
+            if (!isEvalChainLink(left)) break;
+            try self.beginNodeEvaluation(left);
+            link = left;
+        }
+        var acc = try self.eval(ast.chainLeft(link));
+        while (spine.pop()) |next| acc = try self.foldChainLink(next, acc);
+        return acc;
+    }
+
+    /// Apply one chain link to the value accumulated from everything to its
+    /// left, evaluating the link's right operand only when the operator does.
+    fn foldChainLink(self: *Interpreter, link: *const Node, acc: Value) EvalError!Value {
+        return switch (link.*) {
+            .binary => |b| blk: {
+                const right = try self.eval(b.right);
+                break :blk try self.applyBinary(b.op, acc, right);
+            },
+            .logical => |l| switch (l.op) {
+                .@"and" => if (acc.toBoolean()) try self.eval(l.right) else acc,
+                .@"or" => if (acc.toBoolean()) acc else try self.eval(l.right),
+                .nullish => if (acc.isNull() or acc.isUndefined()) try self.eval(l.right) else acc,
+            },
+            // The discarded left value was already evaluated for its effects.
+            .sequence => |sq| try self.eval(sq.second),
+            else => unreachable,
+        };
+    }
+
+    /// Whether `node` continues a chain `evalChain` can fold as left-then-right.
+    /// A private brand check evaluates only its right operand, so it cannot be
+    /// folded that way; it stays an ordinary operand and keeps `evalBinary`.
+    fn isEvalChainLink(node: *const Node) bool {
+        return switch (node.*) {
+            .binary => |b| !(b.op == .in_op and b.left.* == .identifier and value.isPrivateKey(b.left.identifier)),
+            .logical, .sequence => true,
+            else => false,
+        };
     }
 
     fn evalLogical(self: *Interpreter, op: ast.LogicalOp, left: *Node, right: *Node) EvalError!Value {

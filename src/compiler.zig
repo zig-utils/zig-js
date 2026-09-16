@@ -799,6 +799,19 @@ fn finalizeMappedParameterIndices(
 /// Whether a node embeds a `yield` reachable without crossing a function
 /// boundary. Loop-head assignment patterns use this to require resumable native
 /// lowering instead of the Environment-only `bind_pattern` path.
+/// A left-deep chain checked without recursing per link (#935). The predicate
+/// is pure, so checking the right operands top-down and the leftmost operand
+/// last gives the same answer as the recursive left-then-right form.
+fn chainHasYield(top: *const ast.Node) bool {
+    var link = top;
+    while (true) {
+        if (nodeHasYield(ast.chainRight(link))) return true;
+        const left = ast.chainLeft(link);
+        if (!ast.isChainLink(left)) return nodeHasYield(left);
+        link = left;
+    }
+}
+
 fn nodeHasYield(node: *const ast.Node) bool {
     return switch (node.*) {
         .yield_expr => true,
@@ -806,9 +819,7 @@ fn nodeHasYield(node: *const ast.Node) bool {
         .unary => |u| nodeHasYield(u.operand),
         .delete_expr => |d| nodeHasYield(d),
         .update => |u| nodeHasYield(u.target),
-        .binary => |b| nodeHasYield(b.left) or nodeHasYield(b.right),
-        .logical => |b| nodeHasYield(b.left) or nodeHasYield(b.right),
-        .sequence => |s| nodeHasYield(s.first) or nodeHasYield(s.second),
+        .binary, .logical, .sequence => chainHasYield(node),
         .assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
         .op_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
         .logical_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
@@ -1219,6 +1230,23 @@ fn directEvalReferenceMatches(query: anytype) bool {
     } else return true;
 }
 
+/// A left-deep chain searched without recursing per link (#935), checking the
+/// right operands top-down and the leftmost operand last. Visit order cannot
+/// change the result in any query mode. The pure modes only test membership.
+/// `RecordingCapturedBindingReferences` records into a set and returns false
+/// for every match -- including a direct eval, which marks every name captured
+/// and still returns false -- so it never short-circuits and always visits the
+/// whole chain.
+fn chainRefInClosure(top: *const ast.Node, name: anytype, in_fn: bool) bool {
+    var link = top;
+    while (true) {
+        if (nameRefInClosure(ast.chainRight(link), name, in_fn)) return true;
+        const left = ast.chainLeft(link);
+        if (!ast.isChainLink(left)) return nameRefInClosure(left, name, in_fn);
+        link = left;
+    }
+}
+
 fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
     return switch (node.*) {
         .identifier => |id| in_fn and identifierReferenceMatches(name, id),
@@ -1232,9 +1260,7 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
         .unary => |u| nameRefInClosure(u.operand, name, in_fn),
         .delete_expr => |d| nameRefInClosure(d, name, in_fn),
         .update => |u| nameRefInClosure(u.target, name, in_fn),
-        .binary => |b| nameRefInClosure(b.left, name, in_fn) or nameRefInClosure(b.right, name, in_fn),
-        .logical => |b| nameRefInClosure(b.left, name, in_fn) or nameRefInClosure(b.right, name, in_fn),
-        .sequence => |s| nameRefInClosure(s.first, name, in_fn) or nameRefInClosure(s.second, name, in_fn),
+        .binary, .logical, .sequence => chainRefInClosure(node, name, in_fn),
         .assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
         .op_assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
         .logical_assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
@@ -5152,6 +5178,96 @@ pub const Compiler = struct {
         try self.recordTaggedTemplateSite(try self.chunk.emit(if (is_tail) .tail_call else .call, argc), site);
     }
 
+    fn binaryOpcode(op: ast.BinaryOp) bc.Op {
+        return switch (op) {
+            .add => .add,
+            .sub => .sub,
+            .mul => .mul,
+            .div => .div,
+            .mod => .mod,
+            .pow => .pow,
+            .lt => .lt,
+            .le => .le,
+            .gt => .gt,
+            .ge => .ge,
+            .eq => .eq,
+            .neq => .neq,
+            .eq_strict => .eq_strict,
+            .neq_strict => .neq_strict,
+            .instanceof => .instance_of,
+            .in_op => .in_op,
+            .bit_and => .bit_and,
+            .bit_or => .bit_or,
+            .bit_xor => .bit_xor,
+            .shl => .shl,
+            .shr => .shr,
+            .ushr => .ushr,
+        };
+    }
+
+    fn logicalPeekOpcode(op: ast.LogicalOp) bc.Op {
+        return switch (op) {
+            .@"and" => .jump_if_false_peek,
+            .@"or" => .jump_if_true_peek,
+            // ECMA-262 CoalesceExpression evaluates the RHS only when the left
+            // value is null or undefined; falsy values remain on the stack as
+            // the expression result.
+            .nullish => .jump_if_not_nullish_peek,
+        };
+    }
+
+    /// Compile a left-deep chain of binary, logical and comma links without
+    /// recursing down its left spine (#935). The parser builds `a + b + c` in a
+    /// loop and a template literal desugars to two links per substitution, so
+    /// long concatenations and large templates reached a spine thousands of
+    /// links deep, and recursing once per link overflowed the native stack.
+    ///
+    /// The emitted bytecode is identical to the recursive form's. Each arm is a
+    /// post-order sequence -- binary: left, right, op; comma: first, pop,
+    /// second; logical: left, peek-jump, pop, right, patch -- so emitting the
+    /// leftmost operand and then each link's tail bottom-up produces the same
+    /// instructions in the same order, mixed spines included.
+    noinline fn compileChain(self: *Compiler, top: *Node) CompileError!void {
+        var spine: ast.ChainSpine(*Node) = .{};
+        defer spine.deinit(self.arena);
+        var link = top;
+        while (true) {
+            try spine.push(self.arena, link);
+            const left = ast.chainLeft(link);
+            if (!isCompileChainLink(left)) break;
+            link = left;
+        }
+        try self.compileExpr(ast.chainLeft(link));
+        while (spine.pop()) |next| switch (next.*) {
+            .binary => |b| {
+                try self.compileExpr(b.right);
+                _ = try self.chunk.emit(binaryOpcode(b.op), 0);
+            },
+            .sequence => |sq| {
+                _ = try self.chunk.emit(.pop, 0);
+                try self.compileExpr(sq.second);
+            },
+            .logical => |l| {
+                const short = try self.chunk.emit(logicalPeekOpcode(l.op), 0);
+                _ = try self.chunk.emit(.pop, 0);
+                try self.compileExpr(l.right);
+                self.chunk.patchToHere(short);
+            },
+            else => unreachable,
+        };
+    }
+
+    /// Whether `node` continues a chain `compileChain` can emit as left-then-right.
+    /// A private brand check compiles only its right operand, so it stays an
+    /// ordinary operand and keeps the dedicated `.binary` path.
+    fn isCompileChainLink(node: *const Node) bool {
+        return switch (node.*) {
+            .binary => |b| !(b.op == .in_op and b.left.* == .identifier and value_mod.isRawPrivateName(b.left.identifier)),
+            .logical, .sequence => true,
+            else => false,
+        };
+    }
+
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
         switch (node.*) {
             .number => |n| {
@@ -5205,30 +5321,6 @@ pub const Compiler = struct {
             },
             .delete_expr => |target| try self.compileDelete(target),
             .binary => |b| {
-                const op: bc.Op = switch (b.op) {
-                    .add => .add,
-                    .sub => .sub,
-                    .mul => .mul,
-                    .div => .div,
-                    .mod => .mod,
-                    .pow => .pow,
-                    .lt => .lt,
-                    .le => .le,
-                    .gt => .gt,
-                    .ge => .ge,
-                    .eq => .eq,
-                    .neq => .neq,
-                    .eq_strict => .eq_strict,
-                    .neq_strict => .neq_strict,
-                    .instanceof => .instance_of,
-                    .in_op => .in_op,
-                    .bit_and => .bit_and,
-                    .bit_or => .bit_or,
-                    .bit_xor => .bit_xor,
-                    .shl => .shl,
-                    .shr => .shr,
-                    .ushr => .ushr,
-                };
                 if (b.op == .in_op and b.left.* == .identifier and value_mod.isRawPrivateName(b.left.identifier)) {
                     try self.compileExpr(b.right);
                     _ = try self.chunk.emit(
@@ -5237,26 +5329,21 @@ pub const Compiler = struct {
                     );
                     return;
                 }
+                if (isCompileChainLink(b.left)) return self.compileChain(node);
                 try self.compileExpr(b.left);
                 try self.compileExpr(b.right);
-                _ = try self.chunk.emit(op, 0);
+                _ = try self.chunk.emit(binaryOpcode(b.op), 0);
             },
             .sequence => |s| {
+                if (isCompileChainLink(s.first)) return self.compileChain(node);
                 try self.compileExpr(s.first);
                 _ = try self.chunk.emit(.pop, 0);
                 try self.compileExpr(s.second);
             },
             .logical => |l| {
+                if (isCompileChainLink(l.left)) return self.compileChain(node);
                 try self.compileExpr(l.left);
-                const peek: bc.Op = switch (l.op) {
-                    .@"and" => .jump_if_false_peek,
-                    .@"or" => .jump_if_true_peek,
-                    // ECMA-262 CoalesceExpression evaluates the RHS only when
-                    // the left value is null or undefined; falsy values remain
-                    // on the stack as the expression result.
-                    .nullish => .jump_if_not_nullish_peek,
-                };
-                const short = try self.chunk.emit(peek, 0);
+                const short = try self.chunk.emit(logicalPeekOpcode(l.op), 0);
                 _ = try self.chunk.emit(.pop, 0);
                 try self.compileExpr(l.right);
                 self.chunk.patchToHere(short);

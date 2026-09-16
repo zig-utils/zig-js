@@ -2320,7 +2320,14 @@ fn appendQuickArgumentsExpression(
     ops: *[max_quick_leaf_ops]QuickLeafOp,
     op_count: *usize,
     executed: *usize,
+    depth: usize,
 ) bool {
+    // Every accepted node appends exactly one op, so no accepted expression is
+    // deeper than `max_quick_leaf_ops`. Refusing a deeper tree before recursing
+    // gives the answer the op limit would have reached anyway, without first
+    // descending an arbitrarily long operand chain (#935). A refusal discards
+    // `executed` along with the rest of the plan.
+    if (depth >= max_quick_leaf_ops) return false;
     executed.* += 1;
     const op: QuickLeafOp = switch (node.*) {
         .number => |number| .{ .constant = number },
@@ -2340,8 +2347,8 @@ fn appendQuickArgumentsExpression(
             break :argument .{ .argument = @intFromFloat(number) };
         },
         .binary => |binary| binary: {
-            if (!appendQuickArgumentsExpression(binary.left, argument_count, ops, op_count, executed) or
-                !appendQuickArgumentsExpression(binary.right, argument_count, ops, op_count, executed))
+            if (!appendQuickArgumentsExpression(binary.left, argument_count, ops, op_count, executed, depth + 1) or
+                !appendQuickArgumentsExpression(binary.right, argument_count, ops, op_count, executed, depth + 1))
                 return false;
             break :binary switch (binary.op) {
                 .add => .add,
@@ -2380,7 +2387,7 @@ fn compileQuickArgumentsLeaf(function: *const Function, argument_count: usize) ?
     };
     var ops: [max_quick_leaf_ops]QuickLeafOp = undefined;
     var op_count: usize = 0;
-    if (!appendQuickArgumentsExpression(expression, argument_count, &ops, &op_count, &executed) or
+    if (!appendQuickArgumentsExpression(expression, argument_count, &ops, &op_count, &executed, 0) or
         op_count == 0 or executed > std.math.maxInt(u8))
         return null;
 

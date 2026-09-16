@@ -9806,6 +9806,18 @@ pub const Context = struct {
         return false;
     }
 
+    /// A left-deep chain checked without recursing per link (#935). The
+    /// predicate is pure, so the order of the checks cannot change the answer.
+    fn chainHasTopLevelAwait(top: *const ast.Node) bool {
+        var link = top;
+        while (true) {
+            if (nodeHasTopLevelAwait(ast.chainRight(link))) return true;
+            const left = ast.chainLeft(link);
+            if (!ast.isChainLink(left)) return nodeHasTopLevelAwait(left);
+            link = left;
+        }
+    }
+
     fn nodeHasTopLevelAwait(node: *const ast.Node) bool {
         return switch (node.*) {
             .await_expr => true,
@@ -9818,9 +9830,7 @@ pub const Context = struct {
             .unary => |u| nodeHasTopLevelAwait(u.operand),
             .delete_expr => |d| nodeHasTopLevelAwait(d),
             .update => |u| nodeHasTopLevelAwait(u.target),
-            .binary => |b| nodeHasTopLevelAwait(b.left) or nodeHasTopLevelAwait(b.right),
-            .logical => |l| nodeHasTopLevelAwait(l.left) or nodeHasTopLevelAwait(l.right),
-            .sequence => |s| nodeHasTopLevelAwait(s.first) or nodeHasTopLevelAwait(s.second),
+            .binary, .logical, .sequence => chainHasTopLevelAwait(node),
             .assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
             .op_assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
             .logical_assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),

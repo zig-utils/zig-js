@@ -4780,6 +4780,15 @@ pub const Parser = struct {
     /// SuperCall. Each query follows its own function/class boundary: arrows
     /// inherit lexical bindings, class heritage/computed names use the outer
     /// context, and nested methods/initializers have their own super bindings.
+    /// A left-deep chain scanned without recursing per link (#935); the visit
+    /// order, and so the first error reported, matches the recursive form.
+    noinline fn scanSuperAndArgsInChain(self: *Parser, top: *Node) ParseError!void {
+        var spine: ast.ChainSpine(*Node) = .{};
+        defer spine.deinit(self.scratch_allocator);
+        try self.scanSuperAndArgs(try spine.collect(self.scratch_allocator, top));
+        while (spine.pop()) |link| try self.scanSuperAndArgs(ast.chainRight(link));
+    }
+
     fn scanSuperAndArgs(self: *Parser, node: *Node) ParseError!void {
         switch (node.*) {
             .obj_pattern, .arr_pattern => try self.scanSuperAndArgsInPattern(node),
@@ -4801,18 +4810,7 @@ pub const Parser = struct {
             },
             .spread => |v| try self.scanSuperAndArgs(v),
             .optional_chain => |c| try self.scanSuperAndArgs(c),
-            .binary => |b| {
-                try self.scanSuperAndArgs(b.left);
-                try self.scanSuperAndArgs(b.right);
-            },
-            .logical => |l| {
-                try self.scanSuperAndArgs(l.left);
-                try self.scanSuperAndArgs(l.right);
-            },
-            .sequence => |s| {
-                try self.scanSuperAndArgs(s.first);
-                try self.scanSuperAndArgs(s.second);
-            },
+            .binary, .logical, .sequence => try self.scanSuperAndArgsInChain(node),
             .assign => |a| {
                 try self.scanSuperAndArgs(a.target);
                 try self.scanSuperAndArgs(a.value);
@@ -5031,6 +5029,19 @@ pub const Parser = struct {
         }
     }
 
+    /// A left-deep chain checked without recursing per link (#935); the visit
+    /// order, and so the first error reported, matches the recursive form.
+    noinline fn checkPrivateUsesInChain(
+        self: *Parser,
+        declared: *SecureStringMapUnmanaged(void),
+        top: *Node,
+    ) ParseError!void {
+        var spine: ast.ChainSpine(*Node) = .{};
+        defer spine.deinit(self.scratch_allocator);
+        try self.checkPrivateUsesInNode(declared, try spine.collect(self.scratch_allocator, top));
+        while (spine.pop()) |link| try self.checkPrivateUsesInNode(declared, ast.chainRight(link));
+    }
+
     fn checkPrivateUsesInNode(
         self: *Parser,
         declared: *SecureStringMapUnmanaged(void),
@@ -5041,18 +5052,7 @@ pub const Parser = struct {
             .unary => |u| try self.checkPrivateUsesInNode(declared, u.operand),
             .delete_expr => |target| try self.checkPrivateUsesInNode(declared, target),
             .update => |u| try self.checkPrivateUsesInNode(declared, u.target),
-            .binary => |b| {
-                try self.checkPrivateUsesInNode(declared, b.left);
-                try self.checkPrivateUsesInNode(declared, b.right);
-            },
-            .logical => |l| {
-                try self.checkPrivateUsesInNode(declared, l.left);
-                try self.checkPrivateUsesInNode(declared, l.right);
-            },
-            .sequence => |s| {
-                try self.checkPrivateUsesInNode(declared, s.first);
-                try self.checkPrivateUsesInNode(declared, s.second);
-            },
+            .binary, .logical, .sequence => try self.checkPrivateUsesInChain(declared, node),
             .assign => |a| {
                 try self.checkPrivateUsesInNode(declared, a.target);
                 try self.checkPrivateUsesInNode(declared, a.value);
