@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v34.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v35.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 34, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 35, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,48 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 34),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 35),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 35) {
+    requireValue(child.tier_attribution === undefined, "v35 must inherit the scored attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v35 re-pins the frontend native runner only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v35 must inherit completed panel inventory unchanged");
+    for (const name of ["instrumentation_overhead_integration", "context_lifecycle_integration", "no_jit_integration", "string_indexing_integration"])
+      requireValue(child[name] === undefined, `v35 must inherit ${name} unchanged`);
+    const replacement = child.exact_parent_integration;
+    requireValue(
+      replacement && typeof replacement === "object" && same(Object.keys(replacement).sort(), ["native_runners", "publication_boundary"]),
+      "v35 replaces only the exact-parent native runners and publication boundary",
+    );
+    const inheritedRunners = inherited.exact_parent_integration.native_runners;
+    requireValue(
+      Array.isArray(replacement.native_runners) && Array.isArray(inheritedRunners) &&
+        same(replacement.native_runners.map((runner: any) => runner.path), inheritedRunners.map((runner: any) => runner.path)),
+      "v35 native runner inventory drift",
+    );
+    for (let index = 0; index < replacement.native_runners.length; index += 1) {
+      const runner = replacement.native_runners[index];
+      if (runner.path !== "bench/frontend_parse.zig")
+        requireValue(runner.sha256 === inheritedRunners[index].sha256, `v35 must inherit ${runner.path} unchanged`);
+    }
+    const exactParent = { ...inherited.exact_parent_integration, ...replacement };
+    const merged = {
+      ...inherited,
+      ...child,
+      exact_parent_integration: exactParent,
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: { ...inherited.completed_metric_panels.efficiency_thermal, scored_integration: exactParent },
+      },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 34) {
     requireValue(child.tier_attribution === undefined, "v34 must inherit the scored attribution contract unchanged");
@@ -259,7 +294,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 34, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 35, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
