@@ -9283,7 +9283,13 @@ pub const Context = struct {
                     break :admission machine.eval(prog);
                 }
             }
-            switch (compiler.Compiler.admitProgram(a, prog) catch return error.OutOfMemory) {
+            const program_admission = compiler.Compiler.admitProgram(a, prog) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Nested deeper than the compiler can recurse (#937). Not a
+                // lowering limit: the tree-walker recurses over the same tree.
+                error.StackExhausted => break :admission machine.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+            };
+            switch (program_admission) {
                 .compiled => |chunk| {
                     self.bytecode_admission_inventory.record(.program_compiled);
                     break :admission vm.run(&machine, chunk, null);
@@ -10208,7 +10214,14 @@ pub const Context = struct {
         machine.cur_module = m.path;
         machine.import_meta_slot = &m.import_meta_slot;
         machine.import_meta_obj = m.import_meta_slot.load();
-        for (m.items) |item| try self.instantiateModuleFunctionItem(&machine, m, item);
+        for (m.items) |item| self.instantiateModuleFunctionItem(&machine, m, item) catch |err| {
+            // Creating a function throws when its body nests deeper than the
+            // compiler can recurse (#937). Linking runs outside evalModule, so
+            // surface the reason on the context the way moduleError does;
+            // otherwise loaders and import() report a SyntaxError instead.
+            if (err == error.Throw) self.exception = machine.exception;
+            return err;
+        };
     }
 
     fn instantiateModuleFunctionItem(self: *Context, machine: *interp.Interpreter, m: *Module, item: *ast.Node) interp.EvalError!void {

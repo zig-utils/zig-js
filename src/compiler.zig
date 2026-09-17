@@ -22,13 +22,18 @@ const ast = @import("ast.zig");
 const annex_b = @import("annex_b.zig");
 const bc = @import("bytecode.zig");
 const agent = @import("agent.zig");
+const stack_scan = @import("stack_scan.zig");
 
 const Node = ast.Node;
 const Chunk = bc.Chunk;
 const value_mod = @import("value.zig");
 const Value = value_mod.Value;
 
-pub const CompileError = error{ Unsupported, OutOfMemory };
+/// `StackExhausted`: the source nests deeper than this thread's stack allows
+/// the compiler or one of its pre-scans to recurse (#937). It is not a lowering
+/// limit, so callers report it as a RangeError instead of falling back to the
+/// tree-walker, which recurses over the same tree.
+pub const CompileError = error{ Unsupported, OutOfMemory, StackExhausted };
 
 const SecureStringHashContext = struct {
     seed: u64,
@@ -615,36 +620,38 @@ fn addArgumentsSlot(
     arena: std.mem.Allocator,
     scope: *FnScope,
     fnode: *const ast.FunctionNode,
+    floor: usize,
 ) CompileError!?u32 {
     if (fnode.is_arrow or (!fnode.uses_arguments and !fnode.uses_direct_eval)) return null;
     // FunctionDeclarationInstantiation suppresses the implicit object when a
     // formal already owns the `arguments` binding.
-    if (parametersBindName(fnode, "arguments")) return null;
+    if (try parametersBindName(fnode, "arguments", floor)) return null;
     return try scope.addParameter(arena, "arguments");
 }
 
-fn patternBindsName(pattern: *const ast.Node, name: []const u8) bool {
+fn patternBindsName(pattern: *const ast.Node, name: []const u8, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (pattern.*) {
         .identifier => |binding| std.mem.eql(u8, binding, name),
         .obj_pattern => |object| blk: {
-            for (object.props) |property| if (patternBindsName(property.target, name)) break :blk true;
-            if (object.rest) |rest| if (patternBindsName(rest, name)) break :blk true;
+            for (object.props) |property| if (try patternBindsName(property.target, name, floor)) break :blk true;
+            if (object.rest) |rest| if (try patternBindsName(rest, name, floor)) break :blk true;
             break :blk false;
         },
         .arr_pattern => |array| blk: {
             for (array.elems) |element| if (element.target) |target|
-                if (patternBindsName(target, name)) break :blk true;
-            if (array.rest) |rest| if (patternBindsName(rest, name)) break :blk true;
+                if (try patternBindsName(target, name, floor)) break :blk true;
+            if (array.rest) |rest| if (try patternBindsName(rest, name, floor)) break :blk true;
             break :blk false;
         },
         else => false,
     };
 }
 
-fn parametersBindName(fnode: *const ast.FunctionNode, name: []const u8) bool {
+fn parametersBindName(fnode: *const ast.FunctionNode, name: []const u8, floor: usize) error{StackExhausted}!bool {
     for (fnode.params) |parameter| {
         if (parameter.pattern) |pattern| {
-            if (patternBindsName(pattern, name)) return true;
+            if (try patternBindsName(pattern, name, floor)) return true;
         } else if (std.mem.eql(u8, parameter.name, name)) return true;
     }
     return false;
@@ -671,13 +678,14 @@ fn configurePlainParameters(
     arena: std.mem.Allocator,
     scope: *FnScope,
     fnode: *const ast.FunctionNode,
+    floor: usize,
 ) CompileError!PlainParameterLayout {
     scope.may_extend_environment = !fnode.is_strict and fnode.uses_direct_eval;
     var has_parameter_expressions = false;
     for (fnode.params) |parameter| {
         if (parameter.default != null) has_parameter_expressions = true;
         if (parameter.pattern) |pattern| {
-            has_parameter_expressions = has_parameter_expressions or patternHasEvaluationExpressions(pattern);
+            has_parameter_expressions = has_parameter_expressions or try patternHasEvaluationExpressions(pattern, floor);
         }
     }
     if (has_parameter_expressions) {
@@ -704,7 +712,7 @@ fn configurePlainParameters(
         if (parameter.default != null) try default_indices.append(arena, @intCast(index));
         if (parameter.pattern) |pattern| {
             var collector = BindingCollector{ .scope = scope };
-            try collectPatternBindingNames(arena, pattern, &collector);
+            try collectPatternBindingNames(arena, pattern, &collector, floor);
             try pattern_indices.append(arena, @intCast(index));
         } else {
             _ = try scope.addParameter(arena, parameter.name);
@@ -802,75 +810,76 @@ fn finalizeMappedParameterIndices(
 /// A left-deep chain checked without recursing per link (#935). The predicate
 /// is pure, so checking the right operands top-down and the leftmost operand
 /// last gives the same answer as the recursive left-then-right form.
-fn chainHasYield(top: *const ast.Node) bool {
+fn chainHasYield(top: *const ast.Node, floor: usize) error{StackExhausted}!bool {
     var link = top;
     while (true) {
-        if (nodeHasYield(ast.chainRight(link))) return true;
+        if (try nodeHasYield(ast.chainRight(link), floor)) return true;
         const left = ast.chainLeft(link);
-        if (!ast.isChainLink(left)) return nodeHasYield(left);
+        if (!ast.isChainLink(left)) return try nodeHasYield(left, floor);
         link = left;
     }
 }
 
-fn nodeHasYield(node: *const ast.Node) bool {
+fn nodeHasYield(node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .yield_expr => true,
         .function => false, // a nested function/arrow is its own yield scope
-        .unary => |u| nodeHasYield(u.operand),
-        .delete_expr => |d| nodeHasYield(d),
-        .update => |u| nodeHasYield(u.target),
-        .binary, .logical, .sequence => chainHasYield(node),
-        .assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
-        .op_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
-        .logical_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
-        .conditional => |c| nodeHasYield(c.cond) or nodeHasYield(c.consequent) or nodeHasYield(c.alternate),
-        .await_expr => |a| nodeHasYield(a.argument),
-        .import_call => |ic| nodeHasYield(ic.specifier) or (ic.options != null and nodeHasYield(ic.options.?)),
-        .optional_chain => |c| nodeHasYield(c),
-        .spread => |s| nodeHasYield(s),
-        .member => |m| nodeHasYield(m.object) or (m.computed != null and nodeHasYield(m.computed.?)),
-        .super_member => |m| (m.computed != null and nodeHasYield(m.computed.?)),
+        .unary => |u| try nodeHasYield(u.operand, floor),
+        .delete_expr => |d| try nodeHasYield(d, floor),
+        .update => |u| try nodeHasYield(u.target, floor),
+        .binary, .logical, .sequence => try chainHasYield(node, floor),
+        .assign => |a| try nodeHasYield(a.target, floor) or try nodeHasYield(a.value, floor),
+        .op_assign => |a| try nodeHasYield(a.target, floor) or try nodeHasYield(a.value, floor),
+        .logical_assign => |a| try nodeHasYield(a.target, floor) or try nodeHasYield(a.value, floor),
+        .conditional => |c| try nodeHasYield(c.cond, floor) or try nodeHasYield(c.consequent, floor) or try nodeHasYield(c.alternate, floor),
+        .await_expr => |a| try nodeHasYield(a.argument, floor),
+        .import_call => |ic| try nodeHasYield(ic.specifier, floor) or (ic.options != null and try nodeHasYield(ic.options.?, floor)),
+        .optional_chain => |c| try nodeHasYield(c, floor),
+        .spread => |s| try nodeHasYield(s, floor),
+        .member => |m| try nodeHasYield(m.object, floor) or (m.computed != null and try nodeHasYield(m.computed.?, floor)),
+        .super_member => |m| (m.computed != null and try nodeHasYield(m.computed.?, floor)),
         .call => |c| blk: {
-            if (nodeHasYield(c.callee)) break :blk true;
-            for (c.args) |a| if (nodeHasYield(a)) break :blk true;
+            if (try nodeHasYield(c.callee, floor)) break :blk true;
+            for (c.args) |a| if (try nodeHasYield(a, floor)) break :blk true;
             break :blk false;
         },
         .new_expr => |c| blk: {
-            if (nodeHasYield(c.callee)) break :blk true;
-            for (c.args) |a| if (nodeHasYield(a)) break :blk true;
+            if (try nodeHasYield(c.callee, floor)) break :blk true;
+            for (c.args) |a| if (try nodeHasYield(a, floor)) break :blk true;
             break :blk false;
         },
         .tagged_template => |t| blk: {
-            if (nodeHasYield(t.tag)) break :blk true;
-            for (t.exprs) |e| if (nodeHasYield(e)) break :blk true;
+            if (try nodeHasYield(t.tag, floor)) break :blk true;
+            for (t.exprs) |e| if (try nodeHasYield(e, floor)) break :blk true;
             break :blk false;
         },
         .array_lit => |elems| blk: {
-            for (elems) |e| if (nodeHasYield(e)) break :blk true;
+            for (elems) |e| if (try nodeHasYield(e, floor)) break :blk true;
             break :blk false;
         },
         .object_lit => |props| blk: {
             for (props) |p| {
-                if (p.key_expr) |ke| if (nodeHasYield(ke)) break :blk true;
-                if (nodeHasYield(p.value)) break :blk true;
+                if (p.key_expr) |ke| if (try nodeHasYield(ke, floor)) break :blk true;
+                if (try nodeHasYield(p.value, floor)) break :blk true;
             }
             break :blk false;
         },
         .arr_pattern => |p| blk: {
             for (p.elems) |e| {
-                if (e.target) |t| if (nodeHasYield(t)) break :blk true;
-                if (e.default) |d| if (nodeHasYield(d)) break :blk true;
+                if (e.target) |t| if (try nodeHasYield(t, floor)) break :blk true;
+                if (e.default) |d| if (try nodeHasYield(d, floor)) break :blk true;
             }
-            if (p.rest) |r| if (nodeHasYield(r)) break :blk true;
+            if (p.rest) |r| if (try nodeHasYield(r, floor)) break :blk true;
             break :blk false;
         },
         .obj_pattern => |p| blk: {
             for (p.props) |pp| {
-                if (pp.key_expr) |ke| if (nodeHasYield(ke)) break :blk true;
-                if (pp.default) |d| if (nodeHasYield(d)) break :blk true;
-                if (nodeHasYield(pp.target)) break :blk true;
+                if (pp.key_expr) |ke| if (try nodeHasYield(ke, floor)) break :blk true;
+                if (pp.default) |d| if (try nodeHasYield(d, floor)) break :blk true;
+                if (try nodeHasYield(pp.target, floor)) break :blk true;
             }
-            if (p.rest) |rest| if (nodeHasYield(rest)) break :blk true;
+            if (p.rest) |rest| if (try nodeHasYield(rest, floor)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -884,35 +893,36 @@ fn nodeHasYield(node: *const ast.Node) bool {
 /// nested functions or nested loops (which manage their own body bindings).
 /// Captured declarations can use a declarative environment at the block that
 /// owns them. Nested loops establish their own repeated-body root.
-fn repeatedBodyCapturesSupported(node: *const ast.Node, captures: *const RepeatedBodyCaptures) bool {
+fn repeatedBodyCapturesSupported(node: *const ast.Node, captures: *const RepeatedBodyCaptures, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .var_decl => true,
         .decl_group => |declarations| blk: {
             for (declarations) |declaration|
-                if (!repeatedBodyCapturesSupported(declaration, captures)) break :blk false;
+                if (!try repeatedBodyCapturesSupported(declaration, captures, floor)) break :blk false;
             break :blk true;
         },
         .destructure_decl => |declaration| blk: {
-            const captured = declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern);
-            break :blk !captured or patternSupportsEnvironmentNode(declaration.pattern);
+            const captured = declaration.kind != .@"var" and try captures.patternCaptured(declaration.pattern, floor);
+            break :blk !captured or try patternSupportsEnvironmentNode(declaration.pattern, floor);
         },
         .block => |statements| blk: {
-            for (statements) |statement| if (!repeatedBodyCapturesSupported(statement, captures)) break :blk false;
+            for (statements) |statement| if (!try repeatedBodyCapturesSupported(statement, captures, floor)) break :blk false;
             break :blk true;
         },
-        .if_stmt => |statement| repeatedBodyCapturesSupported(statement.consequent, captures) and
-            (if (statement.alternate) |alternate| repeatedBodyCapturesSupported(alternate, captures) else true),
-        .labeled_stmt => |statement| repeatedBodyCapturesSupported(statement.body, captures),
+        .if_stmt => |statement| try repeatedBodyCapturesSupported(statement.consequent, captures, floor) and
+            (if (statement.alternate) |alternate| try repeatedBodyCapturesSupported(alternate, captures, floor) else true),
+        .labeled_stmt => |statement| try repeatedBodyCapturesSupported(statement.body, captures, floor),
         .try_stmt => |statement| blk: {
             const captured_catch = if (statement.catch_param) |catch_param| captures.catchPatternCaptured(catch_param) else false;
-            if (captured_catch and !patternSupportsEnvironmentNode(statement.catch_param.?)) break :blk false;
-            break :blk repeatedBodyCapturesSupported(statement.block, captures) and
-                (if (statement.catch_block) |catch_block| repeatedBodyCapturesSupported(catch_block, captures) else true) and
-                (if (statement.finally_block) |finally_block| repeatedBodyCapturesSupported(finally_block, captures) else true);
+            if (captured_catch and !try patternSupportsEnvironmentNode(statement.catch_param.?, floor)) break :blk false;
+            break :blk try repeatedBodyCapturesSupported(statement.block, captures, floor) and
+                (if (statement.catch_block) |catch_block| try repeatedBodyCapturesSupported(catch_block, captures, floor) else true) and
+                (if (statement.finally_block) |finally_block| try repeatedBodyCapturesSupported(finally_block, captures, floor) else true);
         },
         .switch_stmt => |statement| blk: {
             for (statement.cases) |case| for (case.body) |case_statement|
-                if (!repeatedBodyCapturesSupported(case_statement, captures)) break :blk false;
+                if (!try repeatedBodyCapturesSupported(case_statement, captures, floor)) break :blk false;
             break :blk true;
         },
         // Nested iteration statements compile their own body with a new root.
@@ -921,18 +931,19 @@ fn repeatedBodyCapturesSupported(node: *const ast.Node, captures: *const Repeate
     };
 }
 
-fn patternSupportsEnvironmentNode(pattern: *const ast.Node) bool {
+fn patternSupportsEnvironmentNode(pattern: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (pattern.*) {
         .identifier => true,
         .obj_pattern => |object| blk: {
-            for (object.props) |property| if (!patternSupportsEnvironmentNode(property.target)) break :blk false;
-            if (object.rest) |rest| if (!patternSupportsEnvironmentNode(rest)) break :blk false;
+            for (object.props) |property| if (!try patternSupportsEnvironmentNode(property.target, floor)) break :blk false;
+            if (object.rest) |rest| if (!try patternSupportsEnvironmentNode(rest, floor)) break :blk false;
             break :blk true;
         },
         .arr_pattern => |array| blk: {
             for (array.elems) |element| if (element.target) |target|
-                if (!patternSupportsEnvironmentNode(target)) break :blk false;
-            if (array.rest) |rest| if (!patternSupportsEnvironmentNode(rest)) break :blk false;
+                if (!try patternSupportsEnvironmentNode(target, floor)) break :blk false;
+            if (array.rest) |rest| if (!try patternSupportsEnvironmentNode(rest, floor)) break :blk false;
             break :blk true;
         },
         else => false,
@@ -973,14 +984,14 @@ const LoopBindingNames = struct {
         self.single = name;
     }
 
-    fn referencedByIn(self: *const LoopBindingNames, node: *const ast.Node, in_fn: bool) bool {
+    fn referencedByIn(self: *const LoopBindingNames, node: *const ast.Node, in_fn: bool, floor: usize) error{StackExhausted}!bool {
         if (self.multiple.count() == 0)
-            return if (self.single) |name| nameRefInClosure(node, name, in_fn) else false;
-        return nameRefInClosure(node, CapturedBindingReferences{ .names = &self.multiple }, in_fn);
+            return if (self.single) |name| try nameRefInClosure(node, name, in_fn, floor) else false;
+        return try nameRefInClosure(node, CapturedBindingReferences{ .names = &self.multiple }, in_fn, floor);
     }
 
-    fn referencedBy(self: *const LoopBindingNames, node: *const ast.Node) bool {
-        return self.referencedByIn(node, false);
+    fn referencedBy(self: *const LoopBindingNames, node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+        return try self.referencedByIn(node, false, floor);
     }
 };
 
@@ -1008,15 +1019,15 @@ const RepeatedBodyNameCaptures = struct {
         self.single = name;
     }
 
-    fn classify(self: *RepeatedBodyNameCaptures, node: *const ast.Node) void {
+    fn classify(self: *RepeatedBodyNameCaptures, node: *const ast.Node, floor: usize) error{StackExhausted}!void {
         if (self.multiple.count() == 0) {
-            self.single_captured = if (self.single) |name| nameRefInClosure(node, name, false) else false;
+            self.single_captured = if (self.single) |name| try nameRefInClosure(node, name, false, floor) else false;
             return;
         }
-        _ = nameRefInClosure(node, RecordingCapturedBindingReferences{
+        _ = try nameRefInClosure(node, RecordingCapturedBindingReferences{
             .names = &self.multiple,
             .captured_count = &self.captured_count,
-        }, false);
+        }, false, floor);
     }
 
     fn captures(self: *const RepeatedBodyNameCaptures, name: []const u8) bool {
@@ -1034,12 +1045,12 @@ const RepeatedBodyCaptures = struct {
     bindings: RepeatedBodyNameCaptures,
     captured_catch_patterns: SecureIdentityMapUnmanaged(void) = .{},
 
-    fn init(arena: std.mem.Allocator, hash_state: *CompileHashState, root: *const ast.Node) CompileError!RepeatedBodyCaptures {
+    fn init(arena: std.mem.Allocator, hash_state: *CompileHashState, root: *const ast.Node, floor: usize) CompileError!RepeatedBodyCaptures {
         var captures: RepeatedBodyCaptures = .{
             .bindings = RepeatedBodyNameCaptures.init(hash_state),
         };
-        try collectRepeatedBodyBindings(arena, root, &captures);
-        captures.bindings.classify(root);
+        try collectRepeatedBodyBindings(arena, root, &captures, floor);
+        try captures.bindings.classify(root, floor);
         return captures;
     }
 
@@ -1047,18 +1058,19 @@ const RepeatedBodyCaptures = struct {
         return self.bindings.captures(name);
     }
 
-    fn patternCaptured(self: *const RepeatedBodyCaptures, pattern: *const ast.Node) bool {
+    fn patternCaptured(self: *const RepeatedBodyCaptures, pattern: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         return switch (pattern.*) {
             .identifier => |name| self.nameCaptured(name),
             .obj_pattern => |object| blk: {
-                for (object.props) |property| if (self.patternCaptured(property.target)) break :blk true;
-                if (object.rest) |rest| if (self.patternCaptured(rest)) break :blk true;
+                for (object.props) |property| if (try self.patternCaptured(property.target, floor)) break :blk true;
+                if (object.rest) |rest| if (try self.patternCaptured(rest, floor)) break :blk true;
                 break :blk false;
             },
             .arr_pattern => |array| blk: {
                 for (array.elems) |element| if (element.target) |target|
-                    if (self.patternCaptured(target)) break :blk true;
-                if (array.rest) |rest| if (self.patternCaptured(rest)) break :blk true;
+                    if (try self.patternCaptured(target, floor)) break :blk true;
+                if (array.rest) |rest| if (try self.patternCaptured(rest, floor)) break :blk true;
                 break :blk false;
             },
             else => false,
@@ -1074,109 +1086,113 @@ const RepeatedBodyCaptures = struct {
     }
 };
 
-fn collectPatternBindingNames(arena: std.mem.Allocator, pattern: *const ast.Node, names: anytype) CompileError!void {
+fn collectPatternBindingNames(arena: std.mem.Allocator, pattern: *const ast.Node, names: anytype, floor: usize) CompileError!void {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     switch (pattern.*) {
         .identifier => |name| try names.add(arena, name),
         .obj_pattern => |object| {
-            for (object.props) |property| try collectPatternBindingNames(arena, property.target, names);
-            if (object.rest) |rest| try collectPatternBindingNames(arena, rest, names);
+            for (object.props) |property| try collectPatternBindingNames(arena, property.target, names, floor);
+            if (object.rest) |rest| try collectPatternBindingNames(arena, rest, names, floor);
         },
         .arr_pattern => |array| {
             for (array.elems) |element| if (element.target) |target|
-                try collectPatternBindingNames(arena, target, names);
-            if (array.rest) |rest| try collectPatternBindingNames(arena, rest, names);
+                try collectPatternBindingNames(arena, target, names, floor);
+            if (array.rest) |rest| try collectPatternBindingNames(arena, rest, names, floor);
         },
         else => {},
     }
 }
 
-fn collectLoopBindingNames(arena: std.mem.Allocator, node: *const ast.Node, names: *LoopBindingNames) CompileError!void {
+fn collectLoopBindingNames(arena: std.mem.Allocator, node: *const ast.Node, names: *LoopBindingNames, floor: usize) CompileError!void {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     switch (node.*) {
         .var_decl => |declaration| if (declaration.kind != .@"var") try names.add(arena, declaration.name),
         .destructure_decl => |declaration| if (declaration.kind != .@"var")
-            try collectPatternBindingNames(arena, declaration.pattern, names),
+            try collectPatternBindingNames(arena, declaration.pattern, names, floor),
         .decl_group => |declarations| for (declarations) |declaration|
-            try collectLoopBindingNames(arena, declaration, names),
+            try collectLoopBindingNames(arena, declaration, names, floor),
         else => {},
     }
 }
 
-fn forLoopCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState, init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) CompileError!bool {
+fn forLoopCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState, init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node, floor: usize) CompileError!bool {
     var names = LoopBindingNames.init(hash_state);
-    try collectLoopBindingNames(arena, init_node, &names);
-    return names.referencedBy(init_node) or
-        (if (cond) |condition| names.referencedBy(condition) else false) or
-        (if (update) |increment| names.referencedBy(increment) else false) or
-        names.referencedBy(body);
+    try collectLoopBindingNames(arena, init_node, &names, floor);
+    return try names.referencedBy(init_node, floor) or
+        (if (cond) |condition| try names.referencedBy(condition, floor) else false) or
+        (if (update) |increment| try names.referencedBy(increment, floor) else false) or
+        try names.referencedBy(body, floor);
 }
 
-fn patternHasEvaluationExpressions(pattern: *const ast.Node) bool {
+fn patternHasEvaluationExpressions(pattern: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (pattern.*) {
         .identifier => false,
         .obj_pattern => |object| blk: {
             for (object.props) |property| {
-                if (property.key_expr != null or property.default != null or patternHasEvaluationExpressions(property.target)) break :blk true;
+                if (property.key_expr != null or property.default != null or try patternHasEvaluationExpressions(property.target, floor)) break :blk true;
             }
-            if (object.rest) |rest| if (patternHasEvaluationExpressions(rest)) break :blk true;
+            if (object.rest) |rest| if (try patternHasEvaluationExpressions(rest, floor)) break :blk true;
             break :blk false;
         },
         .arr_pattern => |array| blk: {
             for (array.elems) |element| {
                 if (element.default != null) break :blk true;
-                if (element.target) |target| if (patternHasEvaluationExpressions(target)) break :blk true;
+                if (element.target) |target| if (try patternHasEvaluationExpressions(target, floor)) break :blk true;
             }
-            if (array.rest) |rest| if (patternHasEvaluationExpressions(rest)) break :blk true;
+            if (array.rest) |rest| if (try patternHasEvaluationExpressions(rest, floor)) break :blk true;
             break :blk false;
         },
         else => true,
     };
 }
 
-fn forOfCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState, target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) CompileError!bool {
+fn forOfCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState, target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node, floor: usize) CompileError!bool {
     var names = LoopBindingNames.init(hash_state);
-    try collectPatternBindingNames(arena, target, &names);
-    return names.referencedBy(target) or
-        (if (var_init) |initializer| names.referencedBy(initializer) else false) or
-        names.referencedBy(iterable) or names.referencedBy(body);
+    try collectPatternBindingNames(arena, target, &names, floor);
+    return try names.referencedBy(target, floor) or
+        (if (var_init) |initializer| try names.referencedBy(initializer, floor) else false) or
+        try names.referencedBy(iterable, floor) or try names.referencedBy(body, floor);
 }
 
 /// Collect declarations owned by one repeated-body root. Nested loops establish
 /// their own root; nested functions contain references but not declarations owned
 /// by this iteration. Catch parameters have their own lexical scope, so each is
 /// classified once against only its catch block and cached by pattern identity.
-fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, captures: *RepeatedBodyCaptures) CompileError!void {
+fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, captures: *RepeatedBodyCaptures, floor: usize) CompileError!void {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     switch (node.*) {
         .func_decl => |function| try captures.bindings.add(arena, function.name),
         .var_decl => |declaration| if (declaration.kind != .@"var")
             try captures.bindings.add(arena, declaration.name),
         .destructure_decl => |declaration| if (declaration.kind != .@"var")
-            try collectPatternBindingNames(arena, declaration.pattern, &captures.bindings),
+            try collectPatternBindingNames(arena, declaration.pattern, &captures.bindings, floor),
         .decl_group => |declarations| for (declarations) |declaration|
-            try collectRepeatedBodyBindings(arena, declaration, captures),
+            try collectRepeatedBodyBindings(arena, declaration, captures, floor),
         .block => |statements| for (statements) |statement|
-            try collectRepeatedBodyBindings(arena, statement, captures),
+            try collectRepeatedBodyBindings(arena, statement, captures, floor),
         .if_stmt => |statement| {
-            try collectRepeatedBodyBindings(arena, statement.consequent, captures);
-            if (statement.alternate) |alternate| try collectRepeatedBodyBindings(arena, alternate, captures);
+            try collectRepeatedBodyBindings(arena, statement.consequent, captures, floor);
+            if (statement.alternate) |alternate| try collectRepeatedBodyBindings(arena, alternate, captures, floor);
         },
-        .labeled_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures),
-        .with_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures),
+        .labeled_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures, floor),
+        .with_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures, floor),
         .try_stmt => |statement| {
-            try collectRepeatedBodyBindings(arena, statement.block, captures);
+            try collectRepeatedBodyBindings(arena, statement.block, captures, floor);
             if (statement.catch_block) |catch_block| {
                 if (statement.catch_param) |catch_param| {
                     var catch_captures = RepeatedBodyNameCaptures.init(captures.bindings.multiple.state);
-                    try collectPatternBindingNames(arena, catch_param, &catch_captures);
-                    catch_captures.classify(catch_block);
+                    try collectPatternBindingNames(arena, catch_param, &catch_captures, floor);
+                    try catch_captures.classify(catch_block, floor);
                     if (catch_captures.any()) try captures.captured_catch_patterns.put(arena, captures.bindings.multiple.state, @intFromPtr(catch_param), {});
                 }
-                try collectRepeatedBodyBindings(arena, catch_block, captures);
+                try collectRepeatedBodyBindings(arena, catch_block, captures, floor);
             }
             if (statement.finally_block) |finally_block|
-                try collectRepeatedBodyBindings(arena, finally_block, captures);
+                try collectRepeatedBodyBindings(arena, finally_block, captures, floor);
         },
         .switch_stmt => |statement| for (statement.cases) |case| for (case.body) |case_statement|
-            try collectRepeatedBodyBindings(arena, case_statement, captures),
+            try collectRepeatedBodyBindings(arena, case_statement, captures, floor),
         // Nested iteration statements own their declarations. Their references
         // still participate when the exhaustive root traversal runs below.
         .while_stmt, .do_while_stmt, .for_stmt, .for_in, .function => {},
@@ -1237,17 +1253,18 @@ fn directEvalReferenceMatches(query: anytype) bool {
 /// for every match -- including a direct eval, which marks every name captured
 /// and still returns false -- so it never short-circuits and always visits the
 /// whole chain.
-fn chainRefInClosure(top: *const ast.Node, name: anytype, in_fn: bool) bool {
+fn chainRefInClosure(top: *const ast.Node, name: anytype, in_fn: bool, floor: usize) error{StackExhausted}!bool {
     var link = top;
     while (true) {
-        if (nameRefInClosure(ast.chainRight(link), name, in_fn)) return true;
+        if (try nameRefInClosure(ast.chainRight(link), name, in_fn, floor)) return true;
         const left = ast.chainLeft(link);
-        if (!ast.isChainLink(left)) return nameRefInClosure(left, name, in_fn);
+        if (!ast.isChainLink(left)) return try nameRefInClosure(left, name, in_fn, floor);
         link = left;
     }
 }
 
-fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
+fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .identifier => |id| in_fn and identifierReferenceMatches(name, id),
 
@@ -1255,36 +1272,36 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
 
         // A nested function/arrow (expression or declaration): everything it (and
         // any deeper closure) references is captured — descend with `in_fn = true`.
-        .function, .func_decl => |fnode| fnCaptures(fnode, name),
+        .function, .func_decl => |fnode| try fnCaptures(fnode, name, floor),
 
-        .unary => |u| nameRefInClosure(u.operand, name, in_fn),
-        .delete_expr => |d| nameRefInClosure(d, name, in_fn),
-        .update => |u| nameRefInClosure(u.target, name, in_fn),
-        .binary, .logical, .sequence => chainRefInClosure(node, name, in_fn),
-        .assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
-        .op_assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
-        .logical_assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
-        .conditional => |c| nameRefInClosure(c.cond, name, in_fn) or nameRefInClosure(c.consequent, name, in_fn) or nameRefInClosure(c.alternate, name, in_fn),
-        .yield_expr => |y| y.argument != null and nameRefInClosure(y.argument.?, name, in_fn),
-        .await_expr => |a| nameRefInClosure(a.argument, name, in_fn),
+        .unary => |u| try nameRefInClosure(u.operand, name, in_fn, floor),
+        .delete_expr => |d| try nameRefInClosure(d, name, in_fn, floor),
+        .update => |u| try nameRefInClosure(u.target, name, in_fn, floor),
+        .binary, .logical, .sequence => try chainRefInClosure(node, name, in_fn, floor),
+        .assign => |a| try nameRefInClosure(a.target, name, in_fn, floor) or try nameRefInClosure(a.value, name, in_fn, floor),
+        .op_assign => |a| try nameRefInClosure(a.target, name, in_fn, floor) or try nameRefInClosure(a.value, name, in_fn, floor),
+        .logical_assign => |a| try nameRefInClosure(a.target, name, in_fn, floor) or try nameRefInClosure(a.value, name, in_fn, floor),
+        .conditional => |c| try nameRefInClosure(c.cond, name, in_fn, floor) or try nameRefInClosure(c.consequent, name, in_fn, floor) or try nameRefInClosure(c.alternate, name, in_fn, floor),
+        .yield_expr => |y| y.argument != null and try nameRefInClosure(y.argument.?, name, in_fn, floor),
+        .await_expr => |a| try nameRefInClosure(a.argument, name, in_fn, floor),
         .class_expr => |c| blk: {
             // The superclass and computed member keys evaluate eagerly (current
             // `in_fn`); method bodies, field initializers, and static blocks run
             // deferred and so capture (`in_fn = true`).
-            if (c.superclass) |sc| if (nameRefInClosure(sc, name, in_fn)) break :blk true;
+            if (c.superclass) |sc| if (try nameRefInClosure(sc, name, in_fn, floor)) break :blk true;
             for (c.members) |m| {
-                if (m.key_expr) |ke| if (nameRefInClosure(ke, name, in_fn)) break :blk true;
-                if (m.func) |f| if (nameRefInClosure(f, name, in_fn)) break :blk true;
-                if (m.field_init) |fi| if (nameRefInClosure(fi, name, true)) break :blk true;
-                if (m.static_block) |sb| if (nameRefInClosure(sb, name, true)) break :blk true;
+                if (m.key_expr) |ke| if (try nameRefInClosure(ke, name, in_fn, floor)) break :blk true;
+                if (m.func) |f| if (try nameRefInClosure(f, name, in_fn, floor)) break :blk true;
+                if (m.field_init) |fi| if (try nameRefInClosure(fi, name, true, floor)) break :blk true;
+                if (m.static_block) |sb| if (try nameRefInClosure(sb, name, true, floor)) break :blk true;
             }
             break :blk false;
         },
         .super_call => |args| blk: {
-            for (args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
+            for (args) |a| if (try nameRefInClosure(a, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .super_member => |m| m.computed != null and nameRefInClosure(m.computed.?, name, in_fn),
+        .super_member => |m| m.computed != null and try nameRefInClosure(m.computed.?, name, in_fn, floor),
         .call => |c| blk: {
             // PerformEval can create a closure over any visible binding. A
             // repeated scope must retain fresh cells even when the source text
@@ -1292,191 +1309,194 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
             if (!c.optional and c.callee.* == .identifier and
                 std.mem.eql(u8, c.callee.identifier, "eval") and directEvalReferenceMatches(name))
                 break :blk true;
-            if (nameRefInClosure(c.callee, name, in_fn)) break :blk true;
-            for (c.args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
+            if (try nameRefInClosure(c.callee, name, in_fn, floor)) break :blk true;
+            for (c.args) |a| if (try nameRefInClosure(a, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
         .new_expr => |c| blk: {
-            if (nameRefInClosure(c.callee, name, in_fn)) break :blk true;
-            for (c.args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
+            if (try nameRefInClosure(c.callee, name, in_fn, floor)) break :blk true;
+            for (c.args) |a| if (try nameRefInClosure(a, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
         .tagged_template => |t| blk: {
-            if (nameRefInClosure(t.tag, name, in_fn)) break :blk true;
-            for (t.exprs) |e| if (nameRefInClosure(e, name, in_fn)) break :blk true;
+            if (try nameRefInClosure(t.tag, name, in_fn, floor)) break :blk true;
+            for (t.exprs) |e| if (try nameRefInClosure(e, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .member => |m| nameRefInClosure(m.object, name, in_fn) or (m.computed != null and nameRefInClosure(m.computed.?, name, in_fn)),
-        .optional_chain => |c| nameRefInClosure(c, name, in_fn),
-        .field_init_value => |v| nameRefInClosure(v.expression, name, in_fn),
-        .private_field_def => |p| nameRefInClosure(p.value, name, in_fn),
+        .member => |m| try nameRefInClosure(m.object, name, in_fn, floor) or (m.computed != null and try nameRefInClosure(m.computed.?, name, in_fn, floor)),
+        .optional_chain => |c| try nameRefInClosure(c, name, in_fn, floor),
+        .field_init_value => |v| try nameRefInClosure(v.expression, name, in_fn, floor),
+        .private_field_def => |p| try nameRefInClosure(p.value, name, in_fn, floor),
         .object_lit => |props| blk: {
             for (props) |p| {
-                if (p.key_expr) |ke| if (nameRefInClosure(ke, name, in_fn)) break :blk true;
-                if (nameRefInClosure(p.value, name, in_fn)) break :blk true;
+                if (p.key_expr) |ke| if (try nameRefInClosure(ke, name, in_fn, floor)) break :blk true;
+                if (try nameRefInClosure(p.value, name, in_fn, floor)) break :blk true;
             }
             break :blk false;
         },
         .array_lit => |elems| blk: {
-            for (elems) |e| if (nameRefInClosure(e, name, in_fn)) break :blk true;
+            for (elems) |e| if (try nameRefInClosure(e, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .spread => |s| nameRefInClosure(s, name, in_fn),
+        .spread => |s| try nameRefInClosure(s, name, in_fn, floor),
         .obj_pattern => |p| blk: {
             for (p.props) |pp| {
-                if (pp.key_expr) |ke| if (nameRefInClosure(ke, name, in_fn)) break :blk true;
-                if (nameRefInClosure(pp.target, name, in_fn)) break :blk true;
-                if (pp.default) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+                if (pp.key_expr) |ke| if (try nameRefInClosure(ke, name, in_fn, floor)) break :blk true;
+                if (try nameRefInClosure(pp.target, name, in_fn, floor)) break :blk true;
+                if (pp.default) |d| if (try nameRefInClosure(d, name, in_fn, floor)) break :blk true;
             }
-            if (p.rest) |r| if (nameRefInClosure(r, name, in_fn)) break :blk true;
+            if (p.rest) |r| if (try nameRefInClosure(r, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
         .arr_pattern => |p| blk: {
             for (p.elems) |e| {
-                if (e.target) |t| if (nameRefInClosure(t, name, in_fn)) break :blk true;
-                if (e.default) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+                if (e.target) |t| if (try nameRefInClosure(t, name, in_fn, floor)) break :blk true;
+                if (e.default) |d| if (try nameRefInClosure(d, name, in_fn, floor)) break :blk true;
             }
-            if (p.rest) |r| if (nameRefInClosure(r, name, in_fn)) break :blk true;
+            if (p.rest) |r| if (try nameRefInClosure(r, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .var_decl => |d| d.init != null and nameRefInClosure(d.init.?, name, in_fn),
-        .destructure_decl => |d| nameRefInClosure(d.pattern, name, in_fn) or nameRefInClosure(d.init, name, in_fn),
-        .return_stmt => |r| r != null and nameRefInClosure(r.?, name, in_fn),
-        .throw_stmt => |t| nameRefInClosure(t, name, in_fn),
+        .var_decl => |d| d.init != null and try nameRefInClosure(d.init.?, name, in_fn, floor),
+        .destructure_decl => |d| try nameRefInClosure(d.pattern, name, in_fn, floor) or try nameRefInClosure(d.init, name, in_fn, floor),
+        .return_stmt => |r| r != null and try nameRefInClosure(r.?, name, in_fn, floor),
+        .throw_stmt => |t| try nameRefInClosure(t, name, in_fn, floor),
         .try_stmt => |t| blk: {
-            if (nameRefInClosure(t.block, name, in_fn)) break :blk true;
-            if (t.catch_param) |cp| if (nameRefInClosure(cp, name, in_fn)) break :blk true;
-            if (t.catch_block) |cb| if (nameRefInClosure(cb, name, in_fn)) break :blk true;
-            if (t.finally_block) |fb| if (nameRefInClosure(fb, name, in_fn)) break :blk true;
+            if (try nameRefInClosure(t.block, name, in_fn, floor)) break :blk true;
+            if (t.catch_param) |cp| if (try nameRefInClosure(cp, name, in_fn, floor)) break :blk true;
+            if (t.catch_block) |cb| if (try nameRefInClosure(cb, name, in_fn, floor)) break :blk true;
+            if (t.finally_block) |fb| if (try nameRefInClosure(fb, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .labeled_stmt => |l| nameRefInClosure(l.body, name, in_fn),
-        .expr_stmt => |e| nameRefInClosure(e, name, in_fn),
+        .labeled_stmt => |l| try nameRefInClosure(l.body, name, in_fn, floor),
+        .expr_stmt => |e| try nameRefInClosure(e, name, in_fn, floor),
         .block => |stmts| blk: {
-            for (stmts) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            for (stmts) |s| if (try nameRefInClosure(s, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
         .decl_group => |stmts| blk: {
-            for (stmts) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            for (stmts) |s| if (try nameRefInClosure(s, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
         .program => |stmts| blk: {
-            for (stmts) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            for (stmts) |s| if (try nameRefInClosure(s, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .if_stmt => |i| nameRefInClosure(i.cond, name, in_fn) or nameRefInClosure(i.consequent, name, in_fn) or (i.alternate != null and nameRefInClosure(i.alternate.?, name, in_fn)),
-        .while_stmt => |s| nameRefInClosure(s.cond, name, in_fn) or nameRefInClosure(s.body, name, in_fn),
-        .do_while_stmt => |s| nameRefInClosure(s.body, name, in_fn) or nameRefInClosure(s.cond, name, in_fn),
+        .if_stmt => |i| try nameRefInClosure(i.cond, name, in_fn, floor) or try nameRefInClosure(i.consequent, name, in_fn, floor) or (i.alternate != null and try nameRefInClosure(i.alternate.?, name, in_fn, floor)),
+        .while_stmt => |s| try nameRefInClosure(s.cond, name, in_fn, floor) or try nameRefInClosure(s.body, name, in_fn, floor),
+        .do_while_stmt => |s| try nameRefInClosure(s.body, name, in_fn, floor) or try nameRefInClosure(s.cond, name, in_fn, floor),
         .for_stmt => |f| blk: {
-            if (f.init) |ini| if (nameRefInClosure(ini, name, in_fn)) break :blk true;
-            if (f.cond) |c| if (nameRefInClosure(c, name, in_fn)) break :blk true;
-            if (f.update) |u| if (nameRefInClosure(u, name, in_fn)) break :blk true;
-            break :blk nameRefInClosure(f.body, name, in_fn);
+            if (f.init) |ini| if (try nameRefInClosure(ini, name, in_fn, floor)) break :blk true;
+            if (f.cond) |c| if (try nameRefInClosure(c, name, in_fn, floor)) break :blk true;
+            if (f.update) |u| if (try nameRefInClosure(u, name, in_fn, floor)) break :blk true;
+            break :blk try nameRefInClosure(f.body, name, in_fn, floor);
         },
         .for_in => |f| blk: {
-            if (nameRefInClosure(f.target, name, in_fn)) break :blk true;
-            if (f.var_init) |vi| if (nameRefInClosure(vi, name, in_fn)) break :blk true;
-            if (nameRefInClosure(f.iterable, name, in_fn)) break :blk true;
-            break :blk nameRefInClosure(f.body, name, in_fn);
+            if (try nameRefInClosure(f.target, name, in_fn, floor)) break :blk true;
+            if (f.var_init) |vi| if (try nameRefInClosure(vi, name, in_fn, floor)) break :blk true;
+            if (try nameRefInClosure(f.iterable, name, in_fn, floor)) break :blk true;
+            break :blk try nameRefInClosure(f.body, name, in_fn, floor);
         },
         .switch_stmt => |sw| blk: {
-            if (nameRefInClosure(sw.disc, name, in_fn)) break :blk true;
+            if (try nameRefInClosure(sw.disc, name, in_fn, floor)) break :blk true;
             for (sw.cases) |c| {
-                if (c.@"test") |t| if (nameRefInClosure(t, name, in_fn)) break :blk true;
-                for (c.body) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+                if (c.@"test") |t| if (try nameRefInClosure(t, name, in_fn, floor)) break :blk true;
+                for (c.body) |s| if (try nameRefInClosure(s, name, in_fn, floor)) break :blk true;
             }
             break :blk false;
         },
-        .with_stmt => |w| nameRefInClosure(w.obj, name, in_fn) or nameRefInClosure(w.body, name, in_fn),
+        .with_stmt => |w| try nameRefInClosure(w.obj, name, in_fn, floor) or try nameRefInClosure(w.body, name, in_fn, floor),
         .export_decl => |e| blk: {
-            if (e.declaration) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
-            if (e.default_expr) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+            if (e.declaration) |d| if (try nameRefInClosure(d, name, in_fn, floor)) break :blk true;
+            if (e.default_expr) |d| if (try nameRefInClosure(d, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
-        .import_call => |ic| nameRefInClosure(ic.specifier, name, in_fn) or (ic.options != null and nameRefInClosure(ic.options.?, name, in_fn)),
+        .import_call => |ic| try nameRefInClosure(ic.specifier, name, in_fn, floor) or (ic.options != null and try nameRefInClosure(ic.options.?, name, in_fn, floor)),
     };
 }
 
 /// A nested function/arrow captures `name` if its body — or any parameter default
 /// or destructuring-pattern parameter (which execute in the function's own scope)
 /// — references it. Always searched with `in_fn = true`.
-fn fnCaptures(fnode: *const ast.FunctionNode, name: anytype) bool {
+fn fnCaptures(fnode: *const ast.FunctionNode, name: anytype, floor: usize) error{StackExhausted}!bool {
     for (fnode.params) |p| {
-        if (p.default) |d| if (nameRefInClosure(d, name, true)) return true;
-        if (p.pattern) |pat| if (nameRefInClosure(pat, name, true)) return true;
+        if (p.default) |d| if (try nameRefInClosure(d, name, true, floor)) return true;
+        if (p.pattern) |pat| if (try nameRefInClosure(pat, name, true, floor)) return true;
     }
-    return nameRefInClosure(fnode.body, name, true);
+    return try nameRefInClosure(fnode.body, name, true, floor);
 }
 
 /// Disposal scopes still need resource cleanup on every abrupt completion;
 /// environment-depth unwind alone is insufficient. Conservatively reject any
 /// possible escape until that cleanup is represented in bytecode. Nested
 /// functions have independent control flow and do not escape the current scope.
-fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
+fn stmtCanEscapeAbruptly(node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .yield_expr, .return_stmt, .throw_stmt, .break_stmt, .continue_stmt => true,
         .function => false,
         .block => |b| blk: {
-            for (b) |s| if (stmtCanEscapeAbruptly(s)) break :blk true;
+            for (b) |s| if (try stmtCanEscapeAbruptly(s, floor)) break :blk true;
             break :blk false;
         },
-        .if_stmt => |i| stmtCanEscapeAbruptly(i.consequent) or (i.alternate != null and stmtCanEscapeAbruptly(i.alternate.?)),
-        .while_stmt => |s| stmtCanEscapeAbruptly(s.body),
-        .do_while_stmt => |s| stmtCanEscapeAbruptly(s.body),
-        .for_stmt => |f| stmtCanEscapeAbruptly(f.body),
-        .for_in => |f| stmtCanEscapeAbruptly(f.body),
-        .with_stmt => |w| stmtCanEscapeAbruptly(w.body),
-        .labeled_stmt => |l| stmtCanEscapeAbruptly(l.body),
-        .try_stmt => |t| stmtCanEscapeAbruptly(t.block) or
-            (t.catch_block != null and stmtCanEscapeAbruptly(t.catch_block.?)) or
-            (t.finally_block != null and stmtCanEscapeAbruptly(t.finally_block.?)),
+        .if_stmt => |i| try stmtCanEscapeAbruptly(i.consequent, floor) or (i.alternate != null and try stmtCanEscapeAbruptly(i.alternate.?, floor)),
+        .while_stmt => |s| try stmtCanEscapeAbruptly(s.body, floor),
+        .do_while_stmt => |s| try stmtCanEscapeAbruptly(s.body, floor),
+        .for_stmt => |f| try stmtCanEscapeAbruptly(f.body, floor),
+        .for_in => |f| try stmtCanEscapeAbruptly(f.body, floor),
+        .with_stmt => |w| try stmtCanEscapeAbruptly(w.body, floor),
+        .labeled_stmt => |l| try stmtCanEscapeAbruptly(l.body, floor),
+        .try_stmt => |t| try stmtCanEscapeAbruptly(t.block, floor) or
+            (t.catch_block != null and try stmtCanEscapeAbruptly(t.catch_block.?, floor)) or
+            (t.finally_block != null and try stmtCanEscapeAbruptly(t.finally_block.?, floor)),
         .switch_stmt => |sw| blk: {
-            for (sw.cases) |c| for (c.body) |s| if (stmtCanEscapeAbruptly(s)) break :blk true;
+            for (sw.cases) |c| for (c.body) |s| if (try stmtCanEscapeAbruptly(s, floor)) break :blk true;
             break :blk false;
         },
         // An expression statement may embed a `yield` (e.g. `x = yield`).
-        else => nodeHasYield(node),
+        else => try nodeHasYield(node, floor),
     };
 }
 
-fn labeledStatementTargetsIteration(node: *const ast.Node) bool {
+fn labeledStatementTargetsIteration(node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .while_stmt, .do_while_stmt, .for_stmt, .for_in => true,
-        .labeled_stmt => |statement| labeledStatementTargetsIteration(statement.body),
+        .labeled_stmt => |statement| try labeledStatementTargetsIteration(statement.body, floor),
         else => false,
     };
 }
 
-fn stmtContainsFuncDecl(node: *const ast.Node) bool {
+fn stmtContainsFuncDecl(node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .func_decl => true,
         .function => false,
         .block => |b| blk: {
-            for (b) |s| if (stmtContainsFuncDecl(s)) break :blk true;
+            for (b) |s| if (try stmtContainsFuncDecl(s, floor)) break :blk true;
             break :blk false;
         },
-        .if_stmt => |i| stmtContainsFuncDecl(i.consequent) or (i.alternate != null and stmtContainsFuncDecl(i.alternate.?)),
-        .while_stmt => |s| stmtContainsFuncDecl(s.body),
-        .do_while_stmt => |s| stmtContainsFuncDecl(s.body),
-        .for_stmt => |f| stmtContainsFuncDecl(f.body),
-        .for_in => |f| stmtContainsFuncDecl(f.body),
-        .with_stmt => |w| stmtContainsFuncDecl(w.body),
-        .labeled_stmt => |l| stmtContainsFuncDecl(l.body),
-        .try_stmt => |t| stmtContainsFuncDecl(t.block) or
-            (t.catch_block != null and stmtContainsFuncDecl(t.catch_block.?)) or
-            (t.finally_block != null and stmtContainsFuncDecl(t.finally_block.?)),
+        .if_stmt => |i| try stmtContainsFuncDecl(i.consequent, floor) or (i.alternate != null and try stmtContainsFuncDecl(i.alternate.?, floor)),
+        .while_stmt => |s| try stmtContainsFuncDecl(s.body, floor),
+        .do_while_stmt => |s| try stmtContainsFuncDecl(s.body, floor),
+        .for_stmt => |f| try stmtContainsFuncDecl(f.body, floor),
+        .for_in => |f| try stmtContainsFuncDecl(f.body, floor),
+        .with_stmt => |w| try stmtContainsFuncDecl(w.body, floor),
+        .labeled_stmt => |l| try stmtContainsFuncDecl(l.body, floor),
+        .try_stmt => |t| try stmtContainsFuncDecl(t.block, floor) or
+            (t.catch_block != null and try stmtContainsFuncDecl(t.catch_block.?, floor)) or
+            (t.finally_block != null and try stmtContainsFuncDecl(t.finally_block.?, floor)),
         .switch_stmt => |sw| blk: {
-            for (sw.cases) |c| for (c.body) |s| if (stmtContainsFuncDecl(s)) break :blk true;
+            for (sw.cases) |c| for (c.body) |s| if (try stmtContainsFuncDecl(s, floor)) break :blk true;
             break :blk false;
         },
         else => false,
     };
 }
 
-fn stmtListContainsNestedFuncDecl(stmts: []*Node) bool {
+fn stmtListContainsNestedFuncDecl(stmts: []*Node, floor: usize) error{StackExhausted}!bool {
     for (stmts) |s| switch (s.*) {
         .func_decl => {},
-        else => if (stmtContainsFuncDecl(s)) return true,
+        else => if (try stmtContainsFuncDecl(s, floor)) return true,
     };
     return false;
 }
@@ -1486,18 +1506,18 @@ fn stmtListContainsNestedFuncDecl(stmts: []*Node) bool {
 /// created there capture frame slots normally. Methods, field initializers, and
 /// static blocks execute later through `eval_class` and can only resolve names
 /// available through its Environment chain.
-fn classDeferredBodiesCaptureNames(members: []const ast.ClassMember, names: *const LoopBindingNames) bool {
+fn classDeferredBodiesCaptureNames(members: []const ast.ClassMember, names: *const LoopBindingNames, floor: usize) error{StackExhausted}!bool {
     for (members) |m| {
-        if (m.func) |func| if (names.referencedByIn(func, true)) return true;
-        if (m.field_init) |init| if (names.referencedByIn(init, true)) return true;
-        if (m.static_block) |block| if (names.referencedByIn(block, true)) return true;
+        if (m.func) |func| if (try names.referencedByIn(func, true, floor)) return true;
+        if (m.field_init) |init| if (try names.referencedByIn(init, true, floor)) return true;
+        if (m.static_block) |block| if (try names.referencedByIn(block, true, floor)) return true;
     }
     return false;
 }
 
 /// Global-only classes need no activation projection. A deferred member that
 /// can observe a real current/enclosing frame binding needs an exact live view.
-fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnScope, members: []const ast.ClassMember, class_name: []const u8) CompileError!bool {
+fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnScope, members: []const ast.ClassMember, class_name: []const u8, floor: usize) CompileError!bool {
     var frame_names = LoopBindingNames.init(scope.hash_state);
     var current: ?*const FnScope = scope;
     while (current) |frame_scope| : (current = frame_scope.parent) {
@@ -1529,78 +1549,84 @@ fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnSco
             }
         }
     }
-    return classDeferredBodiesCaptureNames(members, &frame_names);
+    return try classDeferredBodiesCaptureNames(members, &frame_names, floor);
 }
 
-fn functionHasBlockNestedFuncDecl(fnode: *const ast.FunctionNode) bool {
+fn functionHasBlockNestedFuncDecl(fnode: *const ast.FunctionNode, floor: usize) error{StackExhausted}!bool {
     if (fnode.is_expr_body) return false;
     return switch (fnode.body.*) {
-        .block => |stmts| stmtListContainsNestedFuncDecl(stmts),
-        else => stmtContainsFuncDecl(fnode.body),
+        .block => |stmts| try stmtListContainsNestedFuncDecl(stmts, floor),
+        else => try stmtContainsFuncDecl(fnode.body, floor),
     };
 }
 
-fn stmtHasDisposableDecl(node: *const ast.Node) bool {
+fn stmtHasDisposableDecl(node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .var_decl => |d| d.dispose != 0,
-        .block => |stmts| stmtListHasDisposableDecl(stmts),
-        .decl_group => |stmts| stmtListHasDisposableDecl(stmts),
+        .block => |stmts| try stmtListHasDisposableDecl(stmts, floor),
+        .decl_group => |stmts| try stmtListHasDisposableDecl(stmts, floor),
         else => false,
     };
 }
 
-fn stmtListHasDisposableDecl(stmts: []*Node) bool {
-    for (stmts) |s| if (stmtHasDisposableDecl(s)) return true;
+fn stmtListHasDisposableDecl(stmts: []*Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
+    for (stmts) |s| if (try stmtHasDisposableDecl(s, floor)) return true;
     return false;
 }
 
-fn stmtContainsDisposableDeclDeep(node: *const ast.Node) bool {
+fn stmtContainsDisposableDeclDeep(node: *const ast.Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .var_decl => |d| d.dispose != 0,
-        .block, .decl_group, .program => |stmts| stmtListContainsDisposableDeclDeep(stmts),
-        .if_stmt => |s| stmtContainsDisposableDeclDeep(s.consequent) or
-            (if (s.alternate) |alt| stmtContainsDisposableDeclDeep(alt) else false),
-        .while_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
-        .do_while_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
-        .for_stmt => |s| (if (s.init) |init| stmtContainsDisposableDeclDeep(init) else false) or
-            stmtContainsDisposableDeclDeep(s.body),
+        .block, .decl_group, .program => |stmts| try stmtListContainsDisposableDeclDeep(stmts, floor),
+        .if_stmt => |s| try stmtContainsDisposableDeclDeep(s.consequent, floor) or
+            (if (s.alternate) |alt| try stmtContainsDisposableDeclDeep(alt, floor) else false),
+        .while_stmt => |s| try stmtContainsDisposableDeclDeep(s.body, floor),
+        .do_while_stmt => |s| try stmtContainsDisposableDeclDeep(s.body, floor),
+        .for_stmt => |s| (if (s.init) |init| try stmtContainsDisposableDeclDeep(init, floor) else false) or
+            try stmtContainsDisposableDeclDeep(s.body, floor),
         .for_in => |s| s.dispose != 0 or
-            (if (s.var_init) |init| stmtContainsDisposableDeclDeep(init) else false) or
-            stmtContainsDisposableDeclDeep(s.body),
+            (if (s.var_init) |init| try stmtContainsDisposableDeclDeep(init, floor) else false) or
+            try stmtContainsDisposableDeclDeep(s.body, floor),
         .switch_stmt => |s| blk: {
-            for (s.cases) |case| if (stmtListContainsDisposableDeclDeep(case.body)) break :blk true;
+            for (s.cases) |case| if (try stmtListContainsDisposableDeclDeep(case.body, floor)) break :blk true;
             break :blk false;
         },
-        .try_stmt => |t| stmtContainsDisposableDeclDeep(t.block) or
-            (if (t.catch_block) |c| stmtContainsDisposableDeclDeep(c) else false) or
-            (if (t.finally_block) |f| stmtContainsDisposableDeclDeep(f) else false),
-        .labeled_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
-        .with_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
+        .try_stmt => |t| try stmtContainsDisposableDeclDeep(t.block, floor) or
+            (if (t.catch_block) |c| try stmtContainsDisposableDeclDeep(c, floor) else false) or
+            (if (t.finally_block) |f| try stmtContainsDisposableDeclDeep(f, floor) else false),
+        .labeled_stmt => |s| try stmtContainsDisposableDeclDeep(s.body, floor),
+        .with_stmt => |s| try stmtContainsDisposableDeclDeep(s.body, floor),
         else => false,
     };
 }
 
-fn stmtListContainsDisposableDeclDeep(stmts: []*Node) bool {
-    for (stmts) |s| if (stmtContainsDisposableDeclDeep(s)) return true;
+fn stmtListContainsDisposableDeclDeep(stmts: []*Node, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
+    for (stmts) |s| if (try stmtContainsDisposableDeclDeep(s, floor)) return true;
     return false;
 }
 
-fn stmtAwaitUsingDeclCount(node: *const ast.Node) usize {
+fn stmtAwaitUsingDeclCount(node: *const ast.Node, floor: usize) error{StackExhausted}!usize {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     return switch (node.*) {
         .var_decl => |d| if (d.dispose == 2) 1 else 0,
-        .decl_group => |stmts| stmtListAwaitUsingDeclCount(stmts),
+        .decl_group => |stmts| try stmtListAwaitUsingDeclCount(stmts, floor),
         else => 0,
     };
 }
 
-fn stmtListAwaitUsingDeclCount(stmts: []*Node) usize {
+fn stmtListAwaitUsingDeclCount(stmts: []*Node, floor: usize) error{StackExhausted}!usize {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     var count: usize = 0;
-    for (stmts) |s| count += stmtAwaitUsingDeclCount(s);
+    for (stmts) |s| count += try stmtAwaitUsingDeclCount(s, floor);
     return count;
 }
 
-fn stmtListCanEscapeAbruptly(stmts: []*Node) bool {
-    for (stmts) |s| if (stmtCanEscapeAbruptly(s)) return true;
+fn stmtListCanEscapeAbruptly(stmts: []*Node, floor: usize) error{StackExhausted}!bool {
+    for (stmts) |s| if (try stmtCanEscapeAbruptly(s, floor)) return true;
     return false;
 }
 
@@ -1622,6 +1648,13 @@ pub const Compiler = struct {
     chunk: *Chunk,
     mode: Mode,
     hash_state: *CompileHashState,
+    /// The stack address below which compilation and its pre-scans stop
+    /// recursing (#937). Read once when compilation begins and inherited by
+    /// every nested function compiler, generators and async functions
+    /// included: where stack bounds are unknown the floor is measured from the
+    /// frame that reads it, so re-reading it deeper would grant a fresh
+    /// allowance at each nesting level.
+    stack_floor: usize,
     scope: ?*FnScope = null,
     environment_function_body: ?*const Node = null,
     environment_annex_b: SecureIdentityMapUnmanaged(u32) = .{},
@@ -1710,11 +1743,12 @@ pub const Compiler = struct {
         rejected: ProgramRejection,
     };
 
-    pub fn admitProgram(arena: std.mem.Allocator, program: *Node) error{OutOfMemory}!ProgramAdmission {
+    pub fn admitProgram(arena: std.mem.Allocator, program: *Node) error{ OutOfMemory, StackExhausted }!ProgramAdmission {
         var rejection: ?ProgramRejection = null;
         const chunk = compileProgramInner(arena, program, &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
         };
         return .{ .compiled = chunk };
     }
@@ -1742,7 +1776,7 @@ pub const Compiler = struct {
         // hook the VM performs no checkpoint work; retaining the metadata lets a
         // later attachment inspect already-compiled functions without rebuilding
         // their frame/upvalue layout.
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .hash_state = &hash_state, .debug_checkpoints = true };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .hash_state = &hash_state, .stack_floor = stack_scan.nestingStackFloor(), .debug_checkpoints = true };
         if (program.* != .program) {
             rejection.* = .invalid_root;
             return error.Unsupported;
@@ -1779,12 +1813,13 @@ pub const Compiler = struct {
         rejected: GeneratorRejection,
     };
 
-    pub fn admitGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{OutOfMemory}!GeneratorAdmission {
+    pub fn admitGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{ OutOfMemory, StackExhausted }!GeneratorAdmission {
         var rejection: ?GeneratorRejection = null;
         var hash_state: CompileHashState = .{};
-        const chunk = compileGeneratorInner(arena, fnode, debug_checkpoints, &hash_state, &rejection) catch |err| switch (err) {
+        const chunk = compileGeneratorInner(arena, fnode, debug_checkpoints, &hash_state, stack_scan.nestingStackFloor(), &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
         };
         return .{ .compiled = chunk };
     }
@@ -1796,7 +1831,7 @@ pub const Compiler = struct {
         };
     }
 
-    fn compileGeneratorInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, hash_state: *CompileHashState, rejection: *?GeneratorRejection) CompileError!*Chunk {
+    fn compileGeneratorInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, hash_state: *CompileHashState, stack_floor: usize, rejection: *?GeneratorRejection) CompileError!*Chunk {
         // Parameters (including default/rest/destructuring) are bound at runtime
         // by `makeGenerator` into the generator's environment — env-mode name
         // resolution means the body's references resolve there — so the param
@@ -1808,7 +1843,7 @@ pub const Compiler = struct {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         // An async generator body may also `await` (in_async enables await_op).
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .scope = null, .in_generator = true, .in_async = fnode.is_async, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .stack_floor = stack_floor, .scope = null, .in_generator = true, .in_async = fnode.is_async, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
         c.environment_function_body = fnode.body;
         try c.planEnvironmentDeclarations(fnode.body.block, fnode.params, !fnode.is_arrow);
         try c.compileStmt(fnode.body); // body is a block
@@ -1831,12 +1866,13 @@ pub const Compiler = struct {
         rejected: AsyncRejection,
     };
 
-    pub fn admitAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{OutOfMemory}!AsyncAdmission {
+    pub fn admitAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{ OutOfMemory, StackExhausted }!AsyncAdmission {
         var rejection: ?AsyncRejection = null;
         var hash_state: CompileHashState = .{};
-        const chunk = compileAsyncInner(arena, fnode, debug_checkpoints, &hash_state, &rejection) catch |err| switch (err) {
+        const chunk = compileAsyncInner(arena, fnode, debug_checkpoints, &hash_state, stack_scan.nestingStackFloor(), &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
         };
         return .{ .compiled = chunk };
     }
@@ -1848,14 +1884,14 @@ pub const Compiler = struct {
         };
     }
 
-    fn compileAsyncInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, hash_state: *CompileHashState, rejection: *?AsyncRejection) CompileError!*Chunk {
+    fn compileAsyncInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, hash_state: *CompileHashState, stack_floor: usize, rejection: *?AsyncRejection) CompileError!*Chunk {
         if (fnode.is_generator) {
             rejection.* = .async_generator;
             return error.Unsupported; // async generators not lowered yet
         }
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .scope = null, .in_async = true, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .stack_floor = stack_floor, .scope = null, .in_async = true, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
         if (fnode.is_expr_body) {
             try c.compileExpr(fnode.body);
             _ = try chunk.emit(.ret, 0);
@@ -1879,49 +1915,51 @@ pub const Compiler = struct {
         if (lexical) gop.value_ptr.lexical = true;
     }
 
-    fn shadowScanPattern(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), pattern: *Node, lexical: bool) CompileError!void {
+    fn shadowScanPattern(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), pattern: *Node, lexical: bool, floor: usize) CompileError!void {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         switch (pattern.*) {
             .identifier => |name| try shadowAdd(arena, m, name, lexical),
             .obj_pattern => |p| {
-                for (p.props) |prop| try shadowScanPattern(arena, m, prop.target, lexical);
-                if (p.rest) |rest| try shadowScanPattern(arena, m, rest, lexical);
+                for (p.props) |prop| try shadowScanPattern(arena, m, prop.target, lexical, floor);
+                if (p.rest) |rest| try shadowScanPattern(arena, m, rest, lexical, floor);
             },
             .arr_pattern => |p| {
-                for (p.elems) |elem| if (elem.target) |t| try shadowScanPattern(arena, m, t, lexical);
-                if (p.rest) |rest| try shadowScanPattern(arena, m, rest, lexical);
+                for (p.elems) |elem| if (elem.target) |t| try shadowScanPattern(arena, m, t, lexical, floor);
+                if (p.rest) |rest| try shadowScanPattern(arena, m, rest, lexical, floor);
             },
             else => {},
         }
     }
 
-    fn shadowScanStmt(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), node: *Node) CompileError!void {
+    fn shadowScanStmt(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), node: *Node, floor: usize) CompileError!void {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         switch (node.*) {
             .var_decl => |d| try shadowAdd(arena, m, d.name, d.kind != .@"var"),
-            .destructure_decl => |d| try shadowScanPattern(arena, m, d.pattern, d.kind != .@"var"),
+            .destructure_decl => |d| try shadowScanPattern(arena, m, d.pattern, d.kind != .@"var", floor),
             .func_decl => |f| try shadowAdd(arena, m, f.name, false), // nested fn has its own scope; don't descend
-            .block => |stmts| for (stmts) |s| try shadowScanStmt(arena, m, s),
-            .decl_group => |stmts| for (stmts) |s| try shadowScanStmt(arena, m, s),
+            .block => |stmts| for (stmts) |s| try shadowScanStmt(arena, m, s, floor),
+            .decl_group => |stmts| for (stmts) |s| try shadowScanStmt(arena, m, s, floor),
             .if_stmt => |s| {
-                try shadowScanStmt(arena, m, s.consequent);
-                if (s.alternate) |a| try shadowScanStmt(arena, m, a);
+                try shadowScanStmt(arena, m, s.consequent, floor);
+                if (s.alternate) |a| try shadowScanStmt(arena, m, a, floor);
             },
-            .while_stmt => |s| try shadowScanStmt(arena, m, s.body),
-            .do_while_stmt => |s| try shadowScanStmt(arena, m, s.body),
+            .while_stmt => |s| try shadowScanStmt(arena, m, s.body, floor),
+            .do_while_stmt => |s| try shadowScanStmt(arena, m, s.body, floor),
             .for_stmt => |f| {
-                if (f.init) |i| try shadowScanStmt(arena, m, i);
-                try shadowScanStmt(arena, m, f.body);
+                if (f.init) |i| try shadowScanStmt(arena, m, i, floor);
+                try shadowScanStmt(arena, m, f.body, floor);
             },
             .for_in => |f| {
-                if (f.decl_kind) |k| try shadowScanPattern(arena, m, f.target, k != .@"var");
-                try shadowScanStmt(arena, m, f.body);
+                if (f.decl_kind) |k| try shadowScanPattern(arena, m, f.target, k != .@"var", floor);
+                try shadowScanStmt(arena, m, f.body, floor);
             },
-            .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try shadowScanStmt(arena, m, st),
-            .labeled_stmt => |s| try shadowScanStmt(arena, m, s.body),
+            .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try shadowScanStmt(arena, m, st, floor),
+            .labeled_stmt => |s| try shadowScanStmt(arena, m, s.body, floor),
             .try_stmt => |t| {
-                try shadowScanStmt(arena, m, t.block);
-                if (t.catch_param) |p| try shadowScanPattern(arena, m, p, true); // catch binding is lexical
-                if (t.catch_block) |cb| try shadowScanStmt(arena, m, cb);
-                if (t.finally_block) |fb| try shadowScanStmt(arena, m, fb);
+                try shadowScanStmt(arena, m, t.block, floor);
+                if (t.catch_param) |p| try shadowScanPattern(arena, m, p, true, floor); // catch binding is lexical
+                if (t.catch_block) |cb| try shadowScanStmt(arena, m, cb, floor);
+                if (t.finally_block) |fb| try shadowScanStmt(arena, m, fb, floor);
             },
             else => {},
         }
@@ -1936,10 +1974,10 @@ pub const Compiler = struct {
     /// Build the spelling-based binding inventory once for both shadow and TDZ
     /// classification. Distinct lexical bindings still receive distinct slots;
     /// repeated spellings conservatively enable checks for every lexical slot.
-    fn functionBindingInventory(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode) CompileError!FunctionBindingInventory {
+    fn functionBindingInventory(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode, floor: usize) CompileError!FunctionBindingInventory {
         var inventory: FunctionBindingInventory = .{ .bindings = .{ .state = hash_state } };
         for (fnode.params) |param| try shadowAdd(arena, &inventory.bindings, param.name, false);
-        if (!fnode.is_expr_body) try shadowScanStmt(arena, &inventory.bindings, fnode.body);
+        if (!fnode.is_expr_body) try shadowScanStmt(arena, &inventory.bindings, fnode.body, floor);
         var bindings = inventory.bindings.iterator();
         while (bindings.next()) |entry| if (entry.value_ptr.lexical) {
             inventory.has_lexical = true;
@@ -1951,16 +1989,17 @@ pub const Compiler = struct {
         return inventory;
     }
 
-    fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *SecureStringMapUnmanaged(void), pattern: *Node) CompileError!void {
+    fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *SecureStringMapUnmanaged(void), pattern: *Node, floor: usize) CompileError!void {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         switch (pattern.*) {
             .identifier => |name| try declared.put(arena, name, {}),
             .obj_pattern => |p| {
-                for (p.props) |prop| try tdzDeclarePattern(arena, declared, prop.target);
-                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest);
+                for (p.props) |prop| try tdzDeclarePattern(arena, declared, prop.target, floor);
+                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest, floor);
             },
             .arr_pattern => |p| {
-                for (p.elems) |elem| if (elem.target) |t| try tdzDeclarePattern(arena, declared, t);
-                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest);
+                for (p.elems) |elem| if (elem.target) |t| try tdzDeclarePattern(arena, declared, t, floor);
+                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest, floor);
             },
             else => {},
         }
@@ -1971,101 +2010,103 @@ pub const Compiler = struct {
     /// only those evaluation regions so `let [x = x] = []` and a reference to a
     /// later lexical binding select TDZ-checked frame bytecodes without treating
     /// every declared name as a false-positive read.
-    fn tdzPatternRefsPending(pattern: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void)) bool {
+    fn tdzPatternRefsPending(pattern: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void), floor: usize) error{StackExhausted}!bool {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         return switch (pattern.*) {
             .identifier => false,
             .obj_pattern => |object| blk: {
                 for (object.props) |property| {
-                    if (property.key_expr) |key| if (tdzRefsPending(key, m, declared)) break :blk true;
-                    if (property.default) |default| if (tdzRefsPending(default, m, declared)) break :blk true;
-                    if (tdzPatternRefsPending(property.target, m, declared)) break :blk true;
+                    if (property.key_expr) |key| if (try tdzRefsPending(key, m, declared, floor)) break :blk true;
+                    if (property.default) |default| if (try tdzRefsPending(default, m, declared, floor)) break :blk true;
+                    if (try tdzPatternRefsPending(property.target, m, declared, floor)) break :blk true;
                 }
-                if (object.rest) |rest| if (tdzPatternRefsPending(rest, m, declared)) break :blk true;
+                if (object.rest) |rest| if (try tdzPatternRefsPending(rest, m, declared, floor)) break :blk true;
                 break :blk false;
             },
             .arr_pattern => |array| blk: {
                 for (array.elems) |element| {
-                    if (element.default) |default| if (tdzRefsPending(default, m, declared)) break :blk true;
-                    if (element.target) |target| if (tdzPatternRefsPending(target, m, declared)) break :blk true;
+                    if (element.default) |default| if (try tdzRefsPending(default, m, declared, floor)) break :blk true;
+                    if (element.target) |target| if (try tdzPatternRefsPending(target, m, declared, floor)) break :blk true;
                 }
-                if (array.rest) |rest| if (tdzPatternRefsPending(rest, m, declared)) break :blk true;
+                if (array.rest) |rest| if (try tdzPatternRefsPending(rest, m, declared, floor)) break :blk true;
                 break :blk false;
             },
             else => false,
         };
     }
 
-    fn tdzRefsPending(node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void)) bool {
+    fn tdzRefsPending(node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void), floor: usize) error{StackExhausted}!bool {
         // The query is the disjunction the old per-binding scans implemented:
         // visit each identifier once, then test exact pending-lexical membership.
         // Keeping the shared exhaustive walker means new AST node kinds still
         // fail compilation until both capture and TDZ classification handle them.
-        return nameRefInClosure(node, PendingLexicalReferences{
+        return try nameRefInClosure(node, PendingLexicalReferences{
             .bindings = m,
             .declared = declared,
-        }, true);
+        }, true, floor);
     }
 
-    fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *SecureStringMapUnmanaged(void)) CompileError!bool {
+    fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *SecureStringMapUnmanaged(void), floor: usize) CompileError!bool {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         switch (node.*) {
             .var_decl => |d| {
-                if (d.init) |init| if (tdzRefsPending(init, m, declared)) return true;
+                if (d.init) |init| if (try tdzRefsPending(init, m, declared, floor)) return true;
                 if (d.kind != .@"var") try declared.put(arena, d.name, {});
             },
             .destructure_decl => |d| {
-                if (tdzRefsPending(d.init, m, declared)) return true;
-                if (d.kind != .@"var" and tdzPatternRefsPending(d.pattern, m, declared)) return true;
-                if (d.kind != .@"var") try tdzDeclarePattern(arena, declared, d.pattern);
+                if (try tdzRefsPending(d.init, m, declared, floor)) return true;
+                if (d.kind != .@"var" and try tdzPatternRefsPending(d.pattern, m, declared, floor)) return true;
+                if (d.kind != .@"var") try tdzDeclarePattern(arena, declared, d.pattern, floor);
             },
-            .expr_stmt => |expr| return tdzRefsPending(expr, m, declared),
-            .return_stmt => |maybe| if (maybe) |expr| return tdzRefsPending(expr, m, declared),
-            .throw_stmt => |expr| return tdzRefsPending(expr, m, declared),
+            .expr_stmt => |expr| return try tdzRefsPending(expr, m, declared, floor),
+            .return_stmt => |maybe| if (maybe) |expr| return try tdzRefsPending(expr, m, declared, floor),
+            .throw_stmt => |expr| return try tdzRefsPending(expr, m, declared, floor),
             .if_stmt => |stmt| {
-                if (tdzRefsPending(stmt.cond, m, declared)) return true;
-                if (try tdzScanStmt(arena, stmt.consequent, m, declared)) return true;
-                if (stmt.alternate) |alternate| if (try tdzScanStmt(arena, alternate, m, declared)) return true;
+                if (try tdzRefsPending(stmt.cond, m, declared, floor)) return true;
+                if (try tdzScanStmt(arena, stmt.consequent, m, declared, floor)) return true;
+                if (stmt.alternate) |alternate| if (try tdzScanStmt(arena, alternate, m, declared, floor)) return true;
             },
             .while_stmt => |stmt| {
-                if (tdzRefsPending(stmt.cond, m, declared)) return true;
-                return tdzScanStmt(arena, stmt.body, m, declared);
+                if (try tdzRefsPending(stmt.cond, m, declared, floor)) return true;
+                return try tdzScanStmt(arena, stmt.body, m, declared, floor);
             },
             .do_while_stmt => |stmt| {
-                if (try tdzScanStmt(arena, stmt.body, m, declared)) return true;
-                return tdzRefsPending(stmt.cond, m, declared);
+                if (try tdzScanStmt(arena, stmt.body, m, declared, floor)) return true;
+                return try tdzRefsPending(stmt.cond, m, declared, floor);
             },
             .for_stmt => |stmt| {
-                if (stmt.init) |init| if (try tdzScanStmt(arena, init, m, declared)) return true;
-                if (stmt.cond) |cond| if (tdzRefsPending(cond, m, declared)) return true;
-                if (stmt.update) |update| if (tdzRefsPending(update, m, declared)) return true;
-                return tdzScanStmt(arena, stmt.body, m, declared);
+                if (stmt.init) |init| if (try tdzScanStmt(arena, init, m, declared, floor)) return true;
+                if (stmt.cond) |cond| if (try tdzRefsPending(cond, m, declared, floor)) return true;
+                if (stmt.update) |update| if (try tdzRefsPending(update, m, declared, floor)) return true;
+                return try tdzScanStmt(arena, stmt.body, m, declared, floor);
             },
             .for_in => |stmt| {
-                if (tdzRefsPending(stmt.iterable, m, declared)) return true;
-                if (stmt.decl_kind) |kind| if (kind != .@"var") try tdzDeclarePattern(arena, declared, stmt.target);
-                return tdzScanStmt(arena, stmt.body, m, declared);
+                if (try tdzRefsPending(stmt.iterable, m, declared, floor)) return true;
+                if (stmt.decl_kind) |kind| if (kind != .@"var") try tdzDeclarePattern(arena, declared, stmt.target, floor);
+                return try tdzScanStmt(arena, stmt.body, m, declared, floor);
             },
             .block => |stmts| for (stmts) |stmt| {
-                if (try tdzScanStmt(arena, stmt, m, declared)) return true;
+                if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
             },
             .decl_group => |stmts| for (stmts) |stmt| {
-                if (try tdzScanStmt(arena, stmt, m, declared)) return true;
+                if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
             },
             .switch_stmt => |stmt| {
-                if (tdzRefsPending(stmt.disc, m, declared)) return true;
+                if (try tdzRefsPending(stmt.disc, m, declared, floor)) return true;
                 for (stmt.cases) |case| {
-                    if (case.@"test") |test_node| if (tdzRefsPending(test_node, m, declared)) return true;
-                    for (case.body) |body_stmt| if (try tdzScanStmt(arena, body_stmt, m, declared)) return true;
+                    if (case.@"test") |test_node| if (try tdzRefsPending(test_node, m, declared, floor)) return true;
+                    for (case.body) |body_stmt| if (try tdzScanStmt(arena, body_stmt, m, declared, floor)) return true;
                 }
             },
-            .labeled_stmt => |stmt| return tdzScanStmt(arena, stmt.body, m, declared),
+            .labeled_stmt => |stmt| return try tdzScanStmt(arena, stmt.body, m, declared, floor),
             .try_stmt => |stmt| {
-                if (try tdzScanStmt(arena, stmt.block, m, declared)) return true;
-                if (stmt.catch_param) |param| try tdzDeclarePattern(arena, declared, param);
-                if (stmt.catch_block) |catch_block| if (try tdzScanStmt(arena, catch_block, m, declared)) return true;
-                if (stmt.finally_block) |finally_block| if (try tdzScanStmt(arena, finally_block, m, declared)) return true;
+                if (try tdzScanStmt(arena, stmt.block, m, declared, floor)) return true;
+                if (stmt.catch_param) |param| try tdzDeclarePattern(arena, declared, param, floor);
+                if (stmt.catch_block) |catch_block| if (try tdzScanStmt(arena, catch_block, m, declared, floor)) return true;
+                if (stmt.finally_block) |finally_block| if (try tdzScanStmt(arena, finally_block, m, declared, floor)) return true;
             },
-            .func_decl => |function_node| if (tdzRefsPending(function_node.body, m, declared)) return true,
-            else => return tdzRefsPending(node, m, declared),
+            .func_decl => |function_node| if (try tdzRefsPending(function_node.body, m, declared, floor)) return true,
+            else => return try tdzRefsPending(node, m, declared, floor),
         }
         return false;
     }
@@ -2078,14 +2119,15 @@ pub const Compiler = struct {
         arena: std.mem.Allocator,
         fnode: *const ast.FunctionNode,
         bindings: *const SecureStringMapUnmanaged(ShadowBind),
+        floor: usize,
     ) CompileError!bool {
         if (fnode.is_expr_body) return false;
         var declared: SecureStringMapUnmanaged(void) = .{ .state = bindings.state };
-        return tdzScanStmt(arena, fnode.body, bindings, &declared);
+        return try tdzScanStmt(arena, fnode.body, bindings, &declared, floor);
     }
 
-    fn functionNeedsTdzChecks(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode) CompileError!bool {
-        const binding_inventory = try functionBindingInventory(arena, hash_state, fnode);
+    fn functionNeedsTdzChecks(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode, floor: usize) CompileError!bool {
+        const binding_inventory = try functionBindingInventory(arena, hash_state, fnode, floor);
         if (binding_inventory.has_shadowing) return true;
         // With no lexical binding, no identifier can require a TDZ check. The
         // exhaustive inventory proves that negative without a second AST walk.
@@ -2096,7 +2138,7 @@ pub const Compiler = struct {
         // binding uninitialized, so expose TDZ-marked activation slots to the
         // materialized direct-eval Environment from the first instruction.
         if (fnode.uses_direct_eval) return true;
-        return functionHasTdzHazard(arena, fnode, &binding_inventory.bindings);
+        return try functionHasTdzHazard(arena, fnode, &binding_inventory.bindings, floor);
     }
 
     pub const PlainFunctionCode = struct {
@@ -2127,12 +2169,13 @@ pub const Compiler = struct {
     /// Classify a plain function without collapsing every semantic barrier into
     /// `error.Unsupported`. The legacy compile API below deliberately retains its
     /// error contract while tier inventories consume this stable result.
-    pub fn admitPlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) error{OutOfMemory}!PlainFunctionAdmission {
+    pub fn admitPlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) error{ OutOfMemory, StackExhausted }!PlainFunctionAdmission {
         var rejection: ?PlainFunctionRejection = null;
         var hash_state: CompileHashState = .{};
         const compiled = compilePlainFunctionInner(arena, fnode, &hash_state, &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
         };
         return .{ .compiled = compiled };
     }
@@ -2234,20 +2277,22 @@ pub const Compiler = struct {
     }
 
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, hash_state: *CompileHashState, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
+        const stack_floor = stack_scan.nestingStackFloor();
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
         // binding identity rather than spelling.
-        const tdz_checks = try functionNeedsTdzChecks(arena, hash_state, fnode);
+        const tdz_checks = try functionNeedsTdzChecks(arena, hash_state, fnode, stack_floor);
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null, .hash_state = hash_state, .names = .{ .state = hash_state }, .tdz_checks = tdz_checks };
-        const parameter_layout = configurePlainParameters(arena, scope, fnode) catch |err| switch (err) {
+        const parameter_layout = configurePlainParameters(arena, scope, fnode, stack_floor) catch |err| switch (err) {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
         };
-        const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
-        try planFunctionDeclarations(arena, scope, fnode, arguments_slot != null);
+        const arguments_slot = try addArgumentsSlot(arena, scope, fnode, stack_floor);
+        try planFunctionDeclarations(arena, scope, fnode, arguments_slot != null, stack_floor);
         const mapped_parameter_indices = try configureMappedParameters(
             arena,
             scope,
@@ -2272,6 +2317,7 @@ pub const Compiler = struct {
             .chunk = chunk,
             .mode = .function,
             .hash_state = hash_state,
+            .stack_floor = stack_floor,
             .scope = scope,
             .is_strict = fnode.is_strict,
             .is_derived_constructor = fnode.is_derived_class_constructor,
@@ -2287,6 +2333,7 @@ pub const Compiler = struct {
         c.compilePlainParameterEntries(fnode, &parameter_layout) catch |err| switch (err) {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
         };
         try c.emitParameterBodyCopies();
         if (fnode.is_expr_body) {
@@ -2304,6 +2351,12 @@ pub const Compiler = struct {
     }
 
     // ---- name resolution --------------------------------------------------
+
+    /// Recursion that follows source nesting checks here first (#937), so a
+    /// tree deeper than this thread's stack fails with `error.StackExhausted`.
+    inline fn checkNesting(self: *const Compiler) error{StackExhausted}!void {
+        if (stack_scan.stackAddress() <= self.stack_floor) return error.StackExhausted;
+    }
 
     fn resolve(self: *Compiler, name: []const u8) Resolved {
         var depth: u32 = 0;
@@ -2602,6 +2655,7 @@ pub const Compiler = struct {
     }
 
     fn emitLexicalInitializersForNode(self: *Compiler, node: *Node) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |d| if (d.kind != .@"var") try self.emitLexicalInitializer(d.name),
             .destructure_decl => |d| if (d.kind != .@"var") try self.emitLexicalInitializersForPattern(d.pattern),
@@ -2616,6 +2670,7 @@ pub const Compiler = struct {
     }
 
     fn predeclareLexicalNode(self: *Compiler, node: *Node) CompileError!void {
+        try self.checkNesting();
         const scope = self.scope orelse return;
         if (annex_b.functionDeclaration(node)) |declaration| {
             _ = try scope.addLexical(self.arena, declaration.func_decl.name, false);
@@ -2639,6 +2694,7 @@ pub const Compiler = struct {
     }
 
     fn predeclareRepeatedBodyNode(self: *Compiler, node: *Node, captures: *const RepeatedBodyCaptures) CompileError!void {
+        try self.checkNesting();
         const scope = self.scope orelse return;
         if (annex_b.functionDeclaration(node)) |declaration| {
             const name = declaration.func_decl.name;
@@ -2660,7 +2716,7 @@ pub const Compiler = struct {
                 try self.predeclareRepeatedBodyNode(declaration, captures),
             .destructure_decl => |declaration| {
                 if (declaration.kind == .@"var") return;
-                if (captures.patternCaptured(declaration.pattern))
+                if (try captures.patternCaptured(declaration.pattern, self.stack_floor))
                     try self.markEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const")
                 else
                     try self.predeclareLexicalPattern(declaration.pattern, declaration.kind == .@"const");
@@ -2674,6 +2730,7 @@ pub const Compiler = struct {
     }
 
     fn emitDeclareRepeatedBodyNode(self: *Compiler, node: *const Node, captures: *const RepeatedBodyCaptures) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .func_decl => |function| if (captures.nameCaptured(function.name))
                 try self.emitDeclareEnvironmentLexicalName(function.name, false),
@@ -2681,7 +2738,7 @@ pub const Compiler = struct {
                 try self.emitDeclareRepeatedBodyNode(statement.body, captures),
             .var_decl => |declaration| if (declaration.kind != .@"var" and captures.nameCaptured(declaration.name))
                 try self.emitDeclareEnvironmentLexicalName(declaration.name, declaration.kind == .@"const"),
-            .destructure_decl => |declaration| if (declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern))
+            .destructure_decl => |declaration| if (declaration.kind != .@"var" and try captures.patternCaptured(declaration.pattern, self.stack_floor))
                 try self.emitDeclareEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const"),
             .decl_group => |declarations| for (declarations) |declaration|
                 try self.emitDeclareRepeatedBodyNode(declaration, captures),
@@ -2693,44 +2750,47 @@ pub const Compiler = struct {
         for (stmts) |statement| try self.emitDeclareRepeatedBodyNode(statement, captures);
     }
 
-    fn repeatedBodyNodeNeedsEnvironment(node: *const Node, captures: *const RepeatedBodyCaptures) bool {
+    fn repeatedBodyNodeNeedsEnvironment(node: *const Node, captures: *const RepeatedBodyCaptures, floor: usize) error{StackExhausted}!bool {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         return switch (node.*) {
             .func_decl => |function| captures.nameCaptured(function.name),
             .labeled_stmt => |statement| annex_b.functionDeclaration(statement.body) != null and
-                repeatedBodyNodeNeedsEnvironment(statement.body, captures),
+                try repeatedBodyNodeNeedsEnvironment(statement.body, captures, floor),
             .var_decl => |declaration| declaration.kind != .@"var" and captures.nameCaptured(declaration.name),
-            .destructure_decl => |declaration| declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern),
+            .destructure_decl => |declaration| declaration.kind != .@"var" and try captures.patternCaptured(declaration.pattern, floor),
             .decl_group => |declarations| blk: {
-                for (declarations) |declaration| if (repeatedBodyNodeNeedsEnvironment(declaration, captures)) break :blk true;
+                for (declarations) |declaration| if (try repeatedBodyNodeNeedsEnvironment(declaration, captures, floor)) break :blk true;
                 break :blk false;
             },
             else => false,
         };
     }
 
-    fn repeatedBodyListNeedsEnvironment(stmts: []*Node, captures: *const RepeatedBodyCaptures) bool {
-        for (stmts) |statement| if (repeatedBodyNodeNeedsEnvironment(statement, captures)) return true;
+    fn repeatedBodyListNeedsEnvironment(stmts: []*Node, captures: *const RepeatedBodyCaptures, floor: usize) error{StackExhausted}!bool {
+        for (stmts) |statement| if (try repeatedBodyNodeNeedsEnvironment(statement, captures, floor)) return true;
         return false;
     }
 
-    fn loopHeadSupportsEnvironment(node: *const Node) bool {
+    fn loopHeadSupportsEnvironment(node: *const Node, floor: usize) error{StackExhausted}!bool {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         return switch (node.*) {
             .var_decl => |decl| decl.kind != .@"var",
-            .destructure_decl => |decl| decl.kind != .@"var" and patternSupportsEnvironment(decl.pattern),
+            .destructure_decl => |decl| decl.kind != .@"var" and try patternSupportsEnvironment(decl.pattern, floor),
             .decl_group => |decls| blk: {
                 if (decls.len == 0) break :blk false;
-                for (decls) |decl| if (!loopHeadSupportsEnvironment(decl)) break :blk false;
+                for (decls) |decl| if (!try loopHeadSupportsEnvironment(decl, floor)) break :blk false;
                 break :blk true;
             },
             else => false,
         };
     }
 
-    fn patternSupportsEnvironment(pattern: *const Node) bool {
-        return patternSupportsEnvironmentNode(pattern);
+    fn patternSupportsEnvironment(pattern: *const Node, floor: usize) error{StackExhausted}!bool {
+        return try patternSupportsEnvironmentNode(pattern, floor);
     }
 
     fn markEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        try self.checkNesting();
         const scope = self.scope orelse return;
         switch (pattern.*) {
             .identifier => |name| try scope.addEnvironmentLexical(self.arena, name, immutable),
@@ -2748,6 +2808,7 @@ pub const Compiler = struct {
     }
 
     fn predeclareCheckedLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        try self.checkNesting();
         const scope = self.scope orelse return error.Unsupported;
         switch (pattern.*) {
             .identifier => |name| _ = try scope.addLexicalChecked(self.arena, name, immutable),
@@ -2765,6 +2826,7 @@ pub const Compiler = struct {
     }
 
     fn predeclareLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        try self.checkNesting();
         const scope = self.scope orelse return error.Unsupported;
         switch (pattern.*) {
             .identifier => |name| _ = try scope.addLexical(self.arena, name, immutable),
@@ -2782,6 +2844,7 @@ pub const Compiler = struct {
     }
 
     fn emitLexicalInitializersForPattern(self: *Compiler, pattern: *const Node) CompileError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .identifier => |name| try self.emitLexicalInitializer(name),
             .obj_pattern => |object| {
@@ -2798,6 +2861,7 @@ pub const Compiler = struct {
     }
 
     fn markEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        try self.checkNesting();
         const scope = self.scope orelse return;
         switch (node.*) {
             .var_decl => |decl| {
@@ -2814,6 +2878,7 @@ pub const Compiler = struct {
     }
 
     fn emitDeclareEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .identifier => |name| try self.emitDeclareEnvironmentLexicalName(name, immutable),
             .obj_pattern => |object| {
@@ -2833,6 +2898,7 @@ pub const Compiler = struct {
     /// its TDZ before any initializer/RHS evaluation. def_lex modes 3/4 consume
     /// the placeholder and install the realm TDZ marker as let/const.
     fn emitDeclareEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |decl| {
                 if (decl.kind == .@"var") return error.Unsupported;
@@ -2849,6 +2915,7 @@ pub const Compiler = struct {
     }
 
     fn emitLoadEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node) CompileError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .identifier => |name| _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
             .obj_pattern => |object| {
@@ -2865,6 +2932,7 @@ pub const Compiler = struct {
     }
 
     fn emitLoadEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |decl| {
                 if (decl.kind == .@"var") return error.Unsupported;
@@ -2880,6 +2948,7 @@ pub const Compiler = struct {
     }
 
     fn emitDefineEnvironmentLexicalPatternReverse(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .identifier => |name| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 2 else 1),
             .obj_pattern => |object| {
@@ -2904,6 +2973,7 @@ pub const Compiler = struct {
     }
 
     fn emitDefineEnvironmentLexicalNodeReverse(self: *Compiler, node: *const Node) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |decl| {
                 if (decl.kind == .@"var") return error.Unsupported;
@@ -2946,21 +3016,22 @@ pub const Compiler = struct {
         try self.emitDeclareEnvironmentLexicalPattern(pattern, immutable);
     }
 
-    fn patternUsesEnvironment(self: *Compiler, pattern: *const Node) bool {
+    fn patternUsesEnvironment(self: *Compiler, pattern: *const Node) error{StackExhausted}!bool {
+        try self.checkNesting();
         return switch (pattern.*) {
             .identifier => |name| switch (self.resolve(name)) {
                 .environment => true,
                 else => false,
             },
             .obj_pattern => |object| blk: {
-                for (object.props) |property| if (!self.patternUsesEnvironment(property.target)) break :blk false;
-                if (object.rest) |rest| if (!self.patternUsesEnvironment(rest)) break :blk false;
+                for (object.props) |property| if (!try self.patternUsesEnvironment(property.target)) break :blk false;
+                if (object.rest) |rest| if (!try self.patternUsesEnvironment(rest)) break :blk false;
                 break :blk true;
             },
             .arr_pattern => |array| blk: {
                 for (array.elems) |element| if (element.target) |target|
-                    if (!self.patternUsesEnvironment(target)) break :blk false;
-                if (array.rest) |rest| if (!self.patternUsesEnvironment(rest)) break :blk false;
+                    if (!try self.patternUsesEnvironment(target)) break :blk false;
+                if (array.rest) |rest| if (!try self.patternUsesEnvironment(rest)) break :blk false;
                 break :blk true;
             },
             else => false,
@@ -2978,12 +3049,13 @@ pub const Compiler = struct {
         try self.emitDefineEnvironmentLexicalNodeReverse(node);
     }
 
-    fn nodeDeclaresLexical(node: *const Node) bool {
+    fn nodeDeclaresLexical(node: *const Node, floor: usize) error{StackExhausted}!bool {
+        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         return switch (node.*) {
             .var_decl => |decl| decl.kind != .@"var",
             .destructure_decl => |decl| decl.kind != .@"var",
             .decl_group => |decls| for (decls) |decl| {
-                if (nodeDeclaresLexical(decl)) break true;
+                if (try nodeDeclaresLexical(decl, floor)) break true;
             } else false,
             else => false,
         };
@@ -3027,7 +3099,7 @@ pub const Compiler = struct {
     fn planEnvironmentDeclarations(self: *Compiler, stmts: []*Node, params: []const ast.Param, arguments_needed: bool) CompileError!void {
         std.debug.assert(self.scope == null);
         var variables = FnScope{ .parent = null, .hash_state = self.hash_state, .names = .{ .state = self.hash_state } };
-        for (stmts) |statement| try collectFunctionLocals(self.arena, &variables, statement);
+        for (stmts) |statement| try collectFunctionLocals(self.arena, &variables, statement, self.stack_floor);
         var functions: std.ArrayListUnmanaged([]const u8) = .empty;
         var function_names = SecureStringMapUnmanaged(void){ .state = self.hash_state };
         var lexical: std.ArrayListUnmanaged(bc.EnvironmentDeclarations.Lexical) = .empty;
@@ -3055,7 +3127,7 @@ pub const Compiler = struct {
         };
         var collector = Collector{ .compiler = self, .variables = &variables, .functions = &function_names };
         if (!self.is_strict)
-            try annex_b.collect(CompileError, self.arena, stmts, 0, params, arguments_needed, &collector);
+            try annex_b.collect(CompileError, self.arena, stmts, 0, params, arguments_needed, self.stack_floor, &collector);
         self.chunk.environment_declarations = .{
             .lexical = lexical.items,
             .functions = functions.items,
@@ -3068,6 +3140,7 @@ pub const Compiler = struct {
     }
 
     fn collectEnvironmentLexical(self: *Compiler, node: *Node, out: *std.ArrayListUnmanaged(bc.EnvironmentDeclarations.Lexical)) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |declaration| if (declaration.kind != .@"var")
                 try out.append(self.arena, .{ .name = declaration.name, .immutable = declaration.kind == .@"const" }),
@@ -3080,7 +3153,7 @@ pub const Compiler = struct {
                     }
                 };
                 var collector = Collector{ .out = out, .immutable = declaration.kind == .@"const" };
-                try collectPatternBindingNames(self.arena, declaration.pattern, &collector);
+                try collectPatternBindingNames(self.arena, declaration.pattern, &collector, self.stack_floor);
             },
             .decl_group => |group| for (group) |declaration| try self.collectEnvironmentLexical(declaration, out),
             .class_expr => |class| if (class.name.len != 0)
@@ -3095,9 +3168,9 @@ pub const Compiler = struct {
         for (lexical.items) |binding| try self.emitDeclareEnvironmentLexicalName(binding.name, binding.immutable);
     }
 
-    fn environmentBlockNeedsRecord(stmts: []*Node) bool {
+    fn environmentBlockNeedsRecord(stmts: []*Node, floor: usize) error{StackExhausted}!bool {
         for (stmts) |statement| {
-            if (annex_b.functionDeclaration(statement) != null or nodeDeclaresLexical(statement) or statement.* == .class_expr) return true;
+            if (annex_b.functionDeclaration(statement) != null or try nodeDeclaresLexical(statement, floor) or statement.* == .class_expr) return true;
         }
         return false;
     }
@@ -3196,6 +3269,7 @@ pub const Compiler = struct {
     }
 
     fn compileStmt(self: *Compiler, node: *Node) CompileError!void {
+        try self.checkNesting();
         if (self.debug_checkpoints) try self.chunk.markDebugStatement(node);
         switch (node.*) {
             .var_decl => |d| {
@@ -3230,7 +3304,7 @@ pub const Compiler = struct {
             },
             .destructure_decl => |d| {
                 const environment_pattern = d.kind != .@"var" and
-                    (self.scope == null or self.patternUsesEnvironment(d.pattern));
+                    (self.scope == null or try self.patternUsesEnvironment(d.pattern));
                 try self.compileExpr(d.init);
                 const src = try self.freshActivationTemp();
                 try self.emitDefineActivationTemp(src);
@@ -3251,7 +3325,7 @@ pub const Compiler = struct {
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
                 const captured_environment = self.scope == null or if (self.repeated_body_captures) |captures|
-                    repeatedBodyNodeNeedsEnvironment(node, captures)
+                    try repeatedBodyNodeNeedsEnvironment(node, captures, self.stack_floor)
                 else
                     false;
                 if (self.repeated_body_captures) |captures|
@@ -3332,9 +3406,9 @@ pub const Compiler = struct {
                 defer self.popLexicalScope();
                 const repeated_captures = self.repeated_body_captures;
                 const captured_environment = if (self.scope == null)
-                    environmentBlockNeedsRecord(stmts)
+                    try environmentBlockNeedsRecord(stmts, self.stack_floor)
                 else if (repeated_captures) |captures|
-                    repeatedBodyListNeedsEnvironment(stmts, captures)
+                    try repeatedBodyListNeedsEnvironment(stmts, captures, self.stack_floor)
                 else
                     false;
                 const function_body = if (self.scope) |scope| node == scope.function_body else false;
@@ -3349,8 +3423,8 @@ pub const Compiler = struct {
                 // Record for its resources in both env mode and frame mode (a
                 // frame-mode block's own lexicals stay in slots; the record only
                 // carries what `register_disposable` appends).
-                const disposable_scope = stmtListHasDisposableDecl(stmts);
-                const await_using_count = if (disposable_scope and self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
+                const disposable_scope = try stmtListHasDisposableDecl(stmts, self.stack_floor);
+                const await_using_count = if (disposable_scope and self.in_async) try stmtListAwaitUsingDeclCount(stmts, self.stack_floor) else 0;
                 if (disposable_scope) try self.emitEnterEnvironment();
                 if (captured_environment and !disposable_scope) {
                     try self.emitEnterEnvironment();
@@ -3430,7 +3504,7 @@ pub const Compiler = struct {
             },
             .try_stmt => |t| try self.compileTry(t),
             .labeled_stmt => |l| {
-                const target = try self.pushLabel(l.label, labeledStatementTargetsIteration(l.body));
+                const target = try self.pushLabel(l.label, try labeledStatementTargetsIteration(l.body, self.stack_floor));
                 try self.compileStmt(l.body);
                 for (target.breaks.items) |j| self.chunk.patchToHere(j);
                 self.popLoop();
@@ -3609,12 +3683,12 @@ pub const Compiler = struct {
         var captured_environment = false;
         for (cases) |case| {
             if (self.scope == null) {
-                captured_environment = captured_environment or environmentBlockNeedsRecord(case.body);
+                captured_environment = captured_environment or try environmentBlockNeedsRecord(case.body, self.stack_floor);
                 continue;
             }
             if (repeated_captures) |captures| {
                 try self.predeclareRepeatedBodyList(case.body, captures);
-                captured_environment = captured_environment or repeatedBodyListNeedsEnvironment(case.body, captures);
+                captured_environment = captured_environment or try repeatedBodyListNeedsEnvironment(case.body, captures, self.stack_floor);
             } else try self.predeclareLexicalList(case.body);
         }
 
@@ -3682,9 +3756,9 @@ pub const Compiler = struct {
 
     fn compileRepeatedBody(self: *Compiler, body: *Node) CompileError!void {
         if (self.scope == null) return self.compileStmt(body);
-        var captures = try RepeatedBodyCaptures.init(self.arena, self.hash_state, body);
+        var captures = try RepeatedBodyCaptures.init(self.arena, self.hash_state, body, self.stack_floor);
         if (!captures.any()) return self.compileStmt(body);
-        if (!repeatedBodyCapturesSupported(body, &captures)) return error.Unsupported;
+        if (!try repeatedBodyCapturesSupported(body, &captures, self.stack_floor)) return error.Unsupported;
         const saved_captures = self.repeated_body_captures;
         self.repeated_body_captures = &captures;
         defer self.repeated_body_captures = saved_captures;
@@ -3733,9 +3807,9 @@ pub const Compiler = struct {
         // through the awaiting region instead; it only parses in an async body,
         // so a non-async activation seeing one is a context the compiler does
         // not model and tree-walks.
-        const head_await_using_count = if (init_node) |ini| stmtAwaitUsingDeclCount(ini) else 0;
+        const head_await_using_count = if (init_node) |ini| try stmtAwaitUsingDeclCount(ini, self.stack_floor) else 0;
         if (head_await_using_count != 0 and !self.in_async) return error.Unsupported;
-        const head_using = if (init_node) |ini| stmtHasDisposableDecl(ini) else false;
+        const head_using = if (init_node) |ini| try stmtHasDisposableDecl(ini, self.stack_floor) else false;
         const none = std.math.maxInt(u32);
         var head_dispose_handler: ?usize = null;
         if (head_using) {
@@ -3744,12 +3818,12 @@ pub const Compiler = struct {
             self.finally_depth += 1;
         }
         const captured_head = if (init_node) |ini|
-            if (self.scope == null) nodeDeclaresLexical(ini) else try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body)
+            if (self.scope == null) try nodeDeclaresLexical(ini, self.stack_floor) else try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body, self.stack_floor)
         else
             false;
-        if (captured_head and !loopHeadSupportsEnvironment(init_node.?))
+        if (captured_head and !try loopHeadSupportsEnvironment(init_node.?, self.stack_floor))
             return error.Unsupported;
-        const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
+        const lexical_scope = if (init_node) |init| try nodeDeclaresLexical(init, self.stack_floor) else false;
         if (lexical_scope) {
             try self.pushLexicalScope();
             if (captured_head)
@@ -3861,13 +3935,13 @@ pub const Compiler = struct {
         // the stack; move it into a temp first. Patterns WITHOUT yield/await keep
         // using `bind_pattern`, which handles object-rest / fn-name NamedEvaluation /
         // iterator-close that the assignment lowering bails on.
-        if (decl_kind == null and (target.* == .arr_pattern or target.* == .obj_pattern) and nodeHasYield(target)) {
+        if (decl_kind == null and (target.* == .arr_pattern or target.* == .obj_pattern) and try nodeHasYield(target, self.stack_floor)) {
             const src = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(src); // consume the loop value from the stack
             try self.compileAssignPattern(target, src);
             return;
         }
-        if (force_environment and (native_pattern or patternHasEvaluationExpressions(target)) and (target.* == .arr_pattern or target.* == .obj_pattern)) {
+        if (force_environment and (native_pattern or try patternHasEvaluationExpressions(target, self.stack_floor)) and (target.* == .arr_pattern or target.* == .obj_pattern)) {
             const src = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(src);
             try self.compilePattern(target, src, .{ .environment_lexical = decl_kind.? == .@"const" });
@@ -3908,14 +3982,14 @@ pub const Compiler = struct {
         // frame slot. Environment-backed patterns lower defaults and computed
         // keys directly, so every iterator result initializes the fresh record.
         const captured_binding = if (decl_kind) |kind|
-            kind != .@"var" and try forOfCapturesLexical(self.arena, self.hash_state, target, var_init, iterable, body)
+            kind != .@"var" and try forOfCapturesLexical(self.arena, self.hash_state, target, var_init, iterable, body, self.stack_floor)
         else
             false;
         const program_lexical_binding = self.scope == null and if (decl_kind) |kind| kind != .@"var" else false;
         // `for (using x of …)` registers each iteration's resource in that
         // iteration's own Environment Record, so the head always gets one.
         const environment_binding = captured_binding or program_lexical_binding or head_using;
-        if (environment_binding and !patternSupportsEnvironment(target)) return error.Unsupported;
+        if (environment_binding and !try patternSupportsEnvironment(target, self.stack_floor)) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
             kind != .@"var" and (target.* == .identifier or target.* == .arr_pattern or target.* == .obj_pattern)
         else
@@ -4202,6 +4276,7 @@ pub const Compiler = struct {
     }
 
     fn compilePattern(self: *Compiler, pattern: *Node, src: ActivationTemp, mode: PatternMode) CompileError!void {
+        try self.checkNesting();
         switch (pattern.*) {
             .arr_pattern => |p| try self.compileArrayPattern(p.elems, p.rest, src, mode),
             .obj_pattern => |p| try self.compileObjectPattern(p.props, p.rest, src, mode),
@@ -4576,6 +4651,7 @@ pub const Compiler = struct {
     // ---- expressions ------------------------------------------------------
 
     fn compileTailExpr(self: *Compiler, node: *Node) CompileError!void {
+        try self.checkNesting();
         // A live catch handler (still on the VM handler stack) must survive the
         // call, so nothing here is in tail position: evaluate normally and return
         // rather than emitting a tail call that would discard the handler and let a
@@ -4952,6 +5028,7 @@ pub const Compiler = struct {
         node: *Node,
         exits: *std.ArrayListUnmanaged(OptionalExit),
     ) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .member => |member| {
                 try self.compileOptionalValue(member.object, exits);
@@ -5269,6 +5346,7 @@ pub const Compiler = struct {
     }
 
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
+        try self.checkNesting();
         switch (node.*) {
             .number => |n| {
                 const ci = try self.chunk.addConst(Value.num(n));
@@ -6335,7 +6413,7 @@ pub const Compiler = struct {
     fn compileClass(self: *Compiler, node: *Node, inferred_name: ?[]const u8, name_from_stack: bool) CompileError!void {
         const c = node.class_expr;
         const captures_frame = if (self.scope) |scope|
-            try classDeferredBodiesCaptureFrame(self.arena, scope, c.members, c.name)
+            try classDeferredBodiesCaptureFrame(self.arena, scope, c.members, c.name, self.stack_floor)
         else
             false;
 
@@ -6467,7 +6545,7 @@ pub const Compiler = struct {
             self.environment_depth,
             self_environment_depth,
         ) catch return error.Unsupported;
-        const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, self.hash_state, fnode);
+        const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, self.hash_state, fnode, self.stack_floor);
         scope.* = .{
             .parent = self.scope,
             .parent_binding_phase = self.function_binding_phase,
@@ -6482,18 +6560,18 @@ pub const Compiler = struct {
         var template_admission: bc.FnTemplateAdmission = undefined;
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
             var rejection: ?GeneratorRejection = null;
-            const compiled = try compileGeneratorInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, &rejection);
+            const compiled = try compileGeneratorInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, self.stack_floor, &rejection);
             template_admission = .generator_compiled;
             break :blk compiled;
         } else if (fnode.is_async) blk: {
             var rejection: ?AsyncRejection = null;
-            const compiled = try compileAsyncInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, &rejection);
+            const compiled = try compileAsyncInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, self.stack_floor, &rejection);
             template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
-            const parameter_layout = configurePlainParameters(self.arena, scope, fnode) catch |err| switch (err) {
+            const parameter_layout = configurePlainParameters(self.arena, scope, fnode, self.stack_floor) catch |err| switch (err) {
                 error.Unsupported => {
                     if (self.scope == null) {
                         template_admission = .plain_parameter_prologue;
@@ -6502,9 +6580,10 @@ pub const Compiler = struct {
                     return error.Unsupported;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
+                error.StackExhausted => return error.StackExhausted,
             };
-            const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
-            try planFunctionDeclarations(self.arena, scope, fnode, arguments_slot != null);
+            const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode, self.stack_floor);
+            try planFunctionDeclarations(self.arena, scope, fnode, arguments_slot != null, self.stack_floor);
             const mapped_parameter_indices = try configureMappedParameters(
                 self.arena,
                 scope,
@@ -6527,6 +6606,7 @@ pub const Compiler = struct {
                 .chunk = compiled,
                 .mode = .function,
                 .hash_state = self.hash_state,
+                .stack_floor = self.stack_floor,
                 .scope = scope,
                 .is_strict = fnode.is_strict,
                 .is_derived_constructor = false,
@@ -6542,6 +6622,7 @@ pub const Compiler = struct {
                     return error.Unsupported;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
+                error.StackExhausted => return error.StackExhausted,
             };
             try sub_c.emitParameterBodyCopies();
             if (fnode.is_expr_body) {
@@ -6554,6 +6635,7 @@ pub const Compiler = struct {
                         return error.Unsupported;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
+                    error.StackExhausted => return error.StackExhausted,
                 };
                 _ = try compiled.emit(.ret, 0);
             } else {
@@ -6566,6 +6648,7 @@ pub const Compiler = struct {
                         return error.Unsupported;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
+                    error.StackExhausted => return error.StackExhausted,
                 }; // body is a block
                 _ = try compiled.emit(.ret_undef, 0);
             }
@@ -6773,7 +6856,7 @@ pub const Compiler = struct {
 /// Hoist only function-scoped declarations. Lexical declarations are allocated
 /// when their exact block/loop/switch/catch scope is entered during compilation,
 /// so same-spelled bindings receive distinct activation slots.
-fn planFunctionDeclarations(arena: std.mem.Allocator, scope: *FnScope, function: *const ast.FunctionNode, arguments_object_needed: bool) CompileError!void {
+fn planFunctionDeclarations(arena: std.mem.Allocator, scope: *FnScope, function: *const ast.FunctionNode, arguments_object_needed: bool, floor: usize) CompileError!void {
     if (function.is_expr_body) return;
     scope.function_body = function.body;
     const statements = switch (function.body.*) {
@@ -6782,8 +6865,8 @@ fn planFunctionDeclarations(arena: std.mem.Allocator, scope: *FnScope, function:
     };
     // FunctionDeclarationInstantiation: only declarations directly in the body
     // own ordinary variable slots. Block functions get separate lexical cells.
-    try collectFunctionLocals(arena, scope, function.body);
-    if (!function.is_strict and functionHasBlockNestedFuncDecl(function)) {
+    try collectFunctionLocals(arena, scope, function.body, floor);
+    if (!function.is_strict and try functionHasBlockNestedFuncDecl(function, floor)) {
         const Collector = struct {
             arena: std.mem.Allocator,
             scope: *FnScope,
@@ -6794,18 +6877,19 @@ fn planFunctionDeclarations(arena: std.mem.Allocator, scope: *FnScope, function:
             }
         };
         var collector = Collector{ .arena = arena, .scope = scope };
-        try annex_b.collect(CompileError, arena, statements, 0, function.params, arguments_object_needed, &collector);
+        try annex_b.collect(CompileError, arena, statements, 0, function.params, arguments_object_needed, floor, &collector);
     }
 }
 
-fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) CompileError!void {
+fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node, floor: usize) CompileError!void {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
     switch (node.*) {
         .var_decl => |d| {
             if (d.kind == .@"var") _ = try scope.addLocal(arena, d.name, false, false);
         },
         .destructure_decl => |d| if (d.kind == .@"var") {
             var collector = FunctionLocalBindingCollector{ .scope = scope };
-            try collectPatternBindingNames(arena, d.pattern, &collector);
+            try collectPatternBindingNames(arena, d.pattern, &collector, floor);
         },
         .func_decl => {},
         .block => |stmts| for (stmts) |s| {
@@ -6813,35 +6897,35 @@ fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node)
                 _ = try scope.addLocal(arena, declaration.func_decl.name, false, false);
                 continue;
             };
-            try collectFunctionLocals(arena, scope, s);
+            try collectFunctionLocals(arena, scope, s, floor);
         },
-        .decl_group => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
+        .decl_group => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s, floor),
         .if_stmt => |s| {
-            try collectFunctionLocals(arena, scope, s.consequent);
-            if (s.alternate) |alt| try collectFunctionLocals(arena, scope, alt);
+            try collectFunctionLocals(arena, scope, s.consequent, floor);
+            if (s.alternate) |alt| try collectFunctionLocals(arena, scope, alt, floor);
         },
-        .while_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
-        .do_while_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
+        .while_stmt => |s| try collectFunctionLocals(arena, scope, s.body, floor),
+        .do_while_stmt => |s| try collectFunctionLocals(arena, scope, s.body, floor),
         .for_stmt => |f| {
-            if (f.init) |ini| try collectFunctionLocals(arena, scope, ini);
-            try collectFunctionLocals(arena, scope, f.body);
+            if (f.init) |ini| try collectFunctionLocals(arena, scope, ini, floor);
+            try collectFunctionLocals(arena, scope, f.body, floor);
         },
         .for_in => |f| {
             if (f.decl_kind) |kind| {
                 if (kind == .@"var") {
                     var collector = FunctionLocalBindingCollector{ .scope = scope };
-                    try collectPatternBindingNames(arena, f.target, &collector);
+                    try collectPatternBindingNames(arena, f.target, &collector, floor);
                 }
             }
-            try collectFunctionLocals(arena, scope, f.body);
+            try collectFunctionLocals(arena, scope, f.body, floor);
         },
-        .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try collectFunctionLocals(arena, scope, st),
-        .labeled_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
-        .with_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
+        .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try collectFunctionLocals(arena, scope, st, floor),
+        .labeled_stmt => |s| try collectFunctionLocals(arena, scope, s.body, floor),
+        .with_stmt => |s| try collectFunctionLocals(arena, scope, s.body, floor),
         .try_stmt => |t| {
-            try collectFunctionLocals(arena, scope, t.block);
-            if (t.catch_block) |cb| try collectFunctionLocals(arena, scope, cb);
-            if (t.finally_block) |fb| try collectFunctionLocals(arena, scope, fb);
+            try collectFunctionLocals(arena, scope, t.block, floor);
+            if (t.catch_block) |cb| try collectFunctionLocals(arena, scope, cb, floor);
+            if (t.finally_block) |fb| try collectFunctionLocals(arena, scope, fb, floor);
         },
         // Expressions (incl. nested function/arrow literals) declare no names in
         // this function's scope. `var` inside these statement forms is hoisted to
@@ -7108,6 +7192,7 @@ test "compiler threads activation plans through fixed spread and tail eval calls
             .chunk = &chunk,
             .mode = .function,
             .hash_state = &hash_state,
+            .stack_floor = stack_scan.nestingStackFloor(),
             .scope = &scope,
             .is_strict = true,
         };
@@ -7425,13 +7510,14 @@ test "compiler pending lexical query preserves TDZ classifications" {
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
         var hash_state = CompileHashState{ .context = .{ .seed = 0x5444_5a5f_5445_5354 } };
-        const binding_inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl);
+        const binding_inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl, stack_scan.nestingStackFloor());
         try std.testing.expectEqual(
             case.hazardous,
             try Compiler.functionHasTdzHazard(
                 arena.allocator(),
                 program.program[0].func_decl,
                 &binding_inventory.bindings,
+                stack_scan.nestingStackFloor(),
             ),
         );
     }
@@ -7452,7 +7538,7 @@ test "compiler plain function binding inventory preserves lexical and shadow cla
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
         var hash_state = CompileHashState{ .context = .{ .seed = 0x4249_4e44_5445_5354 } };
-        const inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl);
+        const inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl, stack_scan.nestingStackFloor());
         try std.testing.expectEqual(case.has_lexical, inventory.has_lexical);
         try std.testing.expectEqual(case.has_shadowing, inventory.has_shadowing);
     }
@@ -7485,8 +7571,8 @@ test "compiler loop binding query preserves capture classifications" {
         const body = program.program[0].func_decl.body.block[0];
         var hash_state = CompileHashState{ .context = .{ .seed = 0x4c4f_4f50_5445_5354 } };
         const captured = switch (body.*) {
-            .for_stmt => |loop| try forLoopCapturesLexical(arena.allocator(), &hash_state, loop.init.?, loop.cond, loop.update, loop.body),
-            .for_in => |loop| try forOfCapturesLexical(arena.allocator(), &hash_state, loop.target, loop.var_init, loop.iterable, loop.body),
+            .for_stmt => |loop| try forLoopCapturesLexical(arena.allocator(), &hash_state, loop.init.?, loop.cond, loop.update, loop.body, stack_scan.nestingStackFloor()),
+            .for_in => |loop| try forOfCapturesLexical(arena.allocator(), &hash_state, loop.target, loop.var_init, loop.iterable, loop.body, stack_scan.nestingStackFloor()),
             else => return error.TestUnexpectedResult,
         };
         try std.testing.expectEqual(case.captured, captured);
@@ -7526,7 +7612,7 @@ test "compiler repeated body query preserves capture classifications" {
         if (statement.* != .while_stmt) return error.TestUnexpectedResult;
         const body = statement.while_stmt.body;
         var hash_state = CompileHashState{ .context = .{ .seed = 0x424f_4459_5445_5354 } };
-        const captures = try RepeatedBodyCaptures.init(arena.allocator(), &hash_state, body);
+        const captures = try RepeatedBodyCaptures.init(arena.allocator(), &hash_state, body, stack_scan.nestingStackFloor());
         try std.testing.expectEqual(case.first, captures.nameCaptured("first"));
         try std.testing.expectEqual(case.last, captures.nameCaptured("last"));
         try std.testing.expectEqual(case.any, captures.any());
@@ -7554,7 +7640,7 @@ fn exerciseRepeatedBodyIdentityAllocationFailures(allocator: std.mem.Allocator) 
     var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
     defer compile_arena.deinit();
     var hash_state = CompileHashState{ .context = .{ .seed = 0x4341_5443_485f_4f4f } };
-    const captures = try RepeatedBodyCaptures.init(compile_arena.allocator(), &hash_state, body);
+    const captures = try RepeatedBodyCaptures.init(compile_arena.allocator(), &hash_state, body, stack_scan.nestingStackFloor());
     if (body.* != .block or body.block.len != 1 or body.block[0].* != .try_stmt)
         return error.TestUnexpectedResult;
     try std.testing.expect(captures.catchPatternCaptured(body.block[0].try_stmt.catch_param.?));

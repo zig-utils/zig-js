@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const stack_scan = @import("stack_scan.zig");
 const Node = ast.Node;
 const NameStack = std.ArrayListUnmanaged([]const u8);
 
@@ -17,6 +18,10 @@ pub fn functionDeclaration(node: *Node) ?*Node {
 /// copies their block binding into the variable environment. Parameter names
 /// and an actually created arguments binding exclude legacy candidates; eval
 /// callers pass an empty parameter list instead of inheriting caller exclusions.
+///
+/// The walk recurses once per nested statement and pattern, so it stops at
+/// `stack_floor` (see `stack_scan.nestingStackFloor`) with
+/// `error.StackExhausted`, which `Error` must include (#937).
 pub fn collect(
     comptime Error: type,
     allocator: std.mem.Allocator,
@@ -24,9 +29,10 @@ pub fn collect(
     depth: u32,
     parameters: []const ast.Param,
     arguments_object_needed: bool,
+    stack_floor: usize,
     visitor: anytype,
 ) Error!void {
-    var analysis = Analysis(Error, @TypeOf(visitor)){ .allocator = allocator, .visitor = visitor };
+    var analysis = Analysis(Error, @TypeOf(visitor)){ .allocator = allocator, .visitor = visitor, .stack_floor = stack_floor };
     defer analysis.names.deinit(allocator);
     for (parameters) |parameter| {
         if (parameter.pattern) |pattern|
@@ -44,7 +50,12 @@ fn Analysis(comptime Error: type, comptime Visitor: type) type {
         const Self = @This();
         allocator: std.mem.Allocator,
         visitor: Visitor,
+        stack_floor: usize,
         names: NameStack = .empty,
+
+        fn checkNesting(self: *const Self) Error!void {
+            if (stack_scan.stackAddress() <= self.stack_floor) return error.StackExhausted;
+        }
 
         fn contains(self: *const Self, name: []const u8) bool {
             for (self.names.items) |blocked| if (std.mem.eql(u8, blocked, name)) return true;
@@ -52,6 +63,7 @@ fn Analysis(comptime Error: type, comptime Visitor: type) type {
         }
 
         fn appendPattern(self: *Self, pattern: *Node) Error!void {
+            try self.checkNesting();
             switch (pattern.*) {
                 .identifier => |name| try self.names.append(self.allocator, name),
                 .obj_pattern => |object| {
@@ -98,6 +110,7 @@ fn Analysis(comptime Error: type, comptime Visitor: type) type {
         }
 
         fn scanList(self: *Self, statements: []const *Node, depth: u32) Error!void {
+            try self.checkNesting();
             const base = self.names.items.len;
             defer self.names.shrinkRetainingCapacity(base);
             for (statements) |statement| try self.appendLexical(statement);
@@ -119,6 +132,7 @@ fn Analysis(comptime Error: type, comptime Visitor: type) type {
         }
 
         fn scanStatement(self: *Self, node: *Node, depth: u32) Error!void {
+            try self.checkNesting();
             switch (node.*) {
                 .block => |statements| try self.scanList(statements, depth + 1),
                 .if_stmt => |statement| {
@@ -212,7 +226,7 @@ test "Annex B shared analysis preserves exact declaration identities and exclusi
     const program = try parser.parseProgram();
     const owner = program.program[0].func_decl;
     var candidates = TestCandidates{ .allocator = allocator };
-    try collect(std.mem.Allocator.Error, allocator, owner.body.block, 0, owner.params, true, &candidates);
+    try collect(std.mem.Allocator.Error || error{StackExhausted}, allocator, owner.body.block, 0, owner.params, true, stack_scan.nestingStackFloor(), &candidates);
     const expected = [_][]const u8{ "outer", "duplicate", "duplicate", "labeled", "branch", "simple", "switched" };
     try std.testing.expectEqual(expected.len, candidates.nodes.items.len);
     for (expected, candidates.nodes.items) |name, node| try std.testing.expectEqualStrings(name, node.func_decl.name);
@@ -222,7 +236,7 @@ test "Annex B shared analysis preserves exact declaration identities and exclusi
 fn testAllocationFailures(allocator: std.mem.Allocator, statements: []const *Node) !void {
     var candidates = TestCandidates{ .allocator = allocator };
     defer candidates.nodes.deinit(allocator);
-    try collect(std.mem.Allocator.Error, allocator, statements, 0, &.{}, false, &candidates);
+    try collect(std.mem.Allocator.Error || error{StackExhausted}, allocator, statements, 0, &.{}, false, stack_scan.nestingStackFloor(), &candidates);
     try std.testing.expectEqual(@as(usize, 3), candidates.nodes.items.len);
 }
 
@@ -252,12 +266,12 @@ test "Annex B shared analysis keeps eval exclusions and function-top depth expli
     const program = try parser.parseProgram();
     const owner = program.program[0].func_decl;
     var invocation = TestCandidates{ .allocator = allocator };
-    try collect(std.mem.Allocator.Error, allocator, owner.body.block, 0, owner.params, true, &invocation);
+    try collect(std.mem.Allocator.Error || error{StackExhausted}, allocator, owner.body.block, 0, owner.params, true, stack_scan.nestingStackFloor(), &invocation);
     try std.testing.expectEqual(@as(usize, 1), invocation.nodes.items.len);
     try std.testing.expectEqualStrings("available", invocation.nodes.items[0].func_decl.name);
 
     var evaluation = TestCandidates{ .allocator = allocator };
-    try collect(std.mem.Allocator.Error, allocator, owner.body.block, 0, &.{}, false, &evaluation);
+    try collect(std.mem.Allocator.Error || error{StackExhausted}, allocator, owner.body.block, 0, &.{}, false, stack_scan.nestingStackFloor(), &evaluation);
     const expected = [_][]const u8{ "parameter", "arguments", "available" };
     try std.testing.expectEqual(expected.len, evaluation.nodes.items.len);
     for (expected, evaluation.nodes.items) |name, node| try std.testing.expectEqualStrings(name, node.func_decl.name);

@@ -236,6 +236,64 @@ const runtime_cases = [_]Case{
         .expected = 2047,
     },
     .{
+        // #937: creating a generator compiles its body, nested function bodies
+        // included. Each shape sweeps depths until the parser gives up. Every
+        // depth must either work or throw the RangeError -- never crash -- and
+        // for shapes the parser walks more cheaply than the compiler there must
+        // be a depth that parses (inside an unexecuted block) but throws when
+        // the function is created. That pins the compiler's exhaustion as a
+        // RangeError: had it fallen back to a rejection, creation would succeed.
+        .name = "deeply nested function bodies raise RangeError when compiled",
+        .source =
+        \\function outcome(run) {
+        \\  try { run(); return 1; }
+        \\  catch (e) { return e instanceof RangeError && e.message === "Maximum call stack size exceeded." ? 2 : 0; }
+        \\}
+        \\var shapes = [
+        \\  [false, function (n) { return "{".repeat(n) + "x = 1;" + "}".repeat(n); }],
+        \\  [true, function (n) { return "var a; " + "a = ".repeat(n) + "1;"; }],
+        \\  [true, function (n) { return "!".repeat(n) + "1;"; }],
+        \\  [true, function (n) { return "var o = {}; o" + ".b".repeat(n) + ";"; }],
+        \\  [true, function (n) { return "var " + "[".repeat(n) + "z" + "]".repeat(n) + " = [];"; }],
+        \\  [false, function (n) { return "try {} catch ([a]) {".repeat(n) + "}".repeat(n); }],
+        \\  [false, function (n) { return "var c; " + "c ? ".repeat(n) + "1" + " : 2".repeat(n) + ";"; }],
+        \\];
+        \\var wrappers = [
+        \\  function (body) { return "function* g() { " + body + " }"; },
+        \\  function (body) { return "function* g() { (function () { " + body + " }); }"; },
+        \\  function (body) { return "function* g() { (function () { for (;;) { " + body + " break; } }); }"; },
+        \\];
+        \\// One bit per shape and wrapper, so a failure names the combination.
+        \\var passed = 0;
+        \\shapes.forEach(function (entry, s) {
+        \\  wrappers.forEach(function (wrap, w) {
+        \\    var ok = true, band = false, lo = 0, hi = 0;
+        \\    for (var n = 250; n <= 128000; n *= 2) {
+        \\      var source = wrap(entry[1](n));
+        \\      var parsed = outcome(function () { (0, eval)("if (false) { " + source + " }"); });
+        \\      var created = outcome(function () { (0, eval)(source); });
+        \\      if (parsed === 0 || created === 0 || (n === 250 && created !== 1)) ok = false;
+        \\      if (parsed === 1 && created === 2) band = true;
+        \\      if (parsed === 2) { hi = n; break; }
+        \\      lo = n;
+        \\    }
+        \\    // The parser's and compiler's limits can fall within one doubling;
+        \\    // find the deepest source that parses and require creating it to throw.
+        \\    if (entry[0] && !band && lo && hi) {
+        \\      while (hi - lo > 1) {
+        \\        var mid = (lo + hi) >> 1;
+        \\        if (outcome(function () { (0, eval)("if (false) { " + wrap(entry[1](mid)) + " }"); }) === 1) lo = mid; else hi = mid;
+        \\      }
+        \\      band = outcome(function () { (0, eval)(wrap(entry[1](lo))); }) === 2;
+        \\    }
+        \\    if (ok && (band || !entry[0])) passed |= 1 << (s * wrappers.length + w);
+        \\  });
+        \\});
+        \\passed
+        ,
+        .expected = 2097151,
+    },
+    .{
         // #935: the parser builds left-associative chains in a loop, and a
         // template literal desugars to two links per substitution, so a flat
         // source hands evaluation a spine as long as its operand count. Every

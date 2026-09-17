@@ -7577,15 +7577,20 @@ pub const Interpreter = struct {
             }
         };
         var collector = Collector{ .interpreter = self, .names = out, .nodes = nodes };
-        try @import("annex_b.zig").collect(
-            EvalError,
+        @import("annex_b.zig").collect(
+            EvalError || error{StackExhausted},
             self.scratch_allocator orelse self.arena,
             stmts,
             depth,
             if (self.eval_decl_deletable) &.{} else self.cur_func_params,
             !self.eval_decl_deletable and self.cur_func_args_needed,
+            stack_scan.nestingStackFloor(),
             &collector,
-        );
+        ) catch |err| return switch (err) {
+            // Block nesting deeper than this thread's stack allows (#937).
+            error.StackExhausted => self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+            else => |other| other,
+        };
     }
 
     pub fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
@@ -7815,7 +7820,7 @@ pub const Interpreter = struct {
         var admission_reason: BytecodeAdmissionReason = undefined;
         var admission_deferred = false;
         if (fnode.is_generator) {
-            switch (try Compiler.admitGenerator(self.arena, fnode, true)) {
+            switch (Compiler.admitGenerator(self.arena, fnode, true) catch |err| return self.compileAdmissionFailed(err)) {
                 .compiled => |chunk| {
                     func.gen_chunk = chunk;
                     admission_reason = .generator_compiled;
@@ -7825,7 +7830,7 @@ pub const Interpreter = struct {
         } else if (fnode.is_async) {
             // A plain async function compiles to a suspendable body (await is a
             // suspend point); null on unsupported syntax → tree-walk fallback.
-            switch (try Compiler.admitAsync(self.arena, fnode, true)) {
+            switch (Compiler.admitAsync(self.arena, fnode, true) catch |err| return self.compileAdmissionFailed(err)) {
                 .compiled => |chunk| {
                     func.async_chunk = chunk;
                     admission_reason = .async_compiled;
@@ -7866,6 +7871,16 @@ pub const Interpreter = struct {
         return Value.obj(obj);
     }
 
+    /// The compiler could not admit a function body. Running out of stack is
+    /// not a lowering limit (#937): the tree-walker would recurse over the same
+    /// tree, so it is reported as the RangeError runaway recursion raises.
+    fn compileAdmissionFailed(self: *Interpreter, err: error{ OutOfMemory, StackExhausted }) EvalError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.StackExhausted => self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+        };
+    }
+
     fn installPlainFunctionBytecode(self: *Interpreter, func: *Function, fnode: *const ast.FunctionNode) EvalError!BytecodeAdmissionReason {
         if (self.bytecode_execution_mode == .tree_walker) return .plain_forced_tree_walker;
         if (self.debug_statement_hook != null) return .plain_policy_debugger;
@@ -7876,7 +7891,7 @@ pub const Interpreter = struct {
         // admission. Genuine compiler barriers remain causal rejections below.
         if (self.bytecode_execution_mode != .required)
             if (plainFunctionPolicyRejection(fnode)) |reason| return reason;
-        return switch (try Compiler.admitPlainFunction(self.arena, fnode)) {
+        return switch (Compiler.admitPlainFunction(self.arena, fnode) catch |err| return self.compileAdmissionFailed(err)) {
             .compiled => |code| blk: {
                 func.chunk = code.chunk;
                 func.local_count = code.local_count;
@@ -36810,8 +36825,10 @@ fn agentThreadRun(src: []const u8) void {
     machine.strict = parser.strict;
     if (Compiler.compileProgram(a, prog)) |chunk| {
         _ = vm.run(&machine, chunk, null) catch {};
-    } else |_| {
-        _ = machine.eval(prog) catch {};
+    } else |err| {
+        // Only a lowering limit falls back; the tree-walker would recurse over a
+        // tree too deep to compile (#937). Agent scripts report no errors.
+        if (err != error.StackExhausted) _ = machine.eval(prog) catch {};
     }
     machine.drainHostMicrotasks() catch return;
     machine.settleAsyncWaiters() catch return;
