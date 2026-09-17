@@ -6414,6 +6414,16 @@ test "template token storage releases scratch on syntax failure" {
 
 test "template token storage growth and nesting propagate scratch allocation failures" {
     const Probe = struct {
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
+            return backing.rawAlloc(len, alignment, ra);
+        }
+
+        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
+            backing.rawFree(memory, alignment, ra);
+        }
+
         fn run(scratch: std.mem.Allocator) !void {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
@@ -6421,7 +6431,20 @@ test "template token storage growth and nesting propagate scratch allocation fai
             _ = try parser.parseProgram();
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+    var backing = std.testing.allocator;
+    // Token storage grows by remapping, and whether the testing allocator can
+    // extend a buffer in place depends on what else is free next to it. A run
+    // that grows in place makes one allocation fewer than a run that copies,
+    // so the replay saw a different count from one run to the next and failed
+    // with NondeterministicMemoryUsage on Linux CI. Refusing in-place growth
+    // makes every growth an allocation the replay can fail.
+    const non_resizing: std.mem.Allocator = .{ .ptr = &backing, .vtable = &.{
+        .alloc = Probe.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = Probe.free,
+    } };
+    try std.testing.checkAllAllocationFailures(non_resizing, Probe.run, .{});
 }
 
 test "parser fills exact tagged template arrays across nested substitutions" {
