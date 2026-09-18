@@ -10463,7 +10463,12 @@ pub const Context = struct {
     }
 
     fn suspendModuleAwait(self: *Context, machine: *interp.Interpreter, m: *Module, arg: *ast.Node, kind: ModuleAwait) interp.EvalError!void {
-        const awaited_value = try machine.eval(arg);
+        // The operand is user code, and a throw from it is this module's
+        // evaluation error -- not a load failure. Record it like any other
+        // throw from the body: unwinding past `finishModuleError` left the
+        // module "evaluating" forever, so a later importer never settled and
+        // the first one was told "Cannot parse module" (#933 item 1j).
+        const awaited_value = machine.eval(arg) catch |err| return self.finishModuleError(machine, m, err);
         const wrapped = interp.promiseResolveValue(machine, awaited_value) catch |err| return self.finishModuleError(machine, m, err);
         const p = promise.promiseOf(wrapped).?;
         const onf = try gc_mod.allocObj(self.arena());
@@ -11206,6 +11211,34 @@ test "modules expose namespace re-exports and evaluate dependencies in source or
     , &.{
         .{ .path = "dep.js", .source = "export default function fn() { fn = 2; return 1; }" },
     });
+}
+
+test "module top-level await settles importers when its operand throws" {
+    // #933 item 1j: the awaited operand is user code, and a synchronous throw
+    // from it unwound past `finishModuleError`, so the module stayed
+    // "evaluating" -- the first importer was told "Cannot parse module" and a
+    // second never settled at all. Both must see the thrown error, as they do
+    // in JavaScriptCore and V8.
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try evaluateModuleWithFixturesInContext(ctx,
+        \\globalThis.log = [];
+        \\function note(tag) { return function (v) { globalThis.log.push(tag + ":" + (v && v.message ? v.message : String(v))); }; }
+        \\import("./thrower.js").then(note("first-ok"), note("first-err")).then(function () {
+        \\  return import("./thrower.js").then(note("second-ok"), note("second-err"));
+        \\});
+    , &.{.{
+        .path = "thrower.js",
+        .source =
+        \\export const value = 1;
+        \\function boom() { throw new Error("operand"); }
+        \\await boom();
+        ,
+    }});
+    // Drain the import continuations, then read what each importer saw.
+    _ = try ctx.evaluate("0");
+    const seen = try ctx.evaluate("globalThis.log.join('|')");
+    try std.testing.expectEqualStrings("first-err:operand|second-err:operand", seen.asStr());
 }
 
 test "modules keep import.meta distinct per declaring module" {
