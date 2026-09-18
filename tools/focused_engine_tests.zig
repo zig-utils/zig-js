@@ -441,6 +441,50 @@ const runtime_cases = [_]Case{
         .expected = 1023,
     },
     .{
+        // #939: a classic `for` head was first parsed as a for-in/of target and
+        // re-parsed after the rewind, so every function body in the head was
+        // parsed twice -- and a `for` nested inside one of those bodies repeated
+        // that at its own level, doubling time and arena memory per level
+        // (depth 18 cost 411 MB, depth 22 exhausted 3 GB). At depth 24 below,
+        // the old parser would need tens of gigabytes; with one parse per head
+        // it is instant, so a regression shows up as the process dying rather
+        // than as a wrong answer.
+        .name = "nested classic for heads parse once per level",
+        .source =
+        \\function nest(wrap, n) { var s = ";"; for (var i = 0; i < n; i++) s = wrap(s); return s; }
+        \\function parses(src) {
+        \\  try { (0, eval)("function __never() { " + src + " }"); return true; } catch (e) { return false; }
+        \\}
+        \\var checks = [];
+        \\// The two shapes that grew fastest: a member head and a lexical pattern head.
+        \\checks.push(parses(nest(function (s) { return "for (a[function(){ " + s + " }()]; 0;);"; }, 24)));
+        \\checks.push(parses(nest(function (s) { return "for (let [a = function(){ " + s + " }] = []; 0;);"; }, 24)));
+        \\// Deciding the head form must not change what any head means.
+        \\var keys = []; for (var k in { a: 1, b: 2 }) keys.push(k);
+        \\checks.push(keys.join() === "a,b");
+        \\var sum = 0; for (var v of [1, 2, 3]) sum += v;
+        \\checks.push(sum === 6);
+        \\var count = 0; for (var i = 0; i < 3; i++) count += i;
+        \\checks.push(count === 3);
+        \\// A member expression as a for-in target, which is an iteration head
+        \\// whose target is not a declaration.
+        \\var o = {}; for (o.x in { y: 1 });
+        \\checks.push(o.x === "y");
+        \\var p, q; for ([p, q] of [[1, 2]]);
+        \\checks.push(p === 1 && q === 2);
+        \\var last; for (last of [7]);
+        \\checks.push(last === 7);
+        \\// A classic head whose initializer is a function expression, and the
+        \\// `async of =>` head, which is a classic `for` and not a for-of.
+        \\var ran = 0; for (var f = function () { return 5; }; f; f = null) ran = f();
+        \\checks.push(ran === 5);
+        \\checks.push(parses("for (async of => 1; false;);"));
+        \\// One bit per check, so a failure names the shape that regressed.
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 1023,
+    },
+    .{
         // #935: the parser builds left-associative chains in a loop, and a
         // template literal desugars to two links per substitution, so a flat
         // source hands evaluation a spine as long as its operand count. Every

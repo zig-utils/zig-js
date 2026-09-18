@@ -2475,7 +2475,7 @@ pub const Parser = struct {
         // failure: retrying repeats the same descent (at every enclosing head,
         // so the work doubles per level) and a `for await` head would report it
         // as a SyntaxError (#936).
-        const for_target = if (classic_using_of_decl or classic_async_of_arrow) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
+        const for_target = if (classic_using_of_decl or classic_async_of_arrow or self.classicForHeadAhead()) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
             error.StackExhausted, error.OutOfMemory => return err,
             else => null,
         };
@@ -2567,6 +2567,40 @@ pub const Parser = struct {
             try self.checkForHeadDeclVarConflict(ini, body);
         }
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
+    }
+
+    /// Whether the head starting at the cursor is a classic `for (init; cond; update)`.
+    ///
+    /// A classic head always has a `;` at the head's own bracket depth, and an
+    /// iteration head never does: a `;` belonging to anything nested is inside a
+    /// parenthesis, bracket or brace, and a template substitution or regular
+    /// expression is a single token, so neither can contribute one here.
+    ///
+    /// Answering before the head is parsed is what keeps it parsed *once*. The
+    /// iteration form used to be tried first and rewound on failure, which
+    /// re-parsed every nested function body in the head -- and a `for` nested
+    /// inside one of those bodies repeated that at its own level, so the work
+    /// and the arena both doubled per level (#939).
+    fn classicForHeadAhead(self: *const Parser) bool {
+        var depth: usize = 0;
+        var i = self.pos;
+        while (i < self.tokens.len) : (i += 1) {
+            switch (self.tokens[i].kind) {
+                .lparen, .lbracket, .lbrace => depth += 1,
+                .rparen => {
+                    // The head's own `)`: no `;` above it, so this is an
+                    // iteration head (or a malformed one, which the target parse
+                    // reports as it did before).
+                    if (depth == 0) return false;
+                    depth -= 1;
+                },
+                .rbracket, .rbrace => depth -|= 1,
+                .semicolon => if (depth == 0) return true,
+                .eof => return false,
+                else => {},
+            }
+        }
+        return false;
     }
 
     /// Parse a `for-in`/`for-of` loop target (the part between the optional
