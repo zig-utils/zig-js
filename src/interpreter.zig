@@ -9542,8 +9542,23 @@ pub const Interpreter = struct {
             return self.callValueWithThisAtSite(Value.obj(target), args, this_val, site);
         }
         if (obj.boundFunction()) |erased| {
-            const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            return self.callValueWithThisAtSite(bf.target, try self.concatArgs(bf.args, args), bf.this, site);
+            // Walk the chain instead of recursing per link: [[Call]] on a bound
+            // function only prepends its arguments and swaps `this`, none of it
+            // observable, so a 200,000-link chain must not cost 200,000 native
+            // frames (#940). Each link's arguments go in front of the ones
+            // collected so far, and the innermost bound `this` is the one used.
+            var bf: *BoundFn = @ptrCast(@alignCast(erased));
+            var target = bf.target;
+            var call_args = try self.concatArgs(bf.args, args);
+            var bound_this = bf.this;
+            while (target.isObject()) {
+                const next = target.asObj().boundFunction() orelse break;
+                bf = @ptrCast(@alignCast(next));
+                call_args = try self.concatArgs(bf.args, call_args);
+                bound_this = bf.this;
+                target = bf.target;
+            }
+            return self.callValueWithThisAtSite(target, call_args, bound_this, site);
         }
         if (obj.errorCtor()) |name| return self.callErrorConstructor(obj, name, args, callee);
         if (obj.hostClassHooks()) |hooks| if (hooks.call) |call| {
@@ -10595,9 +10610,23 @@ pub const Interpreter = struct {
         if (obj.boundFunction()) |erased| {
             // `new (fn.bind(...))(...)`: construct the target with bound args
             // prepended (the bound `this` is ignored by `new`, per spec).
-            const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            const nt = if (std.meta.eql(new_target, callee)) bf.target else new_target;
-            return self.constructNTAtSite(bf.target, try self.concatArgs(bf.args, args), nt, site);
+            // Walked rather than recursed, for the same reason as [[Call]]
+            // (#940); step 4 of 10.4.1.2 applies once per link, so newTarget
+            // follows the chain whenever it still names the link being unwrapped.
+            var bf: *BoundFn = @ptrCast(@alignCast(erased));
+            var current = callee;
+            var target = bf.target;
+            var ctor_args = try self.concatArgs(bf.args, args);
+            var nt = if (std.meta.eql(new_target, current)) target else new_target;
+            while (target.isObject()) {
+                const next = target.asObj().boundFunction() orelse break;
+                current = target;
+                bf = @ptrCast(@alignCast(next));
+                ctor_args = try self.concatArgs(bf.args, ctor_args);
+                if (std.meta.eql(nt, current)) nt = bf.target;
+                target = bf.target;
+            }
+            return self.constructNTAtSite(target, ctor_args, nt, site);
         }
         if (obj.errorCtor()) |name| return self.callErrorConstructor(obj, name, args, new_target);
         if (obj.hostClassHooks()) |hooks| if (hooks.construct) |construct_callback| {
@@ -14983,6 +15012,10 @@ pub const Interpreter = struct {
     /// without a JS call frame, so the normal call-depth limit wouldn't catch it).
     fn proxyDepth(self: *Interpreter) EvalError!void {
         try self.stackGuard();
+        // A trap-less link forwards to its target without crossing a JS call
+        // boundary, so `depth` never moves and `stackGuard` cannot see a chain
+        // of them; the native frames are real either way (#940).
+        try self.checkNesting();
     }
 
     /// [[GetPrototypeOf]] of an (unwrapped) prototype value for a target object,
@@ -19642,6 +19675,10 @@ pub const Interpreter = struct {
     }
 
     fn flattenIntoLen(self: *Interpreter, dst: Value, src: *value.Object, len: usize, depth: f64, start: usize) EvalError!usize {
+        // Element reads can run user code, so the nesting has to stay recursive;
+        // charge it to the stack floor instead. `depth` is a Number, so
+        // `Infinity - 1` never terminates on a self-referential array (#940).
+        try self.checkNesting();
         const source = Value.obj(src);
         const roots = try self.pushTempRootSlice(&.{ dst, source });
         defer self.restoreTempRoots(roots);
@@ -21898,30 +21935,54 @@ pub const Interpreter = struct {
     }
 
     pub fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
-        if (!r.isObject())
-            return self.throwError("TypeError", "Right-hand side of 'instanceof' is not an object");
-        // InstanceofOperator: GetMethod(r, @@hasInstance) takes precedence — a
-        // custom `[Symbol.hasInstance]` (even on a non-callable object) decides
-        // membership, with ToBoolean applied to its result.
-        if (self.wellKnownSymbolKey("hasInstance")) |hk| {
-            const handler = try self.getProperty(r, hk);
-            if (!handler.isUndefined() and !handler.isNull()) {
-                if (!handler.isCallable())
-                    return self.throwError("TypeError", "Symbol.hasInstance method is not callable");
-                // Fast path: the default %Function.prototype[@@hasInstance]% just
-                // does OrdinaryHasInstance — skip building a call frame for it.
-                if (handler.isObject() and handler.asObj().native == functionHasInstanceFn)
-                    return if (r.asObj().isCallableObject()) self.ordinaryHasInstance(r.asObj(), l) else false;
-                return (try self.callValueWithThis(handler, &.{l}, r)).toBoolean();
+        // OrdinaryHasInstance step 2 re-enters InstanceofOperator once per
+        // [[BoundTargetFunction]] link. Nothing between two links runs user
+        // code, so unwrap the chain in this frame rather than recursing into it
+        // (#940); each hop still repeats the observable @@hasInstance lookup.
+        var right = r;
+        while (true) {
+            if (!right.isObject())
+                return self.throwError("TypeError", "Right-hand side of 'instanceof' is not an object");
+            // InstanceofOperator: GetMethod(r, @@hasInstance) takes precedence — a
+            // custom `[Symbol.hasInstance]` (even on a non-callable object) decides
+            // membership, with ToBoolean applied to its result.
+            if (self.wellKnownSymbolKey("hasInstance")) |hk| {
+                const handler = try self.getProperty(right, hk);
+                if (!handler.isUndefined() and !handler.isNull()) {
+                    if (!handler.isCallable())
+                        return self.throwError("TypeError", "Symbol.hasInstance method is not callable");
+                    // Fast path: the default %Function.prototype[@@hasInstance]% just
+                    // does OrdinaryHasInstance — skip building a call frame for it.
+                    if (handler.isObject() and handler.asObj().native == functionHasInstanceFn) {
+                        if (!right.asObj().isCallableObject()) return false;
+                        if (boundTargetOf(right.asObj())) |target| {
+                            right = target;
+                            continue;
+                        }
+                        return self.ordinaryHasInstance(right.asObj(), l);
+                    }
+                    return (try self.callValueWithThis(handler, &.{l}, right)).toBoolean();
+                }
             }
+            if (right.asObj().hostClassHooks()) |hooks| if (hooks.has_instance) |has_instance| {
+                self.recordExecutionTier(.host_callbacks);
+                return has_instance(@ptrCast(self), right.asObj(), l);
+            };
+            if (!right.asObj().isCallableObject())
+                return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
+            if (boundTargetOf(right.asObj())) |target| {
+                right = target;
+                continue;
+            }
+            return self.ordinaryHasInstance(right.asObj(), l);
         }
-        if (r.asObj().hostClassHooks()) |hooks| if (hooks.has_instance) |has_instance| {
-            self.recordExecutionTier(.host_callbacks);
-            return has_instance(@ptrCast(self), r.asObj(), l);
-        };
-        if (!r.asObj().isCallableObject())
-            return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
-        return self.ordinaryHasInstance(r.asObj(), l);
+    }
+
+    /// The [[BoundTargetFunction]] of a bound function exotic object, if it is one.
+    fn boundTargetOf(o: *value.Object) ?Value {
+        const erased = o.boundFunction() orelse return null;
+        const bf: *BoundFn = @ptrCast(@alignCast(erased));
+        return bf.target;
     }
 
     /// OrdinaryHasInstance(C=`rc`, O=`l`): is `rc.prototype` in `l`'s prototype
@@ -23673,11 +23734,14 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 }
 
 pub fn objectToStringIsArray(self: *Interpreter, o: *value.Object) EvalError!bool {
-    if (o.proxyHandler() != null or o.proxy_revoked) {
-        const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform IsArray on a revoked proxy");
-        return objectToStringIsArray(self, target);
+    // IsArray(argument) recurses through proxy targets, but nothing between two
+    // links is observable, so walk the chain instead of recursing: a deep chain
+    // answers rather than exhausting the stack (#940).
+    var current = o;
+    while (current.proxyHandler() != null or current.proxy_revoked) {
+        current = current.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform IsArray on a revoked proxy");
     }
-    return o.is_array;
+    return current.is_array;
 }
 
 /// Internal key of the well-known `Symbol.toStringTag`, for `@@toStringTag`.

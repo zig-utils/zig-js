@@ -337,6 +337,60 @@ const runtime_cases = [_]Case{
         .expected = 2047,
     },
     .{
+        // #940: a deep chain built at *runtime* -- nested arrays, trap-less
+        // proxies, bound functions -- is walked under one native built-in call,
+        // so `stackGuard`'s call-depth counter never moves and the recursion
+        // ran off the stack. Where a link can run user code (flat reads
+        // elements) the answer is the RangeError; where nothing between links
+        // is observable (bound [[Call]]/[[Construct]], IsArray) the chain is
+        // walked and the operation answers, as it does in other engines.
+        .name = "deep runtime chains answer or raise RangeError instead of crashing",
+        .source =
+        \\function outcome(run) {
+        \\  try { return run(); }
+        \\  catch (e) { return e instanceof RangeError && e.message === "Maximum call stack size exceeded." ? "range" : "other: " + e; }
+        \\}
+        \\function chainProxy(base, n) { var p = base; for (var i = 0; i < n; i++) p = new Proxy(p, {}); return p; }
+        \\// A bound function's name is "bound " + the target's, so a chain of them
+        \\// stores a quadratic amount of text (#942). Reset the configurable name
+        \\// each link: this case is about the frames, not the names.
+        \\function chainBound(f, n) { for (var i = 0; i < n; i++) { f = f.bind(null); Object.defineProperty(f, "name", { value: "" }); } return f; }
+        \\function nestArray(n) { var root = [], cur = root; for (var i = 0; i < n; i++) { var inner = []; cur.push(inner); cur = inner; } cur.push(1); return root; }
+        \\var checks = [];
+        \\// flat: `depth` is a Number, so `Infinity - 1` never ends a cycle.
+        \\var self_ref = [1]; self_ref.push(self_ref);
+        \\checks.push(outcome(function () { return self_ref.flat(Infinity).length; }) === "range");
+        \\checks.push(outcome(function () { return nestArray(100000).flat(Infinity).length; }) === "range");
+        \\checks.push(nestArray(50).flat(Infinity).length === 1);
+        \\// Trap-less proxy links forward without a JS call between them.
+        \\var deep_proxy = chainProxy({}, 150000);
+        \\checks.push(outcome(function () { return Object.getPrototypeOf(deep_proxy); }) === "range");
+        \\checks.push(outcome(function () { return Object.isExtensible(deep_proxy); }) === "range");
+        \\checks.push(outcome(function () { return Object.defineProperty(deep_proxy, "x", { value: 1 }); }) === "range");
+        \\checks.push(outcome(function () { return Object.prototype.toString.call(chainProxy([], 150000)); }) === "range");
+        \\// A shallow chain still forwards, and IsArray still sees through it.
+        \\checks.push(Object.getPrototypeOf(chainProxy({}, 5)) === Object.prototype);
+        \\checks.push(Object.prototype.toString.call(chainProxy([], 5)) === "[object Array]");
+        \\// Bound chains are walked, so they answer at any length.
+        \\checks.push(outcome(function () { return chainBound(function () { return 7; }, 80000)(); }) === 7);
+        \\function Ctor() { this.v = 5; this.nt = new.target; }
+        \\var deep_ctor = chainBound(Ctor, 80000);
+        \\checks.push(outcome(function () { return new deep_ctor().v; }) === 5);
+        \\checks.push(outcome(function () { return ({}) instanceof chainBound(function () {}, 80000); }) === false);
+        \\// The walk preserves bound argument order, the innermost bound `this`,
+        \\// and step 4 of [[Construct]] in both directions.
+        \\function rec(a, b, c) { return [this.tag, a, b, c].join(","); }
+        \\checks.push(rec.bind({ tag: "t" }, 1).bind({ tag: "ignored" }, 2)(3) === "t,1,2,3");
+        \\var b2 = Ctor.bind(null).bind(null);
+        \\checks.push(new b2().nt === Ctor);
+        \\function Other() {}
+        \\checks.push(Reflect.construct(b2, [], Other).nt === Other);
+        \\// One bit per check, so a failure names the shape that regressed.
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 32767,
+    },
+    .{
         // #935: the parser builds left-associative chains in a loop, and a
         // template literal desugars to two links per substitution, so a flat
         // source hands evaluation a spine as long as its operand count. Every

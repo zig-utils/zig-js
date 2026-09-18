@@ -1769,6 +1769,10 @@ pub fn defineDescriptorResult(self: *Interpreter, target: *value.Object, key: []
 }
 
 fn applyDescriptor(self: *Interpreter, target_input: *value.Object, key: []const u8, descriptor_input: PropertyDescriptor) HostError!bool {
+    // A trap-less proxy forwards [[DefineOwnProperty]] to its target by
+    // re-entering here, without crossing a JS call boundary that `stackGuard`
+    // could count (#940).
+    try self.checkNesting();
     std.debug.assert((descriptor_input.get == null and descriptor_input.set == null) or
         (descriptor_input.value == null and descriptor_input.writable == null));
     const target_root = try self.pushTempRoot(Value.obj(target_input));
