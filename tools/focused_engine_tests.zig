@@ -391,6 +391,56 @@ const runtime_cases = [_]Case{
         .expected = 32767,
     },
     .{
+        // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
+        // self-referential array recursed until the stack guard threw, where
+        // JavaScriptCore and V8 render a re-entered receiver as the empty
+        // string. Every expected string below was taken from the JavaScriptCore
+        // oracle (home-tool); node agrees on all of them except the separator
+        // count, where JSC checks the cycle before coercing and V8 after.
+        .name = "cyclic arrays join as the empty string instead of throwing",
+        .source =
+        \\var checks = [];
+        \\var a = [1]; a.push(a);
+        \\checks.push(String(a) === "1,");
+        \\var b = [1, [2]]; b[1].push(b);
+        \\checks.push(b.join("-") === "1-2,");
+        \\var o = { toString: function () { return "O"; } };
+        \\var c = [o]; c.push(c);
+        \\checks.push(c.toLocaleString() === "O,");
+        \\// The re-entered call returns before coercing its separator again.
+        \\var calls = 0;
+        \\var sep = { toString: function () { calls++; return "-"; } };
+        \\var d = [1];
+        \\d.push({ toString: function () { return d.join(sep); } });
+        \\checks.push(d.join(sep) === "1-" && calls === 1);
+        \\// The receiver leaves the set on a throw from a user toString, so the
+        \\// next join of the same array is not silently empty.
+        \\var bad = { toString: function () { throw new Error("boom"); } };
+        \\var f = [bad]; f.push(f);
+        \\var threw = false;
+        \\try { f.join(); } catch (e) { threw = e.message === "boom"; }
+        \\checks.push(threw);
+        \\f[0] = 1;
+        \\checks.push(f.join() === "1,");
+        \\// The same array twice in one join is not a cycle: it renders twice.
+        \\var sib = [1, 2];
+        \\checks.push([sib, sib].join("|") === "1,2|1,2");
+        \\// A cycle that re-enters through a plain object's toString.
+        \\var g = [1]; g.push({ toString: function () { return g.join(); } });
+        \\checks.push(g.join() === "1,");
+        \\// A two-array cycle renders the inner array as empty.
+        \\var i2 = [1]; var j2 = [i2]; i2.push(j2);
+        \\checks.push(String(i2) === "1,");
+        \\// Deep but acyclic nesting still renders in full.
+        \\var deep = []; var cur = deep;
+        \\for (var k = 0; k < 40; k++) { var n = [k]; cur.push(n); cur = n; }
+        \\checks.push(deep.join(",").length === 109);
+        \\// One bit per check, so a failure names the shape that regressed.
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 1023,
+    },
+    .{
         // #935: the parser builds left-associative chains in a loop, and a
         // template literal desugars to two links per substitution, so a flat
         // source hands evaluation a spine as long as its operand count. Every

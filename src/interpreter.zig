@@ -681,6 +681,13 @@ fn lithuanianUpper(self: *Interpreter, s: []const u8) EvalError![]const u8 {
 /// catchable JS `Error` objects raised via `error.Throw`.)
 pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 
+/// Receivers whose `Array.prototype.join`/`toLocaleString` is in progress, in
+/// entry order (#941). Nesting is bounded by the call-depth guard, so a linear
+/// scan per entry is what JavaScriptCore does here too.
+const ArrayJoinActive = struct {
+    items: std.ArrayListUnmanaged(value.RuntimeObjectIdentity) = .empty,
+};
+
 /// Context-owned source identity attached to a parsed statement. Protocol
 /// adapters keep their own script registry; the evaluator only needs a stable
 /// id and exact source coordinates at each statement boundary.
@@ -4057,6 +4064,14 @@ pub const Interpreter = struct {
     /// same-size field reorder does not). At alignment 1 it lands after every
     /// existing field, leaves their offsets alone, and measures at parity.
     stack_floor: usize align(1) = std.math.maxInt(usize),
+
+    /// Receivers whose `Array.prototype.join` or `toLocaleString` is running on
+    /// this interpreter (#941). ECMA-262 defines no cycle detection, so a
+    /// self-referential array recurses until the stack guard throws; every major
+    /// engine instead renders a re-entered receiver as the empty string, and web
+    /// and Bun code relies on that. Allocated on first use and declared here,
+    /// byte-aligned, for the layout reason `stack_floor` above documents.
+    array_join_active: ?*ArrayJoinActive align(1) = null,
 
     /// Bytes in the explicit Promise/next-tick root frontier at a precise
     /// safepoint. Nursery scheduling uses this to amortize a root scan against
@@ -18877,6 +18892,12 @@ pub const Interpreter = struct {
         }
         if (eq(name, "join")) {
             const roots = operand_roots.?;
+            // A receiver already being joined renders as the empty string (#941).
+            // The check precedes the separator coercion because that is where
+            // JavaScriptCore checks: re-entering `a.join(sep)` from an element's
+            // toString coerces `sep` once in JSC, twice in V8.
+            if (try self.enterArrayJoin(self.tempRoot(roots, receiver).asObj())) return Value.str("");
+            defer self.leaveArrayJoin();
             // The separator and each element coerce via ToString (which runs a
             // custom toString/valueOf), not raw formatting.
             const sep = if (args.len > 0 and !self.arrayMethodArgument(roots, args, 0).isUndefined())
@@ -18908,6 +18929,10 @@ pub const Interpreter = struct {
         }
         if (eq(name, "toLocaleString")) {
             const roots = operand_roots.?;
+            // Shares join's cycle set: `toLocaleString` renders elements itself,
+            // so a cycle here never reaches join's own check (#941).
+            if (try self.enterArrayJoin(self.tempRoot(roots, receiver).asObj())) return Value.str("");
+            defer self.leaveArrayJoin();
             // Like join(","), but each present element is rendered via
             // ToString(? Invoke(element, "toLocaleString", « locales, options »)).
             var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -21976,6 +22001,30 @@ pub const Interpreter = struct {
             }
             return self.ordinaryHasInstance(right.asObj(), l);
         }
+    }
+
+    /// Mark `receiver`'s join as in progress. Returns true when this receiver is
+    /// already being joined, which JavaScriptCore and V8 both render as the
+    /// empty string. Paired with `leaveArrayJoin` on every exit path, including
+    /// a throw from a user `toString`. Identities are relocation-stable, so a
+    /// collection during an element's ToString cannot alias a moved receiver.
+    fn enterArrayJoin(self: *Interpreter, receiver: *value.Object) EvalError!bool {
+        const identity = value.RuntimeObjectIdentity.init(receiver);
+        const active = self.array_join_active orelse blk: {
+            const created = try self.arena.create(ArrayJoinActive);
+            created.* = .{};
+            self.array_join_active = created;
+            break :blk created;
+        };
+        for (active.items.items) |ancestor| if (ancestor.eql(identity)) return true;
+        // Appended only after the scan, so a failed append leaves no membership.
+        try active.items.append(self.arena, identity);
+        return false;
+    }
+
+    fn leaveArrayJoin(self: *Interpreter) void {
+        const active = self.array_join_active orelse return;
+        _ = active.items.pop();
     }
 
     /// The [[BoundTargetFunction]] of a bound function exotic object, if it is one.
