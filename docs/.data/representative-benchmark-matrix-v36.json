@@ -1,0 +1,46 @@
+{
+  "schema_version": 36,
+  "matrix_id": "zig-js-representative-v36",
+  "status": "frozen",
+  "frozen_date": "2026-09-18",
+  "owner_issue": 933,
+  "history_policy": "This version hash-inherits every V35 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, evidence schema, validator, and publication ruling. It changes no scored row or production engine behavior. It re-pins the frontend native runner after #933 items 2 and 8c edited it: item 2 froze function-body variants of the #926 and #928 growth shapes plus the #932 catch shape, and item 8c replaced a stale compile expectation. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v35",
+    "path": "docs/.data/representative-benchmark-matrix-v35.json",
+    "sha256": "56965522e4300566712570c0a6ffa7394d1972d27a1507b546b8018c6831c16f",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration"
+    ]
+  },
+  "change": "Re-pins bench/frontend_parse.zig after #933 item 2 added function-body growth rows (`\u2026_in_function_\u2026` for the four #926 private-nesting shapes and the four #928 lexical-scan shapes, plus a new `representative_frontend_catch_destructure_*` family for #932's shape at both scopes) and #933 item 8c updated `validateBindingInventoryCompileProgram`: lexical destructuring compiles since a2d301ae (#730), so the destructure row now pins the lowering's local budget instead of expecting an `unsupported_lowering` rejection. Those diagnostic parser rows remain outside inherited representative coverage. The zig-js comparison runner pin, every representative workload, job count, checksum, attribution, allocation replay, timing, occupancy, stability, process classification, provenance and publication rule are unchanged.",
+  "exact_parent_integration": {
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "8bb9c43959c5d4d5323fe05bf25e8aa8b26edddfad0815ad53838dc1897acb7e"
+      }
+    ],
+    "publication_boundary": "V36 preserves every V35 timing, efficiency, cleanliness, checksum, serial-child, process-classification, provenance, evidence-schema and mixed-tier allocation-replay gate. The frontend parser growth diagnostics, including the new function-body rows, retain their separate non-representative evidence boundary."
+  }
+}

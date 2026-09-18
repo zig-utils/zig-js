@@ -83,7 +83,7 @@ export function selfTest(): void {
   rejects("frontend native runner drift", value => { value.exact_parent_integration.native_runners[1].sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.native_runners[1].sha256 = "0".repeat(64); }, "changed without a matrix version bump");
   rejects("explicit provenance mode drift", value => { value.exact_parent_integration.binary_provenance_profiles.schema_v4 = "implicit"; value.completed_metric_panels.efficiency_thermal.scored_integration.binary_provenance_profiles.schema_v4 = "implicit"; }, "V34 binary provenance profile drift");
   rejects("workload source identity drift", value => { value.exact_parent_integration.workload_source_identity = "unchecked"; value.completed_metric_panels.efficiency_thermal.scored_integration.workload_source_identity = "unchecked"; }, "V34 workload source identity drift");
-  rejects("unsupported future matrix", value => { value.schema_version = 36; }, "unsupported representative matrix schema");
+  rejects("unsupported future matrix", value => { value.schema_version = 37; }, "unsupported representative matrix schema");
   console.log("representative matrix structural tests: 75/75 passed");
 }
 

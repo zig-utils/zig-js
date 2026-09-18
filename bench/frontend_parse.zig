@@ -231,6 +231,46 @@ fn workloadWidth(name: []const u8) !usize {
     // 297 MB at 2048 for a 98 KB source. The rows stop there because 4096 would
     // retain ~1.2 GB -- wide enough to show the curve, narrow enough to stay
     // inside the memory cap.
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_single_inner_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_no_inherited_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_nested_deep_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_wide_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_flat_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_nested_lets_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_lexical_scan_no_lexical_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_256")) return 256;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_512")) return 512;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_1024")) return 1024;
@@ -908,6 +948,56 @@ const PrivateNestedShape = enum {
     deep,
 };
 
+/// Whether this row parses its shape inside a function body rather than at the
+/// top level. The frozen #926 and #928 rows parse top-level scripts, so they
+/// cannot see work that only a function body reaches -- var hoisting, the Annex B
+/// scan, and the parameter/body split (#933 item 2).
+fn isInFunctionWorkload(name: []const u8) bool {
+    return std.mem.indexOf(u8, name, "_in_function_") != null;
+}
+
+/// #932's shape: `catch` parameters that destructure, nested one inside another.
+/// Frozen at top level and inside a function body, because the cost that fix
+/// addressed is charged per enclosing function body.
+fn catchDestructureWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_catch_destructure_");
+}
+
+fn catchDestructureSource(allocator: std.mem.Allocator, width: usize) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..width) |index| {
+        try source.appendSlice(allocator, try std.fmt.allocPrint(
+            allocator,
+            "try {{}} catch ([c{d}]) {{",
+            .{index},
+        ));
+    }
+    for (0..width) |_| try source.append(allocator, '}');
+    return source.items;
+}
+
+fn validateCatchDestructureProgram(statements: anytype, width: usize) !usize {
+    if (statements.len != 1 or width == 0) return error.InvalidProgram;
+    var node = statements[0];
+    var checksum: usize = width;
+    for (0..width) |level| {
+        if (node.* != .try_stmt) return error.InvalidProgram;
+        const handler = node.try_stmt.catch_block orelse return error.InvalidProgram;
+        const parameter = node.try_stmt.catch_param orelse return error.InvalidProgram;
+        // The parameter is what makes this shape: an array pattern, not a name.
+        if (parameter.* != .arr_pattern or parameter.arr_pattern.elems.len != 1) return error.InvalidProgram;
+        if (handler.* != .block) return error.InvalidProgram;
+        checksum += handler.block.len;
+        if (level + 1 == width) {
+            if (handler.block.len != 0) return error.InvalidProgram;
+            break;
+        }
+        if (handler.block.len != 1) return error.InvalidProgram;
+        node = handler.block[0];
+    }
+    return checksum;
+}
+
 fn privateNestedShape(name: []const u8) ?PrivateNestedShape {
     if (std.mem.startsWith(u8, name, "representative_frontend_private_nested_siblings_")) return .siblings;
     if (std.mem.startsWith(u8, name, "representative_frontend_private_nested_single_inner_")) return .single_inner;
@@ -1520,17 +1610,22 @@ fn validateBindingInventoryCompileProgram(
     const expected_params = if (shape == .parameter_shadow) width else 0;
     if (declaration.func_decl.params.len != expected_params) return error.InvalidProgram;
     const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
-    const expected_rejection = shape == .destructure;
     const code = switch (admission) {
-        .compiled => |compiled| if (expected_rejection) return error.InvalidProgram else compiled,
-        .rejected => |reason| {
-            if (!expected_rejection or reason != .unsupported_lowering) return error.InvalidProgram;
-            var checksum = foldChecksum(source.len, width);
-            checksum = foldChecksum(checksum, @backingInt(shape));
-            return foldChecksum(checksum, @backingInt(reason));
-        },
+        // `let [x] = […]` was rejected with `unsupported_lowering` when this
+        // workload was frozen. a2d301ae (#730) lowered plain destructuring
+        // declarations, so every shape here compiles now.
+        .rejected => return error.InvalidProgram,
+        .compiled => |compiled| compiled,
     };
-    const expected_locals = width + expected_params;
+    // A destructuring declaration lowers through iterator temporaries -- one set
+    // per declaration -- so its local budget is a multiple of the width rather
+    // than the width itself. Pinned, so a change in that budget has to be a
+    // deliberate edit here rather than a silent drift.
+    const destructure_locals_per_declaration = 7;
+    const expected_locals = if (shape == .destructure)
+        width * destructure_locals_per_declaration
+    else
+        width + expected_params;
     const checked_inventory = shape == .shadowed or shape == .parameter_shadow or shape == .forward;
     if (code.local_count != expected_locals or
         code.chunk.lexical_slots.len != (if (checked_inventory) width else 0) or
@@ -1713,13 +1808,13 @@ fn validateClassFrameCompileProgram(
 /// ... var vN-1; } ... } }`: every level but the last holds its `let` plus the
 /// next block, and the innermost holds its `let` plus all N vars.
 /// `no_lexical` is the same chain with the `let`s removed.
-fn validateLexicalScanProgram(program: anytype, width: usize, shape: LexicalScanShape) !usize {
-    if (program.* != .program or width == 0) return error.InvalidProgram;
+fn validateLexicalScanProgram(statements: anytype, width: usize, shape: LexicalScanShape) !usize {
+    if (width == 0) return error.InvalidProgram;
     switch (shape) {
         .wide => {
-            if (program.program.len != width) return error.InvalidProgram;
-            var checksum = program.program.len;
-            for (program.program, 0..) |stmt, index| {
+            if (statements.len != width) return error.InvalidProgram;
+            var checksum = statements.len;
+            for (statements, 0..) |stmt, index| {
                 if (stmt.* != .block or stmt.block.len != 2) return error.InvalidProgram;
                 if (!isNamedDecl(stmt.block[0], "let", "a", index)) return error.InvalidProgram;
                 if (!isNamedDecl(stmt.block[1], "var", "v", index)) return error.InvalidProgram;
@@ -1728,8 +1823,8 @@ fn validateLexicalScanProgram(program: anytype, width: usize, shape: LexicalScan
             return checksum;
         },
         .flat => {
-            if (program.program.len != 1) return error.InvalidProgram;
-            const block = program.program[0];
+            if (statements.len != 1) return error.InvalidProgram;
+            const block = statements[0];
             if (block.* != .block or block.block.len != width * 2) return error.InvalidProgram;
             for (block.block[0..width], 0..) |stmt, index|
                 if (!isNamedDecl(stmt, "let", "a", index)) return error.InvalidProgram;
@@ -1741,8 +1836,8 @@ fn validateLexicalScanProgram(program: anytype, width: usize, shape: LexicalScan
             const lets = shape == .nested_lets;
             // Statements per level: the optional `let`, plus one nested block.
             const inner_count: usize = if (lets) 2 else 1;
-            if (program.program.len != 1) return error.InvalidProgram;
-            var node = program.program[0];
+            if (statements.len != 1) return error.InvalidProgram;
+            var node = statements[0];
             for (0..width - 1) |level| {
                 if (node.* != .block or node.block.len != inner_count) return error.InvalidProgram;
                 if (lets and !isNamedDecl(node.block[0], "let", "a", level)) return error.InvalidProgram;
@@ -1790,8 +1885,26 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    const statements = blk: {
+        if (program.* != .program) return error.InvalidProgram;
+        // An `…_in_function_…` row wraps its shape in one carrier function, so
+        // every validator below sees the shape itself, not the carrier
+        // (#933 item 2).
+        if (!isInFunctionWorkload(workload)) break :blk program.program;
+        if (program.program.len != 1) return error.InvalidProgram;
+        const carrier = program.program[0];
+        if (carrier.* != .func_decl or
+            !std.mem.eql(u8, carrier.func_decl.name, "growthCarrier") or
+            carrier.func_decl.params.len != 0 or
+            carrier.func_decl.body.* != .block)
+            return error.InvalidProgram;
+        break :blk carrier.func_decl.body.block;
+    };
+    if (statements.len == 0) return error.InvalidProgram;
+    if (catchDestructureWorkload(workload))
+        return validateCatchDestructureProgram(statements, try workloadWidth(workload));
     if (lexicalScanShape(workload)) |shape|
-        return validateLexicalScanProgram(program, try workloadWidth(workload), shape);
+        return validateLexicalScanProgram(statements, try workloadWidth(workload), shape);
     if (bindingHashCompileShape(workload)) |shape|
         return validateBindingHashCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (classFrameCompileShape(workload)) |shape|
@@ -1955,7 +2068,7 @@ fn parseOnce(
             location.location.byte_offset + location.location.column;
         return checksum;
     }
-    const declaration = program.program[0];
+    const declaration = statements[0];
     if (isRegexLiteralWorkload(workload)) {
         if (program.program.len != 1 or declaration.* != .var_decl) return error.InvalidProgram;
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
@@ -2220,7 +2333,7 @@ pub fn main(init: std.process.Init) !void {
     const private_nested_shape = privateNestedShape(workload);
     const lexical_scan_shape = lexicalScanShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (binding_hash_compile_shape) |shape|
+    const shape_source = if (binding_hash_compile_shape) |shape|
         try bindingHashCompileSource(init.arena.allocator(), width, shape)
     else if (class_frame_compile_shape) |shape|
         try classFrameCompileSource(init.arena.allocator(), width, shape)
@@ -2260,6 +2373,8 @@ pub fn main(init: std.process.Init) !void {
         try moduleSource(init.arena.allocator(), width)
     else if (isTaggedSubstitutionWorkload(workload))
         try taggedSubstitutionSource(init.arena.allocator(), width)
+    else if (catchDestructureWorkload(workload))
+        try catchDestructureSource(init.arena.allocator(), width)
     else if (lexical_scan_shape) |shape|
         try lexicalScanSource(init.arena.allocator(), width, shape)
     else if (private_nested_shape) |shape|
@@ -2314,6 +2429,13 @@ pub fn main(init: std.process.Init) !void {
             else
                 .ordinary,
         );
+    // An `…_in_function_…` row measures the same shape inside a function body,
+    // where the parser does work a top-level parse never reaches (#933 item 2).
+    // The carrier is parsed, never run, so it adds one declaration and nothing else.
+    const source = if (isInFunctionWorkload(workload))
+        try std.fmt.allocPrint(init.arena.allocator(), "function growthCarrier() {{{s}}}", .{shape_source})
+    else
+        shape_source;
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
