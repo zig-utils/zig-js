@@ -294,6 +294,49 @@ const runtime_cases = [_]Case{
         .expected = 2097151,
     },
     .{
+        // #938: the tree-walker recursed over statements, expressions, patterns,
+        // hoisting and class member copies within a single call, where
+        // stackGuard does not look, and crashed on source the parser accepts.
+        // Every depth up to the parser's limit must evaluate or throw the
+        // RangeError, never crash; a shallow copy of each shape must still work.
+        .name = "deeply nested source evaluates or raises RangeError in the tree-walker",
+        .source =
+        \\function outcome(run) {
+        \\  try { run(); return 1; }
+        \\  catch (e) { return e instanceof RangeError && e.message === "Maximum call stack size exceeded." ? 2 : 0; }
+        \\}
+        \\// Evaluated by indirect eval, which the tree-walker runs. One bit per shape.
+        \\var shapes = [
+        \\  function (n) { return "'use strict'; var x; " + "{".repeat(n) + "x = 1;" + "}".repeat(n); },
+        \\  function (n) { return "var x; " + "if (1) ".repeat(n) + "x = 1;"; },
+        \\  function (n) { var s = "var x; "; for (var i = 0; i < n; i++) s += "l" + i + ": "; return s + "x = 1;"; },
+        \\  function (n) { return "var x; " + "with ({}) ".repeat(n) + "x = 1;"; },
+        \\  function (n) { return "var a = {}; a.b = a; a" + ".b".repeat(n) + ";"; },
+        \\  function (n) { return "var a; " + "a = ".repeat(n) + "1;"; },
+        \\  function (n) { return "!".repeat(n) + "1;"; },
+        \\  function (n) { return "var c = 1; " + "c ? ".repeat(n) + "1" + " : 2".repeat(n) + ";"; },
+        \\  function (n) { return "`${".repeat(n) + "1" + "}`".repeat(n) + ";"; },
+        \\  function (n) { return "var o = " + "[".repeat(n) + "1" + "]".repeat(n) + "; var " + "[".repeat(n) + "z" + "]".repeat(n) + " = o;"; },
+        \\  function (n) { return "(class { #x = 1; m() { " + "{".repeat(n) + "this.#x;" + "}".repeat(n) + " } });"; },
+        \\];
+        \\var bits = 0;
+        \\shapes.forEach(function (shape, i) {
+        \\  var ok = outcome(function () { (0, eval)(shape(50)); }) === 1;
+        \\  for (var n = 250; n <= 64000 && ok; n *= 2) {
+        \\    var parsed = outcome(function () { (0, eval)("function __never() { " + shape(n) + " }"); });
+        \\    var evaluated = outcome(function () { (0, eval)(shape(n)); });
+        \\    if (parsed === 0 || evaluated === 0) ok = false;
+        \\    // Deeper sources add nothing once either limit is reached, and every
+        \\    // evaluated tree stays in the context's arena.
+        \\    if (parsed === 2 || evaluated === 2) break;
+        \\  }
+        \\  if (ok) bits |= 1 << i;
+        \\});
+        \\bits
+        ,
+        .expected = 2047,
+    },
+    .{
         // #935: the parser builds left-associative chains in a loop, and a
         // template literal desugars to two links per substitution, so a flat
         // source hands evaluation a spine as long as its operand count. Every
@@ -449,6 +492,24 @@ const runtime_cases = [_]Case{
 };
 
 const concurrency_cases = [_]Case{
+    .{
+        // #938: each interpreter reads its stack floor on the thread that
+        // evaluates. A spawned Thread has its own stack, so a floor taken from
+        // another thread would either fail every node or guard nothing. Shallow
+        // nesting must evaluate there, and deep nesting must end in RangeError.
+        .name = "nesting guard uses the evaluating thread's stack",
+        .source =
+        \\const t = new Thread(() => {
+        \\  const outcome = run => { try { run(); return 1; } catch (e) { return e instanceof RangeError ? 2 : 0; } };
+        \\  const shallow = outcome(() => (0, eval)("var x; " + "if (1) ".repeat(300) + "x = 1;"));
+        \\  let deep = 1;
+        \\  for (let n = 1000; n <= 512000 && deep === 1; n *= 2) deep = outcome(() => (0, eval)("var x; " + "if (1) ".repeat(n) + "x = 1;"));
+        \\  return shallow * 10 + deep;
+        \\});
+        \\t.join()
+        ,
+        .expected = 12,
+    },
     .{
         .name = "atomic increments",
         .source =

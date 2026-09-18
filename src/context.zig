@@ -10419,7 +10419,10 @@ pub const Context = struct {
             machine.stack_trace_call_frame = saved_stack_trace_call_frame;
         }
         if (!m.body_hoisted) {
-            try machine.hoistVarNames(m.items);
+            // Hoisting can throw (a body nested deeper than the stack allows,
+            // #938); record it as this module's evaluation error like any
+            // other throw, or the module stays "evaluating" forever.
+            machine.hoistVarNames(m.items) catch |err| return self.finishModuleError(machine, m, err);
             m.body_hoisted = true;
         }
         while (m.eval_index < m.items.len) {

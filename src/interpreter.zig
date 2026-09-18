@@ -4044,6 +4044,20 @@ pub const Interpreter = struct {
     vm_inline_call_depth: u8 = 0,
     vm_inline_calls_disabled: bool = false,
 
+    /// The stack address below which evaluation stops recursing into nested
+    /// source (#938): statements, expressions, patterns, hoisting and the other
+    /// walks over the tree within one call, which `stackGuard` does not see.
+    /// It starts at the highest address so the first check always takes the
+    /// cold path, which reads the floor on the thread actually evaluating.
+    ///
+    /// Declared last and byte-aligned on purpose: auto layout groups fields by
+    /// alignment, so a naturally-aligned word here — anywhere in the struct —
+    /// pushes `depth` and the flags below it 8 bytes along and costs 3-4% on a
+    /// default-mode call/loop benchmark (an *unused* field reproduces it, and a
+    /// same-size field reorder does not). At alignment 1 it lands after every
+    /// existing field, leaves their offsets alone, and measures at parity.
+    stack_floor: usize align(1) = std.math.maxInt(usize),
+
     /// Bytes in the explicit Promise/next-tick root frontier at a precise
     /// safepoint. Nursery scheduling uses this to amortize a root scan against
     /// at least the same amount of young allocation; a multi-million-job burst
@@ -4069,6 +4083,21 @@ pub const Interpreter = struct {
     /// recursing, so a deep-recursing peer throws instead of crashing the
     /// process. Each spawned `Thread` registered its stack bounds on entry
     /// (`stack_scan.enter` → `registerThreadBounds`).
+    /// Recursion that follows source nesting checks here first (#938), so a
+    /// tree deeper than this thread's stack allows raises the same RangeError
+    /// as runaway call recursion instead of overflowing the native stack.
+    pub inline fn checkNesting(self: *Interpreter) EvalError!void {
+        if (stack_scan.stackAddress() <= self.stack_floor) return self.nestingLimitReached();
+    }
+
+    noinline fn nestingLimitReached(self: *Interpreter) EvalError!void {
+        if (self.stack_floor == std.math.maxInt(usize)) {
+            self.stack_floor = stack_scan.nestingStackFloor();
+            if (stack_scan.stackAddress() > self.stack_floor) return;
+        }
+        return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded.");
+    }
+
     pub inline fn stackGuard(self: *Interpreter) EvalError!void {
         // Shallow-call hot path: a single compare, identical to the old guard.
         // Only once a chain is already deep do we pay the logical-limit check
@@ -4329,7 +4358,7 @@ pub const Interpreter = struct {
         // parameter scope); `arguments` has its own separate restriction.
         if (self.in_param_default) {
             for (vars.items) |n|
-                if (!eq(n, "arguments") and paramsBindName(self.cur_func_params, n))
+                if (!eq(n, "arguments") and try self.paramsBindName(self.cur_func_params, n))
                     return self.throwError("SyntaxError", "eval cannot var-declare a parameter name in a parameter default");
         }
         var env: *Environment = self.env;
@@ -4408,6 +4437,7 @@ pub const Interpreter = struct {
     }
 
     fn collectTopLexNamesNode(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |d| if (d.kind != .@"var" and d.name.len > 0) try out.append(self.arena, d.name),
             .destructure_decl => |d| if (d.kind != .@"var") try self.evalPatternVarNames(d.pattern, out),
@@ -4425,6 +4455,7 @@ pub const Interpreter = struct {
     }
 
     fn collectEvalVarNamesNode(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |d| if (d.kind == .@"var" and d.name.len > 0) try out.append(self.arena, d.name),
             .destructure_decl => |d| if (d.kind == .@"var") try self.evalPatternVarNames(d.pattern, out),
@@ -4456,6 +4487,7 @@ pub const Interpreter = struct {
     }
 
     fn evalPatternVarNames(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        try self.checkNesting();
         switch (node.*) {
             .identifier => |n| try out.append(self.arena, n),
             .obj_pattern => |p| {
@@ -4574,6 +4606,7 @@ pub const Interpreter = struct {
 
     /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
     fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) EvalError!void {
+        try self.checkNesting();
         switch (target.*) {
             .identifier => |name| {
                 try self.env.put(name, tdz);
@@ -4600,6 +4633,7 @@ pub const Interpreter = struct {
     }
 
     fn checkRestrictedGlobalLexicalPattern(self: *Interpreter, target: *Node) EvalError!void {
+        try self.checkNesting();
         switch (target.*) {
             .identifier => |name| try self.checkRestrictedGlobalLexical(name),
             .obj_pattern => |p| {
@@ -5320,10 +5354,11 @@ pub const Interpreter = struct {
         return @import("annex_b.zig").functionDeclaration(node);
     }
 
-    fn labeledStatementTargetsIteration(node: *const Node) bool {
+    fn labeledStatementTargetsIteration(self: *Interpreter, node: *const Node) EvalError!bool {
+        try self.checkNesting();
         return switch (node.*) {
             .while_stmt, .do_while_stmt, .for_stmt, .for_in => true,
-            .labeled_stmt => |statement| labeledStatementTargetsIteration(statement.body),
+            .labeled_stmt => |statement| try self.labeledStatementTargetsIteration(statement.body),
             else => false,
         };
     }
@@ -5678,6 +5713,7 @@ pub const Interpreter = struct {
     /// this before bypassing `eval`; otherwise a tier-local fast path can delay
     /// host progress or lose the cooperative scheduling point the AST carries.
     fn beginNodeEvaluation(self: *Interpreter, node: *const Node) EvalError!void {
+        try self.checkNesting();
         try self.serviceDebugStatement(node);
         self.steps += 1;
         if (self.steps > self.step_budget) return self.throwError("RangeError", "evaluation step budget exceeded");
@@ -6258,7 +6294,7 @@ pub const Interpreter = struct {
             .labeled_stmt => |l| blk: {
                 const saved_labels_len = self.current_labels.items.len;
                 const saved_labels_consumed = self.labels_consumed;
-                if (labeledStatementTargetsIteration(l.body)) try self.current_labels.append(self.arena, l.label);
+                if (try self.labeledStatementTargetsIteration(l.body)) try self.current_labels.append(self.arena, l.label);
                 defer {
                     self.current_labels.items.len = saved_labels_len;
                     self.labels_consumed = saved_labels_consumed;
@@ -6422,6 +6458,13 @@ pub const Interpreter = struct {
     /// control state and suppresses recursive debugger stops while the command
     /// itself runs.
     pub fn evaluateForDebugger(self: *Interpreter, source: []const u8, environment: *Environment, this_value: Value, strict: bool) EvalError!Value {
+        // An inspector may evaluate on a paused interpreter from the thread that
+        // dispatched the command, whose stack is not the one the cached floor
+        // describes. Measure it again here and restore the paused thread's
+        // floor afterwards; that thread is blocked while this runs (#938).
+        const saved_stack_floor = self.stack_floor;
+        self.stack_floor = std.math.maxInt(usize);
+        defer self.stack_floor = saved_stack_floor;
         // Functions/classes created by the command retain AST slices into the
         // parser input after this call returns. Match Context evaluation's
         // ownership boundary instead of borrowing the debugger transport buffer.
@@ -6883,7 +6926,7 @@ pub const Interpreter = struct {
         // if any. They get a fresh, value-copied environment each iteration so a
         // closure created in the body captures that iteration's binding.
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
-        if (init_node) |ini| collectForLexNames(ini, &names, self.arena);
+        if (init_node) |ini| try self.collectForLexNames(ini, &names, self.arena);
         const lexical = names.items.len > 0;
 
         const outer = self.env;
@@ -7042,20 +7085,21 @@ pub const Interpreter = struct {
 
     /// Collect the names bound by a `for` loop's lexical (`let`/`const`) init.
     /// Returns nothing for a `var`/expression init (no per-iteration scope).
-    fn collectForLexNames(node: *Node, out: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator) void {
+    fn collectForLexNames(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator) EvalError!void {
         switch (node.*) {
             .var_decl => |d| if (d.kind != .@"var") {
-                out.append(arena, d.name) catch {};
+                try out.append(arena, d.name);
             },
             .destructure_decl => |d| if (d.kind != .@"var") {
-                collectPatternNames(d.pattern, out, arena);
+                try self.collectPatternNames(d.pattern, out, arena);
             },
-            .decl_group => |group| for (group) |n| collectForLexNames(n, out, arena),
+            .decl_group => |group| for (group) |n| try self.collectForLexNames(n, out, arena),
             else => {},
         }
     }
 
     fn predeclareForLexicals(self: *Interpreter, node: *Node) EvalError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |decl| if (decl.kind != .@"var") {
                 if (decl.kind == .@"const")
@@ -7072,6 +7116,7 @@ pub const Interpreter = struct {
     }
 
     fn predeclareForLexicalPattern(self: *Interpreter, target: *Node, immutable: bool) EvalError!void {
+        try self.checkNesting();
         switch (target.*) {
             .identifier => |name| {
                 if (immutable)
@@ -7093,16 +7138,17 @@ pub const Interpreter = struct {
     }
 
     /// Append every identifier bound by a destructuring pattern.
-    fn collectPatternNames(target: *Node, out: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator) void {
+    fn collectPatternNames(self: *Interpreter, target: *Node, out: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator) EvalError!void {
+        try self.checkNesting();
         switch (target.*) {
-            .identifier => |name| out.append(arena, name) catch {},
+            .identifier => |name| try out.append(arena, name),
             .obj_pattern => |p| {
-                for (p.props) |pr| collectPatternNames(pr.target, out, arena);
-                if (p.rest) |r| if (r.* == .identifier) out.append(arena, r.identifier) catch {};
+                for (p.props) |pr| try self.collectPatternNames(pr.target, out, arena);
+                if (p.rest) |r| if (r.* == .identifier) try out.append(arena, r.identifier);
             },
             .arr_pattern => |p| {
-                for (p.elems) |e| if (e.target) |t| collectPatternNames(t, out, arena);
-                if (p.rest) |r| collectPatternNames(r, out, arena);
+                for (p.elems) |e| if (e.target) |t| try self.collectPatternNames(t, out, arena);
+                if (p.rest) |r| try self.collectPatternNames(r, out, arena);
             },
             else => {},
         }
@@ -7461,6 +7507,7 @@ pub const Interpreter = struct {
     }
 
     fn hoistVarsIn(self: *Interpreter, node: *Node) EvalError!void {
+        try self.checkNesting();
         switch (node.*) {
             .var_decl => |d| if (d.kind == .@"var") try self.hoistOneVar(d.name),
             .destructure_decl => |d| if (d.kind == .@"var") try self.hoistPatternVars(d.pattern),
@@ -7498,6 +7545,7 @@ pub const Interpreter = struct {
     }
 
     fn hoistPatternVars(self: *Interpreter, pat: *Node) EvalError!void {
+        try self.checkNesting();
         switch (pat.*) {
             .identifier => |name| try self.hoistOneVar(name),
             .obj_pattern => |p| {
@@ -7514,38 +7562,40 @@ pub const Interpreter = struct {
 
     // ---- Annex B B.3.3 block-level function legacy-binding analysis -----------
 
-    fn annexbListMayNeedScan(stmts: []const *Node, depth: u32) bool {
+    fn annexbListMayNeedScan(self: *Interpreter, stmts: []const *Node, depth: u32) EvalError!bool {
+        try self.checkNesting();
         if (depth >= 1) for (stmts) |s| switch (s.*) {
             .func_decl => |f| if (!f.is_generator and !f.is_async) return true,
             .labeled_stmt => if (labeledFunctionDeclNode(s) != null) return true,
             else => {},
         };
-        for (stmts) |s| if (annexbStmtMayNeedScan(s, depth)) return true;
+        for (stmts) |s| if (try self.annexbStmtMayNeedScan(s, depth)) return true;
         return false;
     }
 
-    fn annexbBranchMayNeedScan(node: *const Node, depth: u32) bool {
+    fn annexbBranchMayNeedScan(self: *Interpreter, node: *const Node, depth: u32) EvalError!bool {
         return switch (node.*) {
-            .block => |b| annexbListMayNeedScan(b, depth + 1),
+            .block => |b| try self.annexbListMayNeedScan(b, depth + 1),
             .func_decl => |f| !f.is_generator and !f.is_async,
-            else => annexbStmtMayNeedScan(node, depth),
+            else => try self.annexbStmtMayNeedScan(node, depth),
         };
     }
 
     /// Allocation-free structural pre-scan for the exact statement forms the
     /// Annex B collector traverses. Nested function bodies are intentionally not
     /// entered: each invocation owns its own cached decision.
-    fn annexbStmtMayNeedScan(s: *const Node, depth: u32) bool {
+    fn annexbStmtMayNeedScan(self: *Interpreter, s: *const Node, depth: u32) EvalError!bool {
+        try self.checkNesting();
         return switch (s.*) {
-            .block => |b| annexbListMayNeedScan(b, depth + 1),
-            .if_stmt => |i| annexbBranchMayNeedScan(i.consequent, depth) or
-                (i.alternate != null and annexbBranchMayNeedScan(i.alternate.?, depth)),
-            .while_stmt => |w| annexbBranchMayNeedScan(w.body, depth),
-            .do_while_stmt => |w| annexbBranchMayNeedScan(w.body, depth),
-            .with_stmt => |w| annexbBranchMayNeedScan(w.body, depth),
-            .for_stmt => |f| annexbBranchMayNeedScan(f.body, depth),
-            .for_in => |f| annexbBranchMayNeedScan(f.body, depth),
-            .labeled_stmt => |l| annexbBranchMayNeedScan(l.body, depth),
+            .block => |b| try self.annexbListMayNeedScan(b, depth + 1),
+            .if_stmt => |i| try self.annexbBranchMayNeedScan(i.consequent, depth) or
+                (i.alternate != null and try self.annexbBranchMayNeedScan(i.alternate.?, depth)),
+            .while_stmt => |w| try self.annexbBranchMayNeedScan(w.body, depth),
+            .do_while_stmt => |w| try self.annexbBranchMayNeedScan(w.body, depth),
+            .with_stmt => |w| try self.annexbBranchMayNeedScan(w.body, depth),
+            .for_stmt => |f| try self.annexbBranchMayNeedScan(f.body, depth),
+            .for_in => |f| try self.annexbBranchMayNeedScan(f.body, depth),
+            .labeled_stmt => |l| try self.annexbBranchMayNeedScan(l.body, depth),
             .switch_stmt => |sw| blk: {
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
                     .func_decl => |f| if (!f.is_generator and !f.is_async) break :blk true,
@@ -7553,12 +7603,12 @@ pub const Interpreter = struct {
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs|
-                    if (annexbStmtMayNeedScan(cs, depth + 1)) break :blk true;
+                    if (try self.annexbStmtMayNeedScan(cs, depth + 1)) break :blk true;
                 break :blk false;
             },
-            .try_stmt => |t| annexbBranchMayNeedScan(t.block, depth) or
-                (t.catch_block != null and annexbBranchMayNeedScan(t.catch_block.?, depth)) or
-                (t.finally_block != null and annexbBranchMayNeedScan(t.finally_block.?, depth)),
+            .try_stmt => |t| try self.annexbBranchMayNeedScan(t.block, depth) or
+                (t.catch_block != null and try self.annexbBranchMayNeedScan(t.catch_block.?, depth)) or
+                (t.finally_block != null and try self.annexbBranchMayNeedScan(t.finally_block.?, depth)),
             else => false,
         };
     }
@@ -7784,7 +7834,7 @@ pub const Interpreter = struct {
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
             .annex_b_possible = !fnode.is_strict and switch (fnode.body.*) {
-                .block => |stmts| annexbListMayNeedScan(stmts, 0),
+                .block => |stmts| try self.annexbListMayNeedScan(stmts, 0),
                 else => false,
             },
             .is_method = fnode.is_method,
@@ -8211,6 +8261,7 @@ pub const Interpreter = struct {
     }
 
     fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *const PrivateNameMap) EvalError!void {
+        try self.checkNesting();
         switch (node.*) {
             .identifier => |name| node.* = .{ .identifier = remapPrivateName(map, name) },
             .unary => |u| try self.rewritePrivateNamesInNode(u.operand, map),
@@ -8444,6 +8495,7 @@ pub const Interpreter = struct {
     }
 
     fn deepCopyNode(self: *Interpreter, node: *const Node) EvalError!*Node {
+        try self.checkNesting();
         if (ast.isChainLink(node)) return self.deepCopyChain(node);
         const n = try self.arena.create(Node);
         n.* = switch (node.*) {
@@ -10225,36 +10277,37 @@ pub const Interpreter = struct {
 
     /// Whether any parameter binds the name `arguments` (a simple param, a rest
     /// param, or a name inside a destructuring pattern).
-    fn paramsBindArguments(params: []const ast.Param) bool {
+    fn paramsBindArguments(self: *Interpreter, params: []const ast.Param) EvalError!bool {
         for (params) |p| {
             if (p.pattern) |pat| {
-                if (patternBindsName(pat, "arguments")) return true;
+                if (try self.patternBindsName(pat, "arguments")) return true;
             } else if (std.mem.eql(u8, p.name, "arguments")) return true;
         }
         return false;
     }
 
-    fn paramsBindName(params: []const ast.Param, name: []const u8) bool {
+    fn paramsBindName(self: *Interpreter, params: []const ast.Param, name: []const u8) EvalError!bool {
         for (params) |parameter| {
             if (parameter.pattern) |pattern| {
-                if (patternBindsName(pattern, name)) return true;
+                if (try self.patternBindsName(pattern, name)) return true;
             } else if (std.mem.eql(u8, parameter.name, name)) return true;
         }
         return false;
     }
 
-    fn patternBindsName(node: *Node, name: []const u8) bool {
+    fn patternBindsName(self: *Interpreter, node: *Node, name: []const u8) EvalError!bool {
+        try self.checkNesting();
         switch (node.*) {
             .identifier => |n| return std.mem.eql(u8, n, name),
             .obj_pattern => |p| {
-                for (p.props) |prop| if (patternBindsName(prop.target, name)) return true;
+                for (p.props) |prop| if (try self.patternBindsName(prop.target, name)) return true;
                 if (p.rest) |r| if (r.* == .identifier and std.mem.eql(u8, r.identifier, name)) return true;
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| if (elem.target) |t| {
-                    if (patternBindsName(t, name)) return true;
+                    if (try self.patternBindsName(t, name)) return true;
                 };
-                if (p.rest) |r| if (patternBindsName(r, name)) return true;
+                if (p.rest) |r| if (try self.patternBindsName(r, name)) return true;
             },
             else => {},
         }
@@ -10413,7 +10466,7 @@ pub const Interpreter = struct {
         // The parameter scope binds `arguments` when this is a non-arrow function
         // (the arguments object) or when a parameter is named `arguments`; in
         // either case a direct eval in a default may not declare `arguments`.
-        const param_scope_has_arguments = !is_arrow or paramsBindArguments(params);
+        const param_scope_has_arguments = !is_arrow or try self.paramsBindArguments(params);
         // ECMA-262 10.2.11: the complete formals BindingInitialization runs in
         // the callee's parameter context, including computed keys, nested
         // defaults, and rest patterns. EvalDeclarationInstantiation must test
@@ -15944,6 +15997,7 @@ pub const Interpreter = struct {
     }
 
     fn bindPattern(self: *Interpreter, target: *Node, val: Value, declare: bool) EvalError!void {
+        try self.checkNesting();
         switch (target.*) {
             .identifier => |name| if (declare)
                 (if (self.binding_hoisted)
@@ -16000,6 +16054,7 @@ pub const Interpreter = struct {
     }
 
     fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?*Node, val: Value, declare: bool) EvalError!void {
+        try self.checkNesting();
         if (val.isUndefined() or val.isNull())
             return self.throwDestructureError(if (props.len != 0 and props[0].key_expr == null) props[0].key else null);
         const source_root = try self.pushTempRoot(val);
@@ -16140,6 +16195,7 @@ pub const Interpreter = struct {
     }
 
     fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value, declare: bool) EvalError!void {
+        try self.checkNesting();
         if (val.isUndefined() or val.isNull())
             return self.throwError("TypeError", notAnObjectMessage(val));
 
@@ -23238,11 +23294,19 @@ fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const buf = self.print_buffer orelse return Value.undef();
-    for (args, 0..) |a, i| {
+    // ToString can run user code, and a collection there must not lose or
+    // move the arguments not yet printed.
+    const roots = try self.pushTempRootSlice(args);
+    defer self.restoreTempRoots(roots);
+    for (args, 0..) |argument, i| {
+        const a = self.tempRoot(roots + i, argument);
         if (i != 0) try buf.append(self.arena, ' ');
         // A flat-latin1 string arg must egress as canonical WTF-8, not its raw
-        // 1-byte-per-unit image; non-strings keep their existing coercion.
-        try buf.appendSlice(self.arena, if (a.isString()) try a.asWtf8(self.arena) else try a.toString(self.arena));
+        // 1-byte-per-unit image. Anything else goes through ECMAScript ToString,
+        // as JavaScriptCore's shell prints it: the host-side conversion recursed
+        // into nested arrays with no stack limit, so printing one nested deeply
+        // enough (or containing itself) overflowed the native stack (#938).
+        try buf.appendSlice(self.arena, if (a.isString()) try a.asWtf8(self.arena) else try self.toStringWtf8(a));
     }
     try buf.append(self.arena, '\n');
     return Value.undef();
