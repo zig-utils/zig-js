@@ -3586,15 +3586,22 @@ fn privateSetPendingValue(context: *Context, thrown: Value) void {
     group.setPendingException(privateExceptionBox(context, thrown, encoded));
 }
 
+/// Publish the VM's construction-time OOM exception without encoding or
+/// boxing after allocation has already failed. Every private context belongs
+/// to a group whose immutable exception cell was admitted before publication.
+fn privateSetPendingOutOfMemory(context: *Context) void {
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    group.setPendingException(group.oom_exception.?);
+}
+
 fn privateSetPendingAbrupt(context: *Context, machine: *interp.Interpreter, err: anyerror) void {
     if (err == error.Throw) {
         privateSetPendingValue(context, machine.exception);
         return;
     }
-    const opaque_group = context.c_api_group orelse return;
-    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    if (group.pending_exception != null) return;
-    group.setPendingException(group.oom_exception.?);
+    privateSetPendingOutOfMemory(context);
 }
 
 fn privateEncodeResult(context: *Context, machine: *interp.Interpreter, result: Value) EncodedValue {
@@ -3991,7 +3998,7 @@ fn privateCreateFFIFunction(
     const object = boxed.value.asObj();
     const pointer_bits: u64 = @intFromPtr(callback);
     object.setOwn(context.arena(), context.root_shape, "ptr", Value.num(@bitCast(pointer_bits))) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     object.setAttr(context.arena(), "ptr", .{
@@ -3999,7 +4006,7 @@ fn privateCreateFFIFunction(
         .enumerable = true,
         .configurable = true,
     }) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     return encoded;
@@ -5103,7 +5110,7 @@ fn privateBunStringValue(
 
 fn privatePublishBunStringError(context: *Context, err: PrivateBunStringError) void {
     if (err == error.OutOfMemory) {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return;
     }
     const gc_saved = gc_mod.setActiveContext(context);
@@ -7912,7 +7919,7 @@ fn privateBunStringPropertyKey(context: *Context, key: *const PrivateBunString) 
 fn privateLatin1PropertyKey(context: *Context, bytes: [*]const u8, len: u32) ?[]const u8 {
     if (len == 0) return "";
     return privateLatin1ToWTF8(context.arena(), bytes[0..len]) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return null;
     };
 }
@@ -9347,11 +9354,11 @@ export fn JSC__JSBigInt__toString(
 
     var stack: [42]u8 = undefined;
     const decimal = object.bigIntText() orelse std.fmt.bufPrint(&stack, "{d}", .{object.bigIntValue()}) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return PrivateBunString.dead();
     };
     return privateOwnedLatin1String(decimal) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return PrivateBunString.dead();
     };
 }
@@ -11821,7 +11828,7 @@ export fn JSC__createStructure(
             };
             if (!name_value.isString()) return .empty;
             const name = privateCanonicalStringBytes(context, name_value) catch {
-                privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                privateSetPendingOutOfMemory(context);
                 return .empty;
             };
             var duplicate = false;
@@ -11833,15 +11840,15 @@ export fn JSC__createStructure(
             }
             if (!duplicate) {
                 const owned = context.arena().dupe(u8, name) catch {
-                    privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                    privateSetPendingOutOfMemory(context);
                     return .empty;
                 };
                 collected.append(context.arena(), owned) catch {
-                    privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                    privateSetPendingOutOfMemory(context);
                     return .empty;
                 };
                 shape = shape.transition(owned) catch {
-                    privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                    privateSetPendingOutOfMemory(context);
                     return .empty;
                 };
             }
@@ -11851,7 +11858,7 @@ export fn JSC__createStructure(
     }
 
     const descriptor = context.arena().create(PrivateStructure) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     descriptor.* = .{
@@ -11862,7 +11869,7 @@ export fn JSC__createStructure(
         .inline_capacity_hint = non_duplicate_count,
     };
     const boxed = context.arena().create(Boxed) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     boxed.* = .{
@@ -12339,7 +12346,7 @@ fn privateFetchHeadersExistingBox(group: *CContextGroup, record: *fetch_headers.
 
 fn privatePublishFetchHeadersError(context: *Context, err: fetch_headers.Error) void {
     if (err == error.OutOfMemory) {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return;
     }
     const gc_saved = gc_mod.setActiveContext(context);
@@ -15563,12 +15570,12 @@ fn privateModuleLoaderPromiseFromBunString(
         return .empty;
     };
     const promise_value = context.loadAndEvaluateModule(decoded.asStr(), "") catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     const encoded = privateEncodedFromValue(context, promise_value);
     if (encoded == .empty)
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
     return encoded;
 }
 
@@ -15600,12 +15607,12 @@ fn privateModuleLoaderEvaluateError(
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
     const reason = machine.makeError(kind, message) catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     const encoded = privateEncodedFromValue(context, reason);
     if (encoded == .empty) {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     }
     if (exception_out) |out| out.* = encoded else privateSetPendingValue(context, reason);
@@ -15615,7 +15622,7 @@ fn privateModuleLoaderEvaluateError(
 fn privateEncodeModuleLoaderValue(context: *Context, result: Value) EncodedValue {
     const encoded = privateEncodedFromValue(context, result);
     if (encoded == .empty)
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
     return encoded;
 }
 
@@ -21614,7 +21621,7 @@ export fn ArrayBuffer__fromSharedMemfd(
     ) catch return .empty;
     const mapping_owner = context.gpa.create(PrivateSharedMemfdMapping) catch {
         std.posix.munmap(mapping);
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     mapping_owner.* = .{ .allocator = context.gpa, .mapping = mapping };
@@ -21726,7 +21733,7 @@ fn privateMakeExternalBufferValue(
 
     const owner = context.createExternalBufferOwner(bytes, deallocator, deallocator_context) catch {
         privateReleaseTransferredInput(bytes, deallocator, deallocator_context);
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return .empty;
     };
     var owner_transferred = false;
@@ -21884,7 +21891,7 @@ fn privateEnsureNativeArrayBufferHandle(
     defer backing.unlockBuffer();
     if (backing.native_handle.load(.acquire)) |existing| {
         if (existing.tryRetainExternal()) return existing;
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return null;
     }
 
@@ -21895,16 +21902,16 @@ fn privateEnsureNativeArrayBufferHandle(
         value.NativeArrayBufferHandle.createExternal(current, backing.max_byte_length)
     else
         value.NativeArrayBufferHandle.createOwned(current, backing.max_byte_length) catch {
-            privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+            privateSetPendingOutOfMemory(context);
             return null;
         };
     const handle = candidate catch {
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return null;
     };
     context.trackNativeArrayBufferHandle(handle) catch {
         privateDiscardNativeArrayBufferHandle(handle);
-        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        privateSetPendingOutOfMemory(context);
         return null;
     };
 
@@ -36135,6 +36142,51 @@ test "host checkpoint exhausted private handle allocator retains a pending excep
     JSGlobalObject__clearException(global);
     privateVMDrainMicrotasks(group);
     try std.testing.expectEqual(@as(usize, 1), fault.calls);
+}
+
+test "private OOM fallbacks publish the admitted exception without allocation" {
+    const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global).?;
+    const group = privatePropertyBoundaryGroup(context).?;
+    const original_context_lock = context.locked_arena;
+    const original_owner_lock = group.primary.locked_arena;
+    defer {
+        context.locked_arena = original_context_lock;
+        group.primary.locked_arena = original_owner_lock;
+    }
+
+    const target_value = try context.evaluate("({ 'caf\xc3\xa9': 42 })");
+    const target = privateEncodedFromValue(context, target_value);
+    try std.testing.expect(target != .empty);
+    const latin1_key = [_]u8{ 'c', 'a', 'f', 0xe9 };
+
+    var property_allocator = std.testing.FailingAllocator.init(context.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    var property_exhausted = ContextMod.LockedArena{ .inner = property_allocator.allocator() };
+    context.locked_arena = &property_exhausted;
+    group.primary.locked_arena = &property_exhausted;
+    try std.testing.expectEqual(
+        EncodedValue.empty,
+        JSC__JSValue__getPropertyValue(target, global, &latin1_key, latin1_key.len),
+    );
+    try std.testing.expect(property_allocator.has_induced_failure);
+    try std.testing.expectEqual(group.oom_exception, group.pending_exception);
+
+    context.locked_arena = original_context_lock;
+    group.primary.locked_arena = original_owner_lock;
+    JSGlobalObject__clearException(global);
+    try std.testing.expect(group.pending_exception == null);
+
+    var module_allocator = std.testing.FailingAllocator.init(context.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    var module_exhausted = ContextMod.LockedArena{ .inner = module_allocator.allocator() };
+    context.locked_arena = &module_exhausted;
+    group.primary.locked_arena = &module_exhausted;
+    try std.testing.expectEqual(
+        EncodedValue.empty,
+        JSC__JSModuleLoader__evaluate(global, null, 1, null, 0, null, 0, .undefined, null),
+    );
+    try std.testing.expect(module_allocator.has_induced_failure);
+    try std.testing.expectEqual(group.oom_exception, group.pending_exception);
 }
 
 test "private exception roots rewrite pending handles across nursery and compaction" {
