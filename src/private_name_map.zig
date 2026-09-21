@@ -12,8 +12,10 @@ const SecureStringHashContext = struct {
     }
 };
 
-/// Immutable runtime PrivateEnvironment mapping. Each evaluated class owns its
-/// context: the map survives parsing and is carried by closures, suspended VM
+/// Immutable runtime PrivateEnvironment. Each evaluated class owns only its
+/// PrivateBoundIdentifiers and points to the enclosing environment, matching
+/// the specification's lexical chain without flattening inherited bindings.
+/// The chain survives parsing and is carried by closures, suspended VM
 /// activations, exception handlers, and direct eval.
 pub const PrivateNameMap = struct {
     const Self = @This();
@@ -31,16 +33,14 @@ pub const PrivateNameMap = struct {
 
     index: Index = .empty,
     context: SecureStringHashContext,
+    parent: ?*const Self = null,
 
     pub fn init(seed: u64) Self {
         return .{ .context = .{ .seed = seed } };
     }
 
-    /// A nested-class shadowing filter contains the same lexical names and is
-    /// invocation-local, so reuse the installed context instead of consuming
-    /// entropy for a transient clone.
-    pub fn emptyClone(self: *const Self) Self {
-        return .{ .context = self.context };
+    pub fn initChild(seed: u64, parent: ?*const Self) Self {
+        return .{ .context = .{ .seed = seed }, .parent = parent };
     }
 
     pub fn put(self: *Self, allocator: std.mem.Allocator, key: []const u8, binding: Binding) std.mem.Allocator.Error!void {
@@ -48,33 +48,35 @@ pub const PrivateNameMap = struct {
     }
 
     pub fn get(self: *const Self, key: []const u8) ?[]const u8 {
-        return if (self.index.getContext(key, self.context)) |binding| binding.storage_key else null;
+        var environment: ?*const Self = self;
+        while (environment) |current| : (environment = current.parent)
+            if (current.index.getContext(key, current.context)) |binding| return binding.storage_key;
+        return null;
     }
 
     /// Resolve diagnostics from the evaluation-unique storage key retained in
     /// rewritten AST/bytecode back to the private element's declaration kind.
     pub fn kindForStorageKey(self: *const Self, storage_key: []const u8) ?Kind {
-        var entries = self.index.iterator();
-        while (entries.next()) |entry|
-            if (std.mem.eql(u8, entry.value_ptr.storage_key, storage_key))
-                return entry.value_ptr.kind;
+        var environment: ?*const Self = self;
+        while (environment) |current| : (environment = current.parent) {
+            var entries = current.index.iterator();
+            while (entries.next()) |entry|
+                if (std.mem.eql(u8, entry.value_ptr.storage_key, storage_key))
+                    return entry.value_ptr.kind;
+        }
         return null;
     }
 
     pub fn contains(self: *const Self, key: []const u8) bool {
+        return self.get(key) != null;
+    }
+
+    pub fn containsOwn(self: *const Self, key: []const u8) bool {
         return self.index.containsContext(key, self.context);
     }
 
-    pub fn remove(self: *Self, key: []const u8) bool {
-        return self.index.removeContext(key, self.context);
-    }
-
-    pub fn count(self: *const Self) usize {
+    pub fn ownCount(self: *const Self) usize {
         return self.index.count();
-    }
-
-    pub fn iterator(self: *const Self) Index.Iterator {
-        return self.index.iterator();
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -82,7 +84,7 @@ pub const PrivateNameMap = struct {
     }
 };
 
-test "runtime private name maps key placement and preserve clone context" {
+test "runtime private name maps preserve secure placement and lexical parents" {
     const target_mask: u64 = 1023;
     const collision_count = 32;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -116,17 +118,18 @@ test "runtime private name maps key placement and preserve clone context" {
     try std.testing.expect(occupied_count > collision_count / 2);
     for (names.items) |name| try std.testing.expect(keyed.contains(name));
 
-    var shadow = keyed.emptyClone();
-    try std.testing.expectEqual(keyed.context.seed, shadow.context.seed);
-    var entries = keyed.iterator();
-    while (entries.next()) |entry| try shadow.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
-    try std.testing.expect(shadow.remove(names.items[0]));
-    try std.testing.expect(!shadow.contains(names.items[0]));
+    var child = PrivateNameMap.initChild(keyed_seed + 1, &keyed);
+    try child.put(allocator, names.items[0], .{ .storage_key = "shadow\x001", .kind = .method_or_accessor });
+    try std.testing.expectEqualStrings("shadow\x001", child.get(names.items[0]).?);
+    try std.testing.expectEqualStrings(keyed.get(names.items[1]).?, child.get(names.items[1]).?);
+    try std.testing.expectEqual(PrivateNameMap.Kind.method_or_accessor, child.kindForStorageKey("shadow\x001").?);
+    try std.testing.expectEqual(PrivateNameMap.Kind.field, child.kindForStorageKey(keyed.get(names.items[0]).?).?);
+    try std.testing.expectEqual(@as(usize, 1), child.ownCount());
     try std.testing.expect(keyed.contains(names.items[0]));
 
     var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
     var failed = PrivateNameMap.init(keyed_seed);
     try std.testing.expectError(error.OutOfMemory, failed.put(unavailable.allocator(), "#first", .{ .storage_key = "private\x001", .kind = .field }));
-    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.ownCount());
     try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
 }

@@ -8303,25 +8303,11 @@ pub const Interpreter = struct {
             .function => |f| try self.rewritePrivateNamesInFunction(f, map),
             .yield_expr => |y| if (y.argument) |a| try self.rewritePrivateNamesInNode(a, map),
             .await_expr => |a| try self.rewritePrivateNamesInNode(a.argument, map),
-            .class_expr => |c| {
-                if (c.superclass) |sc| try self.rewritePrivateNamesInNode(sc, map);
-                var nested_map = map.emptyClone();
-                defer nested_map.deinit(self.arena);
-                var it = map.iterator();
-                while (it.next()) |entry| try nested_map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
-                for (c.members) |m| {
-                    if (m.key_expr == null and value.isRawPrivateName(m.key)) _ = nested_map.remove(m.key);
-                }
-                for (c.members) |m| {
-                    // Computed names see the nested class's own PrivateEnvironment.
-                    // Rewrite only unshadowed outer names now; leave an own raw
-                    // `#name` for that class evaluation to mint and resolve.
-                    if (m.key_expr) |key_expr| try self.rewritePrivateNamesInNode(key_expr, &nested_map);
-                    if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, &nested_map);
-                    if (m.func) |func| try self.rewritePrivateNamesInNode(func, &nested_map);
-                    if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, &nested_map);
-                }
-            },
+            // A nested class creates its own chained PrivateEnvironment when it
+            // is evaluated. Rewriting its subtree here would revisit every
+            // descendant once per enclosing class and would resolve shadowing
+            // before the nested class has minted its own identities (#927).
+            .class_expr => {},
             .super_call => |args| for (args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map),
             .super_member => |sm| {
                 if (sm.computed) |c| {
@@ -8526,7 +8512,10 @@ pub const Interpreter = struct {
             .function => |f| .{ .function = try self.deepCopyFunction(f) },
             .yield_expr => |y| .{ .yield_expr = .{ .argument = try self.deepCopyOpt(y.argument), .delegate = y.delegate } },
             .await_expr => |a| .{ .await_expr = .{ .argument = try self.deepCopyNode(a.argument) } },
-            .class_expr => |c| .{ .class_expr = .{ .name = c.name, .inferred_name = c.inferred_name, .superclass = try self.deepCopyOpt(c.superclass), .members = try self.deepCopyClassMembers(c.members), .source = c.source } },
+            // A nested class owns a later ClassDefinitionEvaluation. Its parent
+            // copy never rewrites across this boundary, so sharing the immutable
+            // subtree lets that evaluation copy only its own body (#927).
+            .class_expr => node.*,
             .super_call => |args| .{ .super_call = try self.deepCopyNodes(args) },
             .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed) } },
             .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional, .source = c.source, .callee_len = c.callee_len } },
@@ -8603,24 +8592,15 @@ pub const Interpreter = struct {
         // Interpreter's invocation-local PRNG state.
         const seed = try self.root_shape.deriveSecureHashSeed();
         const map = try self.arena.create(PrivateNameMap);
-        map.* = PrivateNameMap.init(seed);
+        map.* = PrivateNameMap.initChild(seed, self.current_private_map);
         for (members) |m| {
-            if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
+            if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.containsOwn(m.key)) continue;
             try map.put(self.arena, m.key, .{
                 .storage_key = try self.nextPrivateStorageKey(m.key),
                 .kind = if (m.is_field and !m.is_auto_accessor) .field else .method_or_accessor,
             });
         }
-        std.debug.assert(map.count() != 0);
-        // Keep the published map immutable. Its flattened lookup preserves the
-        // complete lexical private environment without mutating an outer class.
-        if (self.current_private_map) |outer| {
-            var names = outer.iterator();
-            while (names.next()) |entry| {
-                if (!map.contains(entry.key_ptr.*))
-                    try map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
-            }
-        }
+        std.debug.assert(map.ownCount() != 0);
         return map;
     }
 
@@ -8637,21 +8617,6 @@ pub const Interpreter = struct {
             if (m.func) |func| try self.rewritePrivateNamesInNode(func, map);
             if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, map);
         }
-    }
-
-    /// Tree-walker entry combines PrivateEnvironment creation and AST rewriting;
-    /// VM entry performs creation earlier, before its eagerly lowered keys.
-    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const PrivateNameMap {
-        const map = try self.prepareClassPrivateEnvironment(members);
-        if (map) |private_map| {
-            var has_own = false;
-            for (members) |m| if (m.key_expr == null and value.isRawPrivateName(m.key)) {
-                has_own = true;
-                break;
-            };
-            if (has_own) try self.rewriteClassPrivateNamesWithMap(members, private_map);
-        }
-        return map;
     }
 
     /// Evaluate a `class` to a constructor function value: methods go on its
@@ -8711,7 +8676,18 @@ pub const Interpreter = struct {
         self.strict = true;
         defer self.strict = saved_strict;
         if (name.len > 0) try class_env.put(name, self.tdzVal());
-        const prepared = if (superclass) |sc| try self.prepareClassHeritage(try self.eval(sc)) else null;
+        const prepared = if (superclass) |sc| blk: {
+            // An outer rewrite deliberately stops at nested classes. Heritage is
+            // evaluated before this class creates its own PrivateEnvironment, so
+            // resolve a private, evaluation-local copy against the active outer
+            // one now; the source AST remains reusable by another evaluation.
+            const heritage = if (self.current_private_map) |map| heritage: {
+                const copy = try self.deepCopyNode(sc);
+                try self.rewritePrivateNamesInNode(copy, map);
+                break :heritage copy;
+            } else sc;
+            break :blk try self.prepareClassHeritage(try self.eval(heritage));
+        } else null;
         return self.buildClass(
             name,
             inferred_name,
@@ -8766,10 +8742,11 @@ pub const Interpreter = struct {
         const superclass = if (super_obj) |object| Value.obj(object) else Value.nul();
         const superclass_root = try self.pushTempRoot(superclass);
         defer self.restoreTempRoots(superclass_root);
-        // A class with private names is rewritten (`#x` → a unique storage key) in
-        // place. Deep-copy the member ASTs first so EACH evaluation rewrites its
-        // own copy — two evaluations of the same class source then have distinct
-        // private names (the `classfactory()` / multiple-evaluations tests).
+        // A class evaluated inside any PrivateEnvironment rewrites raw names to
+        // that evaluation's storage keys. Copy its own body first, stopping at
+        // nested-class boundaries: each nested class copies its body when its
+        // separate ClassDefinitionEvaluation runs. This preserves per-evaluation
+        // identities without recursively copying the remaining class tree (#927).
         var has_private = false;
         for (members_arg) |m| {
             if (m.key_expr == null and value.isRawPrivateName(m.key)) {
@@ -8777,15 +8754,22 @@ pub const Interpreter = struct {
                 break;
             }
         }
-        const members = if (has_private) try self.deepCopyClassMembers(members_arg) else members_arg;
-        const private_map = if (prepared_private) |prepared| prepared.map else try self.rewriteClassPrivateNames(members);
-        if (prepared_private != null and has_private) {
-            const map = private_map orelse
+        const private_map = if (prepared_private) |prepared|
+            prepared.map
+        else
+            try self.prepareClassPrivateEnvironment(members_arg);
+        const members = if (private_map != null) try self.deepCopyClassMembers(members_arg) else members_arg;
+        if (prepared_private == null) {
+            if (private_map) |map| try self.rewriteClassPrivateNamesWithMap(members, map);
+        } else {
+            if (has_private and private_map == null)
                 return self.throwError("InternalError", "class PrivateEnvironment was not prepared");
-            for (members) |member|
-                if (member.key_expr == null and value.isRawPrivateName(member.key) and map.get(member.key) == null)
-                    return self.throwError("InternalError", "class PrivateEnvironment is missing a bound name");
-            try self.rewriteClassPrivateNamesWithMap(members, map);
+            if (private_map) |map| {
+                for (members) |member|
+                    if (member.key_expr == null and value.isRawPrivateName(member.key) and !map.containsOwn(member.key))
+                        return self.throwError("InternalError", "class PrivateEnvironment is missing a bound name");
+                try self.rewriteClassPrivateNamesWithMap(members, map);
+            }
         }
         // Execute the class's static elements / field initializers with this
         // class's private map active, so a direct eval in them resolves the
@@ -61222,7 +61206,8 @@ test "runtime class private environments preserve reuse shadowing and identity" 
     try std.testing.expectEqualStrings(outer_name, inner.get("#outer") orelse return error.TestUnexpectedResult);
     try std.testing.expect(!std.mem.eql(u8, outer_shared, inner.get("#shared") orelse return error.TestUnexpectedResult));
     try std.testing.expect(inner.get("#inner") != null);
-    try std.testing.expectEqual(@as(usize, 3), inner.count());
+    try std.testing.expectEqual(outer, inner.parent.?);
+    try std.testing.expectEqual(@as(usize, 2), inner.ownCount());
 }
 
 test "interpreter class private fields/methods and static blocks" {

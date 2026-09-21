@@ -1,0 +1,82 @@
+{
+  "schema_version": 38,
+  "matrix_id": "zig-js-representative-v38",
+  "status": "frozen",
+  "frozen_date": "2026-09-21",
+  "owner_issue": 927,
+  "history_policy": "This version hash-inherits every V37 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, evidence schema, validator, and publication ruling. It changes no scored representative row. It re-pins the zig-js comparison runner after #927 added separate diagnostic private-environment growth workloads. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v37",
+    "path": "docs/.data/representative-benchmark-matrix-v37.json",
+    "sha256": "d652fd77d0fb4d25a600ecd1213e500aab80c1aca07433facc5fc5e2cdd91029",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration"
+    ]
+  },
+  "change": "Re-pins bench/comparison_zig_js.zig after #927 added frozen `private_environment_{deep,siblings}[_control]_*` rows. The source is parsed during benchmark selection, so the measured boundary evaluates one stable class AST per logical job. Subject/control pairs preserve class count, static-initializer work, checksum, and execution mode while varying only the inherited private environment. These diagnostic growth rows remain outside inherited representative coverage.",
+  "runtime_growth_diagnostics": {
+    "owner_issue": 927,
+    "source": {
+      "path": "bench/private_environment_growth.js",
+      "sha256": "a6bcd02f4387fdd0efb9a97e3b5cac6f3c595f7c6433189c3449e7b57c771076"
+    },
+    "families": [
+      "private_environment_deep",
+      "private_environment_deep_control",
+      "private_environment_siblings",
+      "private_environment_siblings_control"
+    ],
+    "widths": {
+      "deep": [32, 64, 128],
+      "siblings": [256, 512, 1024]
+    },
+    "boundary": "Source generation and Function parsing complete during workload selection; each measured logical job evaluates the same parsed class AST once. Controls preserve class count, static-initializer work, checksum, mode, and lane while omitting only private declarations."
+  },
+  "exact_parent_integration": {
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "1ad7c01f1ca9ac5e3543b0af3c19a9d3b2b561bd45bda452b14ad30604c1cdd0"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "2f5e4dba23c7f277dff138df40c0b7e8ee6516feba77125d27e274d11c8805e3"
+      }
+    ],
+    "publication_boundary": "V38 preserves every V37 timing, efficiency, cleanliness, checksum, serial-child, process-classification, provenance, evidence-schema, and mixed-tier allocation-replay gate. The private-environment growth rows retain their separate non-representative diagnostic boundary."
+  },
+  "context_lifecycle_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "1ad7c01f1ca9ac5e3543b0af3c19a9d3b2b561bd45bda452b14ad30604c1cdd0"
+    },
+    "publication_boundary": "V38 changes only the shared runner hash. Lifecycle scenarios, options, checksums, phase and finalizer reconciliation, plateau policy, measured-boundary occupancy, and evidence ruling are unchanged."
+  },
+  "no_jit_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "1ad7c01f1ca9ac5e3543b0af3c19a9d3b2b561bd45bda452b14ad30604c1cdd0"
+    },
+    "publication_boundary": "V38 changes only the shared runner hash. Required-bytecode and no-native modes, logical work, checksums, attribution, quickening contracts, publication duration, and exact-parent requirements are unchanged."
+  },
+  "string_indexing_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "1ad7c01f1ca9ac5e3543b0af3c19a9d3b2b561bd45bda452b14ad30604c1cdd0"
+    },
+    "publication_boundary": "V38 changes only the shared runner hash. Every string representation, width, job count, checksum, required-bytecode boundary, attribution value, measured-boundary occupancy rule, and exact allocation replay remains unchanged."
+  }
+}
