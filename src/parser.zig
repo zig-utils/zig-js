@@ -1189,6 +1189,9 @@ pub const Parser = struct {
                 if (f.decl_kind) |k| if (k == .@"var") try self.putPatternVarNames(f.target, out);
                 try self.collectVarNames(f.body, out);
             },
+            // A with environment changes name resolution, not declaration
+            // ownership. Vars in its body still hoist through the statement.
+            .with_stmt => |w| try self.collectVarNames(w.body, out),
             .labeled_stmt => |l| try self.collectVarNames(l.body, out),
             .try_stmt => |t| {
                 try self.collectVarNames(t.block, out);
@@ -1317,6 +1320,9 @@ pub const Parser = struct {
                 if (f.decl_kind) |k| if (k == .@"var") try self.checkPatternVarNames(f.target, scope);
                 try self.recurseScope(f.body, scope);
             },
+            // `with` introduces an object environment but no lexical or var
+            // declaration boundary. Its statement body remains in this walk.
+            .with_stmt => |w| try self.recurseScope(w.body, scope),
             .labeled_stmt => |l| try self.recurseScope(l.body, scope),
             .try_stmt => |t| {
                 try self.recurseScope(t.block, scope);
@@ -7408,6 +7414,39 @@ test "parser includes labelled functions in their statement-list declarations" {
         "{ function f(){} lbl: function f(){} }",
         "{ outer: inner: function f(){} function f(){} }",
         "switch (0) { case 0: function f(){} case 1: lbl: function f(){} }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+}
+
+test "parser lexical and var early errors traverse with statement bodies" {
+    // #930 family 2. A with environment changes runtime name resolution but is
+    // not a declaration boundary, so its body contributes the same lexical and
+    // var names as any other statement body.
+    const invalid = [_][]const u8{
+        "{ let x; with ({}) { var x; } }",
+        "with ({}) { let y; var y; }",
+        "try {} catch ([e]) { with ({}) { var e; } }",
+        "{ let x; with ({}) if (1) var x; }",
+        // Exercises collectVarNames, used by the lexical for-head check before
+        // the shared post-parse scope walk runs.
+        "for (let x;;) { with ({}) { var x; } break; }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+
+    const valid = [_][]const u8{
+        "{ let x; with ({}) { function f(){ var x; } } }",
+        "with ({}) { let y; } var y;",
+        "try {} catch ([e]) { with ({}) { function f(){ var e; } } }",
     };
     for (valid) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
