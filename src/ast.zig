@@ -254,9 +254,10 @@ pub const Node = union(enum) {
     await_expr: struct { argument: *Node },
     class_expr: struct { name: []const u8, inferred_name: []const u8 = "", superclass: ?*Node, members: []ClassMember, source: []const u8 = "" },
     /// `super(args)` — call the superclass constructor on the current `this`.
-    super_call: []*Node,
+    /// Both token offsets survive until context-specific early-error scans.
+    super_call: struct { args: []*Node, super_offset: usize, call_offset: usize },
     /// `super.prop` / `super[expr]` — look up on the home object's prototype.
-    super_member: struct { property: []const u8 = "", computed: ?*Node = null },
+    super_member: struct { property: []const u8 = "", computed: ?*Node = null, super_offset: usize = 0 },
     /// `callee(args)`. `source` is the exact source text of the whole
     /// CallExpression and `callee_len` the byte length of its callee prefix
     /// inside it, retained so a failed call can name the callee the way

@@ -5625,14 +5625,21 @@ pub const Interpreter = struct {
     /// Raise a SyntaxError for parser failures with a best-effort source
     /// location. `context` names the embedding operation ("eval", "Function",
     /// etc.); source-bearing APIs can layer richer filenames on top separately.
-    /// An eval early-error scan over the parsed program failed. Its failures are
-    /// the SyntaxError `message` names, except running out of stack (#936) or
-    /// memory, which are not grammar errors.
-    fn evalScanFailed(self: *Interpreter, err: parser_mod.ParseError, message: []const u8) EvalError {
+    /// An eval early-error scan over the parsed program failed. Preserve a
+    /// structured parser diagnostic when the scanner supplied one; `message`
+    /// remains the fallback for legacy unclassified rules. Stack exhaustion
+    /// (#936) and allocation failure are resource errors, not grammar errors.
+    fn evalScanFailed(self: *Interpreter, err: parser_mod.ParseError, message: []const u8, parser: *const Parser) EvalError {
         return switch (err) {
             error.StackExhausted => self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
             error.OutOfMemory => error.OutOfMemory,
-            else => self.throwError("SyntaxError", message),
+            else => if (parser.last_error_reason) |reason|
+                if (err == reason.parseError())
+                    self.throwParserSyntaxErrorMessageAt(try parser.diagnosticMessage(self.arena, reason), parser.errorLocation())
+                else
+                    self.throwError("SyntaxError", message)
+            else
+                self.throwError("SyntaxError", message),
         };
     }
 
@@ -6036,7 +6043,7 @@ pub const Interpreter = struct {
                 const args = if (self.in_default_ctor) dblk: {
                     const av = self.env.get("args") orelse Value.undef();
                     break :dblk if (av.isObject() and av.asObj().is_array) try av.asObj().internalElementsSnapshot(self.arena) else &[_]Value{};
-                } else try self.evalArgs(sc);
+                } else try self.evalArgs(sc.args);
                 // IsConstructor(superConstructor) AFTER the arguments are evaluated.
                 const sup = sup_opt orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
                 if (!isConstructorValue(Value.obj(sup))) return self.throwError("TypeError", "Super constructor is not a constructor");
@@ -8310,12 +8317,12 @@ pub const Interpreter = struct {
             // descendant once per enclosing class and would resolve shadowing
             // before the nested class has minted its own identities (#927).
             .class_expr => {},
-            .super_call => |args| for (args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map),
+            .super_call => |call| for (call.args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map),
             .super_member => |sm| {
                 if (sm.computed) |c| {
                     try self.rewritePrivateNamesInNode(c, map);
                 } else {
-                    node.* = .{ .super_member = .{ .property = remapPrivateName(map, sm.property), .computed = null } };
+                    node.* = .{ .super_member = .{ .property = remapPrivateName(map, sm.property), .computed = null, .super_offset = sm.super_offset } };
                 }
             },
             .call => |c| {
@@ -8518,8 +8525,8 @@ pub const Interpreter = struct {
             // copy never rewrites across this boundary, so sharing the immutable
             // subtree lets that evaluation copy only its own body (#927).
             .class_expr => node.*,
-            .super_call => |args| .{ .super_call = try self.deepCopyNodes(args) },
-            .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed) } },
+            .super_call => |call| .{ .super_call = .{ .args = try self.deepCopyNodes(call.args), .super_offset = call.super_offset, .call_offset = call.call_offset } },
+            .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed), .super_offset = sm.super_offset } },
             .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional, .source = c.source, .callee_len = c.callee_len } },
             .new_expr => |x| .{ .new_expr = .{ .callee = try self.deepCopyNode(x.callee), .args = try self.deepCopyNodes(x.args), .source = x.source } },
             .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs), .source = t.source } },
@@ -8855,7 +8862,7 @@ pub const Interpreter = struct {
             spread_node.* = .{ .spread = args_id };
             const super_args = try self.arena.dupe(*Node, &.{spread_node});
             const super_node = try self.arena.create(Node);
-            super_node.* = .{ .super_call = super_args };
+            super_node.* = .{ .super_call = .{ .args = super_args, .super_offset = 0, .call_offset = 0 } };
             const stmt = try self.arena.create(Node);
             stmt.* = .{ .expr_stmt = super_node };
             default_super = try self.arena.dupe(*Node, &.{stmt});
@@ -22190,16 +22197,16 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (prog.* == .program) {
         if (!self.direct_eval_call) {
             parser.scanEvalContext(prog.program, true, true) catch |err|
-                return self.evalScanFailed(err, "eval: 'super' is only valid inside a method");
+                return self.evalScanFailed(err, "eval: 'super' is only valid inside a method", &parser);
         } else if (self.in_field_initializer) {
-            parser.scanEvalContext(prog.program, false, false) catch |err|
-                return self.evalScanFailed(err, "eval: 'super()'/'arguments' not allowed in a field initializer");
+            parser.scanEvalFieldContext(prog.program) catch |err|
+                return self.evalScanFailed(err, "eval: 'super()'/'arguments' not allowed in a field initializer", &parser);
         } else if (self.home_object == null) {
             parser.scanEvalContext(prog.program, true, true) catch |err|
-                return self.evalScanFailed(err, "eval: 'super' is only valid inside a method");
+                return self.evalScanFailed(err, "eval: 'super' is only valid inside a method", &parser);
         } else if (!self.in_derived_ctor) {
             parser.scanEvalContext(prog.program, true, false) catch |err|
-                return self.evalScanFailed(err, "eval: 'super()' is only valid inside a derived constructor");
+                return self.evalScanFailed(err, "eval: 'super()' is only valid inside a derived constructor", &parser);
         }
         // A direct eval in a non-arrow function's parameter scope may not declare
         // `arguments` (the parameter environment already binds the arguments

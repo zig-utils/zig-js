@@ -31,6 +31,8 @@ pub const DiagnosticReason = enum {
     new_target_invalid_identifier,
     private_field_delete,
     undeclared_private_name,
+    invalid_super,
+    super_call_field_initializer,
     invalid_assignment,
     invalid_destructuring_assignment,
     invalid_prefix_increment,
@@ -105,6 +107,8 @@ pub const DiagnosticReason = enum {
             .new_target_invalid_identifier => "\"new.\" can only be followed with target.",
             .private_field_delete => "Cannot delete private field.",
             .undeclared_private_name => "Cannot reference undeclared private names.",
+            .invalid_super => "super is not valid in this context.",
+            .super_call_field_initializer => "Unexpected token '('. super call is not valid in class field initializer context.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
             .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
@@ -564,6 +568,10 @@ pub const Parser = struct {
     /// Parameter Contains Await/Yield queries must not impose a SuperCall ban;
     /// the enclosing function/method/field validates its own lexical super use.
     scan_forbid_super_call: bool = true,
+    /// Selects the class-field-specific SuperCall diagnostic while that
+    /// initializer's Contains query runs. Arrows inherit it; nested ordinary
+    /// functions and class bodies retain their existing query boundaries.
+    scan_super_call_field_initializer: bool = false,
     /// When true, `scanSuperAndArgs` also flags a SuperProperty (`super.x`) —
     /// used to validate indirect-eval code, which is global and may contain no
     /// `super` at all (a direct eval from a field initializer leaves this false,
@@ -4496,20 +4504,21 @@ pub const Parser = struct {
     /// `super(args)` or `super.prop` / `super[expr]`. (`super.m(args)` is a
     /// super_member that the enclosing member-tail turns into a call.)
     fn parseSuper(self: *Parser) ParseError!*Node {
-        _ = self.advance(); // super
+        const super_token = self.advance();
         if (self.check(.lparen)) {
+            const call_offset = self.cur().pos;
             const args = try self.parseArgs();
-            return self.alloc(.{ .super_call = args });
+            return self.alloc(.{ .super_call = .{ .args = args, .super_offset = super_token.pos, .call_offset = call_offset } });
         }
         if (self.match(.dot)) {
             const name = self.advance();
             if (name.kind != .identifier) return ParseError.UnexpectedToken;
-            return self.alloc(.{ .super_member = .{ .property = name.text } });
+            return self.alloc(.{ .super_member = .{ .property = name.text, .super_offset = super_token.pos } });
         }
         if (self.match(.lbracket)) {
             const idx = try self.parseExpression();
             try self.expect(.rbracket);
-            return self.alloc(.{ .super_member = .{ .computed = idx } });
+            return self.alloc(.{ .super_member = .{ .computed = idx, .super_offset = super_token.pos } });
         }
         return ParseError.UnexpectedToken;
     }
@@ -4784,6 +4793,9 @@ pub const Parser = struct {
                 // Early error (15.7.1): a field Initializer may not contain a
                 // SuperCall or an `arguments` reference.
                 if (init_expr) |ie| {
+                    const saved_field_diagnostic = self.scan_super_call_field_initializer;
+                    self.scan_super_call_field_initializer = true;
+                    defer self.scan_super_call_field_initializer = saved_field_diagnostic;
                     try self.scanSuperAndArgs(ie);
                 }
                 try members.append(self.arena, .{
@@ -4971,6 +4983,15 @@ pub const Parser = struct {
         for (stmts) |s| try self.scanSuperAndArgs(s);
     }
 
+    /// Direct eval in a class field inherits the field initializer's
+    /// SuperCall and `arguments` restrictions, including its diagnostic.
+    pub fn scanEvalFieldContext(self: *Parser, stmts: []const *Node) ParseError!void {
+        const saved_field_diagnostic = self.scan_super_call_field_initializer;
+        self.scan_super_call_field_initializer = true;
+        defer self.scan_super_call_field_initializer = saved_field_diagnostic;
+        return self.scanEvalContext(stmts, false, false);
+    }
+
     fn forbidYieldAwaitInParams(self: *Parser, params: []const ast.Param, forbid_yield: bool, forbid_await: bool) ParseError!void {
         const saved_args = self.scan_allow_arguments;
         const saved_call = self.scan_forbid_super_call;
@@ -5044,9 +5065,13 @@ pub const Parser = struct {
         switch (node.*) {
             .obj_pattern, .arr_pattern => try self.scanSuperAndArgsInPattern(node),
             .identifier => |name| if (!self.scan_allow_arguments and std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
-            .super_call => |args| {
-                if (self.scan_forbid_super_call) return ParseError.UnexpectedToken;
-                for (args) |arg| try self.scanSuperAndArgs(arg);
+            .super_call => |call| {
+                if (self.scan_forbid_super_call)
+                    return self.failWithReasonAt(
+                        if (self.scan_super_call_field_initializer) .super_call_field_initializer else .invalid_super,
+                        if (self.scan_super_call_field_initializer) call.call_offset else call.super_offset,
+                    );
+                for (call.args) |arg| try self.scanSuperAndArgs(arg);
             },
             .unary => |u| try self.scanSuperAndArgs(u.operand),
             .delete_expr => |t| try self.scanSuperAndArgs(t),
@@ -5080,7 +5105,7 @@ pub const Parser = struct {
                 try self.scanSuperAndArgs(c.alternate);
             },
             .super_member => |m| {
-                if (self.scan_forbid_super_property) return ParseError.UnexpectedToken;
+                if (self.scan_forbid_super_property) return self.failWithReasonAt(.invalid_super, m.super_offset);
                 if (m.computed) |computed| try self.scanSuperAndArgs(computed);
             },
             .call => |c| {
@@ -5335,7 +5360,7 @@ pub const Parser = struct {
             },
             .yield_expr => |y| if (y.argument) |arg| try self.checkPrivateUsesInNode(declared, arg),
             .await_expr => |a| try self.checkPrivateUsesInNode(declared, a.argument),
-            .super_call => |args| for (args) |arg| try self.checkPrivateUsesInNode(declared, arg),
+            .super_call => |call| for (call.args) |arg| try self.checkPrivateUsesInNode(declared, arg),
             .super_member => |m| if (m.computed) |computed| try self.checkPrivateUsesInNode(declared, computed),
             .call => |c| {
                 try self.checkPrivateUsesInNode(declared, c.callee);
@@ -7901,6 +7926,44 @@ test "undeclared private diagnostics retain decoded names and exact offsets" {
     var bare = try Parser.init(arena.allocator(), "#missing;");
     try std.testing.expectError(ParseError.UnexpectedToken, bare.parseProgram());
     try std.testing.expectEqual(@as(?DiagnosticReason, null), bare.last_error_reason);
+}
+
+test "invalid super diagnostics retain context and exact token offsets" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        global_scan: bool = false,
+    };
+    const cases = [_]Case{
+        .{ .source = "super()", .reason = .invalid_super, .marker = "super", .global_scan = true },
+        .{ .source = "super.x", .reason = .invalid_super, .marker = "super", .global_scan = true },
+        .{ .source = "class C { m(){ super(); } }", .reason = .invalid_super, .marker = "super" },
+        .{ .source = "class C { static { super(); } }", .reason = .invalid_super, .marker = "super" },
+        .{ .source = "class C { x = super(); }", .reason = .super_call_field_initializer, .marker = "super(" },
+        .{ .source = "class C { static x = (() => super())(); }", .reason = .super_call_field_initializer, .marker = "super(" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        if (case.global_scan) {
+            const program = try parser.parseProgram();
+            try std.testing.expectError(ParseError.UnexpectedToken, parser.scanEvalContext(program.program, true, true));
+        } else {
+            try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        }
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        const marker_offset = std.mem.indexOf(u8, case.source, case.marker).?;
+        const expected_offset = marker_offset + if (case.reason == .super_call_field_initializer) "super".len else 0;
+        try std.testing.expectEqual(expected_offset, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.reason.message(), try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var valid = try Parser.init(arena.allocator(), "class B {} class C extends B { constructor(){ super(); } m(){ return super.x; } }");
+    _ = try valid.parseProgram();
 }
 
 test "parser enforces private name declaration collisions" {

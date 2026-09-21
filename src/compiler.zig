@@ -1297,8 +1297,8 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool, floor: us
             }
             break :blk false;
         },
-        .super_call => |args| blk: {
-            for (args) |a| if (try nameRefInClosure(a, name, in_fn, floor)) break :blk true;
+        .super_call => |call| blk: {
+            for (call.args) |a| if (try nameRefInClosure(a, name, in_fn, floor)) break :blk true;
             break :blk false;
         },
         .super_member => |m| m.computed != null and try nameRefInClosure(m.computed.?, name, in_fn, floor),
@@ -5651,7 +5651,8 @@ pub const Compiler = struct {
                     _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
                 }
             },
-            .super_call => |args| {
+            .super_call => |call| {
+                const args = call.args;
                 _ = try self.chunk.emit(.load_super_constructor, 0);
                 if (self.is_default_constructor) {
                     const rest_slot = self.chunk.rest_parameter_index orelse return error.Unsupported;

@@ -14219,6 +14219,10 @@ test "class diagnostic reasons render prose through eval and Function" {
         .{ .source = "class C { m(o){ return #missing in o; } }", .message = "Cannot reference undeclared private names: \"#missing\"" },
         .{ .source = "({}).#missing", .message = "Cannot reference undeclared private names: \"#missing\"" },
         .{ .source = "class C { m(){ return this.#\\u0078; } }", .message = "Cannot reference undeclared private names: \"#x\"" },
+        .{ .source = "super()", .message = "super is not valid in this context." },
+        .{ .source = "super.x", .message = "super is not valid in this context." },
+        .{ .source = "class C { m(){ super(); } }", .message = "super is not valid in this context." },
+        .{ .source = "class C { x = super(); }", .message = "Unexpected token '('. super call is not valid in class field initializer context." },
         .{ .source = "`a\r\n${class C { constructor; }}`", .message = "Cannot declare class field named 'constructor'." },
     };
     for (cases) |case| {
