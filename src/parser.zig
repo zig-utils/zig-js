@@ -1064,6 +1064,10 @@ pub const Parser = struct {
                 // `{ function f(){} function f(){} }` is a strict SyntaxError.
                 .func_decl => |fnode| if (funcs_lexical and fnode.name.len > 0)
                     try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator or self.strict),
+                .labeled_stmt => if (funcs_lexical) {
+                    if (statementFunctionDecl(s)) |fnode| if (fnode.name.len > 0)
+                        try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator or self.strict);
+                },
                 else => {},
             }
         }
@@ -1089,8 +1093,8 @@ pub const Parser = struct {
         // At a function/script scope, top-level function declarations are
         // themselves var-scoped, so they take the var side of the check.
         if (!funcs_lexical) for (stmts) |s| {
-            if (s.* == .func_decl and s.func_decl.name.len > 0)
-                try self.checkVarAgainstLexical(scope, s.func_decl.name);
+            if (statementFunctionDecl(s)) |fnode| if (fnode.name.len > 0)
+                try self.checkVarAgainstLexical(scope, fnode.name);
         };
         for (stmts) |s| try self.recurseScope(s, scope);
     }
@@ -2084,10 +2088,14 @@ pub const Parser = struct {
     /// A labeled statement, after peeling any number of labels, whose innermost
     /// item is a plain `function` declaration — the LabelledItem-is-a-function
     /// case from Annex B.3.2.
-    fn labeledEndsInFunc(node: *Node) bool {
+    fn statementFunctionDecl(node: *Node) ?*ast.FunctionNode {
         var n = node;
         while (n.* == .labeled_stmt) n = n.labeled_stmt.body;
-        return n.* == .func_decl;
+        return if (n.* == .func_decl) n.func_decl else null;
+    }
+
+    fn labeledEndsInFunc(node: *Node) bool {
+        return statementFunctionDecl(node) != null;
     }
 
     /// Parse the single-statement body of an `if`/`else`, loop, `with`, or
@@ -2739,6 +2747,9 @@ pub const Parser = struct {
                 if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and bound.contains(d2.var_decl.name)) return ParseError.UnexpectedToken;
             },
             .func_decl => |fnode| if (fnode.name.len > 0 and bound.contains(fnode.name)) return ParseError.UnexpectedToken,
+            .labeled_stmt => if (statementFunctionDecl(s)) |fnode| {
+                if (fnode.name.len > 0 and bound.contains(fnode.name)) return ParseError.UnexpectedToken;
+            },
             .class_expr => |c| if (c.name.len > 0 and bound.contains(c.name)) return ParseError.UnexpectedToken,
             else => {},
         };
@@ -7360,6 +7371,43 @@ test "parser checks duplicate block functions with their owning strictness" {
         "function g(){ switch (0) { case 0: function f(){} case 1: function f(){} } }",
         // Checking a strict sibling must restore sloppy mode for the next body.
         "function strict(){ 'use strict'; { function f(){} } } function sloppy(){ { function f(){} function f(){} } }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+}
+
+test "parser includes labelled functions in their statement-list declarations" {
+    // #930 family 3. Annex B.3.2 permits a sloppy LabelledItem ending in a
+    // FunctionDeclaration. Its name is var-scoped in a Script/FunctionBody and
+    // lexical in a Block/CaseBlock, just like an unlabelled declaration in that
+    // statement list. Peeling labels must not make the declaration invisible.
+    const invalid = [_][]const u8{
+        "let g; lbl: function g(){}",
+        "function g(){ let f; lbl: function f(){} }",
+        "{ let f; lbl: function f(){} }",
+        "{ var f; lbl: function f(){} }",
+        "{ class f{} lbl: function f(){} }",
+        "{ let f; outer: inner: function f(){} }",
+        "switch (0) { case 0: let f; case 1: lbl: function f(){} }",
+        "try {} catch ([f]) { lbl: function f(){} }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+
+    const valid = [_][]const u8{
+        "var g; lbl: function g(){}",
+        "function g(){ var f; lbl: function f(){} }",
+        "{ function f(){} lbl: function f(){} }",
+        "{ outer: inner: function f(){} function f(){} }",
+        "switch (0) { case 0: function f(){} case 1: lbl: function f(){} }",
     };
     for (valid) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
