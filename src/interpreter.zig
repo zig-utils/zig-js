@@ -8520,7 +8520,7 @@ pub const Interpreter = struct {
             .conditional => |c| .{ .conditional = .{ .cond = try self.deepCopyNode(c.cond), .consequent = try self.deepCopyNode(c.consequent), .alternate = try self.deepCopyNode(c.alternate) } },
             .function => |f| .{ .function = try self.deepCopyFunction(f) },
             .yield_expr => |y| .{ .yield_expr = .{ .argument = try self.deepCopyOpt(y.argument), .delegate = y.delegate } },
-            .await_expr => |a| .{ .await_expr = .{ .argument = try self.deepCopyNode(a.argument) } },
+            .await_expr => |a| .{ .await_expr = .{ .argument = try self.deepCopyNode(a.argument), .offset = a.offset } },
             // A nested class owns a later ClassDefinitionEvaluation. Its parent
             // copy never rewrites across this boundary, so sharing the immutable
             // subtree lets that evaluation copy only its own body (#927).
@@ -8551,7 +8551,7 @@ pub const Interpreter = struct {
                 for (pat.elems, 0..) |el, i| elems[i] = .{ .target = try self.deepCopyOpt(el.target), .default = try self.deepCopyOpt(el.default) };
                 break :blk .{ .arr_pattern = .{ .elems = elems, .rest = try self.deepCopyOpt(pat.rest) } };
             },
-            .var_decl => |vd| .{ .var_decl = .{ .kind = vd.kind, .name = vd.name, .init = try self.deepCopyOpt(vd.init), .dispose = vd.dispose } },
+            .var_decl => |vd| .{ .var_decl = .{ .kind = vd.kind, .name = vd.name, .init = try self.deepCopyOpt(vd.init), .dispose = vd.dispose, .await_offset = vd.await_offset } },
             .destructure_decl => |dd| .{ .destructure_decl = .{ .kind = dd.kind, .pattern = try self.deepCopyNode(dd.pattern), .init = try self.deepCopyNode(dd.init) } },
             .func_decl => |f| .{ .func_decl = try self.deepCopyFunction(f) },
             .return_stmt => |x| .{ .return_stmt = try self.deepCopyOpt(x) },
@@ -8570,7 +8570,7 @@ pub const Interpreter = struct {
             .while_stmt => |w| .{ .while_stmt = .{ .cond = try self.deepCopyNode(w.cond), .body = try self.deepCopyNode(w.body) } },
             .do_while_stmt => |d| .{ .do_while_stmt = .{ .body = try self.deepCopyNode(d.body), .cond = try self.deepCopyNode(d.cond) } },
             .for_stmt => |f| .{ .for_stmt = .{ .init = try self.deepCopyOpt(f.init), .cond = try self.deepCopyOpt(f.cond), .update = try self.deepCopyOpt(f.update), .body = try self.deepCopyNode(f.body) } },
-            .for_in => |f| .{ .for_in = .{ .decl_kind = f.decl_kind, .target = try self.deepCopyNode(f.target), .var_init = try self.deepCopyOpt(f.var_init), .iterable = try self.deepCopyNode(f.iterable), .body = try self.deepCopyNode(f.body), .is_of = f.is_of, .is_await = f.is_await, .dispose = f.dispose } },
+            .for_in => |f| .{ .for_in = .{ .decl_kind = f.decl_kind, .target = try self.deepCopyNode(f.target), .var_init = try self.deepCopyOpt(f.var_init), .iterable = try self.deepCopyNode(f.iterable), .body = try self.deepCopyNode(f.body), .is_of = f.is_of, .is_await = f.is_await, .dispose = f.dispose, .await_offset = f.await_offset } },
             .switch_stmt => |s| blk: {
                 const cases = try self.arena.alloc(ast.SwitchCase, s.cases.len);
                 for (s.cases, 0..) |c, i| cases[i] = .{ .@"test" = try self.deepCopyOpt(c.@"test"), .body = try self.deepCopyNodes(c.body) };

@@ -33,6 +33,9 @@ pub const DiagnosticReason = enum {
     undeclared_private_name,
     invalid_super,
     super_call_field_initializer,
+    static_block_await_statement,
+    static_block_await_reference,
+    static_block_for_await,
     invalid_assignment,
     invalid_destructuring_assignment,
     invalid_prefix_increment,
@@ -109,6 +112,9 @@ pub const DiagnosticReason = enum {
             .undeclared_private_name => "Cannot reference undeclared private names.",
             .invalid_super => "super is not valid in this context.",
             .super_call_field_initializer => "Unexpected token '('. super call is not valid in class field initializer context.",
+            .static_block_await_statement => "Unexpected identifier 'await'. Cannot use 'await' within static block.",
+            .static_block_await_reference => "The 'await' keyword is disallowed in the IdentifierReference position within static block.",
+            .static_block_for_await => "for-await-of can only be used in an async function or async generator.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
             .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
@@ -585,6 +591,12 @@ pub const Parser = struct {
     /// the early error "FormalParameters of an async function/arrow must not
     /// contain an AwaitExpression" (e.g. `async function f(a = await x) {}`).
     scan_forbid_await: bool = false,
+    /// The active ContainsAwait query belongs to a class static block, which
+    /// has position-specific diagnostics distinct from parameter queries.
+    scan_static_block_await: bool = false,
+    /// The current node is a direct StatementList item. Cleared before descent;
+    /// nested blocks publish their own items while `if`/label bodies do not.
+    scan_static_statement_list_item: bool = false,
     /// Array literals (parsed as a cover for array patterns) that ended with a
     /// trailing comma right after a rest element (`[...x,]`). Legal in a literal
     /// but not in the destructuring refinement, so `litToPattern` rejects them.
@@ -2448,6 +2460,7 @@ pub const Parser = struct {
 
     /// `dispose`: 0 = ordinary `var`/`let`/`const`, 1 = `using`, 2 = `await using`.
     fn parseVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
+        const await_offset = if (dispose == 2 and self.pos > 0) self.tokens[self.pos - 1].pos else 0;
         _ = self.advance(); // var/let/const/using
         // One or more comma-separated declarators: `let a, {b} = obj, c = 1`.
         var decls: std.ArrayListUnmanaged(*Node) = .empty;
@@ -2477,7 +2490,7 @@ pub const Parser = struct {
                     return ParseError.UnexpectedToken;
                 }
                 if (kind == .@"var") try self.noteVarName(name_tok.text);
-                try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose } }));
+                try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose, .await_offset = await_offset } }));
             }
             if (!self.match(.comma)) break;
         }
@@ -2557,8 +2570,9 @@ pub const Parser = struct {
         _ = self.advance(); // for
         // `for await (x of asyncIterable)` — only inside an async function.
         var is_await = false;
+        var await_offset: usize = 0;
         if (self.in_async and isKeyword(self.cur(), "await")) {
-            _ = self.advance();
+            await_offset = self.advance().pos;
             is_await = true;
         }
         try self.expect(.lparen);
@@ -2598,7 +2612,7 @@ pub const Parser = struct {
             decl_kind = .@"const";
             is_using = true;
             dispose = 2;
-            _ = self.advance(); // await
+            await_offset = self.advance().pos;
             _ = self.advance(); // using
         }
         const classic_using_of_decl =
@@ -2677,6 +2691,7 @@ pub const Parser = struct {
                     .is_of = is_of,
                     .is_await = is_await,
                     .dispose = dispose,
+                    .await_offset = await_offset,
                 } });
             }
         }
@@ -3825,10 +3840,10 @@ pub const Parser = struct {
         // An escaped `await` (`await`) is never the keyword (the leftover
         // identifier is then rejected as a reserved reference in its context).
         if (self.in_async and !self.cur().escaped_identifier and isKeyword(self.cur(), "await")) {
-            _ = self.advance();
+            const await_token = self.advance();
             const operand = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseUnaryOperand();
             try self.rejectExponentAfterUnary();
-            return self.alloc(.{ .await_expr = .{ .argument = operand } });
+            return self.alloc(.{ .await_expr = .{ .argument = operand, .offset = await_token.pos } });
         }
         if (self.check(.plus_plus) or self.check(.minus_minus)) {
             const inc = self.cur().kind == .plus_plus;
@@ -4719,9 +4734,14 @@ pub const Parser = struct {
                 const block = try self.parseBlock();
                 // No super()/arguments, and no AwaitExpression (ContainsAwait).
                 const saved_fa = self.scan_forbid_await;
+                const saved_static_await = self.scan_static_block_await;
                 self.scan_forbid_await = true;
-                defer self.scan_forbid_await = saved_fa;
-                for (block.block) |s| try self.scanSuperAndArgs(s);
+                self.scan_static_block_await = true;
+                defer {
+                    self.scan_forbid_await = saved_fa;
+                    self.scan_static_block_await = saved_static_await;
+                }
+                for (block.block) |s| try self.scanStatementListItem(s);
                 // Own lexical scope, and its own var scope: nothing opened by the
                 // enclosing class body's context is visible to a `var` in here.
                 //
@@ -5017,6 +5037,14 @@ pub const Parser = struct {
         }
     }
 
+    fn scanStatementListItem(self: *Parser, node: *Node) ParseError!void {
+        if (!self.scan_static_block_await) return self.scanSuperAndArgs(node);
+        const saved = self.scan_static_statement_list_item;
+        self.scan_static_statement_list_item = true;
+        defer self.scan_static_statement_list_item = saved;
+        return self.scanSuperAndArgs(node);
+    }
+
     /// ECMA-262 Contains/ContainsArguments descend into computed keys and
     /// initializers within patterns too. BindingIdentifier leaves are not
     /// IdentifierReferences; assignment member targets still evaluate their
@@ -5062,6 +5090,9 @@ pub const Parser = struct {
 
     fn scanSuperAndArgs(self: *Parser, node: *Node) ParseError!void {
         try self.checkNesting();
+        const statement_list_item = self.scan_static_statement_list_item;
+        self.scan_static_statement_list_item = false;
+        defer self.scan_static_statement_list_item = statement_list_item;
         switch (node.*) {
             .obj_pattern, .arr_pattern => try self.scanSuperAndArgsInPattern(node),
             .identifier => |name| if (!self.scan_allow_arguments and std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
@@ -5077,7 +5108,10 @@ pub const Parser = struct {
             .delete_expr => |t| try self.scanSuperAndArgs(t),
             .update => |u| try self.scanSuperAndArgs(u.target),
             .await_expr => |a| {
-                if (self.scan_forbid_await) return ParseError.UnexpectedToken;
+                if (self.scan_forbid_await) return if (self.scan_static_block_await)
+                    self.failWithReasonAt(.static_block_await_reference, a.offset)
+                else
+                    ParseError.UnexpectedToken;
                 try self.scanSuperAndArgs(a.argument);
             },
             .yield_expr => |y| {
@@ -5186,14 +5220,21 @@ pub const Parser = struct {
                 }
             },
             // Statement nodes (an arrow's block body):
-            .block => |stmts| for (stmts) |s| try self.scanSuperAndArgs(s),
-            .expr_stmt => |e| try self.scanSuperAndArgs(e),
+            .block => |stmts| for (stmts) |s| try self.scanStatementListItem(s),
+            .expr_stmt => |e| {
+                if (self.scan_static_block_await and statement_list_item and e.* == .await_expr and !self.isParenWrapped(e))
+                    return self.failWithReasonAt(.static_block_await_statement, e.await_expr.offset);
+                try self.scanSuperAndArgs(e);
+            },
             .return_stmt => |r| if (r) |v| try self.scanSuperAndArgs(v),
             .throw_stmt => |t| try self.scanSuperAndArgs(t),
             .var_decl => |d| {
                 // ClassStaticBlock Contains `await` includes asynchronous
                 // disposal, whose keyword is a flag rather than an expression.
-                if (self.scan_forbid_await and d.dispose == 2) return ParseError.UnexpectedToken;
+                if (self.scan_forbid_await and d.dispose == 2) return if (self.scan_static_block_await)
+                    self.failWithReasonAt(.static_block_await_statement, d.await_offset)
+                else
+                    ParseError.UnexpectedToken;
                 if (d.init) |ini| try self.scanSuperAndArgs(ini);
             },
             .destructure_decl => |d| {
@@ -5221,7 +5262,14 @@ pub const Parser = struct {
                 try self.scanSuperAndArgs(fo.body);
             },
             .for_in => |fo| {
-                if (self.scan_forbid_await and (fo.is_await or fo.dispose == 2)) return ParseError.UnexpectedToken;
+                if (self.scan_forbid_await and fo.is_await) return if (self.scan_static_block_await)
+                    self.failWithReasonAt(.static_block_for_await, fo.await_offset)
+                else
+                    ParseError.UnexpectedToken;
+                if (self.scan_forbid_await and fo.dispose == 2) return if (self.scan_static_block_await)
+                    self.failWithReasonAt(.static_block_await_reference, fo.await_offset)
+                else
+                    ParseError.UnexpectedToken;
                 try self.scanSuperAndArgsInPattern(fo.target);
                 if (fo.var_init) |ini| try self.scanSuperAndArgs(ini);
                 try self.scanSuperAndArgs(fo.iterable);
@@ -7963,6 +8011,34 @@ test "invalid super diagnostics retain context and exact token offsets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var valid = try Parser.init(arena.allocator(), "class B {} class C extends B { constructor(){ super(); } m(){ return super.x; } }");
+    _ = try valid.parseProgram();
+}
+
+test "static block await diagnostics preserve syntactic position" {
+    const Case = struct { source: []const u8, reason: DiagnosticReason };
+    const cases = [_]Case{
+        .{ .source = "class C { static { await 1; } }", .reason = .static_block_await_statement },
+        .{ .source = "class C { static { { await 1; } } }", .reason = .static_block_await_statement },
+        .{ .source = "class C { static { (await 1); } }", .reason = .static_block_await_reference },
+        .{ .source = "class C { static { let x = await 1; } }", .reason = .static_block_await_reference },
+        .{ .source = "class C { static { if (true) await 1; } }", .reason = .static_block_await_reference },
+        .{ .source = "class C { static { for await (const x of []) {} } }", .reason = .static_block_for_await },
+        .{ .source = "class C { static { await using x = null; } }", .reason = .static_block_await_statement },
+        .{ .source = "class C { static { for (await using x of []) {} } }", .reason = .static_block_await_reference },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, "await").?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.reason.message(), try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var valid = try Parser.init(arena.allocator(), "class C { static { const f = async () => await 1; } }");
     _ = try valid.parseProgram();
 }
 

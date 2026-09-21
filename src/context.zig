@@ -14223,6 +14223,9 @@ test "class diagnostic reasons render prose through eval and Function" {
         .{ .source = "super.x", .message = "super is not valid in this context." },
         .{ .source = "class C { m(){ super(); } }", .message = "super is not valid in this context." },
         .{ .source = "class C { x = super(); }", .message = "Unexpected token '('. super call is not valid in class field initializer context." },
+        .{ .source = "class C { static { await 1; } }", .message = "Unexpected identifier 'await'. Cannot use 'await' within static block." },
+        .{ .source = "class C { static { let x = await 1; } }", .message = "The 'await' keyword is disallowed in the IdentifierReference position within static block." },
+        .{ .source = "class C { static { for await (const x of []) {} } }", .message = "for-await-of can only be used in an async function or async generator." },
         .{ .source = "`a\r\n${class C { constructor; }}`", .message = "Cannot declare class field named 'constructor'." },
     };
     for (cases) |case| {

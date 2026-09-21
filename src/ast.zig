@@ -251,7 +251,7 @@ pub const Node = union(enum) {
     /// `.next(v)` resume.
     yield_expr: struct { argument: ?*Node = null, delegate: bool = false },
     /// `await expr` — only valid inside an async function body.
-    await_expr: struct { argument: *Node },
+    await_expr: struct { argument: *Node, offset: usize },
     class_expr: struct { name: []const u8, inferred_name: []const u8 = "", superclass: ?*Node, members: []ClassMember, source: []const u8 = "" },
     /// `super(args)` — call the superclass constructor on the current `this`.
     /// Both token offsets survive until context-specific early-error scans.
@@ -321,7 +321,7 @@ pub const Node = union(enum) {
 
     // statements
     // `dispose`: 0 = ordinary declaration, 1 = `using` (sync), 2 = `await using`.
-    var_decl: struct { kind: DeclKind, name: []const u8, init: ?*Node, dispose: u8 = 0 },
+    var_decl: struct { kind: DeclKind, name: []const u8, init: ?*Node, dispose: u8 = 0, await_offset: usize = 0 },
     destructure_decl: struct { kind: DeclKind, pattern: *Node, init: *Node },
     func_decl: *FunctionNode, // `function name(...) {...}` -> binds name
     return_stmt: ?*Node,
@@ -348,7 +348,7 @@ pub const Node = union(enum) {
     /// assignment form) a member expression. `is_of` picks `for-of` (values) vs
     /// `for-in` (keys).
     // `dispose`: 0 = ordinary head, 1 = `for (using x of …)`, 2 = `for (await using x of …)`.
-    for_in: struct { decl_kind: ?DeclKind, target: *Node, var_init: ?*Node = null, iterable: *Node, body: *Node, is_of: bool, is_await: bool = false, dispose: u8 = 0 },
+    for_in: struct { decl_kind: ?DeclKind, target: *Node, var_init: ?*Node = null, iterable: *Node, body: *Node, is_of: bool, is_await: bool = false, dispose: u8 = 0, await_offset: usize = 0 },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     with_stmt: struct { obj: *Node, body: *Node },
     /// `import ... from "spec"` / `import "spec"`. `entries` carries each binding
