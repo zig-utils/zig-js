@@ -426,6 +426,10 @@ pub const Parser = struct {
     /// literal reuses the largest validation footprint seen by that parse. The
     /// pointer is stack-local to parsing and never escapes or enters the AST.
     regex_validation_arena: ?*std.heap.ArenaAllocator = null,
+    /// The matching `)` of every `(` token, by token index, or
+    /// `no_matching_paren`. Built once, the first time an arrow lookahead crosses
+    /// deep nesting, and arena-owned like the tokens it indexes (#933 item 8b).
+    paren_close: ?[]u32 = null,
     /// The original source text, so function definitions can capture their exact
     /// source span for `Function.prototype.toString`.
     source: []const u8 = "",
@@ -3245,7 +3249,7 @@ pub const Parser = struct {
                 const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
                 return self.parseArrowBody(params, true, start, false);
             }
-            if (self.peekKind(1) == .lparen and self.arrowAheadAt(self.pos + 1)) {
+            if (self.peekKind(1) == .lparen and try self.arrowAheadAt(self.pos + 1)) {
                 _ = self.advance(); // async
                 var uses_direct_eval_in_parameters = false;
                 const saved_direct_eval_use = self.current_direct_eval_use;
@@ -3272,7 +3276,7 @@ pub const Parser = struct {
             const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
             return self.parseArrowBody(params, false, start, false);
         }
-        if (self.check(.lparen) and self.arrowAhead()) {
+        if (self.check(.lparen) and try self.arrowAhead()) {
             const start = self.pos;
             var uses_direct_eval_in_parameters = false;
             const saved_direct_eval_use = self.current_direct_eval_use;
@@ -3410,30 +3414,72 @@ pub const Parser = struct {
     /// Precondition: current token is `(`. Returns true if its matching `)` is
     /// immediately followed by `=>` (i.e. this is an arrow parameter list, not
     /// a parenthesized expression).
-    fn arrowAhead(self: *Parser) bool {
+    fn arrowAhead(self: *Parser) ParseError!bool {
         return self.arrowAheadAt(self.pos);
     }
 
     /// Like `arrowAhead`, but scanning a `(` that begins at token index `start`
     /// (used to peek past an `async` modifier: `async (params) => …`).
-    fn arrowAheadAt(self: *Parser, start: usize) bool {
+    fn arrowAheadAt(self: *Parser, start: usize) ParseError!bool {
+        const close = (try self.matchingParen(start)) orelse return false;
+        const next = if (close + 1 < self.tokens.len) self.tokens[close + 1].kind else .eof;
+        return next == .arrow;
+    }
+
+    const no_matching_paren = std.math.maxInt(u32);
+    /// Nesting a lookahead may cross before the parser indexes every paren.
+    /// Every `(` of an AssignmentExpression asks for its match, so `N` nested
+    /// parentheses rescanned the rest of the group `N` times -- quadratic, and
+    /// on the path that fails at the stack floor each of those scans covered the
+    /// whole remaining source (#933 item 8b). Real code never nests this deep,
+    /// so it keeps the plain scan and never allocates the index.
+    const deep_paren_nesting = 64;
+
+    /// Token index of the `)` matching the `(` at `start`, or null when the
+    /// parentheses are unbalanced.
+    fn matchingParen(self: *Parser, start: usize) ParseError!?usize {
+        if (self.paren_close) |table| {
+            const close = table[start];
+            return if (close == no_matching_paren) null else close;
+        }
         var depth: usize = 0;
         var i = start;
         while (i < self.tokens.len) : (i += 1) {
             switch (self.tokens[i].kind) {
-                .lparen => depth += 1,
-                .rparen => {
-                    depth -= 1;
-                    if (depth == 0) {
-                        const next = if (i + 1 < self.tokens.len) self.tokens[i + 1].kind else .eof;
-                        return next == .arrow;
+                .lparen => {
+                    depth += 1;
+                    if (depth > deep_paren_nesting and self.tokens.len < no_matching_paren) {
+                        try self.indexParens();
+                        return self.matchingParen(start);
                     }
                 },
-                .eof => return false,
+                .rparen => {
+                    depth -= 1;
+                    if (depth == 0) return i;
+                },
+                .eof => return null,
                 else => {},
             }
         }
-        return false;
+        return null;
+    }
+
+    /// Record every `(`'s matching `)` in one pass over the tokens. The token
+    /// array never changes after lexing, so the index stays exact for the rest
+    /// of the parse.
+    fn indexParens(self: *Parser) ParseError!void {
+        const table = try self.arena.alloc(u32, self.tokens.len);
+        @memset(table, no_matching_paren);
+        var open: std.ArrayListUnmanaged(u32) = .empty;
+        defer open.deinit(self.scratch_allocator);
+        for (self.tokens, 0..) |token, index| switch (token.kind) {
+            .lparen => try open.append(self.scratch_allocator, @intCast(index)),
+            .rparen => if (open.pop()) |opener| {
+                table[opener] = @intCast(index);
+            },
+            else => {},
+        };
+        self.paren_close = table;
     }
 
     /// Parse an async arrow's `( params )` as [+Await] — `await` is reserved as a

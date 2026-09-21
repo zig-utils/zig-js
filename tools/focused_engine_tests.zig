@@ -205,6 +205,34 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        // #933 item 8b: every `(` that starts an AssignmentExpression asked
+        // whether its matching `)` is followed by `=>`, each by scanning to the
+        // match, so N nested groups rescanned the rest of the group N times.
+        // Past 64 levels the parser now indexes every paren once; these groups
+        // are 100 deep so the index answers, and each must mean what the scan
+        // said it meant.
+        .name = "deeply nested parentheses keep their arrow and call meaning",
+        .source =
+        \\function nest(n, core) { return "(".repeat(n) + core + ")".repeat(n); }
+        \\var checks = [];
+        \\// An arrow at the bottom of a deep group is still an arrow.
+        \\checks.push((0, eval)(nest(100, "(x) => x * 2"))(21) === 42);
+        \\// An arrow head whose default nests the groups is still an arrow head.
+        \\checks.push((0, eval)("(a = " + nest(100, "7") + ") => a")() === 7);
+        \\checks.push(typeof (0, eval)("async (a = " + nest(100, "7") + ") => a") === "function");
+        \\// A deep argument list is a call, and plain grouping is grouping.
+        \\checks.push((0, eval)("var id = function (v) { return v; }; id(" + nest(100, "5") + ")") === 5);
+        \\checks.push((0, eval)(nest(100, "3")) === 3);
+        \\// A group followed by an arrow in the same sequence.
+        \\checks.push((0, eval)(nest(100, "1") + ", ((y) => y + 1)(4)") === 5);
+        \\// `async (…)` with a deep argument is a call to a function named async.
+        \\checks.push((0, eval)("var async = function (v) { return v; }; async(" + nest(100, "9") + ")") === 9);
+        \\// One bit per check, so a failure names the shape that regressed.
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 127,
+    },
+    .{
         // #936: source nested deeper than the stack allows segfaulted the
         // process during lexing or parsing. It must instead raise the same
         // catchable RangeError as runaway recursion -- JavaScriptCore reports
