@@ -42468,6 +42468,30 @@ test "enable_gc: runtime StringCells are traced and finalized" {
     try std.testing.expectEqual(@as(usize, 3), stats.strings);
 }
 
+test "enable_gc: bound-name prepend backing is accounted and reclaimed" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+    const baseline = ctx.gc_string_bytes_live;
+
+    const length = try ctx.evaluate(
+        \\(() => {
+        \\  let fn = function x() {};
+        \\  for (let i = 0; i < 10000; i++) fn = fn.bind(null);
+        \\  globalThis.__boundNameChain = fn;
+        \\  return fn.name.length;
+        \\})()
+    );
+    try std.testing.expectEqual(@as(f64, 60_001), length.asNum());
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_string_bytes_live > baseline);
+    try std.testing.expect(ctx.gc_string_bytes_live - baseline < 256 * 1024);
+
+    _ = try ctx.evaluate("globalThis.__boundNameChain = undefined");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_string_bytes_live);
+}
+
 test "enable_gc: moving StringCell preserves and finalizes UTF-16 index" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
     defer ctx.destroy();

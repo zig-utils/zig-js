@@ -173,6 +173,7 @@ pub const ExternalStringDeallocator = *const fn (
 pub const StringAuxKind = enum(u8) {
     external_owner,
     intern_owner,
+    bound_name,
     utf16_index,
     static_utf16_index,
 };
@@ -184,6 +185,57 @@ const StringAuxHeader = struct {
 fn stringAuxKind(raw: *anyopaque) StringAuxKind {
     const header: *const StringAuxHeader = @ptrCast(raw);
     return header.kind;
+}
+
+/// Shared prepend storage for SetFunctionName's ASCII `"bound "` prefix.
+/// Each StringCell still exposes one ordinary immutable flat slice. A deeper
+/// bind claims the six bytes immediately before that slice; when the current
+/// block has no headroom, a geometrically larger block copies the name once.
+/// Thus a chain retains O(final name length) byte storage instead of one full
+/// copy per depth. Separate cells retain the block because configurable `name`
+/// properties may keep any intermediate string alive.
+pub const BoundNameBacking = struct {
+    refs: std.atomic.Value(usize) = .init(1),
+    allocation: []u8,
+    initialized_start: std.atomic.Value(usize),
+    prefix_lock: std.atomic.Value(u8) = .init(0),
+
+    fn retain(self: *BoundNameBacking) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    fn release(self: *BoundNameBacking, allocator: std.mem.Allocator) usize {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return 0;
+        const bytes = self.allocation.len;
+        allocator.free(self.allocation);
+        allocator.destroy(self);
+        return bytes;
+    }
+
+    fn ensurePrefix(self: *BoundNameBacking, start: usize) void {
+        if (start >= self.initialized_start.load(.acquire)) return;
+        var spins: usize = 0;
+        while (self.prefix_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        defer self.prefix_lock.store(0, .release);
+        if (start >= self.initialized_start.load(.monotonic)) return;
+        @memcpy(self.allocation[start..][0..bound_name_prefix.len], bound_name_prefix);
+        self.initialized_start.store(start, .release);
+    }
+};
+
+pub const BoundNameOwner = struct {
+    aux_header: StringAuxHeader = .{ .kind = .bound_name },
+    backing: *BoundNameBacking,
+};
+
+fn boundNameOwnerFromRaw(raw: ?*anyopaque) ?*BoundNameOwner {
+    const owner = raw orelse return null;
+    if (stringAuxKind(owner) != .bound_name) return null;
+    const header: *const StringAuxHeader = @ptrCast(owner);
+    const unaligned: *align(1) const BoundNameOwner = @fieldParentPtr("aux_header", header);
+    return @alignCast(@constCast(unaligned));
 }
 
 /// Context-owned exact-once obligation for an embedder string allocation.
@@ -467,11 +519,29 @@ pub const StringCell = struct {
 
     fn ensureContentHash(self: *const StringCell, pending: u64) u64 {
         std.debug.assert(pending & hash_ready_flag == 0);
-        // Flat storage changes the byte image, so those cells are deliberately
-        // eager in `uninternedHashState` and can never enter this path.
-        std.debug.assert(!isFlatLatin1(pending));
+        // Ordinary flat-latin1 cells are eager because their physical bytes are
+        // not the canonical StringData hash input. Bound-name cells deliberately
+        // defer this O(length) work so constructing a chain stays linear; hash
+        // their flat bytes as canonical WTF-8 without allocating.
+        const content_hash = if (isFlatLatin1(pending)) blk: {
+            std.debug.assert(self.boundNameOwner() != null);
+            var hasher = std.hash.XxHash3.init(0);
+            for (self.bytes) |byte| {
+                if (byte < 0x80) {
+                    const one = [1]u8{byte};
+                    hasher.update(&one);
+                } else {
+                    const encoded = [2]u8{
+                        @intCast(0xC0 | (byte >> 6)),
+                        @intCast(0x80 | (byte & 0x3F)),
+                    };
+                    hasher.update(&encoded);
+                }
+            }
+            break :blk hasher.final();
+        } else hashBytes(self.bytes);
         const computed = (pending & persistent_state_mask) | hash_ready_flag |
-            (hashBytes(self.bytes) & content_hash_mask);
+            (content_hash & content_hash_mask);
         return @cmpxchgStrong(
             u64,
             &@constCast(self).hash,
@@ -565,6 +635,26 @@ pub const StringCell = struct {
 
     pub fn hasUtf16Index(self: *const StringCell) bool {
         return indexFromAux(self.aux.load(.acquire)) != null;
+    }
+
+    fn boundNameOwner(self: *const StringCell) ?*BoundNameOwner {
+        return boundNameOwnerFromRaw(priorOwner(self.aux.load(.acquire)));
+    }
+
+    pub fn isBoundName(self: *const StringCell) bool {
+        return self.boundNameOwner() != null;
+    }
+
+    /// Release the auxiliary owner and its shared prepend block. Callers must
+    /// first remove a dynamic UTF-16 index so `priorOwner` is again direct.
+    /// Returns the backing bytes actually freed for exact GC accounting.
+    pub fn deinitBoundName(self: *StringCell, allocator: std.mem.Allocator) usize {
+        const owner = self.boundNameOwner() orelse return 0;
+        std.debug.assert(indexFromAux(self.aux.load(.acquire)) == null);
+        self.aux.store(null, .release);
+        const released = owner.backing.release(allocator);
+        allocator.destroy(owner);
+        return released;
     }
 
     fn linearCodeUnitAt(self: *const StringCell, index: usize) ?Utf16CodeUnit {
@@ -943,6 +1033,115 @@ pub fn createCellWithAsciiAffixes(
     return cell;
 }
 
+const bound_name_prefix = "bound ";
+const bound_name_min_backing: usize = 64;
+
+fn boundNameCapacity(required: usize) std.mem.Allocator.Error!usize {
+    var capacity = bound_name_min_backing;
+    while (capacity < required) {
+        capacity = std.math.mul(usize, capacity, 2) catch return error.OutOfMemory;
+    }
+    return capacity;
+}
+
+pub const PreparedBoundName = struct {
+    bytes: []const u8,
+    hash: u64,
+    owner: *BoundNameOwner,
+    new_backing_bytes: usize,
+
+    pub fn deinit(self: PreparedBoundName, allocator: std.mem.Allocator) void {
+        _ = self.owner.backing.release(allocator);
+        allocator.destroy(self.owner);
+    }
+};
+
+/// Prepare the flat physical image for `"bound " + source` without copying the
+/// complete source at every chain depth. The source's representation is kept:
+/// canonical WTF-8 remains canonical and flat latin1 remains flat latin1.
+/// Content hashing is lazy because hashing every progressively longer prefix
+/// would recreate the same quadratic cost as copying it.
+pub fn prepareBoundName(
+    allocator: std.mem.Allocator,
+    source: *const StringCell,
+) std.mem.Allocator.Error!PreparedBoundName {
+    const required = std.math.add(usize, source.bytes.len, bound_name_prefix.len) catch
+        return error.OutOfMemory;
+    const source_owner = source.boundNameOwner();
+    var backing: *BoundNameBacking = undefined;
+    var bytes: []const u8 = undefined;
+    var new_backing_bytes: usize = 0;
+    var reused = false;
+
+    if (source_owner) |owner| {
+        const allocation = owner.backing.allocation;
+        const source_start = @intFromPtr(source.bytes.ptr) - @intFromPtr(allocation.ptr);
+        std.debug.assert(source_start <= allocation.len);
+        std.debug.assert(source.bytes.len <= allocation.len - source_start);
+        if (source_start >= bound_name_prefix.len) {
+            backing = owner.backing;
+            backing.retain();
+            const prefix_start = source_start - bound_name_prefix.len;
+            // Publish each headroom region once. Branches from an earlier depth
+            // reuse already initialized bytes without writing through another
+            // live StringCell's immutable slice.
+            backing.ensurePrefix(prefix_start);
+            bytes = allocation[prefix_start .. source_start + source.bytes.len];
+            reused = true;
+        }
+    }
+    if (!reused) {
+        const capacity = try boundNameCapacity(required);
+        const allocation = try allocator.alloc(u8, capacity);
+        errdefer allocator.free(allocation);
+        backing = try allocator.create(BoundNameBacking);
+        errdefer allocator.destroy(backing);
+        const source_start = capacity - source.bytes.len;
+        const prefix_start = source_start - bound_name_prefix.len;
+        backing.* = .{
+            .allocation = allocation,
+            .initialized_start = .init(prefix_start),
+        };
+        @memcpy(allocation[source_start..][0..source.bytes.len], source.bytes);
+        @memcpy(allocation[prefix_start..][0..bound_name_prefix.len], bound_name_prefix);
+        bytes = allocation[prefix_start..capacity];
+        new_backing_bytes = capacity;
+    }
+
+    errdefer _ = backing.release(allocator);
+    const owner = try allocator.create(BoundNameOwner);
+    owner.* = .{ .backing = backing };
+    const units = std.math.add(usize, source.utf16Len(), bound_name_prefix.len) catch {
+        allocator.destroy(owner);
+        return error.OutOfMemory;
+    };
+    const hash = (source.hashState() & classification_mask) |
+        (if (units < utf16_length_unknown) @as(u64, @intCast(units)) else utf16_length_unknown);
+    return .{
+        .bytes = bytes,
+        .hash = hash,
+        .owner = owner,
+        .new_backing_bytes = new_backing_bytes,
+    };
+}
+
+pub fn createBoundNameCell(
+    allocator: std.mem.Allocator,
+    source: *const StringCell,
+) std.mem.Allocator.Error!*StringCell {
+    if (active_managed_factory) |factory|
+        return factory.create_bound_name(factory.context, allocator, source);
+    const prepared = try prepareBoundName(allocator, source);
+    errdefer prepared.deinit(allocator);
+    const cell = try allocator.create(StringCell);
+    cell.* = .{
+        .bytes = prepared.bytes,
+        .hash = prepared.hash,
+        .aux = .init(@ptrCast(&prepared.owner.aux_header)),
+    };
+    return cell;
+}
+
 /// Allocate a fresh (un-interned) cell that owns a (surrogate-canonicalized) copy
 /// of `bytes`. This is the minimal constructor the NaN-box `Value` representation
 /// needs; interning is optional (below). `allocator` owns both the cell and the
@@ -994,6 +1193,7 @@ pub const ManagedFactory = struct {
     create: *const fn (*anyopaque, std.mem.Allocator, []const u8) std.mem.Allocator.Error!*StringCell,
     create_owned: *const fn (*anyopaque, std.mem.Allocator, []u8) std.mem.Allocator.Error!*StringCell,
     create_ascii_affixes: *const fn (*anyopaque, std.mem.Allocator, []const u8, []const u8, bool, []const u8) std.mem.Allocator.Error!*StringCell,
+    create_bound_name: *const fn (*anyopaque, std.mem.Allocator, *const StringCell) std.mem.Allocator.Error!*StringCell,
 };
 
 threadlocal var active_managed_factory: ?ManagedFactory = null;
@@ -1816,6 +2016,136 @@ test "strcell: ASCII affixes materialize one final backing image" {
     try std.testing.expectEqual(@as(usize, 1), fail_cell.allocations);
     try std.testing.expectEqual(@as(usize, 1), fail_cell.deallocations);
     try std.testing.expectEqual(fail_cell.allocated_bytes, fail_cell.freed_bytes);
+}
+
+test "strcell: one hundred thousand bound prefixes retain linear backing" {
+    const depth = 100_000;
+    var measured: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    const allocator = measured.allocator();
+    const cells = try std.testing.allocator.alloc(*StringCell, depth + 1);
+    defer std.testing.allocator.free(cells);
+
+    cells[0] = try createCell(allocator, "base");
+    var backing_bytes: usize = 0;
+    for (0..depth) |index| {
+        cells[index + 1] = try createBoundNameCell(allocator, cells[index]);
+        const current = cells[index + 1].boundNameOwner().?.backing;
+        const previous = if (index == 0) null else cells[index].boundNameOwner().?.backing;
+        if (previous == null or current != previous.?) backing_bytes += current.allocation.len;
+    }
+    defer {
+        var index = cells.len;
+        while (index > 1) {
+            index -= 1;
+            _ = cells[index].deinitBoundName(allocator);
+            allocator.destroy(cells[index]);
+        }
+        allocator.free(@constCast(cells[0].bytes));
+        allocator.destroy(cells[0]);
+    }
+
+    const final = cells[depth];
+    try std.testing.expectEqual(@as(usize, depth * bound_name_prefix.len + "base".len), final.bytes.len);
+    try std.testing.expectEqualStrings(bound_name_prefix, final.bytes[0..bound_name_prefix.len]);
+    try std.testing.expectEqualStrings("base", final.bytes[final.bytes.len - "base".len ..]);
+    // Geometric blocks retain less than four times the final physical name.
+    // Cell/owner allocations are constant per bind, so total requested bytes
+    // also have an explicit linear ceiling independent of allocator RSS.
+    try std.testing.expect(backing_bytes < final.bytes.len * 4);
+    try std.testing.expect(measured.allocated_bytes < depth * 128);
+}
+
+test "strcell: deferred bound-name hash matches canonical flat latin1" {
+    const allocator = std.testing.allocator;
+    const source = try createCell(allocator, "caf\xc3\xa9");
+    defer {
+        allocator.free(@constCast(source.bytes));
+        allocator.destroy(source);
+    }
+    const bound = try createBoundNameCell(allocator, source);
+    defer {
+        _ = bound.deinitBoundName(allocator);
+        allocator.destroy(bound);
+    }
+    const canonical = try createCell(allocator, "bound caf\xc3\xa9");
+    defer {
+        allocator.free(@constCast(canonical.bytes));
+        allocator.destroy(canonical);
+    }
+
+    try std.testing.expect(!bound.hasCachedContentHash());
+    try std.testing.expect(bound.eql(canonical));
+    try std.testing.expectEqual(canonical.hashState(), bound.hashState());
+}
+
+test "strcell: bound-name allocation failures release complete ownership" {
+    const source = try createCell(std.testing.allocator, "source");
+    defer {
+        std.testing.allocator.free(@constCast(source.bytes));
+        std.testing.allocator.destroy(source);
+    }
+
+    for (0..4) |failure_index| {
+        var failing: std.testing.FailingAllocator = .init(
+            std.testing.allocator,
+            .{ .fail_index = failure_index },
+        );
+        try std.testing.expectError(
+            error.OutOfMemory,
+            createBoundNameCell(failing.allocator(), source),
+        );
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+
+    const parent = try createBoundNameCell(std.testing.allocator, source);
+    defer {
+        _ = parent.deinitBoundName(std.testing.allocator);
+        std.testing.allocator.destroy(parent);
+    }
+    for (0..2) |failure_index| {
+        const refs_before = parent.boundNameOwner().?.backing.refs.load(.acquire);
+        var failing: std.testing.FailingAllocator = .init(
+            std.testing.allocator,
+            .{ .fail_index = failure_index },
+        );
+        try std.testing.expectError(
+            error.OutOfMemory,
+            createBoundNameCell(failing.allocator(), parent),
+        );
+        try std.testing.expectEqual(refs_before, parent.boundNameOwner().?.backing.refs.load(.acquire));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "strcell: concurrent binds from one name publish immutable flat slices" {
+    const allocator = std.heap.page_allocator;
+    const source = try createCell(allocator, "base");
+    defer {
+        allocator.free(@constCast(source.bytes));
+        allocator.destroy(source);
+    }
+    const parent = try createBoundNameCell(allocator, source);
+    defer {
+        _ = parent.deinitBoundName(allocator);
+        allocator.destroy(parent);
+    }
+
+    const Worker = struct {
+        fn run(shared: *const StringCell) void {
+            for (0..1_000) |_| {
+                const child = createBoundNameCell(std.heap.page_allocator, shared) catch unreachable;
+                std.debug.assert(std.mem.eql(u8, child.bytes, "bound bound base"));
+                _ = child.deinitBoundName(std.heap.page_allocator);
+                std.heap.page_allocator.destroy(child);
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Worker.run, .{parent});
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqualStrings("bound base", parent.bytes);
+    try std.testing.expectEqual(@as(usize, 1), parent.boundNameOwner().?.backing.refs.load(.acquire));
 }
 
 fn repeatedTestBytes(comptime pattern: []const u8, comptime count: usize) [pattern.len * count]u8 {

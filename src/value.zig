@@ -6919,6 +6919,10 @@ pub const Value = struct {
     pub inline fn strOwned(allocator: std.mem.Allocator, s: []u8) std.mem.Allocator.Error!Value {
         return boxed(tag_string, @intFromPtr(try strcell.createCellOwned(allocator, s)));
     }
+    pub inline fn boundName(allocator: std.mem.Allocator, source: Value) std.mem.Allocator.Error!Value {
+        std.debug.assert(source.isString());
+        return boxed(tag_string, @intFromPtr(try strcell.createBoundNameCell(allocator, source.asStringCell())));
+    }
     pub inline fn strCell(cell: *const StringCell) Value {
         return boxed(tag_string, @intFromPtr(cell));
     }

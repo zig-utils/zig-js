@@ -4518,8 +4518,16 @@ pub const Binding = struct {
                     string.setExternalOwner(null);
                 }
                 string.deinitUtf16Index(ctx.gpa);
-                if (string.bytes.len > 0) ctx.gpa.free(@constCast(string.bytes));
-                _ = @atomicRmw(usize, &ctx.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
+                const is_bound_name = string.isBoundName();
+                const released_bytes = string.deinitBoundName(ctx.gpa);
+                if (!is_bound_name and string.bytes.len > 0) ctx.gpa.free(@constCast(string.bytes));
+                _ = @atomicRmw(
+                    usize,
+                    &ctx.gc_string_bytes_live,
+                    .Sub,
+                    if (is_bound_name) released_bytes else string.bytes.len,
+                    .monotonic,
+                );
                 string.bytes = &.{};
                 string.setGcManaged(false);
             },
@@ -5123,6 +5131,7 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
             .create = allocManagedString,
             .create_owned = allocManagedStringOwned,
             .create_ascii_affixes = allocManagedStringAsciiAffixes,
+            .create_bound_name = allocManagedBoundName,
         });
         _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk, managedBarrierThunk);
         _ = gc_runtime.setStableIdentity(raw, stableIdentityThunk, stableIdentityEpochThunk);
@@ -5248,6 +5257,26 @@ fn allocManagedStringAsciiAffixes(
     const realm = active_realm_context orelse heap.ctx.context;
     const prepared = try strcell.prepareAsciiAffixedString(realm.gpa, prefix, middle, middle_flat_latin1, suffix);
     return finishManagedStoredString(heap, prepared.stored, prepared.hash);
+}
+
+fn allocManagedBoundName(
+    raw: *anyopaque,
+    _: std.mem.Allocator,
+    source: *const StringCell,
+) std.mem.Allocator.Error!*StringCell {
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    const realm = active_realm_context orelse heap.ctx.context;
+    const prepared = try strcell.prepareBoundName(realm.gpa, source);
+    errdefer prepared.deinit(realm.gpa);
+    const cell = try heap.create(StringCell, .string);
+    cell.* = .{
+        .bytes = prepared.bytes,
+        .hash = prepared.hash,
+        .aux = .init(@ptrCast(&prepared.owner.aux_header)),
+    };
+    cell.setGcManaged(true);
+    _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, prepared.new_backing_bytes, .monotonic);
+    return cell;
 }
 
 /// Whether the current thread's cell-allocation funnels target the GC heap.

@@ -9710,13 +9710,11 @@ pub const Interpreter = struct {
         try obj.setOwn(self.arena, self.root_shape, "length", Value.num(bound_len));
         try obj.setAttr(self.arena, "length", ro_attr);
         const tgt_name = try self.getProperty(Value.obj(target), "name");
-        // SetFunctionName prefixes the target's String value, not the backing
-        // bytes used by a particular StringCell representation.
-        const base_name = if (tgt_name.isString()) try tgt_name.asWtf8(self.arena) else "";
-        var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
-        defer scratch.deinit();
-        const bound_name = try std.fmt.allocPrint(scratch.allocator(), "bound {s}", .{base_name});
-        try obj.setOwn(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, bound_name));
+        // The observable Get above stays eager. The resulting String is a flat
+        // slice over shared prepend storage, so repeated bind() calls retain
+        // linear bytes while every intermediate configurable name stays valid.
+        const base_name = if (tgt_name.isString()) tgt_name else Value.str("");
+        try obj.setOwn(self.arena, self.root_shape, "name", try Value.boundName(self.arena, base_name));
         try obj.setAttr(self.arena, "name", ro_attr);
         return Value.obj(obj);
     }
@@ -60945,6 +60943,24 @@ test "Function metadata canonicalizes physical StringData names" {
         "bound caf\xc3\xa9|1|n|function caf\xc3\xa9() { [native code] }",
         try result.asWtf8(allocator),
     );
+}
+
+test "Function bind keeps one hundred thousand bound names linear and exact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalSource(arena.allocator(),
+        \\let fn = function x() {};
+        \\let atOne, atHalf;
+        \\for (let i = 0; i < 100000; i++) {
+        \\  fn = fn.bind(null);
+        \\  if (i === 0) atOne = fn.name;
+        \\  if (i === 49999) atHalf = fn.name;
+        \\}
+        \\fn.name.length === 600001 &&
+        \\  fn.name.startsWith("bound bound ") && fn.name.endsWith("x") &&
+        \\  atOne === "bound x" && atHalf.length === 300001
+    );
+    try std.testing.expect(result.asBool());
 }
 
 test "JSON stringify promotes deep active paths without rejecting aliases" {
