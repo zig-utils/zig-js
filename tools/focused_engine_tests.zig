@@ -22,6 +22,31 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        // #933 item 8: what node accepts beside those rejections -- a var before or
+        // after the loop, a lexical shadow in the body, a `var` head, other names,
+        // and a var inside a function, arrow or static block in the body, each
+        // its own var scope. One bit per program.
+        .name = "lexical for heads accept vars outside their body's var scope",
+        .source =
+        \\var programs = [
+        \\  "var x; for (let x of []) {}",
+        \\  "for (let x of []) { function f(){ var x; } }",
+        \\  "for (let x of []) { (() => { var x; })(); }",
+        \\  "for (let x of []) { class C { static { var x; } } }",
+        \\  "for (let x of []) { let y; } var x;",
+        \\  "for (let x of []) { let x; }",
+        \\  "for (var x of []) { var x; }",
+        \\  "for (let x of []) { var y; }",
+        \\  "for (let x of []) { for (let y of []) { var z; } var w; }",
+        \\  "for (let x of []) { var f = function () { var x; }; }",
+        \\];
+        \\programs.reduce(function (bits, source, i) {
+        \\  try { (0, eval)(source); return bits | (1 << i); } catch (e) { return bits; }
+        \\}, 0)
+        ,
+        .expected = 1023,
+    },
+    .{
         .name = "operator precedence",
         .source = "1 + 2 * 3",
         .expected = 7,
@@ -140,6 +165,45 @@ const frontend_cases = [_]Case{
 };
 
 const frontend_error_cases = [_]ErrorCase{
+    // #933 item 8: a lexical `for` head's names must not be var-declared in its
+    // body (14.7.4.1, 14.7.5.1). Checked once per head by declaration order
+    // instead of re-collecting the body at every nested head.
+    .{
+        .name = "a lexical for-of head collides with a var in its body",
+        .source = "for (let x of []) { var x; }",
+    },
+    .{
+        .name = "a lexical for-of head collides with a var statement body",
+        .source = "for (let x of []) var x;",
+    },
+    .{
+        .name = "a destructured lexical head collides with a var in a nested block",
+        .source = "for (let [x] of []) { { var x; } }",
+    },
+    .{
+        .name = "a classic lexical head collides with a var in its body",
+        .source = "for (let x = 0; false;) { var x; }",
+    },
+    .{
+        .name = "a const for-in head collides with a var under an if",
+        .source = "for (const x in {}) { if (1) var x; }",
+    },
+    .{
+        .name = "an outer lexical head collides with a var in a nested for body",
+        .source = "for (let x of []) for (let y of []) { var x; }",
+    },
+    .{
+        .name = "a lexical head collides with a var for-of target in its body",
+        .source = "for (let x of []) { for (var x of []) {} }",
+    },
+    .{
+        .name = "a lexical head collides with a destructured var in its body",
+        .source = "for (let x of []) { var {x} = {}; }",
+    },
+    .{
+        .name = "a second classic head binding collides with a var in finally",
+        .source = "for (let x = 0, y = 0; false;) { try {} finally { var y; } }",
+    },
     .{
         .name = "duplicate lexical binding rejected",
         .source = "let x; let x;",

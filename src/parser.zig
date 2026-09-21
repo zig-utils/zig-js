@@ -430,6 +430,13 @@ pub const Parser = struct {
     /// `no_matching_paren`. Built once, the first time an arrow lookahead crosses
     /// deep nesting, and arena-owned like the tokens it indexes (#933 item 8b).
     paren_close: ?[]u32 = null,
+    /// Var-scoped names declared inside the body of the outermost lexical `for`
+    /// being parsed in the current var scope, each with the order of its latest
+    /// declaration. A lexical head asks this whether its body var-declares one
+    /// of its names: one lookup per name, where re-collecting the body's
+    /// VarDeclaredNames at every head was quadratic for nested heads (#933 item
+    /// 8). Null outside such a body; every var-scope boundary suspends it.
+    for_body_vars: ?*ForBodyVars = null,
     /// The original source text, so function definitions can capture their exact
     /// source span for `Function.prototype.toString`.
     source: []const u8 = "",
@@ -1247,13 +1254,50 @@ pub const Parser = struct {
     /// VarDeclaredNames of the loop body — `for (const x of []) { var x; }` is an
     /// early error (the body's `var` would redeclare the per-iteration lexical
     /// binding). Called only for lexical heads.
-    fn checkForHeadVarConflict(self: *Parser, target: *Node, body: *Node) ParseError!void {
-        var head: std.ArrayListUnmanaged([]const u8) = .empty;
-        try self.addPatternNames(&head, target);
-        if (head.items.len == 0) return;
-        var vars = self.secureStringMap(void);
-        try self.collectVarNames(body, &vars);
-        for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
+    const ForBodyVars = struct {
+        names: SecureStringMapUnmanaged(usize),
+        count: usize = 0,
+    };
+
+    /// Record a var-scoped declaration of `name` for an enclosing lexical `for`.
+    fn noteVarName(self: *Parser, name: []const u8) ParseError!void {
+        const vars = self.for_body_vars orelse return;
+        if (name.len == 0) return;
+        vars.count += 1;
+        try vars.names.put(self.scratch_allocator, name, vars.count);
+    }
+
+    fn noteVarPattern(self: *Parser, pattern: *Node) ParseError!void {
+        if (self.for_body_vars == null) return;
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, pattern);
+        for (names.items) |name| try self.noteVarName(name);
+    }
+
+    /// Parse the body of a `for` whose lexical head binds `head`. Its BoundNames
+    /// must not occur among the body's VarDeclaredNames (14.7.4.1, 14.7.5.1):
+    /// `for (let x of a) { var x; }` is an early error. The outermost lexical
+    /// `for` of a var scope owns the record of var declarations; a nested one
+    /// joins it and only compares declaration order against its own start.
+    fn parseLexicalForBody(self: *Parser, head: []const []const u8) ParseError!*Node {
+        var own: ForBodyVars = undefined;
+        const owns = self.for_body_vars == null;
+        if (owns) {
+            own = .{ .names = self.secureStringMap(usize) };
+            self.for_body_vars = &own;
+        }
+        defer if (owns) {
+            own.names.deinit(self.scratch_allocator);
+            self.for_body_vars = null;
+        };
+        const started = self.for_body_vars.?.count;
+        const body = try self.parseLoopBody();
+        const vars = self.for_body_vars.?;
+        for (head) |name| {
+            const declared = vars.names.get(name) orelse continue;
+            if (declared > started) return ParseError.UnexpectedToken;
+        }
+        return body;
     }
 
     /// Collect the BoundNames of a *lexical* (`let`/`const`/`using`) declaration
@@ -1266,17 +1310,6 @@ pub const Parser = struct {
             .decl_group => |g| for (g) |d2| try self.collectLexicalDeclNames(d2, out),
             else => {},
         }
-    }
-
-    /// A classic `for (lexical-decl; …) Statement`'s BoundNames must not also be
-    /// VarDeclaredNames of the body: `for (let x; …) { var x; }` is an early error.
-    fn checkForHeadDeclVarConflict(self: *Parser, decl: *Node, body: *Node) ParseError!void {
-        var head: std.ArrayListUnmanaged([]const u8) = .empty;
-        try self.collectLexicalDeclNames(decl, &head);
-        if (head.items.len == 0) return;
-        var vars = self.secureStringMap(void);
-        try self.collectVarNames(body, &vars);
-        for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
     }
 
     fn addDecl(self: *Parser, seen: *SecureStringMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
@@ -2330,6 +2363,7 @@ pub const Parser = struct {
                 const pattern = try self.parseBindingTarget();
                 try self.expect(.assign);
                 const init_expr = try self.parseAssignment();
+                if (kind == .@"var") try self.noteVarPattern(pattern);
                 try decls.append(self.arena, try self.alloc(.{ .destructure_decl = .{ .kind = kind, .pattern = pattern, .init = init_expr } }));
             } else {
                 const name_tok = self.advance();
@@ -2348,6 +2382,7 @@ pub const Parser = struct {
                     // `const` and `using` declarations require an initializer.
                     return ParseError.UnexpectedToken;
                 }
+                if (kind == .@"var") try self.noteVarName(name_tok.text);
                 try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose } }));
             }
             if (!self.match(.comma)) break;
@@ -2529,8 +2564,16 @@ pub const Parser = struct {
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
-                const body = try self.parseLoopBody();
-                if (decl_kind) |k| if (k != .@"var") try self.checkForHeadVarConflict(target, body);
+                const body = if (decl_kind != null and decl_kind.? != .@"var") body: {
+                    var head: std.ArrayListUnmanaged([]const u8) = .empty;
+                    try self.addPatternNames(&head, target);
+                    break :body try self.parseLexicalForBody(head.items);
+                } else body: {
+                    // A `var` target is itself a VarDeclaredName of the enclosing
+                    // var scope, so an enclosing lexical `for` has to see it.
+                    if (decl_kind != null) try self.noteVarPattern(target);
+                    break :body try self.parseLoopBody();
+                };
                 return self.alloc(.{ .for_in = .{
                     .decl_kind = decl_kind,
                     .target = target,
@@ -2585,11 +2628,13 @@ pub const Parser = struct {
         var update: ?*Node = null;
         if (!self.check(.rparen)) update = try self.parseExpression();
         try self.expect(.rparen);
-        const body = try self.parseLoopBody();
-        if (init_node) |ini| {
-            try self.checkNoDuplicateLexicalDeclNames(ini);
-            try self.checkForHeadDeclVarConflict(ini, body);
-        }
+        const body = if (init_node) |ini| body: {
+            var head: std.ArrayListUnmanaged([]const u8) = .empty;
+            try self.collectLexicalDeclNames(ini, &head);
+            if (head.items.len == 0) break :body try self.parseLoopBody();
+            break :body try self.parseLexicalForBody(head.items);
+        } else try self.parseLoopBody();
+        if (init_node) |ini| try self.checkNoDuplicateLexicalDeclNames(ini);
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
     }
 
@@ -3082,6 +3127,11 @@ pub const Parser = struct {
     /// generator/async contexts (an inner non-generator function nested in a
     /// generator does not see `yield` as a keyword), restored on the way out.
     fn parseFnBody(self: *Parser, is_gen: bool, is_async: bool) ParseError!*Node {
+        // A function body is its own var scope: its `var`s are not the
+        // VarDeclaredNames of an enclosing `for` body (#933 item 8).
+        const saved_for_body_vars = self.for_body_vars;
+        self.for_body_vars = null;
+        defer self.for_body_vars = saved_for_body_vars;
         const saved_gen = self.in_generator;
         const saved_async = self.in_async;
         const saved_strict = self.strict;
@@ -3533,6 +3583,10 @@ pub const Parser = struct {
             const own_use_strict = self.peekUseStrict();
             if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
             self.strict = saved_strict or own_use_strict;
+            // Its own var scope, like any function body (#933 item 8).
+            const saved_for_body_vars = self.for_body_vars;
+            self.for_body_vars = null;
+            defer self.for_body_vars = saved_for_body_vars;
             fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true, .is_async = is_async, .is_strict = self.strict };
             try self.checkParamBodyConflict(params, fnode.body);
         } else {
@@ -4590,6 +4644,10 @@ pub const Parser = struct {
                 const saved_fn = self.fn_depth;
                 const saved_iter = self.iter_depth;
                 const saved_switch = self.switch_depth;
+                // A static block is its own var scope (#933 item 8).
+                const saved_for_body_vars = self.for_body_vars;
+                self.for_body_vars = null;
+                defer self.for_body_vars = saved_for_body_vars;
                 const saved_active = self.active_labels.items.len;
                 const saved_pending = self.pending_labels.items.len;
                 const saved_continue = self.continue_labels.items.len;

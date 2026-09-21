@@ -271,6 +271,18 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_512")) return 512;
     if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_catch_destructure_in_function_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_of_128")) return 128;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_of_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_of_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_of_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_classic_128")) return 128;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_classic_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_classic_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_lexical_classic_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_var_128")) return 128;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_var_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_var_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_for_head_var_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_256")) return 256;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_512")) return 512;
     if (std.mem.eql(u8, name, "representative_frontend_private_nested_siblings_1024")) return 1024;
@@ -996,6 +1008,58 @@ fn validateCatchDestructureProgram(statements: anytype, width: usize) !usize {
         node = handler.block[0];
     }
     return checksum;
+}
+
+/// #933 item 8: N nested `for` heads with N `var`s at the bottom. A lexical
+/// head must check its names against its body's VarDeclaredNames; doing that
+/// by re-collecting the body at every head was quadratic. `var_head` is the
+/// control -- identical nesting, no lexical names, so no check at all.
+const ForHeadShape = enum { lexical_of, lexical_classic, var_head };
+
+fn forHeadShape(name: []const u8) ?ForHeadShape {
+    if (std.mem.startsWith(u8, name, "representative_frontend_for_head_lexical_of_")) return .lexical_of;
+    if (std.mem.startsWith(u8, name, "representative_frontend_for_head_lexical_classic_")) return .lexical_classic;
+    if (std.mem.startsWith(u8, name, "representative_frontend_for_head_var_")) return .var_head;
+    return null;
+}
+
+fn forHeadSource(allocator: std.mem.Allocator, width: usize, shape: ForHeadShape) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..width) |index| try source.appendSlice(allocator, switch (shape) {
+        .lexical_of => try std.fmt.allocPrint(allocator, "for (let a{d} of []) ", .{index}),
+        .lexical_classic => try std.fmt.allocPrint(allocator, "for (let a{d} = 0; false;) ", .{index}),
+        .var_head => try std.fmt.allocPrint(allocator, "for (var a{d} of []) ", .{index}),
+    });
+    try source.append(allocator, '{');
+    for (0..width) |index| try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "var v{d};", .{index}));
+    try source.append(allocator, '}');
+    return source.items;
+}
+
+fn validateForHeadProgram(statements: anytype, width: usize, shape: ForHeadShape) !usize {
+    if (statements.len != 1 or width == 0) return error.InvalidProgram;
+    var node = statements[0];
+    for (0..width) |_| {
+        node = switch (shape) {
+            .lexical_of, .var_head => blk: {
+                if (node.* != .for_in or !node.for_in.is_of) return error.InvalidProgram;
+                const kind = node.for_in.decl_kind orelse return error.InvalidProgram;
+                if ((kind == .@"var") != (shape == .var_head)) return error.InvalidProgram;
+                break :blk node.for_in.body;
+            },
+            .lexical_classic => blk: {
+                if (node.* != .for_stmt) return error.InvalidProgram;
+                const init = node.for_stmt.init orelse return error.InvalidProgram;
+                if (init.* != .var_decl or init.var_decl.kind != .let) return error.InvalidProgram;
+                break :blk node.for_stmt.body;
+            },
+        };
+    }
+    // The innermost body holds every `var`, so each head's body contains them all.
+    if (node.* != .block or node.block.len != width) return error.InvalidProgram;
+    for (node.block, 0..) |statement, index|
+        if (!isNamedDecl(statement, "var", "v", index)) return error.InvalidProgram;
+    return width * 2 + @backingInt(shape);
 }
 
 fn privateNestedShape(name: []const u8) ?PrivateNestedShape {
@@ -1903,6 +1967,8 @@ fn parseOnce(
     if (statements.len == 0) return error.InvalidProgram;
     if (catchDestructureWorkload(workload))
         return validateCatchDestructureProgram(statements, try workloadWidth(workload));
+    if (forHeadShape(workload)) |shape|
+        return validateForHeadProgram(statements, try workloadWidth(workload), shape);
     if (lexicalScanShape(workload)) |shape|
         return validateLexicalScanProgram(statements, try workloadWidth(workload), shape);
     if (bindingHashCompileShape(workload)) |shape|
@@ -2375,6 +2441,8 @@ pub fn main(init: std.process.Init) !void {
         try taggedSubstitutionSource(init.arena.allocator(), width)
     else if (catchDestructureWorkload(workload))
         try catchDestructureSource(init.arena.allocator(), width)
+    else if (forHeadShape(workload)) |shape|
+        try forHeadSource(init.arena.allocator(), width, shape)
     else if (lexical_scan_shape) |shape|
         try lexicalScanSource(init.arena.allocator(), width, shape)
     else if (private_nested_shape) |shape|
