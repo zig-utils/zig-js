@@ -1834,6 +1834,7 @@ pub fn main() void {
         fail("private exception source realm creation failed");
     const public_number = JSValueMakeNumber(exception_source, 908) orelse
         fail("private exception public value creation failed");
+    Bun__JSValue__protect(EncodedValue.fromRef(public_number));
     JSC__VM__throwError(exception_vm, exception_source, EncodedValue.fromRef(public_number));
     const projected_exception = JSGlobalObject__tryTakeException(protected_context);
     Bun__JSValue__protect(projected_exception);
@@ -1843,6 +1844,7 @@ pub fn main() void {
         fail("retired source realm changed exception projection identity");
     if (JSValueToNumber(protected_context, projected_number.cellPointer(), null) != 908)
         fail("retired source realm invalidated exception projection value");
+    Bun__JSValue__unprotect(projected_number);
     Bun__JSValue__unprotect(projected_exception);
 
     // Revision-pinned property iterator (#368): the independently compiled

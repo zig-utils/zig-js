@@ -714,9 +714,10 @@ const Boxed = struct {
     /// while explicitly protected, so its Context remains in the precise
     /// registry's retiring set until the last root disappears.
     owner: *Context,
-    /// Context whose arena owns this stable boundary box and whose C handle
-    /// table roots it. For private EncodedJSValues this is the hidden precise
-    /// heap owner, deliberately distinct from `owner`.
+    /// Context whose C handle table roots this value. Grouped public wrappers
+    /// are allocated from the VM arena but retain source-context root ownership
+    /// until that context is released. Private values and exception cells use
+    /// the hidden precise heap owner instead.
     storage_owner: *Context,
     private_kind: enum(u8) { value, exception, structure } = .value,
     exception_encoded: EncodedValue = .empty,
@@ -3386,12 +3387,12 @@ fn ctxForLifecycle(ref: JSContextRef) ?*Context {
 }
 
 fn box(ctx: *Context, v: Value) JSValueRef {
-    const storage_owner = if (ctx.c_api_group) |opaque_group| blk: {
+    const native_owner = if (ctx.c_api_group) |opaque_group| blk: {
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
         break :blk group.primary;
     } else ctx;
-    const b = storage_owner.arena().create(Boxed) catch return null;
-    b.* = .{ .value = v, .owner = ctx, .storage_owner = storage_owner };
+    const b = native_owner.arena().create(Boxed) catch return null;
+    b.* = .{ .value = v, .owner = ctx, .storage_owner = ctx };
     return @ptrCast(b);
 }
 
@@ -3435,7 +3436,9 @@ fn privateExceptionBox(ctx: *Context, thrown: Value, encoded: EncodedValue) ?*Bo
     const stable_encoded = if (encoded.asCellAddress()) |_| stable: {
         const encoded_box = privateBoxedFrom(encoded) orelse return null;
         if (encoded_box.private_kind != .value) return null;
-        if (encoded_box.storage_owner != owner) return null;
+        if (owner.c_api_group) |opaque_group| {
+            if (encoded_box.storage_owner.c_api_group != opaque_group) return null;
+        } else if (encoded_box.storage_owner != owner) return null;
         exception_realm = encoded_box.exception_realm orelse encoded_box.owner;
         projection_box = encoded_box;
         break :stable encoded;
@@ -3467,10 +3470,15 @@ fn boxedFrom(ref: JSValueRef) ?*Boxed {
 fn privateBoxedFrom(encoded: EncodedValue) ?*Boxed {
     const address = encoded.asCellAddress() catch return null;
     const boxed: *Boxed = @ptrFromInt(address);
-    const opaque_group = boxed.storage_owner.c_api_group orelse return null;
+    // Exception publication gives a grouped public wrapper VM affinity while
+    // leaving any pre-existing source-context protection in its original root
+    // table. The VM arena keeps the native wrapper address stable; the semantic
+    // realm is retired separately until pending/protected aliases disappear.
+    const lifetime_owner = if (boxed.exception_realm != null) boxed.owner else boxed.storage_owner;
+    const opaque_group = lifetime_owner.c_api_group orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    if (boxed.storage_owner != group.primary and boxed.storage_owner.c_api_ref_count.load(.acquire) == 0) return null;
-    boxed.storage_owner.assertOwnerThread();
+    if (lifetime_owner != group.primary and lifetime_owner.c_api_ref_count.load(.acquire) == 0) return null;
+    lifetime_owner.assertOwnerThread();
     return boxed;
 }
 
@@ -36248,6 +36256,7 @@ test "private exception projection and protection outlive a retired source realm
     // the source Context after that realm retires.
     const source_box = box(source_context, Value.num(908)) orelse return error.OutOfMemory;
     const source_encoded = privateEncodedFromRef(source_box);
+    Bun__JSValue__protect(source_encoded);
     JSC__VM__throwError(group_ref, source, source_encoded);
     const exception = group.pending_exception orelse return error.MissingException;
     const handle = privateEncodedFromRef(@ptrCast(exception));
@@ -36262,6 +36271,8 @@ test "private exception projection and protection outlive a retired source realm
     const projected = JSC__Exception__asJSValue(@ptrCast(exception));
     try std.testing.expectEqual(source_encoded, projected);
     try std.testing.expectEqual(@as(f64, 908), privateValueFrom(observer, projected).?.asNum());
+    Bun__JSValue__unprotect(source_encoded);
+    try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
     Bun__JSValue__unprotect(handle);
     try std.testing.expectEqual(@as(usize, 0), group.retiring_precise_contexts.items.len);
 }
