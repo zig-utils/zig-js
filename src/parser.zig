@@ -1457,6 +1457,11 @@ pub const Parser = struct {
     const LexicalScope = struct {
         /// name -> depth of the innermost open scope declaring it lexically.
         names: SecureStringMapUnmanaged(usize),
+        /// Lexical names already inventoried by the current var scope's caller.
+        /// Modules need this because their top-level declaration pass also owns
+        /// export validation; borrowing that map avoids hashing every import a
+        /// second time merely to check vars nested in module statements (#949).
+        var_scope_names: ?*const SecureStringMapUnmanaged(void) = null,
         /// Restores a shadowed name's outer depth instead of deleting it, since
         /// one name may be open at several depths at once.
         undo: std.ArrayListUnmanaged(Undo) = .empty,
@@ -1511,6 +1516,8 @@ pub const Parser = struct {
     fn checkVarAgainstLexical(self: *Parser, scope: *const LexicalScope, name: []const u8) ParseError!void {
         _ = self;
         if (name.len == 0) return;
+        if (scope.var_scope_names) |names| if (names.contains(name))
+            return ParseError.UnexpectedToken;
         const depth = scope.names.get(name) orelse return;
         if (depth >= scope.var_base) return ParseError.UnexpectedToken;
     }
@@ -1660,6 +1667,10 @@ pub const Parser = struct {
         for (stmts) |stmt| try checkLocalExportedBindings(stmt, &lexical, &vars);
         var lexical_scope = self.lexicalScope();
         defer lexical_scope.undo.deinit(self.scratch_allocator);
+        // ModuleBody's LexicallyDeclaredNames remain visible while nested
+        // statements contribute VarDeclaredNames: `let x; { var x; }` is an
+        // early error. Reuse the inventory above instead of copying it (#949).
+        lexical_scope.var_scope_names = &lexical;
         for (stmts) |stmt| try self.recurseScope(stmt, &lexical_scope);
         lexical_scope.assertBalanced();
         try self.checkPrivateUsesInProgram(stmts);
@@ -6802,6 +6813,35 @@ test "parser rejects module duplicate lexical and exported names" {
 
     var star_dup = try Parser.init(arena.allocator(), "var x; export { x as z }; export * as z from './m.js';");
     try std.testing.expectError(ParseError.UnexpectedToken, star_dup.parseModule());
+}
+
+test "parser rejects nested vars over module lexical declarations" {
+    const invalid = [_][]const u8{
+        "let x; { var x; }",
+        "export let x; { var x; }",
+        "function f(){} { var f; }",
+        "import {x} from 'm'; { var x; }",
+        "export default function f(){} { var f; }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        errdefer std.debug.print("module lexical/var conflict: {s}\n", .{source});
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseModule());
+    }
+
+    const valid = [_][]const u8{
+        "let x; function f(){ var x; }",
+        "export let x; export function f(){ var x; }",
+        "import {x} from 'm'; const f = function(){ var x; };",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        _ = try parser.parseModule();
+    }
 }
 
 test "parser rejects unresolved local exports" {
