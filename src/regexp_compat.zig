@@ -1,4 +1,28 @@
 const std = @import("std");
+const regex = @import("regex");
+
+pub fn compileErrorMessage(reason: regex.CompileErrorReason) []const u8 {
+    return switch (reason) {
+        .missing_closing_parenthesis => "Invalid regular expression: missing )",
+        .missing_character_class_terminator => "Invalid regular expression: missing terminating ] for character class",
+        .quantifier_numbers_out_of_order => "Invalid regular expression: numbers out of order in {} quantifier",
+        .nothing_to_repeat => "Invalid regular expression: nothing to repeat",
+        .trailing_backslash => "Invalid regular expression: \\ at end of pattern",
+        .invalid_group_specifier_name => "Invalid regular expression: invalid group specifier name",
+        .range_out_of_order_in_character_class => "Invalid regular expression: range out of order in character class",
+        .duplicate_group_specifier_name => "Invalid regular expression: duplicate group specifier name",
+        .invalid_named_backreference => "Invalid regular expression: invalid \\k<> named backreference",
+        .invalid_property_expression => "Invalid regular expression: invalid property expression",
+        .invalid_escaped_character_for_unicode_pattern => "Invalid regular expression: invalid escaped character for Unicode pattern",
+        .invalid_unicode_escape => "Invalid regular expression: invalid Unicode \\u escape",
+        .invalid_unicode_code_point_escape => "Invalid regular expression: invalid Unicode code point \\u{} escape",
+        .invalid_octal_escape_for_unicode_pattern => "Invalid regular expression: invalid octal escape for Unicode pattern",
+        .invalid_range_in_character_class_for_unicode_pattern => "Invalid regular expression: invalid range in character class for Unicode pattern",
+        .invalid_backreference_for_unicode_pattern => "Invalid regular expression: invalid backreference for Unicode pattern",
+        .unrecognized_character_after_group_start => "Invalid regular expression: unrecognized character after (?",
+        .unmatched_parentheses => "Invalid regular expression: unmatched parentheses",
+    };
+}
 
 fn isLegacyClassEscape(c: u8) bool {
     return switch (c) {

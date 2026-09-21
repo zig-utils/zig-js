@@ -57,6 +57,24 @@ pub const DiagnosticReason = enum {
     static_setter_instance_getter,
     instance_getter_static_setter,
     instance_setter_static_getter,
+    regexp_missing_closing_parenthesis,
+    regexp_missing_character_class_terminator,
+    regexp_quantifier_numbers_out_of_order,
+    regexp_nothing_to_repeat,
+    regexp_trailing_backslash,
+    regexp_invalid_group_specifier_name,
+    regexp_range_out_of_order_in_character_class,
+    regexp_duplicate_group_specifier_name,
+    regexp_invalid_named_backreference,
+    regexp_invalid_property_expression,
+    regexp_invalid_escaped_character_for_unicode_pattern,
+    regexp_invalid_unicode_escape,
+    regexp_invalid_unicode_code_point_escape,
+    regexp_invalid_octal_escape_for_unicode_pattern,
+    regexp_invalid_range_in_character_class_for_unicode_pattern,
+    regexp_invalid_backreference_for_unicode_pattern,
+    regexp_unrecognized_character_after_group_start,
+    regexp_unmatched_parentheses,
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
@@ -113,9 +131,50 @@ pub const DiagnosticReason = enum {
             .static_setter_instance_getter => "Cannot declare a private static setter if there is a non-static private getter with used name.",
             .instance_getter_static_setter => "Cannot declare a private non-static getter if there is a static private setter with used name.",
             .instance_setter_static_getter => "Cannot declare a private non-static setter if there is a static private getter with used name.",
+            .regexp_missing_closing_parenthesis => "Invalid regular expression: missing )",
+            .regexp_missing_character_class_terminator => "Invalid regular expression: missing terminating ] for character class",
+            .regexp_quantifier_numbers_out_of_order => "Invalid regular expression: numbers out of order in {} quantifier",
+            .regexp_nothing_to_repeat => "Invalid regular expression: nothing to repeat",
+            .regexp_trailing_backslash => "Invalid regular expression: \\ at end of pattern",
+            .regexp_invalid_group_specifier_name => "Invalid regular expression: invalid group specifier name",
+            .regexp_range_out_of_order_in_character_class => "Invalid regular expression: range out of order in character class",
+            .regexp_duplicate_group_specifier_name => "Invalid regular expression: duplicate group specifier name",
+            .regexp_invalid_named_backreference => "Invalid regular expression: invalid \\k<> named backreference",
+            .regexp_invalid_property_expression => "Invalid regular expression: invalid property expression",
+            .regexp_invalid_escaped_character_for_unicode_pattern => "Invalid regular expression: invalid escaped character for Unicode pattern",
+            .regexp_invalid_unicode_escape => "Invalid regular expression: invalid Unicode \\u escape",
+            .regexp_invalid_unicode_code_point_escape => "Invalid regular expression: invalid Unicode code point \\u{} escape",
+            .regexp_invalid_octal_escape_for_unicode_pattern => "Invalid regular expression: invalid octal escape for Unicode pattern",
+            .regexp_invalid_range_in_character_class_for_unicode_pattern => "Invalid regular expression: invalid range in character class for Unicode pattern",
+            .regexp_invalid_backreference_for_unicode_pattern => "Invalid regular expression: invalid backreference for Unicode pattern",
+            .regexp_unrecognized_character_after_group_start => "Invalid regular expression: unrecognized character after (?",
+            .regexp_unmatched_parentheses => "Invalid regular expression: unmatched parentheses",
         };
     }
 };
+
+fn regexDiagnosticReason(reason: regex.CompileErrorReason) DiagnosticReason {
+    return switch (reason) {
+        .missing_closing_parenthesis => .regexp_missing_closing_parenthesis,
+        .missing_character_class_terminator => .regexp_missing_character_class_terminator,
+        .quantifier_numbers_out_of_order => .regexp_quantifier_numbers_out_of_order,
+        .nothing_to_repeat => .regexp_nothing_to_repeat,
+        .trailing_backslash => .regexp_trailing_backslash,
+        .invalid_group_specifier_name => .regexp_invalid_group_specifier_name,
+        .range_out_of_order_in_character_class => .regexp_range_out_of_order_in_character_class,
+        .duplicate_group_specifier_name => .regexp_duplicate_group_specifier_name,
+        .invalid_named_backreference => .regexp_invalid_named_backreference,
+        .invalid_property_expression => .regexp_invalid_property_expression,
+        .invalid_escaped_character_for_unicode_pattern => .regexp_invalid_escaped_character_for_unicode_pattern,
+        .invalid_unicode_escape => .regexp_invalid_unicode_escape,
+        .invalid_unicode_code_point_escape => .regexp_invalid_unicode_code_point_escape,
+        .invalid_octal_escape_for_unicode_pattern => .regexp_invalid_octal_escape_for_unicode_pattern,
+        .invalid_range_in_character_class_for_unicode_pattern => .regexp_invalid_range_in_character_class_for_unicode_pattern,
+        .invalid_backreference_for_unicode_pattern => .regexp_invalid_backreference_for_unicode_pattern,
+        .unrecognized_character_after_group_start => .regexp_unrecognized_character_after_group_start,
+        .unmatched_parentheses => .regexp_unmatched_parentheses,
+    };
+}
 
 const DiagnosticToken = struct {
     kind: enum { identifier, keyword, number, string, token },
@@ -642,16 +701,25 @@ pub const Parser = struct {
         state.realm_shape = realm_shape;
     }
 
-    fn validateRegexLiteral(self: *Parser, pattern: []const u8, flags: []const u8) ParseError!void {
-        if (self.regex_validation_arena) |validation_arena|
-            return validateRegexLiteralWithArena(validation_arena, pattern, flags);
+    fn validateRegexLiteral(self: *Parser, pattern: []const u8, flags: []const u8, offset: usize) ParseError!void {
+        var diagnostic: ?regex.CompileErrorReason = null;
+        if (self.regex_validation_arena) |validation_arena| {
+            validateRegexLiteralWithArena(validation_arena, pattern, flags, &diagnostic) catch |err| {
+                if (diagnostic) |reason| return self.failWithReasonAt(regexDiagnosticReason(reason), offset);
+                return self.fail(err);
+            };
+            return;
+        }
 
         // `parseExpression` is also a public entry point. When it is used
         // directly, keep the same bounded validation lifetime without requiring
         // the caller to establish the Program/Module parse scope first.
         var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
         defer validation_arena.deinit();
-        return validateRegexLiteralWithArena(&validation_arena, pattern, flags);
+        validateRegexLiteralWithArena(&validation_arena, pattern, flags, &diagnostic) catch |err| {
+            if (diagnostic) |reason| return self.failWithReasonAt(regexDiagnosticReason(reason), offset);
+            return self.fail(err);
+        };
     }
 
     /// Source slice from the start position of the token at `start_pos` through
@@ -3258,7 +3326,7 @@ pub const Parser = struct {
                 var end = i + 1;
                 while (end < self.source.len and isIdentifierPartByte(self.source[end])) : (end += 1) {}
                 const flags = self.source[i + 1 .. end];
-                try self.validateRegexLiteral(pattern, flags);
+                try self.validateRegexLiteral(pattern, flags, start);
                 while (self.pos < self.tokens.len and self.tokens[self.pos].pos < end) self.pos += 1;
                 return self.alloc(.{ .regex_literal = .{ .pattern = pattern, .flags = flags } });
             }
@@ -5584,7 +5652,7 @@ pub const Parser = struct {
                 // them at parse time so an invalid literal fails the parse (the
                 // `phase: parse` negative tests rely on this), matching the same
                 // compile the interpreter runs eagerly at evaluation.
-                try self.validateRegexLiteral(t.text, t.flags);
+                try self.validateRegexLiteral(t.text, t.flags, t.pos);
                 return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } });
             },
             .lparen => {
@@ -5629,13 +5697,13 @@ pub const Parser = struct {
 /// Validate a regex literal's flags and pattern, returning a parse error for an
 /// invalid one. Mirrors the interpreter's eager compile so the result is the
 /// same whether the literal is rejected at parse or at evaluation.
-fn validateRegexLiteralWithArena(validation_arena: *std.heap.ArenaAllocator, pattern: []const u8, flags: []const u8) ParseError!void {
+fn validateRegexLiteralWithArena(validation_arena: *std.heap.ArenaAllocator, pattern: []const u8, flags: []const u8, diagnostic: *?regex.CompileErrorReason) ParseError!void {
     _ = validation_arena.reset(.retain_capacity);
     defer _ = validation_arena.reset(.retain_capacity);
-    _ = try compileRegexLiteralForValidation(validation_arena.allocator(), pattern, flags);
+    _ = try compileRegexLiteralForValidation(validation_arena.allocator(), pattern, flags, diagnostic);
 }
 
-fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8) ParseError!regex.Regex {
+fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8, diagnostic: *?regex.CompileErrorReason) ParseError!regex.Regex {
     var seen = std.mem.zeroes([128]bool);
     for (flags) |f| {
         if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f]) return ParseError.UnexpectedToken;
@@ -5655,7 +5723,7 @@ fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, patter
     else
         try regexp_compat.normalizeAnnexBClassRanges(scratch_allocator, pattern);
     defer normalized.deinit(scratch_allocator);
-    return regex.Regex.compileWithFlags(scratch_allocator, normalized.bytes, cf) catch |err| switch (err) {
+    return regex.Regex.compileWithFlagsDiagnostic(scratch_allocator, normalized.bytes, cf, diagnostic) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return ParseError.UnexpectedToken,
     };
@@ -8178,7 +8246,8 @@ fn exerciseRegexCompilerAllocationFailures(allocator: std.mem.Allocator) !void {
         .{ .pattern = "[\\d-a]+", .flags = "" },
         .{ .pattern = "unicode-[a-z]+", .flags = "u" },
     }) |spec| {
-        var compiled = try compileRegexLiteralForValidation(allocator, spec.pattern, spec.flags);
+        var diagnostic: ?regex.CompileErrorReason = null;
+        var compiled = try compileRegexLiteralForValidation(allocator, spec.pattern, spec.flags, &diagnostic);
         defer compiled.deinit();
     }
 }
@@ -8200,4 +8269,29 @@ test "parser RegExp validation releases every scratch allocation and preserves A
     var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
     var exhausted = try Parser.initWithScratch(arena.allocator(), fixed.allocator(), "var pattern = /a+/;");
     try std.testing.expectError(error.OutOfMemory, exhausted.parseProgram());
+}
+
+test "regex literal validation preserves exact compile diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "/(/;", .reason = .regexp_missing_closing_parenthesis, .message = "Invalid regular expression: missing )" },
+        .{ .source = "/a{2,1}/;", .reason = .regexp_quantifier_numbers_out_of_order, .message = "Invalid regular expression: numbers out of order in {} quantifier" },
+        .{ .source = "/a**/;", .reason = .regexp_nothing_to_repeat, .message = "Invalid regular expression: nothing to repeat" },
+        .{ .source = "/(?<1>a)/;", .reason = .regexp_invalid_group_specifier_name, .message = "Invalid regular expression: invalid group specifier name" },
+        .{ .source = "/[z-a]/;", .reason = .regexp_range_out_of_order_in_character_class, .message = "Invalid regular expression: range out of order in character class" },
+        .{ .source = "/\\q/u;", .reason = .regexp_invalid_escaped_character_for_unicode_pattern, .message = "Invalid regular expression: invalid escaped character for Unicode pattern" },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for (cases) |case| {
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
 }

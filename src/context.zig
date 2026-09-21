@@ -14103,13 +14103,10 @@ test "Intl option errors enumerate the legal values as JavaScriptCore does" {
     );
 }
 
-// JavaScriptCore uses ONE constant for every bad-flags shape, and prefixes each
+// JavaScriptCore uses one constant for every bad-flags shape and prefixes each
 // pattern failure with `Invalid regular expression: ` plus a specific reason
-// (#902). Only the reasons whose zig-regex error tag maps 1:1 are translated:
-// most tags stand in for up to four different JSC reasons, so emitting a
-// JSC-shaped sentence for them would be confidently wrong. The generic cases
-// below are pinned deliberately, so that if the dependency ever carries a
-// finer reason this test shows exactly which strings should change.
+// (#902). zig-regex retains that precise reason separately from its stable,
+// coarse public error categories.
 test "RegExp syntax errors use JavaScriptCore's flags constant and exact reasons" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{
@@ -14119,16 +14116,30 @@ test "RegExp syntax errors use JavaScriptCore's flags constant and exact reasons
         .{ .source = "new RegExp('a','uv')", .message = "Invalid flags supplied to RegExp constructor." },
         .{ .source = "new RegExp('a','yy')", .message = "Invalid flags supplied to RegExp constructor." },
         .{ .source = "new RegExp('a',1)", .message = "Invalid flags supplied to RegExp constructor." },
-        // The two pattern reasons whose tag is unambiguous.
         .{ .source = "new RegExp(')')", .message = "Invalid regular expression: unmatched parentheses" },
         .{ .source = "new RegExp('a)b')", .message = "Invalid regular expression: unmatched parentheses" },
         .{ .source = "new RegExp('(a))')", .message = "Invalid regular expression: unmatched parentheses" },
         .{ .source = "new RegExp('(?<a>x)(?<a>y)')", .message = "Invalid regular expression: duplicate group specifier name" },
         .{ .source = "new RegExp('(?<a>x)(?<b>y)(?<a>z)')", .message = "Invalid regular expression: duplicate group specifier name" },
-        // Still generic: one zig-regex tag covers several JSC reasons here.
-        .{ .source = "new RegExp('(')", .message = "invalid regular expression" },
-        .{ .source = "new RegExp('[a')", .message = "invalid regular expression" },
-        .{ .source = "new RegExp('a{2,1}')", .message = "invalid regular expression" },
+        .{ .source = "new RegExp('(')", .message = "Invalid regular expression: missing )" },
+        .{ .source = "new RegExp('[a')", .message = "Invalid regular expression: missing terminating ] for character class" },
+        .{ .source = "new RegExp('a{2,1}')", .message = "Invalid regular expression: numbers out of order in {} quantifier" },
+        .{ .source = "new RegExp('*')", .message = "Invalid regular expression: nothing to repeat" },
+        .{ .source = "new RegExp('a**')", .message = "Invalid regular expression: nothing to repeat" },
+        .{ .source = "new RegExp('a' + String.fromCharCode(92))", .message = "Invalid regular expression: \\ at end of pattern" },
+        .{ .source = "new RegExp('(?<1>a)')", .message = "Invalid regular expression: invalid group specifier name" },
+        .{ .source = "new RegExp('[z-a]')", .message = "Invalid regular expression: range out of order in character class" },
+        .{ .source = "new RegExp('\\\\k<z>(?<a>x)')", .message = "Invalid regular expression: invalid \\k<> named backreference" },
+        .{ .source = "new RegExp('\\\\p{Nope}','u')", .message = "Invalid regular expression: invalid property expression" },
+        .{ .source = "new RegExp('\\\\q','u')", .message = "Invalid regular expression: invalid escaped character for Unicode pattern" },
+        .{ .source = "new RegExp('\\\\u123','u')", .message = "Invalid regular expression: invalid Unicode \\u escape" },
+        .{ .source = "new RegExp('\\\\u{110000}','u')", .message = "Invalid regular expression: invalid Unicode code point \\u{} escape" },
+        .{ .source = "new RegExp('\\\\01','u')", .message = "Invalid regular expression: invalid octal escape for Unicode pattern" },
+        .{ .source = "new RegExp('[\\\\d-a]','u')", .message = "Invalid regular expression: invalid range in character class for Unicode pattern" },
+        .{ .source = "new RegExp('\\\\1','u')", .message = "Invalid regular expression: invalid backreference for Unicode pattern" },
+        .{ .source = "new RegExp('(?')", .message = "Invalid regular expression: unrecognized character after (?" },
+        // Literal validation consumes the same dependency diagnostic.
+        .{ .source = "eval('/(/')", .message = "Invalid regular expression: missing )" },
     };
     var buffer: [512]u8 = undefined;
     for (cases) |case| {

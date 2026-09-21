@@ -12494,10 +12494,11 @@ pub const Interpreter = struct {
             .ecmascript = true,
         };
         const compiled = try self.arena.create(regex.Regex);
-        compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch |err| switch (err) {
-            error.UnmatchedParenthesis => return self.throwError("SyntaxError", "Invalid regular expression: unmatched parentheses"),
-            error.DuplicateGroupName => return self.throwError("SyntaxError", "Invalid regular expression: duplicate group specifier name"),
-            else => return self.throwError("SyntaxError", "invalid regular expression"),
+        var diagnostic: ?regex.CompileErrorReason = null;
+        compiled.* = regex.Regex.compileWithFlagsDiagnostic(self.arena, src, cf, &diagnostic) catch {
+            if (diagnostic) |reason|
+                return self.throwError("SyntaxError", regexp_compat.compileErrorMessage(reason));
+            return self.throwError("SyntaxError", "invalid regular expression");
         };
         const regex_state = try o.ensureRegexState(self.arena);
         regex_state.compiled = @ptrCast(compiled);
