@@ -22,6 +22,32 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        // #930 family 1: what node accepts beside those rejections -- distinct
+        // names, duplicate vars, a lexical shadow in a nested block, a var that
+        // repeats an outer function's lexical name, sloppy Annex B duplicate
+        // block functions, and names reused across sibling functions or after
+        // them. One bit per program.
+        .name = "function bodies in expressions accept what node accepts",
+        .source =
+        \\var programs = [
+        \\  "(function(){ let x; var y; })();",
+        \\  "var g0 = function (f) {}; g0(function(){ var x; var x; });",
+        \\  "({ m(){ let x; { var y; } } });",
+        \\  "xx = () => { let y; { let y; } };",
+        \\  "function h(){ let x; return function(){ var x; } }",
+        \\  "(function(){ { function f(){} function f(){} } })();",
+        \\  "(function(){ 'use strict'; { function f(){} } })();",
+        \\  "[() => { var z; }, () => { let z; }];",
+        \\  "let {a = () => { var z; }} = {}; var z;",
+        \\  "(function(){ let x; })(); var x;",
+        \\];
+        \\programs.reduce(function (bits, source, i) {
+        \\  try { (0, eval)(source); return bits | (1 << i); } catch (e) { return bits; }
+        \\}, 0)
+        ,
+        .expected = 1023,
+    },
+    .{
         // #933 item 8: what node accepts beside those rejections -- a var before or
         // after the loop, a lexical shadow in the body, a `var` head, other names,
         // and a var inside a function, arrow or static block in the body, each
@@ -165,6 +191,72 @@ const frontend_cases = [_]Case{
 };
 
 const frontend_error_cases = [_]ErrorCase{
+    // #930 family 1: every function body is checked once as it is parsed,
+    // so its lexical/var conflicts are found wherever the function appears.
+    .{
+        .name = "lexical/var conflict in a function in an immediately invoked function",
+        .source = "(function(){ let x; var x; })();",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a call argument",
+        .source = "g0(function(){ let x; var x; });",
+    },
+    .{
+        .name = "lexical/var conflict in a function in an object literal method",
+        .source = "({ m(){ let x; var x; } });",
+    },
+    .{
+        .name = "lexical/var conflict in a function in an assigned arrow",
+        .source = "xx = () => { let y; var y; };",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a returned function",
+        .source = "function h(){ return function(){ let x; var x; } }",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a later declarator",
+        .source = "var a = 1, b = function(){ let x; var x; };",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a class method in a later declarator",
+        .source = "let a2 = 1, b2 = class { m(){ let x; var x; } };",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a for-head initializer",
+        .source = "for (var i = function(){ let x; var x; };;) break;",
+    },
+    .{
+        .name = "lexical/var conflict in a function in an array literal",
+        .source = "[function(){ let z; var z; }];",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a class field initializer",
+        .source = "class K { x = function(){ let z; var z; }; }",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a destructuring default",
+        .source = "let {a = function(){ let z; var z; }} = {};",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a new expression",
+        .source = "new function(){ let x; var x; };",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a parameter default",
+        .source = "function f2(a = function(){ let x; var x; }){}",
+    },
+    .{
+        .name = "lexical/var conflict in a function in a template substitution",
+        .source = "`${function(){ let x; var x; }}`;",
+    },
+    .{
+        .name = "lexical/var conflict in a function in an object literal getter",
+        .source = "({ get p(){ let x; var x; } });",
+    },
+    .{
+        .name = "lexical/var conflict in a function in an async arrow",
+        .source = "async () => { let x; var x; };",
+    },
     // #933 item 8: a lexical `for` head's names must not be var-declared in its
     // body (14.7.4.1, 14.7.5.1). Checked once per head by declaration order
     // instead of re-collecting the body at every nested head.

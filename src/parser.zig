@@ -1372,12 +1372,16 @@ pub const Parser = struct {
                 for (sw.cases) |cs| try combined.appendSlice(self.arena, cs.body);
                 try self.checkLexicalDupes(combined.items, true, scope);
             },
-            .func_decl => |fnode| try self.recurseFnBody(fnode, scope),
-            .function => |fnode| try self.recurseFnBody(fnode, scope),
-            // A class/function used as an initializer carries its own body scopes.
-            .class_expr => |c| for (c.members) |m| {
-                if (m.func) |mf| if (mf.* == .function) try self.recurseFnBody(mf.function, scope);
-            },
+            // Function bodies -- declarations, expressions, arrows, methods and
+            // accessors alike -- are checked as each one finishes parsing
+            // (`checkFunctionBodyDeclarations`), wherever it appears. Reaching
+            // them from here found only the few positions this walk followed,
+            // so a function in a call argument, literal or default was never
+            // checked (#930 family 1); and descending here as well would walk
+            // every nested body once per enclosing body, the #928 quadratic.
+            .func_decl, .function => {},
+            // Class members' bodies are function bodies too: see above.
+            .class_expr => {},
             .expr_stmt => |e| try self.recurseScope(e, scope),
             else => {},
         }
@@ -1428,22 +1432,21 @@ pub const Parser = struct {
         for (names.items) |n| try self.checkVarAgainstLexical(scope, n);
     }
 
-    /// A function body is a fresh function scope: its top-level function
-    /// declarations are var-scoped (not lexical), so `funcs_lexical = false`.
-    /// It is also a fresh VAR scope, so lexical names opened by enclosing
-    /// functions must stop matching: `{ let x; function f() { var x; } }` is legal.
-    fn recurseFnBody(self: *Parser, fnode: *ast.FunctionNode, scope: *LexicalScope) ParseError!void {
-        if (fnode.body.* != .block) return;
-        // Parsing restored the enclosing mode before this post-parse walk.
-        // Duplicate block functions depend on the body owner's strictness:
-        // sloppy code has the Annex B.3.3 allowance, strict code does not.
-        const saved_strict = self.strict;
-        self.strict = fnode.is_strict;
-        defer self.strict = saved_strict;
-        const saved_var_base = scope.var_base;
-        scope.var_base = scope.depth + 1;
-        defer scope.var_base = saved_var_base;
-        try self.checkLexicalDupes(fnode.body.block, false, scope);
+    /// A function body's lexical/var early errors (15.2.1 and the block rules
+    /// within it), checked once, when the body has just been parsed.
+    ///
+    /// A function body is a fresh var scope, so no lexical name from an
+    /// enclosing scope can collide with a `var` in it: the check needs nothing
+    /// but the body itself. Running it here means every body is checked exactly
+    /// once whatever expression contains it, and the parser's strictness is
+    /// already the body's own -- Annex B.3.3 duplicate block functions are
+    /// allowed only in sloppy code (#930 families 1 and 4).
+    fn checkFunctionBodyDeclarations(self: *Parser, body: *Node) ParseError!void {
+        if (body.* != .block) return;
+        var scope = self.lexicalScope();
+        defer scope.undo.deinit(self.scratch_allocator);
+        try self.checkLexicalDupes(body.block, false, &scope);
+        scope.assertBalanced();
     }
 
     /// Lexical names currently open for the var/lexical early error (#928),
@@ -3172,7 +3175,11 @@ pub const Parser = struct {
             self.continue_labels.items.len = saved_continue_labels;
             self.no_in = saved_no_in;
         }
-        return self.parseBlock();
+        const body = try self.parseBlock();
+        // Checked here, with this body's strictness and context still in
+        // force, rather than by the post-parse scope walk (#930 family 1).
+        try self.checkFunctionBodyDeclarations(body);
+        return body;
     }
 
     /// Does a `"use strict"` directive lead the body about to be parsed? The
@@ -3587,7 +3594,9 @@ pub const Parser = struct {
             const saved_for_body_vars = self.for_body_vars;
             self.for_body_vars = null;
             defer self.for_body_vars = saved_for_body_vars;
-            fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true, .is_async = is_async, .is_strict = self.strict };
+            const arrow_body = try self.parseBlock();
+            try self.checkFunctionBodyDeclarations(arrow_body);
+            fnode.* = .{ .params = params, .body = arrow_body, .is_expr_body = false, .is_arrow = true, .is_async = is_async, .is_strict = self.strict };
             try self.checkParamBodyConflict(params, fnode.body);
         } else {
             fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true, .is_async = is_async, .is_strict = saved_strict };
