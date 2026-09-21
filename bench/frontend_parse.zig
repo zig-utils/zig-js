@@ -341,6 +341,17 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_substitutions_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_substitutions_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_substitutions_4096")) return 4096;
+    // #948: keep the substitution depth separate from the fixed 400 KB
+    // payload. The paired parenthesis rows distinguish ordinary nesting cost
+    // from rescanning the complete payload at every template boundary.
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_nested_32")) return 32;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_nested_64")) return 64;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_nested_128")) return 128;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_nested_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_parentheses_32")) return 32;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_parentheses_64")) return 64;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_parentheses_128")) return 128;
+    if (std.mem.eql(u8, name, "representative_frontend_template_substitution_parentheses_256")) return 256;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_4096")) return 4096;
@@ -402,6 +413,14 @@ fn isNormalizedTemplateWorkload(name: []const u8) bool {
 
 fn isTaggedSubstitutionWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_templates_tagged_substitutions_");
+}
+
+fn isTemplateSubstitutionGrowthWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_template_substitution_");
+}
+
+fn isNestedTemplateSubstitutionGrowthWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_template_substitution_nested_");
 }
 
 fn isEscapedIdentifierWorkload(name: []const u8) bool {
@@ -1264,6 +1283,23 @@ fn taggedSubstitutionSource(allocator: std.mem.Allocator, width: usize) ![]const
     return source.items;
 }
 
+const template_substitution_payload_elements = 200_000;
+
+fn templateSubstitutionGrowthSource(allocator: std.mem.Allocator, depth: usize, nested_templates: bool) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function __never(){return ");
+    for (0..depth) |_| try source.appendSlice(allocator, if (nested_templates) "`${" else "(");
+    try source.append(allocator, '[');
+    for (0..template_substitution_payload_elements) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try source.append(allocator, '0');
+    }
+    try source.append(allocator, ']');
+    for (0..depth) |_| try source.appendSlice(allocator, if (nested_templates) "}`" else ")");
+    try source.appendSlice(allocator, ";}");
+    return source.items;
+}
+
 fn numericLiteralSource(allocator: std.mem.Allocator, width: usize, separated: bool) ![]const u8 {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     try source.appendSlice(allocator, "var numericCorpus = [");
@@ -2009,6 +2045,31 @@ fn parseOnce(
         return validateNestedArrowArgumentsProgram(program, source, try workloadWidth(workload));
     if (isNestedFunctionWorkload(workload))
         return validateNestedFunctionProgram(program, source, workload, try workloadWidth(workload));
+    if (isTemplateSubstitutionGrowthWorkload(workload)) {
+        const depth = try workloadWidth(workload);
+        if (program.program.len != 1) return error.InvalidProgram;
+        const carrier = program.program[0];
+        if (carrier.* != .func_decl or
+            !std.mem.eql(u8, carrier.func_decl.name, "__never") or
+            carrier.func_decl.params.len != 0 or
+            carrier.func_decl.body.* != .block or
+            carrier.func_decl.body.block.len != 1)
+            return error.InvalidProgram;
+        const return_statement = carrier.func_decl.body.block[0];
+        if (return_statement.* != .return_stmt or return_statement.return_stmt == null or
+            carrier.func_decl.source.len != source.len)
+            return error.InvalidProgram;
+        const returned = return_statement.return_stmt.?;
+        if (isNestedTemplateSubstitutionGrowthWorkload(workload)) {
+            // Every untagged boundary concatenates its quasi with the nested
+            // expression, so the payload must remain reachable through the
+            // resulting binary tree rather than disappearing during parsing.
+            if (returned.* != .binary) return error.InvalidProgram;
+        } else if (returned.* != .array_lit or returned.array_lit.len != template_substitution_payload_elements) {
+            return error.InvalidProgram;
+        }
+        return source.len + depth + carrier.func_decl.source.len;
+    }
     if (isStatementLocationWorkload(workload)) {
         const width = try workloadWidth(workload);
         if (isSingleStatementLocationWorkload(workload)) {
@@ -2390,6 +2451,7 @@ pub fn main(init: std.process.Init) !void {
     const nested_function_workload = isNestedFunctionWorkload(workload);
     const nested_arrow_workload = isNestedArrowArgumentsWorkload(workload);
     const regex_literal_workload = isRegexLiteralWorkload(workload);
+    const template_substitution_growth_workload = isTemplateSubstitutionGrowthWorkload(workload);
     const class_frame_compile_shape = classFrameCompileShape(workload);
     const repeated_body_compile_shape = repeatedBodyCompileShape(workload);
     const loop_capture_compile_shape = loopCaptureCompileShape(workload);
@@ -2439,6 +2501,12 @@ pub fn main(init: std.process.Init) !void {
         try moduleSource(init.arena.allocator(), width)
     else if (isTaggedSubstitutionWorkload(workload))
         try taggedSubstitutionSource(init.arena.allocator(), width)
+    else if (template_substitution_growth_workload)
+        try templateSubstitutionGrowthSource(
+            init.arena.allocator(),
+            width,
+            isNestedTemplateSubstitutionGrowthWorkload(workload),
+        )
     else if (catchDestructureWorkload(workload))
         try catchDestructureSource(init.arena.allocator(), width)
     else if (forHeadShape(workload)) |shape|
@@ -2507,7 +2575,7 @@ pub fn main(init: std.process.Init) !void {
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (lexical_scan_shape != null or private_nested_shape != null or binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (template_substitution_growth_workload or lexical_scan_shape != null or private_nested_shape != null or binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;

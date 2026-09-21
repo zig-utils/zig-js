@@ -1,0 +1,57 @@
+{
+  "schema_version": 39,
+  "matrix_id": "zig-js-representative-v39",
+  "status": "frozen",
+  "frozen_date": "2026-09-21",
+  "owner_issue": 948,
+  "history_policy": "This version hash-inherits every V38 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, evidence schema, validator, and publication ruling. It changes no scored row or production engine behavior. It re-pins the frontend native runner after #948 froze nested-template-substitution and matched-parenthesis growth rows in it. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v38",
+    "path": "docs/.data/representative-benchmark-matrix-v38.json",
+    "sha256": "038aa5402261c3bf7d721935ae4a94d197b3be317adef64feb7ebec8ff380273",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration"
+    ]
+  },
+  "change": "Re-pins bench/frontend_parse.zig after #948 added `representative_frontend_template_substitution_{nested,parentheses}_*` rows at depths 32, 64, 128 and 256 around the same 200,000-element, roughly 400 KB array payload. Source construction remains outside every warmup and measured boundary. The nested family exposes payload rescanning at each template boundary; the parenthesis family preserves payload and nesting depth without template rescans. These diagnostic parser rows remain outside inherited representative coverage. The zig-js comparison runner pin, every representative workload, job count, checksum, attribution, allocation replay, timing, occupancy, stability, process classification, provenance and publication rule are unchanged.",
+  "frontend_growth_diagnostics": {
+    "owner_issue": 948,
+    "families": [
+      "representative_frontend_template_substitution_nested_",
+      "representative_frontend_template_substitution_parentheses_"
+    ],
+    "depths": [32, 64, 128, 256],
+    "payload_elements": 200000,
+    "timed_boundary": "Parse and structurally validate one preconstructed carrier function; source construction is outside warmup and measurement.",
+    "ruling": "The rows diagnose parser growth only and do not enter the inherited representative application-surface scorecard."
+  },
+  "exact_parent_integration": {
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "1ad7c01f1ca9ac5e3543b0af3c19a9d3b2b561bd45bda452b14ad30604c1cdd0"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "9b638839aadc247d5b3381d1dc7cc1cffd47a4bee6d73dfc2bd13d4ee7bedee9"
+      }
+    ],
+    "publication_boundary": "V39 preserves every V38 timing, efficiency, cleanliness, checksum, serial-child, process-classification, provenance, evidence-schema and mixed-tier allocation-replay gate. The frontend parser growth diagnostics, including the new template-substitution rows, retain their separate non-representative evidence boundary."
+  }
+}
