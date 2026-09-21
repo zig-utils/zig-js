@@ -10675,7 +10675,9 @@ fn runThreadRestrictLifecycleInterleavingKind(
         return false;
     }
     if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
-        std.debug.print("seed {d}: Thread.restrict lifecycle did not finish a parallel collection\n", .{seed});
+        std.debug.print("seed {d}: Thread.restrict lifecycle did not finish a parallel collection: {any}\n", .{
+            seed, ctx.parallelGcStats().?,
+        });
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__restrictLifecycleOracle") catch |err| {
@@ -20727,6 +20729,24 @@ pub fn main(init: std.process.Init) !void {
         }
         printProfileSummary("lifecycle", iters * 56, base_seed, lfail, run_started_ms);
         if (lfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcfinal <iters> <seed>`: focused reproduction for the
+    // finalization/asyncJoin mid-script collection witness. This invokes the
+    // exact case used by the full midgc profile, including its watchdog,
+    // workload, collector budgets, and completion oracle.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcfinal")) {
+        iters = 20;
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mffail: usize = 0;
+        var mfi: usize = 0;
+        while (mfi < iters) : (mfi += 1) {
+            const seed = base_seed +% mfi;
+            try runWatchedSeedCase(.midgc, "finalization-async-join-cleanup", runMidScriptFinalizationAsyncJoinCleanupGc, gpa, seed, &mffail);
+        }
+        printProfileSummary("midgcfinal", iters, base_seed, mffail, run_started_ms);
+        if (mffail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz midgc <iters> <seed>`: targeted mid-script parallel-GC

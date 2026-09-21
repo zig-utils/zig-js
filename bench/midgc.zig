@@ -56,11 +56,11 @@ pub fn main() !void {
 
     std.debug.print("zig-js mid-script parallel GC telemetry (internal testing policy)\n", .{});
     std.debug.print(
-        "{s:>6} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>9} {s:>11} {s:>12}\n",
-        .{ "runs", "attempts", "sweeps", "aborts", "pub-abort", "rnd-abort", "def-abort", "generations", "wait-poll", "wait-max", "fin-retry", "retry-max", "born-grow", "ext-rnd", "deferred", "run-peer", "park-peer", "published", "backoff", "pause-us", "pause-max-us" },
+        "{s:>6} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>9} {s:>9} {s:>9} {s:>11} {s:>12}\n",
+        .{ "runs", "attempts", "sweeps", "aborts", "pub-abort", "rnd-abort", "def-abort", "generations", "wait-poll", "wait-max", "fin-retry", "retry-max", "born-grow", "ext-rnd", "deferred", "run-peer", "park-peer", "published", "backoff", "topo-byp", "limit-byp", "pause-us", "pause-max-us" },
     );
     std.debug.print(
-        "{d:>6} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>9} {d:>11} {d:>12}  wall={d} us\n",
+        "{d:>6} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>9} {d:>9} {d:>9} {d:>11} {d:>12}  wall={d} us\n",
         .{
             runs + 1,
             ctx.gc_par_attempts.load(.monotonic),
@@ -81,6 +81,8 @@ pub fn main() !void {
             ctx.gc_par_parked_peer_observations.load(.monotonic),
             ctx.gc_par_peer_publications.load(.monotonic),
             ctx.gc_par_backoff_skips.load(.monotonic),
+            ctx.gc_par_topology_retry_bypasses.load(.monotonic),
+            ctx.gc_par_backoff_limit_bypasses.load(.monotonic),
             ctx.gc_par_pause_ns_total.load(.monotonic) / 1_000,
             ctx.gc_par_pause_ns_max.load(.monotonic) / 1_000,
             elapsed / 1_000,

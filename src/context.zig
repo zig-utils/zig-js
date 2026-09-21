@@ -4370,8 +4370,9 @@ pub const Context = struct {
     /// Pause time is collector-mutator time spent inside the driver, not a
     /// stop-the-world pause: peer mutators continue throughout. Backoff skips
     /// count safepoints that avoided immediately re-electing another collector
-    /// after an abort-safe fallback, reducing churn while sustained allocation is
-    /// still unlikely to converge.
+    /// after an abort-safe fallback. One skipped eligible safepoint or an earlier
+    /// topology change bounds that cooldown so it cannot consume the workload's
+    /// remaining progress opportunities.
     gc_par_generations: std.atomic.Value(u64) = .init(0),
     gc_par_publication_wait_iterations: std.atomic.Value(u64) = .init(0),
     gc_par_finish_retries: std.atomic.Value(u64) = .init(0),
@@ -4390,6 +4391,17 @@ pub const Context = struct {
     gc_par_pause_ns_total: std.atomic.Value(u64) = .init(0),
     gc_par_pause_ns_max: std.atomic.Value(u64) = .init(0),
     gc_par_backoff_skips: std.atomic.Value(u64) = .init(0),
+    /// Running interpreters observed when the last abort armed its retry
+    /// backoff. A smaller population is a new convergence opportunity: peers
+    /// have exited or parked, so retaining the old time delay would suppress
+    /// the first quiet safepoint after sustained allocation.
+    gc_par_retry_running_interpreters: std.atomic.Value(usize) = .init(0),
+    /// Bound the time cooldown by one otherwise-eligible safepoint. Wall-clock
+    /// delay alone can consume every remaining checkpoint in a short workload,
+    /// turning an abort-safe fallback into a progress failure.
+    gc_par_retry_skip_claimed: std.atomic.Value(bool) = .init(false),
+    gc_par_topology_retry_bypasses: std.atomic.Value(u64) = .init(0),
+    gc_par_backoff_limit_bypasses: std.atomic.Value(u64) = .init(0),
     gc_par_retry_after_ns: std.atomic.Value(u64) = .init(0),
     /// Shipping no-GIL heaps use a bounded stop rendezvous after a large
     /// allocation tranche. The opt-in abort-safe concurrent collector above is
@@ -4677,11 +4689,22 @@ pub const Context = struct {
         round_limit_aborts: u64,
         mark_work_aborts: u64,
         generations: u64,
+        publication_wait_iterations: u64,
+        publication_wait_iterations_max: u64,
         peer_publications: u64,
+        running_peer_requests: u64,
+        parked_peer_observations: u64,
         finish_retries: u64,
+        finish_retries_max: u64,
         born_growth_rounds: u64,
+        round_extension_rounds: u64,
         deferred_rounds: u64,
         deferred_aborts: u64,
+        pause_ns_total: u64,
+        pause_ns_max: u64,
+        backoff_skips: u64,
+        topology_retry_bypasses: u64,
+        backoff_limit_bypasses: u64,
     };
     pub const AutomaticGcCompactionStats = struct {
         requests: u64,
@@ -7012,11 +7035,22 @@ pub const Context = struct {
             .round_limit_aborts = self.gc_par_round_limit_aborts.load(.monotonic),
             .mark_work_aborts = self.gc_par_mark_work_aborts.load(.monotonic),
             .generations = self.gc_par_generations.load(.monotonic),
+            .publication_wait_iterations = self.gc_par_publication_wait_iterations.load(.monotonic),
+            .publication_wait_iterations_max = self.gc_par_publication_wait_iterations_max.load(.monotonic),
             .peer_publications = self.gc_par_peer_publications.load(.monotonic),
+            .running_peer_requests = self.gc_par_running_peer_requests.load(.monotonic),
+            .parked_peer_observations = self.gc_par_parked_peer_observations.load(.monotonic),
             .finish_retries = self.gc_par_finish_retries.load(.monotonic),
+            .finish_retries_max = self.gc_par_finish_retries_max.load(.monotonic),
             .born_growth_rounds = self.gc_par_born_growth_rounds.load(.monotonic),
+            .round_extension_rounds = self.gc_par_round_extension_rounds.load(.monotonic),
             .deferred_rounds = self.gc_par_deferred_rounds.load(.monotonic),
             .deferred_aborts = self.gc_par_deferred_aborts.load(.monotonic),
+            .pause_ns_total = self.gc_par_pause_ns_total.load(.monotonic),
+            .pause_ns_max = self.gc_par_pause_ns_max.load(.monotonic),
+            .backoff_skips = self.gc_par_backoff_skips.load(.monotonic),
+            .topology_retry_bypasses = self.gc_par_topology_retry_bypasses.load(.monotonic),
+            .backoff_limit_bypasses = self.gc_par_backoff_limit_bypasses.load(.monotonic),
         };
     }
 
@@ -8710,18 +8744,47 @@ pub const Context = struct {
         return @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
     }
 
+    fn parallelRunningInterpreterCount(self: *Context) usize {
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        var running: usize = 0;
+        for (self.active_interpreters.items) |machine| {
+            if (!machine.gc_parked.load(.acquire)) running += 1;
+        }
+        return running;
+    }
+
     fn shouldDeferParallelGcRetry(self: *Context) bool {
         const retry_after = self.gc_par_retry_after_ns.load(.acquire);
         if (retry_after == 0) return false;
         if (parallelGcNowNs() < retry_after) {
-            _ = self.gc_par_backoff_skips.fetchAdd(1, .monotonic);
-            return true;
+            const running_at_abort = self.gc_par_retry_running_interpreters.load(.acquire);
+            const running_now = self.parallelRunningInterpreterCount();
+            if (running_now >= running_at_abort) {
+                if (!self.gc_par_retry_skip_claimed.swap(true, .acq_rel)) {
+                    _ = self.gc_par_backoff_skips.fetchAdd(1, .monotonic);
+                    return true;
+                }
+                // The cooldown already suppressed one eligible checkpoint.
+                // Admit the next normal bounded attempt even when less than a
+                // millisecond elapsed; otherwise a short allocation tail can
+                // end with no later opportunity to collect.
+                _ = self.gc_par_backoff_limit_bypasses.fetchAdd(1, .monotonic);
+            } else {
+                // A peer exiting or parking changes the collection topology.
+                // The abort's allocation-churn evidence no longer describes
+                // this safepoint, so admit one normal bounded attempt
+                // immediately.
+                _ = self.gc_par_topology_retry_bypasses.fetchAdd(1, .monotonic);
+            }
         }
         self.gc_par_retry_after_ns.store(0, .release);
         return false;
     }
 
     fn deferParallelGcRetry(self: *Context) void {
+        self.gc_par_retry_running_interpreters.store(self.parallelRunningInterpreterCount(), .release);
+        self.gc_par_retry_skip_claimed.store(false, .release);
         self.gc_par_retry_after_ns.store(
             parallelGcNowNs() + std.time.ns_per_ms,
             .release,
@@ -39319,6 +39382,39 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     try std.testing.expect(deferred_rounds <= generations);
     try std.testing.expect(deferred_aborts <= round_aborts);
     if (aborts == 0) try std.testing.expectEqual(@as(u64, 0), backoff_skips);
+}
+
+test "parallel_js (M3): abort backoff is bounded and yields to a quieter topology" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    var collector = ctx.interpreter();
+    var peer = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&collector);
+    defer ctx.popActiveInterpreter(&collector);
+    try ctx.pushActiveInterpreter(&peer);
+    defer ctx.popActiveInterpreter(&peer);
+
+    ctx.deferParallelGcRetry();
+    ctx.gc_par_retry_after_ns.store(std.math.maxInt(u64), .release);
+    try std.testing.expect(ctx.shouldDeferParallelGcRetry());
+    try std.testing.expectEqual(@as(u64, 1), ctx.gc_par_backoff_skips.load(.monotonic));
+    try std.testing.expect(!ctx.shouldDeferParallelGcRetry());
+    try std.testing.expectEqual(@as(u64, 1), ctx.gc_par_backoff_limit_bypasses.load(.monotonic));
+
+    ctx.deferParallelGcRetry();
+    ctx.gc_par_retry_after_ns.store(std.math.maxInt(u64), .release);
+    peer.gc_parked.store(true, .release);
+    defer peer.gc_parked.store(false, .release);
+    try std.testing.expect(!ctx.shouldDeferParallelGcRetry());
+    try std.testing.expectEqual(@as(u64, 1), ctx.gc_par_topology_retry_bypasses.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_retry_after_ns.load(.acquire));
 }
 
 test "parallel_js (M3): publication generations skip idle zero at wrap" {
