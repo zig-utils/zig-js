@@ -1827,6 +1827,24 @@ pub fn main() void {
         fail("protected exception rethrow changed identity");
     Bun__JSValue__unprotect(exception_handle);
 
+    // A public JSValueRef wrapper belongs to its source realm, while the
+    // private exception and its encoded projection belong to the VM. Retiring
+    // that realm must leave the protected exception fully usable (#908).
+    const exception_source = JSGlobalContextCreateInGroup(JSContextGetGroup(protected_context), null) orelse
+        fail("private exception source realm creation failed");
+    const public_number = JSValueMakeNumber(exception_source, 908) orelse
+        fail("private exception public value creation failed");
+    JSC__VM__throwError(exception_vm, exception_source, EncodedValue.fromRef(public_number));
+    const projected_exception = JSGlobalObject__tryTakeException(protected_context);
+    Bun__JSValue__protect(projected_exception);
+    JSGlobalContextRelease(exception_source);
+    const projected_number = JSC__Exception__asJSValue(projected_exception.cellPointer());
+    if (projected_number != EncodedValue.fromRef(public_number))
+        fail("retired source realm changed exception projection identity");
+    if (JSValueToNumber(protected_context, projected_number.cellPointer(), null) != 908)
+        fail("retired source realm invalidated exception projection value");
+    Bun__JSValue__unprotect(projected_exception);
+
     // Revision-pinned property iterator (#368): the independently compiled
     // consumer sees the exact opaque pointer/BunString ABI, stable name
     // snapshot, UTF-16 length, and observable-versus-VMInquiry split.

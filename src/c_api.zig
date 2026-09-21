@@ -720,6 +720,11 @@ const Boxed = struct {
     storage_owner: *Context,
     private_kind: enum(u8) { value, exception, structure } = .value,
     exception_encoded: EncodedValue = .empty,
+    /// Creating realm for an exception or its exact value projection. The
+    /// group keeps this Context record retired-but-live while either alias is
+    /// pending or protected so structured source lookup never follows a stale
+    /// native pointer.
+    exception_realm: ?*Context = null,
     structure: ?*PrivateStructure = null,
 };
 
@@ -1417,11 +1422,48 @@ const CContextGroup = struct {
         }
     }
 
+    fn releaseHostReference(self: *CContextGroup) void {
+        if (self.release()) {
+            self.destroy();
+            return;
+        }
+        if (self.retiring_precise_contexts.items.len != 0 and self.drainRetiringPreciseContexts()) return;
+        _ = self.drainIfOwnedOnlyByRetiringRealms();
+    }
+
     fn setPendingException(self: *CContextGroup, exception: ?*Boxed) void {
         self.primary.realmLock();
         defer self.primary.realmUnlock();
         self.pending_exception = exception;
         self.primary.private_pending_exception_root = if (exception) |boxed| privateExceptionRoot(boxed) else null;
+    }
+
+    fn exceptionRetainsRealm(self: *CContextGroup, context: *Context) bool {
+        self.primary.realmLock();
+        defer self.primary.realmUnlock();
+        if (self.pending_exception) |exception|
+            if (exception.exception_realm == context) return true;
+        for (self.primary.c_api_handles.items) |handle| {
+            const boxed: *Boxed = @ptrCast(@alignCast(handle.ref));
+            if (boxed.exception_realm == context) return true;
+        }
+        return false;
+    }
+
+    /// Once the refcount consists only of inert precise-realm records, no host
+    /// can observe VM exception state again. Drop those internal roots before
+    /// retrying retirement; independently protected handles remain in the
+    /// owner's counted C-handle table and continue to retain their cells.
+    fn drainIfOwnedOnlyByRetiringRealms(self: *CContextGroup) bool {
+        if (!self.usesPreciseHeap() or self.contexts.items.len != 0) return false;
+        if (self.ref_count.load(.acquire) != self.retiring_precise_contexts.items.len) return false;
+        self.primary.realmLock();
+        self.pending_exception = null;
+        self.termination_exception = null;
+        self.primary.private_pending_exception_root = null;
+        self.primary.private_termination_exception_root = null;
+        self.primary.realmUnlock();
+        return self.drainRetiringPreciseContexts();
     }
 
     fn usesPreciseHeap(self: *const CContextGroup) bool {
@@ -1481,6 +1523,10 @@ const CContextGroup = struct {
         var index: usize = 0;
         while (index < self.retiring_precise_contexts.items.len) {
             const context = self.retiring_precise_contexts.items[index];
+            if (self.exceptionRetainsRealm(context)) {
+                index += 1;
+                continue;
+            }
             context.destroySharedPreciseRealm() catch |err| switch (err) {
                 error.RealmCellsRemain, error.RealmNotQuiescent => {
                     self.reconcilePrivateObjectBoxes();
@@ -1511,20 +1557,30 @@ const CContextGroup = struct {
         std.debug.assert(self.usesPreciseHeap());
         if (!self.removeContext(context)) return;
         std.debug.assert(self.retiring_precise_contexts.items.len < self.retiring_precise_contexts.capacity);
+        if (self.exceptionRetainsRealm(context)) {
+            self.retiring_precise_contexts.appendAssumeCapacity(context);
+            return;
+        }
         context.destroySharedPreciseRealm() catch |err| switch (err) {
             error.RealmCellsRemain, error.RealmNotQuiescent => {
                 self.reconcilePrivateObjectBoxes();
                 self.retiring_precise_contexts.appendAssumeCapacity(context);
+                _ = self.drainIfOwnedOnlyByRetiringRealms();
                 return;
             },
             else => {
                 self.reconcilePrivateObjectBoxes();
                 self.retiring_precise_contexts.appendAssumeCapacity(context);
+                _ = self.drainIfOwnedOnlyByRetiringRealms();
                 return;
             },
         };
         self.reconcilePrivateObjectBoxes();
-        if (self.release()) self.destroy();
+        if (self.release()) {
+            self.destroy();
+            return;
+        }
+        _ = self.drainIfOwnedOnlyByRetiringRealms();
     }
 
     fn destroy(self: *CContextGroup) void {
@@ -3330,8 +3386,12 @@ fn ctxForLifecycle(ref: JSContextRef) ?*Context {
 }
 
 fn box(ctx: *Context, v: Value) JSValueRef {
-    const b = ctx.arena().create(Boxed) catch return null;
-    b.* = .{ .value = v, .owner = ctx, .storage_owner = ctx };
+    const storage_owner = if (ctx.c_api_group) |opaque_group| blk: {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        break :blk group.primary;
+    } else ctx;
+    const b = storage_owner.arena().create(Boxed) catch return null;
+    b.* = .{ .value = v, .owner = ctx, .storage_owner = storage_owner };
     return @ptrCast(b);
 }
 
@@ -3370,13 +3430,32 @@ fn privateExceptionBox(ctx: *Context, thrown: Value, encoded: EncodedValue) ?*Bo
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
         break :blk group.primary;
     } else ctx;
+    var projection_box: ?*Boxed = null;
+    var exception_realm = ctx;
+    const stable_encoded = if (encoded.asCellAddress()) |_| stable: {
+        const encoded_box = privateBoxedFrom(encoded) orelse return null;
+        if (encoded_box.private_kind != .value) return null;
+        if (encoded_box.storage_owner != owner) return null;
+        exception_realm = encoded_box.exception_realm orelse encoded_box.owner;
+        projection_box = encoded_box;
+        break :stable encoded;
+    } else |_| encoded;
+    if (stable_encoded == .empty) return null;
     const boxed = owner.arena().create(Boxed) catch return null;
+    if (projection_box) |projection| {
+        // EncodedJSValue identity is the wrapper address. Once publication can
+        // no longer fail, transfer its affinity to the VM so a retired source
+        // realm cannot leave it pointing at freed Context storage.
+        projection.owner = owner;
+        projection.exception_realm = exception_realm;
+    }
     boxed.* = .{
         .value = thrown,
-        .owner = ctx,
+        .owner = owner,
         .storage_owner = owner,
         .private_kind = .exception,
-        .exception_encoded = encoded,
+        .exception_encoded = stable_encoded,
+        .exception_realm = exception_realm,
     };
     return boxed;
 }
@@ -8603,7 +8682,7 @@ fn privateCreatePropertyIteratorRecord(
     keys: []const []const u8,
 ) !*PrivateJSPropertyIterator {
     if (!group.retain()) return error.OutOfMemory;
-    errdefer _ = group.release();
+    errdefer group.releaseHostReference();
 
     const entries = try gpa.alloc(PrivateJSPropertyIteratorEntry, keys.len);
     var initialized: usize = 0;
@@ -8639,7 +8718,7 @@ fn privateDestroyPropertyIterator(iterator: *PrivateJSPropertyIterator) void {
     for (iterator.entries) |entry| gpa.free(entry.key);
     gpa.free(iterator.entries);
     gpa.destroy(iterator);
-    if (group.release()) group.destroy();
+    group.releaseHostReference();
 }
 
 fn privatePropertyIteratorObject(
@@ -14672,7 +14751,7 @@ export fn JSC__VM__deinit(vm_ref: ?*anyopaque, global: JSContextRef) callconv(.c
     const context = ctxForLifecycle(global) orelse return;
     if (context.c_api_group != vm_ref) return;
     if (group.private_vm_owner_released.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
-    if (group.release()) group.destroy();
+    group.releaseHostReference();
 }
 
 fn privateQueueCollection(group: *CContextGroup) void {
@@ -15626,7 +15705,7 @@ export fn Bun__StrongRef__new(global: JSContextRef, encoded: EncodedValue) callc
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     const internal = privateValueFrom(global, encoded) orelse return null;
     if (!group.retain()) return null;
-    errdefer if (group.release()) group.destroy();
+    errdefer group.releaseHostReference();
 
     const ref = group.primary.arena().create(PrivateStrongRef) catch return null;
     ref.* = .{
@@ -15671,7 +15750,7 @@ export fn Bun__StrongRef__delete(ref: ?*PrivateStrongRef) callconv(.c) void {
     const group = strong.group;
     group.primary.assertOwnerThread();
     privateStrongRefRemove(strong);
-    if (group.release()) group.destroy();
+    group.releaseHostReference();
 }
 
 fn privateWeakRefRemove(ref: *PrivateWeakRef) void {
@@ -15706,7 +15785,7 @@ export fn Bun__WeakRef__new(
         else => return null,
     }
     if (!group.retain()) return null;
-    errdefer if (group.release()) group.destroy();
+    errdefer group.releaseHostReference();
 
     const ref = group.primary.arena().create(PrivateWeakRef) catch return null;
     const finalize_fn: ?Context.PrivateWeakFinalizeFn = switch (ref_type) {
@@ -15753,7 +15832,7 @@ export fn Bun__WeakRef__delete(ref: ?*PrivateWeakRef) callconv(.c) void {
     const group = weak.group;
     group.primary.assertOwnerThread();
     privateWeakRefRemove(weak);
-    if (group.release()) group.destroy();
+    group.releaseHostReference();
 }
 
 fn privateRemoveStrongRootLocked(context: *Context, target: *Context.PrivateStrongRoot) void {
@@ -16154,7 +16233,7 @@ fn privateExceptionInput(global: JSContextRef, encoded: EncodedValue) ?struct { 
         const boxed = privateBoxedFrom(encoded) orelse return null;
         if (boxed.owner.c_api_group != context.c_api_group) return null;
         return .{
-            .context = boxed.owner,
+            .context = boxed.exception_realm orelse boxed.owner,
             .value = boxed.value,
             .cell = if (boxed.private_kind == .exception) @ptrFromInt(address) else null,
         };
@@ -16297,7 +16376,7 @@ export fn ZigException__fromException(exception: ?*anyopaque) callconv(.c) Priva
     var output = PrivateZigException{};
     const boxed = privateBoxFromCell(exception) orelse return output;
     if (boxed.private_kind != .exception) return output;
-    _ = privateProjectExceptionValue(boxed.owner, boxed.value, exception, &output);
+    _ = privateProjectExceptionValue(boxed.exception_realm orelse boxed.owner, boxed.value, exception, &output);
     return output;
 }
 
@@ -17201,7 +17280,7 @@ export fn JSContextGroupRetain(group_ref: JSContextGroupRef) callconv(.c) JSCont
 
 export fn JSContextGroupRelease(group_ref: JSContextGroupRef) callconv(.c) void {
     const group = contextGroupFrom(group_ref) orelse return;
-    if (group.release()) group.destroy();
+    group.releaseHostReference();
 }
 
 export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
@@ -17291,7 +17370,7 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
         return null;
     }
     group.contexts.ensureUnusedCapacity(gpa, 1) catch {
-        if (group.release()) group.destroy();
+        group.releaseHostReference();
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     };
@@ -17299,19 +17378,19 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
         gpa,
         group.retiring_precise_contexts.items.len + group.contexts.items.len + 1,
     ) catch {
-        if (group.release()) group.destroy();
+        group.releaseHostReference();
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     };
     const ctx = if (group.usesPreciseHeap())
         Context.createSharedPreciseRealm(group.primary) catch {
-            if (group.release()) group.destroy();
+            group.releaseHostReference();
             if (created_group) JSContextGroupRelease(effective_ref);
             return null;
         }
     else
         Context.createSharedArenaRealm(group.primary) catch {
-            if (group.release()) group.destroy();
+            group.releaseHostReference();
             if (created_group) JSContextGroupRelease(effective_ref);
             return null;
         };
@@ -17334,13 +17413,13 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
     ctx.termination_request_flag = &group.termination_requested;
     if (!privateApplyProcessGlobals(ctx, group.process_options)) {
         destroy_created(ctx, precise);
-        if (group.release()) group.destroy();
+        group.releaseHostReference();
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     }
     initializeCApiOomHandle(ctx) catch {
         destroy_created(ctx, precise);
-        if (group.release()) group.destroy();
+        group.releaseHostReference();
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     };
@@ -17349,13 +17428,13 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
     if (global_class != null) {
         const class = classFrom(global_class) orelse {
             destroy_created(ctx, precise);
-            _ = group.release();
+            group.releaseHostReference();
             if (created_group) JSContextGroupRelease(effective_ref);
             return null;
         };
         if (!attachClassToExistingObject(ctx_ref, ctx, ctx.global_object, class, null)) {
             destroy_created(ctx, precise);
-            _ = group.release();
+            group.releaseHostReference();
             if (created_group) JSContextGroupRelease(effective_ref);
             return null;
         }
@@ -17444,7 +17523,7 @@ export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
         if (group.usesPreciseHeap() and c != group.primary) {
             group.retirePreciseContext(c);
-        } else if (group.release()) group.destroy();
+        } else group.releaseHostReference();
     } else c.destroy();
 }
 
@@ -17483,7 +17562,7 @@ export fn Zig__GlobalObject__create(
     const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
     const context = JSGlobalContextCreateInGroup(@ptrCast(group), null) orelse {
         if (group.private_vm_owner_released.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
-            if (group.release()) group.destroy();
+            group.releaseHostReference();
         return null;
     };
     const typed_context = ctxForLifecycle(context).?;
@@ -20517,6 +20596,14 @@ fn valueProtectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
         }
     }
     root_context.reserveCApiHandlesLocked(1) catch return false;
+    const group: ?*CContextGroup = if (root_context.c_api_group) |opaque_group|
+        @ptrCast(@alignCast(opaque_group))
+    else
+        null;
+    // One VM reference owns each distinct native handle entry. Repeated
+    // protections only increment its count, so final unprotect releases the
+    // VM exactly once after removing the root.
+    if (group) |owner| if (!owner.retain()) return false;
     root_context.c_api_handles.appendAssumeCapacity(.{
         .ref = raw,
         .count = 1,
@@ -20538,16 +20625,23 @@ fn valueUnprotectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
     const root_context = boxed.storage_owner;
     if (root_context.gc != c.gc) return false;
     root_context.realmLock();
-    defer root_context.realmUnlock();
     for (root_context.c_api_handles.items, 0..) |*h, i| {
         if (h.ref != raw) continue;
         if (h.count > 1) {
             h.count -= 1;
+            root_context.realmUnlock();
         } else {
             _ = root_context.c_api_handles.swapRemove(i);
+            const opaque_group = root_context.c_api_group;
+            root_context.realmUnlock();
+            if (opaque_group) |opaque_ref| {
+                const group: *CContextGroup = @ptrCast(@alignCast(opaque_ref));
+                group.releaseHostReference();
+            }
         }
         return true;
     }
+    root_context.realmUnlock();
     return false;
 }
 
@@ -20555,12 +20649,7 @@ fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
     if (boxed.private_kind != .value) return false;
-    const removed = valueUnprotectInContext(c, boxed, v.?);
-    if (removed) if (c.c_api_group) |opaque_group| {
-        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-        if (group.usesPreciseHeap()) _ = group.drainRetiringPreciseContexts();
-    };
-    return removed;
+    return valueUnprotectInContext(c, boxed, v.?);
 }
 
 /// Private Home/Bun ABI: encoded cell handles carry their owning context, so
@@ -20573,11 +20662,7 @@ fn privateSetValueProtected(encoded: EncodedValue, protected: bool) void {
     if (protected) {
         _ = valueProtectInContext(boxed.owner, boxed, @ptrCast(boxed));
     } else {
-        const removed = valueUnprotectInContext(boxed.owner, boxed, @ptrCast(boxed));
-        if (removed) if (boxed.owner.c_api_group) |opaque_group| {
-            const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-            if (group.usesPreciseHeap()) _ = group.drainRetiringPreciseContexts();
-        };
+        _ = valueUnprotectInContext(boxed.owner, boxed, @ptrCast(boxed));
     }
 }
 
@@ -36121,6 +36206,7 @@ test "private exception roots retain protected retired realm and release on fina
     const realm = ctxForEvaluation(retiring).?;
     primary.gc_scan_native_stack = false;
     realm.gc_scan_native_stack = false;
+    _ = try realm.evaluate("globalThis.discard = []; for (let i = 0; i < 4096; i++) discard.push({ i }); discard = null;");
     const encoded = privateEncodedFromValue(realm, try realm.evaluate("({ marker: 908 })"));
     JSC__VM__throwError(@ptrCast(group), retiring, encoded);
     const exception = group.pending_exception.?;
@@ -36128,6 +36214,11 @@ test "private exception roots retain protected retired realm and release on fina
     Bun__JSValue__protect(handle);
     Bun__JSValue__protect(handle);
     try std.testing.expectEqual(@as(usize, 1), primary.c_api_handles.items.len);
+    const before = exception.value.asObj();
+    const moved = primary.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(before != exception.value.asObj());
+    try std.testing.expectEqual(exception.value.asObj(), privateValueFrom(global, encoded).?.asObj());
     JSGlobalContextRelease(retiring);
     try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
     try std.testing.expectEqual(handle, JSGlobalObject__tryTakeException(global));
@@ -36135,15 +36226,105 @@ test "private exception roots retain protected retired realm and release on fina
     try std.testing.expectEqual(@as(f64, 908), privateValueFrom(global, encoded).?.asObj().getOwn("marker").?.asNum());
     Bun__JSValue__unprotect(handle);
     try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
-    _ = try primary.evaluate("globalThis.discard = []; for (let i = 0; i < 4096; i++) discard.push({ i }); discard = null;");
-    const before = exception.value.asObj();
-    const moved = primary.compactGarbage();
-    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
-    try std.testing.expect(before != exception.value.asObj());
-    try std.testing.expectEqual(exception.value.asObj(), privateValueFrom(global, encoded).?.asObj());
     Bun__JSValue__unprotect(handle);
     try std.testing.expectEqual(@as(usize, 0), primary.c_api_handles.items.len);
     try std.testing.expectEqual(@as(usize, 0), group.retiring_precise_contexts.items.len);
+}
+
+test "private exception projection and protection outlive a retired source realm" {
+    const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const observer = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(observer);
+    const source = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    var source_released = false;
+    defer if (!source_released) JSGlobalContextRelease(source);
+    const source_context = ctxForEvaluation(source).?;
+
+    // Public JSValueRefs retain exact encoded identity when promoted to a
+    // VM-owned exception. Their native wrapper and affinity must not depend on
+    // the source Context after that realm retires.
+    const source_box = box(source_context, Value.num(908)) orelse return error.OutOfMemory;
+    const source_encoded = privateEncodedFromRef(source_box);
+    JSC__VM__throwError(group_ref, source, source_encoded);
+    const exception = group.pending_exception orelse return error.MissingException;
+    const handle = privateEncodedFromRef(@ptrCast(exception));
+    try std.testing.expectEqual(primary, exception.owner);
+    try std.testing.expectEqual(source_encoded, JSC__Exception__asJSValue(@ptrCast(exception)));
+    Bun__JSValue__protect(handle);
+
+    JSGlobalContextRelease(source);
+    source_released = true;
+    try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
+    try std.testing.expectEqual(handle, JSGlobalObject__tryTakeException(observer));
+    const projected = JSC__Exception__asJSValue(@ptrCast(exception));
+    try std.testing.expectEqual(source_encoded, projected);
+    try std.testing.expectEqual(@as(f64, 908), privateValueFrom(observer, projected).?.asNum());
+    Bun__JSValue__unprotect(handle);
+    try std.testing.expectEqual(@as(usize, 0), group.retiring_precise_contexts.items.len);
+}
+
+test "private pending exception cannot retain the VM after its final external owner" {
+    var tracked: std.heap.DebugAllocator(.{
+        .enable_memory_limit = true,
+        .stack_trace_frames = 0,
+    }) = .init;
+    const allocator = tracked.allocator();
+    const primary = try Context.createWith(allocator, .{ .enable_gc = true, .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, allocator) orelse return error.GroupCreateFailed;
+    const first = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    const second = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    const first_context = ctxForEvaluation(first).?;
+    const thrown = privateEncodedFromValue(first_context, try first_context.evaluate("({ marker: 908 })"));
+    JSC__VM__throwError(group_ref, first, thrown);
+
+    JSGlobalContextRelease(first);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
+    JSGlobalContextRelease(second);
+    try std.testing.expectEqual(@as(usize, 1), group.retiring_precise_contexts.items.len);
+
+    // Releasing the explicit group owner removes the last host path back into
+    // this VM. Its pending exception is then an internal cycle, not an external
+    // root, and teardown must reclaim the retired realm and owner.
+    JSContextGroupRelease(group_ref);
+    const live_after_release = tracked.total_requested_bytes;
+    if (live_after_release != 0) {
+        // Keep a failing baseline finite: remove the known internal cycle and
+        // let the ordinary retirement path reclaim every tracked allocation.
+        group.setPendingException(null);
+        _ = group.drainRetiringPreciseContexts();
+    }
+    tracked.deinitWithoutLeakChecks();
+    try std.testing.expectEqual(@as(usize, 0), live_after_release);
+}
+
+test "private protected exception retains the VM until final unprotect" {
+    var tracked: std.heap.DebugAllocator(.{
+        .enable_memory_limit = true,
+        .stack_trace_frames = 0,
+    }) = .init;
+    const allocator = tracked.allocator();
+    const primary = try Context.createWith(allocator, .{ .enable_gc = true, .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, allocator) orelse return error.GroupCreateFailed;
+    const global = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    JSGlobalObject__requestTermination(global);
+    const exception = privateMaterializeTermination(group) orelse return error.MissingException;
+    const handle = privateEncodedFromRef(@ptrCast(exception));
+    Bun__JSValue__protect(handle);
+
+    JSGlobalContextRelease(global);
+    JSContextGroupRelease(group_ref);
+    const live_while_protected = tracked.total_requested_bytes;
+    if (live_while_protected != 0) Bun__JSValue__unprotect(handle);
+    const live_after_unprotect = tracked.total_requested_bytes;
+    tracked.deinitWithoutLeakChecks();
+
+    try std.testing.expect(live_while_protected != 0);
+    try std.testing.expectEqual(@as(usize, 0), live_after_unprotect);
 }
 
 test "private exception roots publish existing handles without allocation and reject foreign VMs" {

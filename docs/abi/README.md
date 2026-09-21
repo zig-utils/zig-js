@@ -723,12 +723,23 @@ keep the thrown value rooted until clear/take. Exception cells remain distinct
 from ordinary values and can be safely rethrown while owned by the VM or
 explicitly protected. The VM traces and relocates the actual exception and
 encoded-value handle slots, with no root-registration allocation at publication.
+The exception cell and grouped public value wrappers live in VM-owned native
+storage. Publishing an exception transfers its projection's affinity to that VM
+without changing the encoded pointer, so retiring the source realm cannot leave
+either alias pointing into its native arena or change Error identity. The source
+realm record, including its structured source metadata, remains available while
+the exception or exact projection is pending or protected.
 The cached termination exception remains rooted after pending state is cleared.
 `Bun__JSValue__protect` counts protections for exception cells as well as ordinary
-values; protecting an exception retains and relocates its value projection too.
+values; the first protection owns the VM until the final matching unprotect, and
+protecting an exception retains and relocates its value projection too.
 After clear/take, hosts must protect an exception before the next collection if
 they intend to retain or rethrow it. Final unprotect releases that ownership,
-including a retired sibling realm retained by the exception's managed graph.
+including a retired sibling realm retained by the exception's managed graph. If
+only inert retired-realm records remain after the final context, VM, group, or
+opaque host reference is released, the VM drops its own pending and cached
+exception roots and retries retirement; an independently protected handle still
+retains the VM and its graph until its final matching unprotect.
 
 The structured exception-stack slice retains frames when an Error or
 DOMException is created, independently of the public formatted stack string.
