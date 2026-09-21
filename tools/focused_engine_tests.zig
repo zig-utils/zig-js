@@ -25,8 +25,9 @@ const frontend_cases = [_]Case{
         // #930 family 1: what node accepts beside those rejections -- distinct
         // names, duplicate vars, a lexical shadow in a nested block, a var that
         // repeats an outer function's lexical name, sloppy Annex B duplicate
-        // block functions, and names reused across sibling functions or after
-        // them. One bit per program.
+        // block functions (an object literal method is sloppy too), names reused
+        // across sibling functions or after them, and a `var` repeating a simple
+        // catch parameter (Annex B.3.4). One bit per program.
         .name = "function bodies in expressions accept what node accepts",
         .source =
         \\var programs = [
@@ -40,12 +41,14 @@ const frontend_cases = [_]Case{
         \\  "[() => { var z; }, () => { let z; }];",
         \\  "let {a = () => { var z; }} = {}; var z;",
         \\  "(function(){ let x; })(); var x;",
+        \\  "({ m(){ { function g(){} function g(){} } } });",
+        \\  "(function(){ try {} catch (e) { var e; } })();",
         \\];
         \\programs.reduce(function (bits, source, i) {
         \\  try { (0, eval)(source); return bits | (1 << i); } catch (e) { return bits; }
         \\}, 0)
         ,
-        .expected = 1023,
+        .expected = 4095,
     },
     .{
         // #933 item 8: what node accepts beside those rejections -- a var before or
@@ -256,6 +259,30 @@ const frontend_error_cases = [_]ErrorCase{
     .{
         .name = "lexical/var conflict in a function in an async arrow",
         .source = "async () => { let x; var x; };",
+    },
+    // The other declaration checks the per-body walk runs reach the same
+    // positions: a `var` against a destructured catch parameter (#931), a
+    // `with` body (family 2), and strict duplicate block functions under the
+    // body's own strictness (family 4).
+    .{
+        .name = "var repeating a destructured catch parameter in an immediately invoked function",
+        .source = "(function(){ try {} catch ([e]) { var e; } })();",
+    },
+    .{
+        .name = "var repeating a destructured catch parameter in an arrow in an array literal",
+        .source = "[() => { try {} catch ([e]) { var e; } }];",
+    },
+    .{
+        .name = "lexical/var conflict in a with body in an immediately invoked function",
+        .source = "(function(){ with ({}) { let q; var q; } })();",
+    },
+    .{
+        .name = "strict duplicate block functions in an immediately invoked function",
+        .source = "(function(){ \"use strict\"; { function g(){} function g(){} } })();",
+    },
+    .{
+        .name = "strict duplicate switch functions in a class method in an assignment",
+        .source = "x = class { m(){ switch (0) { case 0: function g(){} case 1: function g(){} } } };",
     },
     // #933 item 8: a lexical `for` head's names must not be var-declared in its
     // body (14.7.4.1, 14.7.5.1). Checked once per head by declaration order
