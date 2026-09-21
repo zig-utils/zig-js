@@ -1387,6 +1387,12 @@ pub const Parser = struct {
     /// functions must stop matching: `{ let x; function f() { var x; } }` is legal.
     fn recurseFnBody(self: *Parser, fnode: *ast.FunctionNode, scope: *LexicalScope) ParseError!void {
         if (fnode.body.* != .block) return;
+        // Parsing restored the enclosing mode before this post-parse walk.
+        // Duplicate block functions depend on the body owner's strictness:
+        // sloppy code has the Annex B.3.3 allowance, strict code does not.
+        const saved_strict = self.strict;
+        self.strict = fnode.is_strict;
+        defer self.strict = saved_strict;
         const saved_var_base = scope.var_base;
         scope.var_base = scope.depth + 1;
         defer scope.var_base = saved_var_base;
@@ -7320,6 +7326,40 @@ test "parser lexical and var early errors span nested block scopes" {
         "{ let x; { let x; } }",
         "{ var x; { let x; } }",
         "{ let a; { let b; { var v; } } }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+}
+
+test "parser checks duplicate block functions with their owning strictness" {
+    // #930 family 4. These bodies have already restored the enclosing parser
+    // mode when the lexical walk runs, so the FunctionNode's recorded mode is
+    // the authority for the Annex B.3.3 duplicate-function allowance.
+    const invalid = [_][]const u8{
+        "function g(){ 'use strict'; { function f(){} function f(){} } }",
+        "function g(){ 'use strict'; switch (0) { case 0: function f(){} case 1: function f(){} } }",
+        "class C { m(){ { function f(){} function f(){} } } }",
+        "class C { m(){ switch (0) { case 0: function f(){} case 1: function f(){} } } }",
+        // Strictness is inherited by a nested declaration even without its own
+        // directive prologue.
+        "function outer(){ 'use strict'; function inner(){ { function f(){} function f(){} } } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+
+    const valid = [_][]const u8{
+        "function g(){ { function f(){} function f(){} } }",
+        "function g(){ switch (0) { case 0: function f(){} case 1: function f(){} } }",
+        // Checking a strict sibling must restore sloppy mode for the next body.
+        "function strict(){ 'use strict'; { function f(){} } } function sloppy(){ { function f(){} function f(){} } }",
     };
     for (valid) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
