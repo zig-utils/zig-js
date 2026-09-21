@@ -213,6 +213,10 @@ pub const Node = union(enum) {
     /// An array-literal elision (`[1, , 3]`) — a hole, not an `undefined` value.
     elision,
     identifier: []const u8,
+    /// The private identifier in `#name in object`. It is a distinct node from
+    /// an IdentifierReference: its name is resolved through the surrounding
+    /// class PrivateEnvironment and its source offset feeds early diagnostics.
+    private_identifier: struct { name: []const u8, offset: usize },
     this_expr,
     /// `new.target` — the constructor when invoked via `new`, else undefined.
     new_target_expr,
@@ -286,7 +290,7 @@ pub const Node = union(enum) {
     /// `source` names the expression whose RequireObjectCoercible failed. For
     /// simple assignment and delete targets JSC names the enclosing operation,
     /// so the parser widens that target's otherwise-member-only span.
-    member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null, optional: bool = false, source: []const u8 = "" },
+    member: struct { object: *Node, property: []const u8 = "", property_offset: usize = 0, computed: ?*Node = null, optional: bool = false, source: []const u8 = "" },
     /// Root of an optional chain (`a?.b.c`): catches the short-circuit and
     /// yields `undefined`.
     optional_chain: *Node,

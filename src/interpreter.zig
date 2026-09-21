@@ -5777,6 +5777,7 @@ pub const Interpreter = struct {
                 const resolved = try self.resolveBindingValue(name, false);
                 break :blk resolved.value;
             },
+            .private_identifier => unreachable, // consumed by private `in`
 
             .unary => |u| try self.evalUnary(u.op, u.operand),
             .delete_expr => |target| blk: {
@@ -8279,6 +8280,7 @@ pub const Interpreter = struct {
         try self.checkNesting();
         switch (node.*) {
             .identifier => |name| node.* = .{ .identifier = remapPrivateName(map, name) },
+            .private_identifier => |private| node.* = .{ .private_identifier = .{ .name = remapPrivateName(map, private.name), .offset = private.offset } },
             .unary => |u| try self.rewritePrivateNamesInNode(u.operand, map),
             .delete_expr => |n| try self.rewritePrivateNamesInNode(n, map),
             .update => |u| try self.rewritePrivateNamesInNode(u.target, map),
@@ -8500,7 +8502,7 @@ pub const Interpreter = struct {
         if (ast.isChainLink(node)) return self.deepCopyChain(node);
         const n = try self.arena.create(Node);
         n.* = switch (node.*) {
-            .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .identifier, .break_stmt, .continue_stmt, .import_decl, .import_meta => node.*,
+            .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .identifier, .private_identifier, .break_stmt, .continue_stmt, .import_decl, .import_meta => node.*,
             .unary => |u| .{ .unary = .{ .op = u.op, .operand = try self.deepCopyNode(u.operand) } },
             .delete_expr => |x| .{ .delete_expr = try self.deepCopyNode(x) },
             .update => |u| .{ .update = .{ .inc = u.inc, .prefix = u.prefix, .target = try self.deepCopyNode(u.target) } },
@@ -8521,7 +8523,7 @@ pub const Interpreter = struct {
             .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional, .source = c.source, .callee_len = c.callee_len } },
             .new_expr => |x| .{ .new_expr = .{ .callee = try self.deepCopyNode(x.callee), .args = try self.deepCopyNodes(x.args), .source = x.source } },
             .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs), .source = t.source } },
-            .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional, .source = m.source } },
+            .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .property_offset = m.property_offset, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional, .source = m.source } },
             .optional_chain => |x| .{ .optional_chain = try self.deepCopyNode(x) },
             .field_init_value => |x| .{ .field_init_value = .{ .expression = try self.deepCopyNode(x.expression), .name = x.name } },
             .private_field_def => |d| .{ .private_field_def = .{ .name = d.name, .value = try self.deepCopyNode(d.value) } },
@@ -21310,7 +21312,7 @@ pub const Interpreter = struct {
     /// folded that way; it stays an ordinary operand and keeps `evalBinary`.
     fn isEvalChainLink(node: *const Node) bool {
         return switch (node.*) {
-            .binary => |b| !(b.op == .in_op and b.left.* == .identifier and value.isPrivateKey(b.left.identifier)),
+            .binary => |b| !(b.op == .in_op and b.left.* == .private_identifier),
             .logical, .sequence => true,
             else => false,
         };
@@ -21327,11 +21329,11 @@ pub const Interpreter = struct {
 
     fn evalBinary(self: *Interpreter, op: ast.BinaryOp, left_node: *Node, right_node: *Node) EvalError!Value {
         // `#field in obj` — a private-name brand check. The LHS is a private-name
-        // reference (an identifier whose text starts with `#`), which can't be
+        // reference, which can't be
         // evaluated as an ordinary value.
-        if (op == .in_op and left_node.* == .identifier and value.isPrivateKey(left_node.identifier)) {
+        if (op == .in_op and left_node.* == .private_identifier) {
             const robj = try self.eval(right_node);
-            return Value.boolVal(try self.privateIn(left_node.identifier, robj));
+            return Value.boolVal(try self.privateIn(left_node.private_identifier.name, robj));
         }
         const l = try self.eval(left_node);
         const r = try self.eval(right_node);

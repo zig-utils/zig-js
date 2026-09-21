@@ -14215,6 +14215,10 @@ test "class diagnostic reasons render prose through eval and Function" {
         .{ .source = "class C { get #x() {} static set #x(v) {} }", .message = "Cannot declare a private static setter if there is a non-static private getter with used name." },
         .{ .source = "class C { static set #x(v) {} get #x() {} }", .message = "Cannot declare a private non-static getter if there is a static private setter with used name." },
         .{ .source = "class C { static get #x() {} set #x(v) {} }", .message = "Cannot declare a private non-static setter if there is a static private getter with used name." },
+        .{ .source = "class C { m(){ return this.#missing; } }", .message = "Cannot reference undeclared private names: \"#missing\"" },
+        .{ .source = "class C { m(o){ return #missing in o; } }", .message = "Cannot reference undeclared private names: \"#missing\"" },
+        .{ .source = "({}).#missing", .message = "Cannot reference undeclared private names: \"#missing\"" },
+        .{ .source = "class C { m(){ return this.#\\u0078; } }", .message = "Cannot reference undeclared private names: \"#x\"" },
         .{ .source = "`a\r\n${class C { constructor; }}`", .message = "Cannot declare class field named 'constructor'." },
     };
     for (cases) |case| {

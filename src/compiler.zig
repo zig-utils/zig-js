@@ -1268,7 +1268,7 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool, floor: us
     return switch (node.*) {
         .identifier => |id| in_fn and identifierReferenceMatches(name, id),
 
-        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt, .debugger_stmt => false,
+        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .private_identifier, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt, .debugger_stmt => false,
 
         // A nested function/arrow (expression or declaration): everything it (and
         // any deeper closure) references is captured — descend with `in_fn = true`.
@@ -5339,7 +5339,7 @@ pub const Compiler = struct {
     /// ordinary operand and keeps the dedicated `.binary` path.
     fn isCompileChainLink(node: *const Node) bool {
         return switch (node.*) {
-            .binary => |b| !(b.op == .in_op and b.left.* == .identifier and value_mod.isRawPrivateName(b.left.identifier)),
+            .binary => |b| !(b.op == .in_op and b.left.* == .private_identifier),
             .logical, .sequence => true,
             else => false,
         };
@@ -5369,6 +5369,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.make_regex, try self.chunk.addName(r.pattern), try self.chunk.addName(r.flags));
             },
             .identifier => |name| try self.emitLoad(name),
+            .private_identifier => unreachable, // valid only as the LHS of private `in`
             .unary => |u| {
                 if (u.op == .typeof and u.operand.* == .identifier) {
                     if (try self.dynamicBindingReferencePlan(u.operand.identifier)) |reference| {
@@ -5399,11 +5400,12 @@ pub const Compiler = struct {
             },
             .delete_expr => |target| try self.compileDelete(target),
             .binary => |b| {
-                if (b.op == .in_op and b.left.* == .identifier and value_mod.isRawPrivateName(b.left.identifier)) {
+                if (b.op == .in_op and b.left.* == .private_identifier) {
+                    const name = b.left.private_identifier.name;
                     try self.compileExpr(b.right);
                     _ = try self.chunk.emit(
-                        if (isUnresolvedPrivateName(b.left.identifier)) .private_name_in else .private_in,
-                        try self.chunk.addName(b.left.identifier),
+                        if (isUnresolvedPrivateName(name)) .private_name_in else .private_in,
+                        try self.chunk.addName(name),
                     );
                     return;
                 }

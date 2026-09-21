@@ -30,6 +30,7 @@ pub const DiagnosticReason = enum {
     new_target_in_global_arrow,
     new_target_invalid_identifier,
     private_field_delete,
+    undeclared_private_name,
     invalid_assignment,
     invalid_destructuring_assignment,
     invalid_prefix_increment,
@@ -103,6 +104,7 @@ pub const DiagnosticReason = enum {
             .new_target_in_global_arrow => "new.target is not valid inside arrow functions in global code.",
             .new_target_invalid_identifier => "\"new.\" can only be followed with target.",
             .private_field_delete => "Cannot delete private field.",
+            .undeclared_private_name => "Cannot reference undeclared private names.",
             .invalid_assignment => "Left side of assignment is not a reference.",
             .invalid_destructuring_assignment => "Invalid destructuring assignment target.",
             .invalid_prefix_increment => "Prefix ++ operator applied to value that is not a reference.",
@@ -791,6 +793,8 @@ pub const Parser = struct {
         const token = self.last_error_token orelse return reason.message();
         if (reason == .private_field_delete)
             return std.fmt.allocPrint(allocator, "Cannot delete private field {s}.", .{token.text});
+        if (reason == .undeclared_private_name)
+            return std.fmt.allocPrint(allocator, "Cannot reference undeclared private names: \"{s}\"", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
         return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. {s}", .{ noun, quote, token.text, quote, reason.message() });
@@ -3768,12 +3772,13 @@ pub const Parser = struct {
         // `in` (a private brand check) — a RelationalExpression (bp 7). It can't
         // be the right operand of another relational op (`#a in #b in c` has the
         // middle `#b` in RHS position), so only recognize it when a relational
-        // expression may start here (min_bp <= 7). Represent it as an identifier
-        // whose text keeps the leading `#` so the interpreter can recognize it.
-        var left = if (min_bp <= 7 and self.in_class and !self.no_in and self.check(.private_name) and self.peekIsKeyword(1, "in"))
-            try self.alloc(.{ .identifier = self.advance().text })
-        else
-            try self.parseUnary();
+        // expression may start here (min_bp <= 7). Keep it distinct from an
+        // IdentifierReference so later validation retains its exact offset.
+        var left = if (min_bp <= 7 and !self.no_in and self.check(.private_name) and self.peekIsKeyword(1, "in")) blk: {
+            const name = self.advance();
+            if (!self.in_class) return self.failUndeclaredPrivateName(name);
+            break :blk try self.alloc(.{ .private_identifier = .{ .name = name.text, .offset = name.pos } });
+        } else try self.parseUnary();
         // `??` may not be combined with `||`/`&&` without parentheses
         // (CoalesceExpression and LogicalORExpression are distinct productions):
         // `a ?? b || c`, `a && b ?? c` are SyntaxErrors. Track, within this single
@@ -3913,11 +3918,19 @@ pub const Parser = struct {
         return m;
     }
 
-    fn parseMemberName(self: *Parser) ParseError![]const u8 {
+    const MemberName = struct { text: []const u8, offset: usize };
+
+    fn failUndeclaredPrivateName(self: *Parser, token: Token) ParseError {
+        const err = self.failWithReasonAt(.undeclared_private_name, token.pos);
+        self.last_error_token = .{ .kind = .token, .text = token.text };
+        return err;
+    }
+
+    fn parseMemberName(self: *Parser) ParseError!MemberName {
         const name = self.advance();
         if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
-        if (name.kind == .private_name and !self.in_class) return ParseError.UnexpectedToken;
-        return name.text;
+        if (name.kind == .private_name and !self.in_class) return self.failUndeclaredPrivateName(name);
+        return .{ .text = name.text, .offset = name.pos };
     }
 
     /// A CallExpression's own source text and the byte length of its callee.
@@ -3949,7 +3962,7 @@ pub const Parser = struct {
             const suffix_token = self.pos;
             if (self.match(.dot)) {
                 const name = try self.parseMemberName();
-                e = try self.alloc(.{ .member = .{ .object = e, .property = name, .source = self.sourceFrom(start_token) } });
+                e = try self.alloc(.{ .member = .{ .object = e, .property = name.text, .property_offset = name.offset, .source = self.sourceFrom(start_token) } });
             } else if (self.match(.question_dot)) {
                 has_optional = true;
                 if (self.check(.lparen)) {
@@ -3971,7 +3984,7 @@ pub const Parser = struct {
                     e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true, .source = self.sourceFrom(start_token) } });
                 } else {
                     const name = try self.parseMemberName();
-                    e = try self.alloc(.{ .member = .{ .object = e, .property = name, .optional = true, .source = self.sourceFrom(start_token) } });
+                    e = try self.alloc(.{ .member = .{ .object = e, .property = name.text, .property_offset = name.offset, .optional = true, .source = self.sourceFrom(start_token) } });
                 }
             } else if (self.match(.lbracket)) {
                 const saved_no_in = self.no_in; // a computed key is `[+In]`
@@ -4067,7 +4080,7 @@ pub const Parser = struct {
                 // `new MemberExpression Arguments` includes private property
                 // access; it has the same lexical-name gate as ordinary access.
                 const name = try self.parseMemberName();
-                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name, .source = self.sourceFrom(new_start_token) } });
+                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name.text, .property_offset = name.offset, .source = self.sourceFrom(new_start_token) } });
             } else if (self.check(.question_dot)) {
                 // `new o?.C()` / `new C?.()` is syntactically invalid; callers
                 // must parenthesize the optional chain (`new (o?.C)()`).
@@ -5227,10 +5240,13 @@ pub const Parser = struct {
         self: *Parser,
         declared: *SecureStringMapUnmanaged(void),
         name: []const u8,
+        offset: usize,
     ) ParseError!void {
         if (isPrivateNameText(name) and !declared.contains(name)) {
             if (self.eval_private_names) |outer| if (outer.contains(name)) return;
-            return ParseError.UnexpectedToken;
+            const err = self.failWithReasonAt(.undeclared_private_name, offset);
+            self.last_error_token = .{ .kind = .token, .text = name };
+            return err;
         }
     }
 
@@ -5288,7 +5304,8 @@ pub const Parser = struct {
     ) ParseError!void {
         try self.checkNesting();
         switch (node.*) {
-            .identifier => |name| try self.requirePrivateName(declared, name),
+            .identifier => {},
+            .private_identifier => |private| try self.requirePrivateName(declared, private.name, private.offset),
             .unary => |u| try self.checkPrivateUsesInNode(declared, u.operand),
             .delete_expr => |target| try self.checkPrivateUsesInNode(declared, target),
             .update => |u| try self.checkPrivateUsesInNode(declared, u.target),
@@ -5334,7 +5351,7 @@ pub const Parser = struct {
             },
             .member => |m| {
                 try self.checkPrivateUsesInNode(declared, m.object);
-                try self.requirePrivateName(declared, m.property);
+                try self.requirePrivateName(declared, m.property, m.property_offset);
                 if (m.computed) |computed| try self.checkPrivateUsesInNode(declared, computed);
             },
             .optional_chain => |chain| try self.checkPrivateUsesInNode(declared, chain),
@@ -7857,6 +7874,33 @@ test "private eval contexts validate exact enclosing names" {
         else
             try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
     }
+}
+
+test "undeclared private diagnostics retain decoded names and exact offsets" {
+    const Case = struct { source: []const u8, name: []const u8, marker: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "class C { m(){ return this.#missing; } }", .name = "#missing", .marker = "#missing" },
+        .{ .source = "class C { m(o){ return #missing in o; } }", .name = "#missing", .marker = "#missing" },
+        .{ .source = "({}).#missing", .name = "#missing", .marker = "#missing" },
+        .{ .source = "class C { m(){ return this.#\\u0078; } }", .name = "#x", .marker = "#\\u0078" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(DiagnosticReason.undeclared_private_name, parser.last_error_reason.?);
+        try std.testing.expectEqualStrings(case.name, parser.last_error_token.?.text);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Cannot reference undeclared private names: \"{s}\"", .{case.name});
+        try std.testing.expectEqualStrings(expected, try parser.diagnosticMessage(arena.allocator(), parser.last_error_reason.?));
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var bare = try Parser.init(arena.allocator(), "#missing;");
+    try std.testing.expectError(ParseError.UnexpectedToken, bare.parseProgram());
+    try std.testing.expectEqual(@as(?DiagnosticReason, null), bare.last_error_reason);
 }
 
 test "parser enforces private name declaration collisions" {
