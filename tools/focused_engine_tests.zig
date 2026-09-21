@@ -96,6 +96,24 @@ const frontend_cases = [_]Case{
         .expected = 1,
     },
     .{
+        .name = "template substitutions share the ordinary expression lexer",
+        .source =
+        \\function tag(strings, value) { return value; }
+        \\var bits = 0;
+        \\if (`${typeof /}/}` === "object") bits |= 1;
+        \\if (`${(() => { return /}/.source })()}` === "}") bits |= 2;
+        \\if (`${void /`/}` === "undefined") bits |= 4;
+        \\if (`${[1].map(function(){ return /\"/.source })[0]}` === "\\\"") bits |= 8;
+        \\if (`${"source" in /}/}` === "true") bits |= 16;
+        \\if (`${(function(v){ switch (v) { case /}/.source: return 12 } })("}")}` === "12") bits |= 32;
+        \\if (tag`${typeof /}/}` === "object") bits |= 64;
+        \\var escaped = `a${"a\"b".split("").map(c => { return /\"/.test(c) ? "&quot;" : c }).join("")}z`;
+        \\if (escaped === "aa&quot;bz") bits |= 128;
+        \\bits
+        ,
+        .expected = 255,
+    },
+    .{
         .name = "class private field",
         .source = "class C { #x = 7; get() { return this.#x; } } new C().get()",
         .expected = 7,

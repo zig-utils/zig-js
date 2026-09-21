@@ -6,7 +6,10 @@ pub const TokenKind = enum {
     eof,
     number,
     string,
-    template, // `...${expr}...` — `text` is the raw inner source (between backticks)
+    template_no_substitution, // `...` — `text` is the raw quasi
+    template_head, // `...${ — first raw quasi
+    template_middle, // }...${ — raw quasi between substitutions
+    template_tail, // }...` — final raw quasi
     regex, // /pattern/flags — `text` is the pattern, `flags` the flag chars
     private_name, // #ident (class private member); `text` includes the `#`
     identifier,
@@ -94,10 +97,6 @@ pub const Token = struct {
     bigint_text: ?[]const u8 = null,
     /// True when an IdentifierName token contained at least one `\u` escape.
     escaped_identifier: bool = false,
-    /// Number of top-level `${...}` substitutions in a template token. The
-    /// lexer already traverses their exact nested boundaries, so the parser can
-    /// size tagged-template AST arrays without rescanning the complete token.
-    template_substitutions: usize = 0,
 };
 
 /// `StackExhausted` is a resource failure like `OutOfMemory`, not a grammar
@@ -117,8 +116,12 @@ pub const Lexer = struct {
     prev_text: []const u8 = "",
     last_identifier_escaped: bool = false,
     last_error_offset: ?usize = null,
-    /// Depth of `lexTemplate` recursion through nested template literals.
-    template_depth: usize = 0,
+    /// Brace depth for each active TemplateSubstitution. A zero top entry means
+    /// the next `}` selects TemplateMiddle or TemplateTail instead of the
+    /// ordinary punctuator. Substitution contents otherwise use this lexer's
+    /// normal token rules; no byte-level shadow scanner or recursive re-lexing
+    /// exists.
+    template_brace_depths: std.ArrayListUnmanaged(usize) = .empty,
     /// A stack of brace kinds (true = object literal `{`, false = block `{`), to
     /// resolve the `}`-then-`/` ambiguity: `{…} / x` divides an object literal,
     /// whereas a block `}` allows a regex.
@@ -138,10 +141,9 @@ pub const Lexer = struct {
     at_line_start: bool = true,
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
-        // Nesting guards probe this thread's stack bounds, and lexing is the
-        // first phase to recurse over source nesting. Registering here keeps
-        // them effective on every path, including parses that never run
-        // through an evaluation entry point (#936). Idempotent per thread.
+        // Nesting guards probe this thread's stack bounds. The lexer is the
+        // common first phase for standalone and evaluated parses, so register
+        // here before the parser recurses over source nesting (#936).
         stack_scan.registerThreadBounds();
         return .{ .src = src, .arena = arena };
     }
@@ -479,6 +481,18 @@ pub const Lexer = struct {
         // comment once a fresh line terminator (set in skipTrivia) precedes it.
         self.at_line_start = false;
         t.end = self.i;
+        if (self.template_brace_depths.items.len != 0) {
+            const depth = &self.template_brace_depths.items[self.template_brace_depths.items.len - 1];
+            if (t.kind == .lbrace) {
+                depth.* += 1;
+            } else if (t.kind == .rbrace) {
+                // A zero-depth `}` was consumed above as a template
+                // continuation, so every ordinary `}` here closes a nested
+                // brace inside the substitution.
+                std.debug.assert(depth.* != 0);
+                depth.* -= 1;
+            }
+        }
         if (t.kind == .lbrace) {
             if (self.brace_top < self.brace_obj.len) {
                 const function_expr_body = self.pending_function_expr and prev == .rparen;
@@ -505,7 +519,7 @@ pub const Lexer = struct {
     /// the previous token does not end an expression.
     fn regexAllowed(self: *Lexer) bool {
         return switch (self.prev_kind) {
-            .number, .string, .template, .regex, .private_name, .rparen, .rbracket => false,
+            .number, .string, .template_no_substitution, .template_tail, .regex, .private_name, .rparen, .rbracket => false,
             // A `}` that closed an object literal ends an expression (division);
             // one that closed a block does not (regex allowed).
             .rbrace => !self.last_rbrace_object,
@@ -517,9 +531,19 @@ pub const Lexer = struct {
     fn nextRaw(self: *Lexer) LexError!Token {
         try self.skipTrivia();
         const start = self.i;
-        if (self.i >= self.src.len) return .{ .kind = .eof, .text = "", .pos = start };
+        if (self.i >= self.src.len) {
+            if (self.template_brace_depths.items.len != 0) return LexError.UnterminatedString;
+            return .{ .kind = .eof, .text = "", .pos = start };
+        }
 
         const c = self.src[self.i];
+
+        // A substitution-closing `}` is part of TemplateMiddle/TemplateTail,
+        // not an ordinary punctuator. Nested braces keep using normal tokens
+        // until the active substitution's structural depth returns to zero.
+        if (c == '}' and self.template_brace_depths.items.len != 0 and
+            self.template_brace_depths.items[self.template_brace_depths.items.len - 1] == 0)
+            return self.lexTemplateContinuation();
 
         // HashbangComment (`#!...`) — only valid at the very start of the source.
         if (c == '#' and self.peek2() == '!' and start == 0) {
@@ -555,7 +579,7 @@ pub const Lexer = struct {
         // Strings
         if (c == '"' or c == '\'') return self.lexString();
         // Template literals
-        if (c == '`') return self.lexTemplate();
+        if (c == '`') return self.lexTemplateStart();
 
         // Operators / punctuation
         self.i += 1;
@@ -944,135 +968,57 @@ pub const Lexer = struct {
         return LexError.UnterminatedString;
     }
 
-    /// Scan a `` `...` `` template, returning a token whose `text` is the raw
-    /// inner source (still containing `${...}` and escapes — the parser splits
-    /// and decodes it). Tracks `${ }` brace depth and skips quoted strings so
-    /// braces inside a substitution or a string don't end the template early.
-    fn lexTemplate(self: *Lexer) LexError!Token {
+    /// Scan the first quasi of a template. Template substitutions remain in
+    /// the ordinary token stream: TemplateHead is followed by normal tokens and
+    /// the zero-depth closing `}` becomes TemplateMiddle or TemplateTail.
+    fn lexTemplateStart(self: *Lexer) LexError!Token {
         const start = self.i;
         self.i += 1; // opening backtick
+        return self.lexTemplateChunk(start, false);
+    }
+
+    /// Scan one raw quasi without entering its substitution. For a middle/tail
+    /// chunk `self.i` is just after the substitution-closing `}`; for a
+    /// no-substitution/head chunk it is just after the opening backtick.
+    fn lexTemplateChunk(self: *Lexer, start: usize, continuation: bool) LexError!Token {
         const text_start = self.i;
-        var depth: usize = 0; // brace depth inside ${ ... }
-        var substitution_count: usize = 0;
-        // Last significant byte scanned inside the current `${ }` — drives the
-        // regex-vs-division decision for a `/` (see `templateRegexAllowed`).
-        var last_sig: u8 = 0;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
-            if (depth == 0) {
-                if (c == '`') {
-                    const text = self.src[text_start..self.i];
-                    self.i += 1; // closing backtick
-                    return .{ .kind = .template, .text = text, .pos = start, .template_substitutions = substitution_count };
-                }
-                if (c == '\\') {
-                    self.i += 2; // escaped char (\` \$ \\ ...)
-                    continue;
-                }
-                if (c == '$' and self.peek2() == '{') {
-                    substitution_count += 1;
-                    depth = 1;
-                    last_sig = 0;
-                    self.i += 2;
-                    continue;
-                }
+            if (c == '`') {
+                const text = self.src[text_start..self.i];
                 self.i += 1;
-            } else {
-                // Inside a `${ ... }` substitution: skip strings, regexes,
-                // comments, and nested templates so their braces/quotes don't
-                // confuse the outer brace-depth tracking.
-                switch (c) {
-                    ' ', '\t', '\n', '\r' => self.i += 1,
-                    '{' => {
-                        depth += 1;
-                        last_sig = '{';
-                        self.i += 1;
-                    },
-                    '}' => {
-                        depth -= 1;
-                        last_sig = '}';
-                        self.i += 1;
-                    },
-                    '\'', '"' => {
-                        self.skipStringLiteral(c);
-                        last_sig = '"';
-                    },
-                    '`' => {
-                        // Nested template (recurses): guarded, because a source
-                        // of nested template literals is otherwise bounded only
-                        // by the native stack.
-                        self.template_depth += 1;
-                        defer self.template_depth -= 1;
-                        if (stack_scan.nestingExhausted(self.template_depth)) return error.StackExhausted;
-                        _ = try self.lexTemplate();
-                        last_sig = '`';
-                    },
-                    '/' => {
-                        const n = self.peek2();
-                        if (n == '/') {
-                            while (self.i < self.src.len and self.src[self.i] != '\n') self.i += 1;
-                        } else if (n == '*') {
-                            self.i += 2;
-                            while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) self.i += 1;
-                            self.i = @min(self.i + 2, self.src.len);
-                        } else if (templateRegexAllowed(last_sig)) {
-                            self.skipRegexLiteral();
-                            last_sig = 'r';
-                        } else {
-                            last_sig = '/';
-                            self.i += 1;
-                        }
-                    },
-                    '\\' => {
-                        self.i += 2;
-                        last_sig = '\\';
-                    },
-                    else => {
-                        last_sig = c;
-                        self.i += 1;
-                    },
+                if (continuation) {
+                    _ = self.template_brace_depths.pop();
+                    return .{ .kind = .template_tail, .text = text, .pos = start };
                 }
+                return .{ .kind = .template_no_substitution, .text = text, .pos = start };
             }
+            if (c == '\\') {
+                // The escaped byte cannot introduce a delimiter. A trailing
+                // backslash naturally advances to EOF and reports an
+                // unterminated template below.
+                self.i = @min(self.i + 2, self.src.len);
+                continue;
+            }
+            if (c == '$' and self.peek2() == '{') {
+                const text = self.src[text_start..self.i];
+                self.i += 2;
+                if (!continuation) try self.template_brace_depths.append(self.arena, 0);
+                return .{
+                    .kind = if (continuation) .template_middle else .template_head,
+                    .text = text,
+                    .pos = start,
+                };
+            }
+            self.i += 1;
         }
         return LexError.UnterminatedString;
     }
 
-    /// Within a template substitution, decide whether a `/` begins a regex
-    /// literal (true) or is a division operator (false), from the previous
-    /// significant byte. Regex is allowed at the start of the substitution or
-    /// after an operator/opening punctuator — never after a value-producing
-    /// char (identifier, digit, or closing `)`/`]`/`}`/quote).
-    fn templateRegexAllowed(last: u8) bool {
-        return switch (last) {
-            0, '(', '[', '{', ',', ';', ':', '?', '=', '+', '-', '*', '/', '%', '!', '&', '|', '^', '~', '<', '>' => true,
-            else => false,
-        };
-    }
-
-    /// Advance `self.i` past a `/pattern/flags` regex literal (no token built);
-    /// used by the template-substitution scanner.
-    fn skipRegexLiteral(self: *Lexer) void {
-        self.i += 1; // opening /
-        var in_class = false;
-        while (self.i < self.src.len) {
-            const c = self.src[self.i];
-            if (c == '\n') return;
-            if (c == '\\') {
-                self.i += 2;
-                continue;
-            }
-            if (c == '[') {
-                in_class = true;
-            } else if (c == ']') {
-                in_class = false;
-            } else if (c == '/' and !in_class) {
-                break;
-            }
-            self.i += 1;
-        }
-        if (self.i >= self.src.len) return;
-        self.i += 1; // closing /
-        while (self.i < self.src.len and std.ascii.isAlphabetic(self.src[self.i])) self.i += 1;
+    fn lexTemplateContinuation(self: *Lexer) LexError!Token {
+        const start = self.i;
+        self.i += 1; // substitution-closing `}`
+        return self.lexTemplateChunk(start, true);
     }
 
     /// Scan `/pattern/flags`. `text` is the pattern (between the slashes,
@@ -1105,21 +1051,6 @@ pub const Lexer = struct {
         const flags_start = self.i;
         while (self.i < self.src.len and std.ascii.isAlphabetic(self.src[self.i])) self.i += 1;
         return .{ .kind = .regex, .text = pattern, .flags = self.src[flags_start..self.i], .pos = start };
-    }
-
-    /// Advance past a quoted string starting at `self.i` (whose char is `quote`),
-    /// honoring backslash escapes. Used while scanning inside `${ ... }`.
-    fn skipStringLiteral(self: *Lexer, quote: u8) void {
-        self.i += 1; // opening quote
-        while (self.i < self.src.len) {
-            const c = self.src[self.i];
-            if (c == '\\') {
-                self.i += 2;
-                continue;
-            }
-            self.i += 1;
-            if (c == quote) return;
-        }
     }
 };
 
@@ -1988,17 +1919,41 @@ test "lexer enforces Unicode 17 identifier start and continue properties" {
     }
 }
 
-test "lexer counts only current template substitutions" {
+test "lexer emits template quasis around ordinary substitution tokens" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     var plain = Lexer.init(arena.allocator(), "`plain $ text \\${escaped}`");
-    try std.testing.expectEqual(@as(usize, 0), (try plain.next()).template_substitutions);
+    const plain_token = try plain.next();
+    try std.testing.expectEqual(TokenKind.template_no_substitution, plain_token.kind);
+    try std.testing.expectEqualStrings("plain $ text \\${escaped}", plain_token.text);
 
     var nested = Lexer.init(arena.allocator(), "`a${/}/.test('}') /* } */}b${`nested${1}`}c`");
-    const nested_token = try nested.next();
-    try std.testing.expectEqual(TokenKind.template, nested_token.kind);
-    try std.testing.expectEqual(@as(usize, 2), nested_token.template_substitutions);
+    const expected = [_]struct { TokenKind, []const u8 }{
+        .{ .template_head, "a" },
+        .{ .regex, "}" },
+        .{ .dot, "." },
+        .{ .identifier, "test" },
+        .{ .lparen, "(" },
+        .{ .string, "}" },
+        .{ .rparen, ")" },
+        .{ .template_middle, "b" },
+        .{ .template_head, "nested" },
+        .{ .number, "1" },
+        .{ .template_tail, "" },
+        .{ .template_tail, "c" },
+    };
+    for (expected) |entry| {
+        const token = try nested.next();
+        try std.testing.expectEqual(entry.@"0", token.kind);
+        try std.testing.expectEqualStrings(entry.@"1", token.text);
+    }
+    try std.testing.expectEqual(TokenKind.eof, (try nested.next()).kind);
+
+    var unterminated = Lexer.init(arena.allocator(), "`head${1");
+    try std.testing.expectEqual(TokenKind.template_head, (try unterminated.next()).kind);
+    try std.testing.expectEqual(TokenKind.number, (try unterminated.next()).kind);
+    try std.testing.expectError(LexError.UnterminatedString, unterminated.next());
 }
 
 test "lexer and RegExp share exact Unicode identifier classification" {

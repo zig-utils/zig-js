@@ -3990,7 +3990,7 @@ pub const Parser = struct {
                     .source = source.text,
                     .callee_len = source.callee_len,
                 } });
-            } else if (self.check(.template)) {
+            } else if (self.check(.template_no_substitution) or self.check(.template_head)) {
                 // A tagged template may not appear in an optional chain
                 // (`a?.b`tmpl`` is a SyntaxError) — short-circuiting a tag call is
                 // disallowed.
@@ -3998,7 +3998,7 @@ pub const Parser = struct {
                 // Tagged template: `tag`...`` — call `tag` with the cooked-string
                 // array (carrying `raw`) and the substitution values.
                 const tmpl = self.advance();
-                e = try self.parseTaggedTemplate(e, tmpl.text, tmpl.template_substitutions, self.sourceFrom(start_token));
+                e = try self.parseTaggedTemplate(e, tmpl, start_token);
             } else break;
         }
         if (has_optional) e = try self.alloc(.{ .optional_chain = e });
@@ -4042,8 +4042,8 @@ pub const Parser = struct {
                 return self.failWithTokenReason(.new_target_invalid_identifier);
             _ = self.advance();
             if (m.kind != .identifier) return ParseError.UnexpectedToken;
-            // Keep the NewTarget early error attached to its own token. A
-            // template subparser translates this offset to the original source.
+            // Keep the NewTarget early error attached to its own source token.
+            // Template substitutions now share this parser and its offsets.
             if (self.new_target_depth == 0)
                 return self.failWithReasonAt(if (self.fn_depth > 0) .new_target_in_global_arrow else .new_target_outside_function, self.tokens[new_start_token].pos);
             return self.alloc(.new_target_expr);
@@ -4076,12 +4076,12 @@ pub const Parser = struct {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
                 callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx, .source = self.sourceFrom(new_start_token) } });
-            } else if (self.check(.template)) {
+            } else if (self.check(.template_no_substitution) or self.check(.template_head)) {
                 // `new tag`tmpl`` parses as `new (tag`tmpl`)`: a tagged template is a
                 // MemberExpression, so it binds to the `new` operand (the tag call
                 // happens first, then `new` constructs its result).
                 const tmpl = self.advance();
-                callee = try self.parseTaggedTemplate(callee, tmpl.text, tmpl.template_substitutions, self.sourceFrom(new_start_token));
+                callee = try self.parseTaggedTemplate(callee, tmpl, new_start_token);
             } else break;
         }
         const args: []*Node = if (self.check(.lparen)) try self.parseArgs() else &.{};
@@ -4200,152 +4200,85 @@ pub const Parser = struct {
         return cooked;
     }
 
-    fn templateSubparser(self: *Parser, source: []const u8, tokens: *std.ArrayListUnmanaged(Token)) ParseError!Parser {
-        var ignored: ?SourceLocation = null;
-        var sub = try initWithTokenStorage(self.arena, self.scratch_allocator, source, self.scratch_allocator, tokens, &ignored);
-        sub.shared_secure_hash_state = self.secureHashState();
-        // TemplateSubstitution is an Expression in the enclosing function, not
-        // a function boundary. Keep its grammar context and borrowed usage sinks;
-        // nested ordinary functions still replace those sinks, while arrows
-        // retain the appropriate lexical ownership. Statement/label state stays
-        // local to the new parser because a substitution cannot contain a break.
-        sub.in_generator = self.in_generator;
-        sub.in_async = self.in_async;
-        sub.in_class = self.in_class;
-        sub.strict = self.strict;
-        sub.module = self.module;
-        sub.new_target_depth = self.new_target_depth;
-        // A substitution's parser recurses on top of this one's stack. Where
-        // the thread's bounds are unknown its own floor would be measured from
-        // this deeper frame, granting a fresh allowance at every nested
-        // template, so it keeps the floor of the parse that created it.
-        sub.stack_floor = self.stack_floor;
-        sub.current_arguments_use = self.current_arguments_use;
-        sub.current_direct_eval_use = self.current_direct_eval_use;
-        sub.eval_private_names = self.eval_private_names;
-        sub.regex_validation_arena = self.regex_validation_arena;
-        return sub;
-    }
+    fn parseTemplate(self: *Parser, first: Token) ParseError!*Node {
+        const first_raw = try normalizeTemplateRaw(self.arena, first.text);
+        var node = try self.concatStr(null, (try self.cookTemplateQuasi(first_raw, false)).?);
+        if (first.kind == .template_no_substitution) return node;
+        std.debug.assert(first.kind == .template_head);
 
-    fn parseTemplate(self: *Parser, raw_in: []const u8) ParseError!*Node {
-        const raw = try normalizeTemplateRaw(self.arena, raw_in);
-        if (std.mem.indexOfScalar(u8, raw, '$') == null)
-            return self.concatStr(null, (try self.cookTemplateQuasi(raw, false)).?);
-        // Token structs are consumed while parsing each substitution; AST and
-        // decoded payload slices remain arena-owned. Reuse capacity across
-        // siblings, with a distinct scratch list for every nested template.
-        var substitution_tokens: std.ArrayListUnmanaged(Token) = .empty;
-        defer substitution_tokens.deinit(self.scratch_allocator);
-        var node: ?*Node = null;
-        var raw_start: usize = 0;
-        var i: usize = 0;
-        while (i < raw.len) {
-            const c = raw[i];
-            if (c == '\\' and i + 1 < raw.len) {
-                try validateTemplateEscape(raw, i + 1);
-                i = lex.decodeEscape(raw, i + 1).next;
-            } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                // Flush the literal run so far, then parse the substitution.
-                node = try self.concatStr(node, (try self.cookTemplateQuasi(raw[raw_start..i], false)).?);
-                const expr_start = i + 2;
-                const expr_end = try substEnd(raw, expr_start, 0);
-                var sub = try self.templateSubparser(raw[expr_start..expr_end], &substitution_tokens);
-                const expression = sub.parseTemplateExpression() catch |err| {
-                    self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
-                    return err;
-                };
-                node = try self.concatExpr(node, expression);
-                i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
-                raw_start = i;
-            } else {
-                i += 1;
-            }
+        while (true) {
+            node = try self.concatExpr(node, try self.parseExpression());
+            if (!self.check(.template_middle) and !self.check(.template_tail))
+                return self.failWithTokenReason(.template_expression_tail);
+            const quasi = self.advance();
+            const raw = try normalizeTemplateRaw(self.arena, quasi.text);
+            node = try self.concatStr(node, (try self.cookTemplateQuasi(raw, false)).?);
+            if (quasi.kind == .template_tail) return node;
         }
-        return self.concatStr(node, (try self.cookTemplateQuasi(raw[raw_start..], false)).?);
     }
 
-    /// Split a template's raw inner text into the cooked quasis (escapes
-    /// decoded), the raw quasis (text verbatim), and the substitution
-    /// expressions, then build a `tagged_template` node. There is always one
-    /// more quasi than substitution.
-    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8, substitution_count: usize, source: []const u8) ParseError!*Node {
-        const raw = try normalizeTemplateRaw(self.arena, raw_in);
-        if (substitution_count == 0) {
+    /// Parse a tagged template from the same token stream as its surrounding
+    /// expression. Temporary lists retain only pointers/slices and are released
+    /// before return; final arrays own exact arena-sized storage.
+    fn parseTaggedTemplate(self: *Parser, tag: *Node, first: Token, start_token: usize) ParseError!*Node {
+        const first_raw = try normalizeTemplateRaw(self.arena, first.text);
+        const first_cooked = try self.cookTemplateQuasi(first_raw, true);
+        if (first.kind == .template_no_substitution) {
             const cooked = try self.arena.alloc(?[]const u8, 1);
-            cooked[0] = try self.cookTemplateQuasi(raw, true);
+            cooked[0] = first_cooked;
             const raws = try self.arena.alloc([]const u8, 1);
-            raws[0] = raw;
-            return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = &.{}, .source = source } });
+            raws[0] = first_raw;
+            return self.alloc(.{ .tagged_template = .{
+                .tag = tag,
+                .cooked = cooked,
+                .raw = raws,
+                .exprs = &.{},
+                .source = self.sourceFrom(start_token),
+            } });
         }
-        // A tagged template has one more quasi than substitution. The lexer
-        // records top-level boundaries during its existing nested scan, letting
-        // us fill final arrays directly with no retained list growth capacity.
-        const cooked = try self.arena.alloc(?[]const u8, substitution_count + 1);
-        const raws = try self.arena.alloc([]const u8, substitution_count + 1);
-        const exprs = try self.arena.alloc(*Node, substitution_count);
-        var substitution_tokens: std.ArrayListUnmanaged(Token) = .empty;
-        defer substitution_tokens.deinit(self.scratch_allocator);
-        // A quasi that holds an invalid escape has an `undefined` cooked value
-        // (tolerated in a tagged template); track that per quasi and flush null.
-        var substitution_index: usize = 0;
-        var raw_start: usize = 0;
-        var i: usize = 0;
-        while (i < raw.len) {
-            const c = raw[i];
-            if (c == '\\' and i + 1 < raw.len) {
-                i = lex.decodeEscape(raw, i + 1).next;
-            } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                if (substitution_index >= substitution_count) return ParseError.UnexpectedToken;
-                cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..i], true);
-                raws[substitution_index] = raw[raw_start..i];
-                const expr_start = i + 2;
-                const expr_end = try substEnd(raw, expr_start, 0);
-                var sub = try self.templateSubparser(raw[expr_start..expr_end], &substitution_tokens);
-                exprs[substitution_index] = sub.parseTemplateExpression() catch |err| {
-                    self.inheritTemplateDiagnostic(&sub, raw_in, expr_start);
-                    return err;
-                };
-                substitution_index += 1;
-                i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
-                raw_start = i;
-            } else {
-                i += 1;
-            }
-        }
-        if (substitution_index != substitution_count) return ParseError.UnexpectedToken;
-        cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..], true);
-        raws[substitution_index] = raw[raw_start..];
-        return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = exprs, .source = source } });
-    }
+        std.debug.assert(first.kind == .template_head);
 
-    fn parseTemplateExpression(self: *Parser) ParseError!*Node {
-        const expression = try self.parseExpression();
-        // A TemplateSubstitution contains one complete Expression. This parser
-        // owns the extracted substitution, so neither trailing tokens nor cover
-        // early errors can be left for the enclosing Program/Module to inspect.
-        if (!self.check(.eof)) return self.failWithTokenReason(.template_expression_tail);
-        try self.checkPendingCoverErrors();
-        return expression;
-    }
-
-    fn inheritTemplateDiagnostic(self: *Parser, sub: *const Parser, raw_in: []const u8, expression_start: usize) void {
-        self.last_error_reason = sub.last_error_reason;
-        self.last_error_token = sub.last_error_token;
-        // Substitution parsers see normalized TRV. Translate the error offset
-        // back over removed CRLF bytes before publishing the enclosing source
-        // position; normalized offsets are not offsets into the original file.
-        const normalized_offset = expression_start + sub.errorLocation().byte_offset;
-        var original_offset: usize = 0;
-        var normalized: usize = 0;
-        while (original_offset < raw_in.len and normalized < normalized_offset) : (normalized += 1) {
-            if (raw_in[original_offset] == '\r' and original_offset + 1 < raw_in.len and raw_in[original_offset + 1] == '\n')
-                original_offset += 2
-            else
-                original_offset += 1;
+        const Part = struct {
+            cooked: ?[]const u8,
+            raw: []const u8,
+            expression_before: ?*Node,
+        };
+        var parts: std.ArrayListUnmanaged(Part) = .empty;
+        defer parts.deinit(self.scratch_allocator);
+        // One allocation covers the common case and all current representative
+        // tagged-template rows. Larger sources grow geometrically without
+        // rescanning their already parsed substitutions.
+        try parts.ensureTotalCapacity(self.scratch_allocator, 8);
+        parts.appendAssumeCapacity(.{ .cooked = first_cooked, .raw = first_raw, .expression_before = null });
+        while (true) {
+            const expression = try self.parseExpression();
+            if (!self.check(.template_middle) and !self.check(.template_tail))
+                return self.failWithTokenReason(.template_expression_tail);
+            const quasi = self.advance();
+            const raw = try normalizeTemplateRaw(self.arena, quasi.text);
+            try parts.append(self.scratch_allocator, .{
+                .cooked = try self.cookTemplateQuasi(raw, true),
+                .raw = raw,
+                .expression_before = expression,
+            });
+            if (quasi.kind == .template_tail) break;
         }
-        // Lexer template text is always a slice of this parser's source.
-        const raw_offset = @intFromPtr(raw_in.ptr) - @intFromPtr(self.source.ptr);
-        self.last_error_offset = raw_offset + original_offset;
+
+        const cooked = try self.arena.alloc(?[]const u8, parts.items.len);
+        const raws = try self.arena.alloc([]const u8, parts.items.len);
+        const exprs = try self.arena.alloc(*Node, parts.items.len - 1);
+        for (parts.items, 0..) |part, index| {
+            cooked[index] = part.cooked;
+            raws[index] = part.raw;
+            if (part.expression_before) |expression| exprs[index - 1] = expression;
+        }
+        return self.alloc(.{ .tagged_template = .{
+            .tag = tag,
+            .cooked = cooked,
+            .raw = raws,
+            .exprs = exprs,
+            .source = self.sourceFrom(start_token),
+        } });
     }
 
     fn validateTemplateEscape(raw: []const u8, i: usize) ParseError!void {
@@ -5646,7 +5579,7 @@ pub const Parser = struct {
                 if (self.strict and t.legacy_octal) return ParseError.UnexpectedToken;
                 return self.alloc(.{ .string = t.text });
             },
-            .template => return self.parseTemplate(t.text),
+            .template_no_substitution, .template_head => return self.parseTemplate(t),
             .regex => {
                 // A regex literal's pattern and flags are early errors: validate
                 // them at parse time so an invalid literal fails the parse (the
@@ -5689,11 +5622,6 @@ pub const Parser = struct {
     }
 };
 
-/// Decode one escape char in a template literal's literal text.
-/// Given the raw template text and the index just past a `${`, return the index
-/// of the matching `}` (or `raw.len` if unterminated). Brace- and string-aware.
-/// Within a template substitution, whether a `/` at `last_sig` begins a regex
-/// literal (true) rather than a division. Mirrors the lexer's heuristic.
 /// Validate a regex literal's flags and pattern, returning a parse error for an
 /// invalid one. Mirrors the interpreter's eager compile so the result is the
 /// same whether the literal is rejected at parse or at evaluation.
@@ -5727,99 +5655,6 @@ fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, patter
         error.OutOfMemory => return error.OutOfMemory,
         else => return ParseError.UnexpectedToken,
     };
-}
-
-fn substRegexAllowed(last: u8) bool {
-    return switch (last) {
-        0, '(', '[', '{', ',', ';', ':', '?', '=', '+', '-', '*', '/', '%', '!', '&', '|', '^', '~', '<', '>' => true,
-        else => false,
-    };
-}
-
-/// `template_depth` counts nested template literals, each of which recurses here.
-fn substEnd(raw: []const u8, start: usize, template_depth: usize) error{StackExhausted}!usize {
-    if (stack_scan.nestingExhausted(template_depth)) return error.StackExhausted;
-    var depth: usize = 1;
-    var i = start;
-    var last_sig: u8 = 0; // last significant byte — drives regex-vs-division
-    while (i < raw.len) {
-        const c = raw[i];
-        switch (c) {
-            ' ', '\t', '\n', '\r' => {},
-            '{' => {
-                depth += 1;
-                last_sig = '{';
-            },
-            '}' => {
-                depth -= 1;
-                if (depth == 0) return i;
-                last_sig = '}';
-            },
-            '\'', '"' => {
-                i += 1;
-                while (i < raw.len) : (i += 1) {
-                    if (raw[i] == '\\') {
-                        i += 1;
-                        continue;
-                    }
-                    if (raw[i] == c) break;
-                }
-                last_sig = '"';
-            },
-            '`' => {
-                // Nested template — skip to its matching backtick, honoring its
-                // own `${ }` substitutions recursively.
-                i += 1;
-                while (i < raw.len) : (i += 1) {
-                    if (raw[i] == '\\') {
-                        i += 1;
-                        continue;
-                    }
-                    if (raw[i] == '`') break;
-                    if (raw[i] == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                        const inner = try substEnd(raw, i + 2, template_depth + 1);
-                        i = if (inner < raw.len) inner else raw.len - 1;
-                    }
-                }
-                last_sig = '`';
-            },
-            '/' => {
-                const n = if (i + 1 < raw.len) raw[i + 1] else 0;
-                if (n == '/') {
-                    while (i < raw.len and raw[i] != '\n') i += 1;
-                    continue; // i now at '\n' or end; outer loop re-checks
-                } else if (n == '*') {
-                    i += 2;
-                    while (i + 1 < raw.len and !(raw[i] == '*' and raw[i + 1] == '/')) i += 1;
-                    i += 1; // land on the closing '/', then the trailing i+=1 passes it
-                    last_sig = '/';
-                } else if (substRegexAllowed(last_sig)) {
-                    // Regex literal: skip to the unescaped terminating '/'.
-                    i += 1;
-                    var in_class = false;
-                    while (i < raw.len) : (i += 1) {
-                        const rc = raw[i];
-                        if (rc == '\\') {
-                            i += 1;
-                            continue;
-                        }
-                        if (rc == '[') in_class = true else if (rc == ']') in_class = false else if (rc == '/' and !in_class) break;
-                    }
-                    // skip flags
-                    var j = i + 1;
-                    while (j < raw.len and std.ascii.isAlphabetic(raw[j])) j += 1;
-                    i = j - 1; // trailing i+=1 lands past the flags
-                    last_sig = 'r';
-                } else {
-                    last_sig = '/';
-                }
-            },
-            '\\' => i += 1,
-            else => last_sig = c,
-        }
-        i += 1;
-    }
-    return raw.len;
 }
 
 // ---------------------------------------------------------------------------
@@ -6614,8 +6449,8 @@ test "parser preserves raw and cooked template quasis across substitutions" {
     try std.testing.expectEqualStrings("ok", invalid_template.cooked[1].?);
 }
 
-test "template token storage reuses one scratch allocation across siblings" {
-    for ([_][]const u8{ "tag`${1}${2}${3}${4}`", "`${1}${2}${3}${4}`" }) |source| {
+test "tagged template assembly uses one scratch allocation and untagged templates use none" {
+    for ([_][]const u8{"tag`${1}${2}${3}${4}`"}) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
@@ -6624,7 +6459,7 @@ test "template token storage reuses one scratch allocation across siblings" {
         try std.testing.expectEqual(@as(usize, 1), scratch.allocations);
         try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
     }
-    for ([_][]const u8{ "tag`plain`", "`plain`" }) |source| {
+    for ([_][]const u8{ "tag`plain`", "`plain`", "`${1}${2}${3}${4}`" }) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -6634,7 +6469,7 @@ test "template token storage reuses one scratch allocation across siblings" {
     }
 }
 
-test "template token storage does not own decoded AST payloads or function source" {
+test "streamed template assembly does not own decoded AST payloads or function source" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const source = "tag`a${'\\u0061'}b${\\u0062}c${function f(){return 'c';}}d${tag`n${'\\u0064'}`}e${1+2+3+4+5+6+7+8+9+10}`";
@@ -6651,7 +6486,7 @@ test "template token storage does not own decoded AST payloads or function sourc
     try std.testing.expectEqual(ast.BinaryOp.add, expressions[4].binary.op);
 }
 
-test "template token storage releases scratch on syntax failure" {
+test "streamed template assembly releases scratch on syntax failure" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -6661,7 +6496,7 @@ test "template token storage releases scratch on syntax failure" {
     try std.testing.expectEqualStrings("Unexpected identifier 'é'. getter functions must have no parameters.", try parser.diagnosticMessage(arena.allocator(), parser.last_error_reason.?));
 }
 
-test "template token storage growth and nesting propagate scratch allocation failures" {
+test "streamed tagged template growth propagates scratch allocation failures" {
     const Probe = struct {
         fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
             const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
@@ -6681,7 +6516,7 @@ test "template token storage growth and nesting propagate scratch allocation fai
         }
     };
     var backing = std.testing.allocator;
-    // Token storage grows by remapping, and whether the testing allocator can
+    // Part storage grows by remapping, and whether the testing allocator can
     // extend a buffer in place depends on what else is free next to it. A run
     // that grows in place makes one allocation fewer than a run that copies,
     // so the replay saw a different count from one run to the next and failed
@@ -6709,6 +6544,25 @@ test "parser fills exact tagged template arrays across nested substitutions" {
         try std.testing.expectEqualStrings(expected, cooked.?);
         try std.testing.expectEqualStrings(expected, raw);
         try std.testing.expectEqual(@intFromPtr(cooked.?.ptr), @intFromPtr(raw.ptr));
+    }
+}
+
+test "template substitutions use the ordinary expression token stream" {
+    const sources = [_][]const u8{
+        "var x = `${ typeof /}/ }`; x",
+        "var x = `${ (() => { return /}/.source })() }`; x",
+        "var x = `${ void /`/ }`; x",
+        "var x = `${ [1].map(function(){ return /\"/.source })[0] }`; x",
+        "var x = `${ \"source\" in /}/ }`; x",
+        "var x = `${ (function(v){ switch (v) { case /}/.source: return 12 } })(\"}\") }`; x",
+        "function t(s, v){ return v; } var x = t`${ typeof /}/ }`; x",
+        "var s = 'a\"b'; var x = `${s.split(\"\").map(c => { return /\"/.test(c) ? \"&quot;\" : c }).join(\"\")}`; x",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
     }
 }
 
@@ -7678,7 +7532,6 @@ test "parser lexical and var early errors traverse with statement bodies" {
 }
 
 fn parseForNestingTest(allocator: std.mem.Allocator, source: []const u8) ParseError!void {
-    // Lexing runs inside `init`, so template nesting can be refused there.
     var parser = try Parser.init(allocator, source);
     _ = try parser.parseProgram();
 }
@@ -7733,7 +7586,7 @@ test "parser refuses source nested deeper than the stack allows" {
         .{ .core = ";", .numbered_label = true }, // labelled statements
         .{ .prefix = "var ", .open = "[", .core = "x", .close = "]", .suffix = " = [];" }, // binding patterns
         .{ .open = "[", .core = "x", .close = "]", .suffix = " = [];" }, // assignment patterns via litToPattern
-        .{ .open = "`${", .core = "1", .close = "}`" }, // nested templates: lexer, substEnd, sub-parsers
+        .{ .open = "`${", .core = "1", .close = "}`" }, // streamed template expressions
         // A for-in/of head that fails as a target is retried as a classic head;
         // exhaustion inside it must propagate, not trigger the retry.
         .{ .prefix = "async function f() { for await (a[", .open = "(", .core = "1", .close = ")", .suffix = "] of []); }" },
