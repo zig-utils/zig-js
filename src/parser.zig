@@ -89,6 +89,8 @@ pub const DiagnosticReason = enum {
     new_import,
     new_optional_chain,
     expected_property_after_dot,
+    strict_class_name,
+    class_field_semicolon,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -233,6 +235,8 @@ pub const DiagnosticReason = enum {
             .new_import => "Cannot use new with import.",
             .new_optional_chain => "Cannot call constructor in an optional chain.",
             .expected_property_after_dot => "Expected a property name after '.'.",
+            .strict_class_name => "",
+            .class_field_semicolon => "Expected a ';' following a class field.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -1132,6 +1136,8 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot destructure to a variable named '{s}' in strict mode.", .{token.text});
         if (reason == .strict_delete_identifier)
             return std.fmt.allocPrint(allocator, "Cannot delete unqualified property '{s}' in strict mode.", .{token.text});
+        if (reason == .strict_class_name)
+            return std.fmt.allocPrint(allocator, "Cannot use '{s}' as a class name in strict mode.", .{token.text});
         if (reason == .shorthand_keyword)
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a shorthand property name.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
@@ -5383,7 +5389,7 @@ pub const Parser = struct {
         }
         if (self.match(.dot)) {
             const name = self.advance();
-            if (name.kind != .identifier) return ParseError.UnexpectedToken;
+            if (name.kind != .identifier) return self.failWithToken(.expected_property_after_dot, name);
             return self.alloc(.{ .super_member = .{ .property = name.text, .super_offset = super_token.pos } });
         }
         if (self.match(.lbracket)) {
@@ -5391,7 +5397,7 @@ pub const Parser = struct {
             try self.expect(.rbracket);
             return self.alloc(.{ .super_member = .{ .computed = idx, .super_offset = super_token.pos } });
         }
-        return ParseError.UnexpectedToken;
+        return self.failWithReasonAt(.invalid_super, super_token.pos);
     }
 
     /// `import(specifier ,opt)` / `import(specifier, options ,opt)` (dynamic
@@ -5468,7 +5474,7 @@ pub const Parser = struct {
             else
                 // ToString'd via Number::toString (`0.0000001` → "1e-7"), not `{d}`.
                 try value_mod.numberToString(self.arena, t.number),
-            else => return ParseError.UnexpectedToken,
+            else => return self.failWithToken(.unexpected_token, t),
         };
         return .{ .key = key, .expr = null };
     }
@@ -5518,7 +5524,7 @@ pub const Parser = struct {
             // A class's BindingIdentifier is strict-mode code (`class let {}`,
             // `class yield {}`, `class await {}` in a module, … are SyntaxErrors);
             // `self.strict` is already forced true above.
-            if (self.isForbiddenBindingName(self.cur().text)) return ParseError.UnexpectedToken;
+            if (self.isForbiddenBindingName(self.cur().text)) return self.failWithTokenReason(.strict_class_name);
             name = self.advance().text;
         }
         var superclass: ?*Node = null;
@@ -5659,7 +5665,7 @@ pub const Parser = struct {
                 // ASI (a LineTerminator before the next element): `class C { x y }`
                 // and `class C { #x #y }` are SyntaxErrors.
                 if (!self.match(.semicolon) and !self.check(.rbrace) and self.noNewlineBefore(0))
-                    return ParseError.UnexpectedToken;
+                    return self.failWithTokenReason(.class_field_semicolon);
                 // Early error (15.7.1): a field Initializer may not contain a
                 // SuperCall or an `arguments` reference.
                 if (init_expr) |ie| {
@@ -8653,6 +8659,33 @@ test "parser retains operator optional-chain and new-expression diagnostics" {
         // JavaScriptCore 625.1.22 accepts this form, but Node 24.18 rejects it
         // as required by the async-function grammar. Retain that correct gate.
         .{ .source = "async function f() { new await value; }", .reason = .unexpected_token, .marker = "await", .message = "Unexpected identifier 'await'" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains class field name and super diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "class C extends B { m() { super . 1; } }", .reason = .expected_property_after_dot, .marker = "1", .message = "Unexpected number '1'. Expected a property name after '.'." },
+        .{ .source = "class C extends B { m() { super; } }", .reason = .invalid_super, .marker = "super", .message = "super is not valid in this context." },
+        .{ .source = "class let {}", .reason = .strict_class_name, .marker = "let", .message = "Cannot use 'let' as a class name in strict mode." },
+        .{ .source = "class C { x y }", .reason = .class_field_semicolon, .marker = "y", .message = "Unexpected identifier 'y'. Expected a ';' following a class field." },
+        .{ .source = "class C { + }", .reason = .unexpected_token, .marker = "+", .message = "Unexpected token '+'" },
+        .{ .source = "class C { get +() {} }", .reason = .class_field_semicolon, .marker = "+", .message = "Unexpected token '+'. Expected a ';' following a class field." },
     };
 
     for (cases) |case| {

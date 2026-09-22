@@ -244,6 +244,24 @@ const frontend_cases = [_]Case{
         .expected = 8191,
     },
     .{
+        .name = "class and super SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["class C extends B { m() { super . 1; } }", "Unexpected number '1'. Expected a property name after '.'."],
+        \\  ["class C extends B { m() { super; } }", "super is not valid in this context."],
+        \\  ["class let {}", "Cannot use 'let' as a class name in strict mode."],
+        \\  ["class C { x y }", "Unexpected identifier 'y'. Expected a ';' following a class field."],
+        \\  ["class C { + }", "Unexpected token '+'"],
+        \\  ["class C { get +() {} }", "Unexpected token '+'. Expected a ';' following a class field."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 63,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.
