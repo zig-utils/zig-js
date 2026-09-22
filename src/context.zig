@@ -5987,6 +5987,31 @@ pub const Context = struct {
         memory: ?MemoryInventorySnapshot,
     };
 
+    /// Race-safe logical generation accounting from one zig-gc heap snapshot.
+    /// Current young/old bytes partition `live_bytes`; promoted totals are
+    /// historical policy evidence and are not part of the owned-byte subtotal.
+    pub const GcGenerationMemorySnapshot = struct {
+        live_cells: u64,
+        live_bytes: u64,
+        young_cells: u64,
+        young_bytes: u64,
+        old_cells: u64,
+        old_bytes: u64,
+        promoted_cells_total: u64,
+        promoted_bytes_total: u64,
+        tenuring_age: u8,
+        minor_collections: u64,
+        last_minor_young_bytes: u64,
+        last_minor_reclaimed_bytes: u64,
+        last_minor_survived_cells: u64,
+        last_minor_survived_bytes: u64,
+        last_minor_promoted_bytes: u64,
+        total_minor_young_bytes: u64,
+        total_minor_reclaimed_bytes: u64,
+        total_minor_survived_bytes: u64,
+        total_minor_promoted_bytes: u64,
+    };
+
     /// Versioned owned-byte checkpoint for attribution runs (#974). Top-level
     /// byte domains are disjoint requested/mapped bytes and reconcile to
     /// `accounted_owned_current_bytes`. Logical heap/cell/side-storage fields
@@ -5995,7 +6020,7 @@ pub const Context = struct {
     /// public heap budget and causal backing counters, but its distinct wrapper
     /// makes it part of the reconciled owned subtotal.
     pub const MemoryInventorySnapshot = struct {
-        pub const schema_version = 2;
+        pub const schema_version = 3;
 
         schema: u32 = schema_version,
         accounted_owned_bytes_complete: bool,
@@ -6025,6 +6050,7 @@ pub const Context = struct {
         gc_object_backing_store_bytes_live: u64,
         gc_generator_backing_store_bytes_live: u64,
         gc_promise_reaction_entries_live: u64,
+        gc_generation: ?GcGenerationMemorySnapshot,
         budget: ?HeapBudgetStats,
     };
 
@@ -6085,6 +6111,7 @@ pub const Context = struct {
             profile.snapshot()
         else
             RuntimeAttributionProfiler.Snapshot{};
+        const heap_memory = self.heapMemorySnapshots();
         return .{
             .execution = self.execution_tier_inventory.snapshot(),
             .quick_binary = self.execution_tier_inventory.quickBinarySnapshot(),
@@ -6112,10 +6139,10 @@ pub const Context = struct {
                 profile.debug_registry.snapshot()
             else
                 .{},
-            .heap = self.runtimeHeapAccounting(),
+            .heap = heap_memory.runtime,
             .runtime = runtime,
             .memory = if (self.runtime_attribution_profiler != null)
-                self.memoryInventorySnapshotFrom(runtime, code)
+                self.memoryInventorySnapshotFrom(runtime, code, heap_memory)
             else
                 null,
         };
@@ -6126,13 +6153,18 @@ pub const Context = struct {
     pub fn memoryInventorySnapshot(self: *Context) ?MemoryInventorySnapshot {
         const profile = self.runtime_attribution_profiler orelse return null;
         const owner = self.shared_jit_owner orelse &self.jit_owner;
-        return self.memoryInventorySnapshotFrom(profile.snapshot(), owner.stats());
+        return self.memoryInventorySnapshotFrom(
+            profile.snapshot(),
+            owner.stats(),
+            self.heapMemorySnapshots(),
+        );
     }
 
     fn memoryInventorySnapshotFrom(
         self: *Context,
         runtime: RuntimeAttributionProfiler.Snapshot,
         code: jit.OwnerStats,
+        heap_memory: HeapMemorySnapshots,
     ) MemoryInventorySnapshot {
         const add = struct {
             fn checked(left: u64, right: u64) u64 {
@@ -6170,7 +6202,7 @@ pub const Context = struct {
         accounted_owned = add(accounted_owned, owned_native_retired);
 
         const owns_precise_heap = if (self.gc_state) |state| state.realms.owner == self else false;
-        const heap = self.runtimeHeapAccounting();
+        const heap = heap_memory.runtime;
         return .{
             .accounted_owned_bytes_complete = true,
             .owns_precise_heap = owns_precise_heap,
@@ -6199,6 +6231,7 @@ pub const Context = struct {
             .gc_object_backing_store_bytes_live = @intCast(@atomicLoad(usize, &self.gc_object_backing_stores_live, .acquire)),
             .gc_generator_backing_store_bytes_live = @intCast(@atomicLoad(usize, &self.gc_generator_backing_stores_live, .acquire)),
             .gc_promise_reaction_entries_live = @intCast(@atomicLoad(usize, &self.gc_promise_reactions_live, .acquire)),
+            .gc_generation = heap_memory.generation,
             .budget = budget,
         };
     }
@@ -7478,6 +7511,64 @@ pub const Context = struct {
         full_collections: usize,
         aborted_collections: usize,
     };
+
+    const HeapMemorySnapshots = struct {
+        runtime: RuntimeHeapAccounting,
+        generation: ?GcGenerationMemorySnapshot,
+    };
+
+    fn heapMemorySnapshots(self: *Context) HeapMemorySnapshots {
+        if (self.gc) |heap| {
+            const accounting = heap.accounting();
+            const old_cells = std.math.sub(usize, accounting.live_cells, accounting.young_cells) catch
+                @panic("GC generation cell accounting underflow");
+            const old_bytes = std.math.sub(usize, accounting.live_bytes, accounting.young_bytes) catch
+                @panic("GC generation byte accounting underflow");
+            return .{
+                .runtime = .{
+                    .live_bytes = accounting.live_bytes,
+                    .last_full_collection_bytes = accounting.last_full_collection_bytes,
+                    .collections = accounting.collections,
+                    .full_collections = accounting.full_collections,
+                    .aborted_collections = accounting.aborted_collections,
+                },
+                .generation = .{
+                    .live_cells = @intCast(accounting.live_cells),
+                    .live_bytes = @intCast(accounting.live_bytes),
+                    .young_cells = @intCast(accounting.young_cells),
+                    .young_bytes = @intCast(accounting.young_bytes),
+                    .old_cells = @intCast(old_cells),
+                    .old_bytes = @intCast(old_bytes),
+                    .promoted_cells_total = @intCast(accounting.promoted_cells),
+                    .promoted_bytes_total = @intCast(accounting.promoted_bytes),
+                    .tenuring_age = accounting.tenuring_age,
+                    .minor_collections = @intCast(accounting.minor_collections),
+                    .last_minor_young_bytes = @intCast(accounting.last_minor_young_bytes),
+                    .last_minor_reclaimed_bytes = @intCast(accounting.last_minor_reclaimed_bytes),
+                    .last_minor_survived_cells = @intCast(accounting.last_minor_survived_cells),
+                    .last_minor_survived_bytes = @intCast(accounting.last_minor_survived_bytes),
+                    .last_minor_promoted_bytes = @intCast(accounting.last_minor_promoted_bytes),
+                    .total_minor_young_bytes = @intCast(accounting.total_minor_young_bytes),
+                    .total_minor_reclaimed_bytes = @intCast(accounting.total_minor_reclaimed_bytes),
+                    .total_minor_survived_bytes = @intCast(accounting.total_minor_survived_bytes),
+                    .total_minor_promoted_bytes = @intCast(accounting.total_minor_promoted_bytes),
+                },
+            };
+        }
+        if (self.locked_arena) |arena_lock| arena_lock.acquire();
+        defer if (self.locked_arena) |arena_lock| arena_lock.unlock();
+        const capacity = self.arena_state.queryCapacity();
+        return .{
+            .runtime = .{
+                .live_bytes = capacity,
+                .last_full_collection_bytes = capacity,
+                .collections = 0,
+                .full_collections = 0,
+                .aborted_collections = 0,
+            },
+            .generation = null,
+        };
+    }
 
     /// VM-facing heap accounting used by revision-pinned private bindings.
     /// Precise heaps delegate to zig-gc's race-safe snapshot. Arena heaps report
@@ -37616,6 +37707,7 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expect(arena_memory.accounted_owned_bytes_complete);
     try std.testing.expect(!arena_memory.owns_precise_heap);
     try std.testing.expect(arena_memory.owns_native_code);
+    try std.testing.expect(arena_memory.gc_generation == null);
     try std.testing.expect(!arena_memory.collector_auxiliary_owned_but_untracked);
     try std.testing.expect(arena_memory.context_backing_current_bytes > 0);
     try std.testing.expectEqual(
@@ -37653,6 +37745,12 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expect(precise_memory.gc_cell_net_issued_bytes > 0);
     try std.testing.expect(precise_memory.gc_array_buffer_bytes_live >= 257);
     try std.testing.expect(precise_memory.gc_string_bytes_live > 0);
+    const generation = precise_memory.gc_generation.?;
+    try std.testing.expectEqual(precise_memory.heap_logical_live_bytes, generation.live_bytes);
+    try std.testing.expectEqual(generation.live_cells, generation.young_cells + generation.old_cells);
+    try std.testing.expectEqual(generation.live_bytes, generation.young_bytes + generation.old_bytes);
+    try std.testing.expectEqual(@as(u64, 0), generation.young_cells);
+    try std.testing.expectEqual(@as(u64, 0), generation.young_bytes);
     try std.testing.expectEqual(@as(u64, @sizeOf(BudgetAllocator)), precise_memory.budget_control_bytes);
     try std.testing.expect(precise_memory.recovery_reserve_current_bytes > 0);
     try std.testing.expectEqual(
