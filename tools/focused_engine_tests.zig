@@ -198,6 +198,27 @@ const frontend_cases = [_]Case{
         .expected = 255,
     },
     .{
+        .name = "statement body SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["switch (x) { default: ; default: ; }", "Unexpected keyword 'default'. Expected '}' to end a body of a 'switch'."],
+        \\  ["switch (x) { value; }", "Unexpected identifier 'value'. Expected '}' to end a body of a 'switch'."],
+        \\  ["throw\n1", "Cannot have a newline after 'throw'."],
+        \\  ["try {}", "Unexpected end of script"],
+        \\  ["try {} value", "Unexpected identifier 'value'. Try statements must have at least a catch or finally block."],
+        \\  ["try {} ;", "Unexpected token ';'. Try statements must have at least a catch or finally block."],
+        \\  ["do {} value", "Unexpected identifier 'value'. Expected 'while' to end a do-while loop."],
+        \\  ["do {}", "Unexpected end of script"],
+        \\  ["do {} ;", "Unexpected token ';'. Expected 'while' to end a do-while loop."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 511,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.

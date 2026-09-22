@@ -78,6 +78,10 @@ pub const DiagnosticReason = enum {
     using_for_in,
     for_of_initializer,
     for_await_semicolon,
+    switch_body_end,
+    throw_newline,
+    try_requires_handler,
+    do_while_while,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -143,7 +147,7 @@ pub const DiagnosticReason = enum {
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
-            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name, .expected_import_call_parenthesis => ParseError.ExpectedToken,
+            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name, .expected_import_call_parenthesis, .do_while_while => ParseError.ExpectedToken,
             .invalid_assignment,
             .invalid_destructuring_assignment,
             .array_rest_pattern_closing,
@@ -211,6 +215,10 @@ pub const DiagnosticReason = enum {
             .using_for_in => "Expected either 'in' or 'of' in enumeration syntax.",
             .for_of_initializer => "Cannot assign to the loop variable inside a for-of loop header.",
             .for_await_semicolon => "Unexpected a ';' in for-await-of header.",
+            .switch_body_end => "Expected '}' to end a body of a 'switch'.",
+            .throw_newline => "Cannot have a newline after 'throw'.",
+            .try_requires_handler => "Try statements must have at least a catch or finally block.",
+            .do_while_while => "Expected 'while' to end a do-while loop.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -3001,7 +3009,7 @@ pub const Parser = struct {
     fn parseDoWhile(self: *Parser) ParseError!*Node {
         _ = self.advance(); // do
         const body = try self.parseLoopBody();
-        if (!isKeyword(self.cur(), "while")) return ParseError.ExpectedToken;
+        if (!isKeyword(self.cur(), "while")) return self.failWithTokenReason(.do_while_while);
         _ = self.advance(); // while
         try self.expect(.lparen);
         const cond = try self.parseExpression();
@@ -3409,10 +3417,10 @@ pub const Parser = struct {
                 _ = self.advance();
                 test_expr = try self.parseExpression();
             } else if (isKeyword(self.cur(), "default")) {
-                if (seen_default) return ParseError.UnexpectedToken;
+                if (seen_default) return self.failWithTokenReason(.switch_body_end);
                 seen_default = true;
                 _ = self.advance();
-            } else return ParseError.UnexpectedToken;
+            } else return self.failWithTokenReason(.switch_body_end);
             try self.expect(.colon);
             // Statements until the next case/default/closing brace.
             var body: std.ArrayListUnmanaged(*Node) = .empty;
@@ -3440,8 +3448,8 @@ pub const Parser = struct {
     }
 
     fn parseThrow(self: *Parser) ParseError!*Node {
-        _ = self.advance(); // throw
-        if (self.hasLineTerminatorBefore(0)) return ParseError.UnexpectedToken;
+        const throw_token = self.advance();
+        if (self.hasLineTerminatorBefore(0)) return self.failWithReasonAt(.throw_newline, throw_token.pos);
         const arg = try self.parseExpression();
         _ = self.match(.semicolon);
         return self.alloc(.{ .throw_stmt = arg });
@@ -3526,7 +3534,7 @@ pub const Parser = struct {
             _ = self.advance();
             finally_block = try self.parseBlock();
         }
-        if (catch_block == null and finally_block == null) return ParseError.UnexpectedToken;
+        if (catch_block == null and finally_block == null) return self.failWithTokenReason(.try_requires_handler);
         const node = try self.arena.create(ast.TryNode);
         node.* = .{ .block = block, .catch_param = catch_param, .catch_block = catch_block, .finally_block = finally_block };
         return self.alloc(.{ .try_stmt = node });
@@ -7099,6 +7107,44 @@ test "parser retains statement placement and control flow diagnostics" {
         defer arena.deinit();
         var parser = try Parser.init(arena.allocator(), source);
         _ = try parser.parseProgram();
+    }
+}
+
+test "parser retains switch throw try and do-while diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8 = "",
+        marker_is_last: bool = false,
+        at_end: bool = false,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "switch (x) { default: ; default: ; }", .reason = .switch_body_end, .marker = "default", .marker_is_last = true, .message = "Unexpected keyword 'default'. Expected '}' to end a body of a 'switch'." },
+        .{ .source = "switch (x) { value; }", .reason = .switch_body_end, .marker = "value", .message = "Unexpected identifier 'value'. Expected '}' to end a body of a 'switch'." },
+        .{ .source = "throw\n1", .reason = .throw_newline, .marker = "throw", .message = "Cannot have a newline after 'throw'." },
+        .{ .source = "try {}", .reason = .unexpected_end_of_expression, .at_end = true, .message = "Unexpected end of script" },
+        .{ .source = "try {} value", .reason = .try_requires_handler, .marker = "value", .message = "Unexpected identifier 'value'. Try statements must have at least a catch or finally block." },
+        .{ .source = "try {} ;", .reason = .try_requires_handler, .marker = ";", .message = "Unexpected token ';'. Try statements must have at least a catch or finally block." },
+        .{ .source = "do {} value", .reason = .do_while_while, .marker = "value", .message = "Unexpected identifier 'value'. Expected 'while' to end a do-while loop." },
+        .{ .source = "do {}", .reason = .unexpected_end_of_script, .at_end = true, .message = "Unexpected end of script" },
+        .{ .source = "do {} ;", .reason = .do_while_while, .marker = ";", .message = "Unexpected token ';'. Expected 'while' to end a do-while loop." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        const expected_offset = if (case.at_end)
+            case.source.len
+        else if (case.marker_is_last)
+            std.mem.lastIndexOf(u8, case.source, case.marker).?
+        else
+            std.mem.indexOf(u8, case.source, case.marker).?;
+        try std.testing.expectEqual(expected_offset, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
     }
 }
 
