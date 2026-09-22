@@ -30,6 +30,11 @@ const fetch_headers = @import("fetch_headers.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
+const EvaluationDiagnostic = struct {
+    location: parser_mod.SourceLocation,
+    message: []const u8,
+};
+
 const ModuleStringHashContext = struct {
     seed: u64,
 
@@ -4082,10 +4087,10 @@ pub const Context = struct {
     /// Embedder metadata set through JSGlobalContextSetName. Store exact UTF-16
     /// code units in the arena; the C boundary returns a fresh JSStringRef copy.
     c_api_name_utf16: ?[]const u16 = null,
-    /// Best-effort source location for the last evaluation parse failure. This
-    /// lets public embedding surfaces attach sourceURL/line metadata without
-    /// widening the compact `RunError` error set.
-    last_evaluation_diagnostic: ?parser_mod.SourceLocation = null,
+    /// Structured details for the last evaluation parse failure. This lets
+    /// public embedding surfaces preserve parser prose and source metadata
+    /// without widening the compact `RunError` error set.
+    last_evaluation_diagnostic: ?EvaluationDiagnostic = null,
     env: interp.Environment,
     global_object: *value.Object,
     /// Intrinsic constructors used by the public C convenience APIs. JavaScriptCore
@@ -9200,6 +9205,14 @@ pub const Context = struct {
         return self.evaluateWithThis(source, Value.obj(self.global_object));
     }
 
+    fn recordEvaluationDiagnostic(self: *Context, parser: ?*const Parser, location: parser_mod.SourceLocation, err: anyerror) error{OutOfMemory}!void {
+        const message = if (parser) |p|
+            try p.diagnosticMessageForError(self.arena(), err)
+        else
+            parser_mod.fallbackSyntaxErrorMessage(err);
+        self.last_evaluation_diagnostic = .{ .location = location, .message = message };
+    }
+
     /// Parse global Script source and apply the same early-error scan as
     /// evaluation, without creating an Interpreter or executing any code.
     pub fn checkScriptSyntax(self: *Context, source: []const u8) RunError!void {
@@ -9216,16 +9229,16 @@ pub const Context = struct {
         self.last_evaluation_diagnostic = null;
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
         var parser = Parser.initWithScratchDiagnostic(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
-            self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
+            try self.recordEvaluationDiagnostic(null, lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
             return err;
         };
         parser.useRealmHashKeys(self.root_shape);
         const program = parser.parseProgram() catch |err| {
-            self.last_evaluation_diagnostic = parser.errorLocation();
+            try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
             return err;
         };
         if (program.* == .program) parser.scanEvalContext(program.program, true, true) catch |err| {
-            self.last_evaluation_diagnostic = parser.errorLocation();
+            try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
             return err;
         };
     }
@@ -9262,12 +9275,12 @@ pub const Context = struct {
         self.last_evaluation_diagnostic = null;
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
         var parser = Parser.initWithScratchDiagnostic(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
-            self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
+            try self.recordEvaluationDiagnostic(null, lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
             return err;
         };
         parser.useRealmHashKeys(self.root_shape);
         const prog = parser.parseProgram() catch |err| {
-            self.last_evaluation_diagnostic = parser.errorLocation();
+            try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
             return err;
         };
         if (self.debug_script_id != 0) {
@@ -9287,7 +9300,7 @@ pub const Context = struct {
         // via the interpreter, so this entry is genuine global code only.) The
         // scan descends into arrows but stops at nested functions/classes/methods.
         if (prog.* == .program) parser.scanEvalContext(prog.program, true, true) catch |err| {
-            self.last_evaluation_diagnostic = parser.errorLocation();
+            try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
             return err;
         };
         var machine = self.interpreter();
@@ -13316,7 +13329,7 @@ test "ShadowRealm evaluate wraps child abrupt completions" {
         \\var r = new ShadowRealm();
         \\var ok = false;
         \\try { r.evaluate('let ok = 1;\nlet bad = ;'); }
-        \\catch (e) { ok = e instanceof SyntaxError && e.message.includes('ShadowRealm.evaluate:') && e.message.includes(' at 2:'); }
+        \\catch (e) { ok = e instanceof SyntaxError && e.message === "Unexpected token ';'" && e.line === 2 && e.column === 11 && e.byteOffset === 22 && Object.keys(e).indexOf('line') === -1; }
         \\ok
     )).asBool());
 }
@@ -20842,12 +20855,12 @@ test "eval: direct eval runs in the caller's scope" {
     // A syntax error in the source throws a SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
-        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval:') && e.message.includes(' at 1:') && e.line === 1 && e.column > 0 && e.byteOffset >= 0 && Object.keys(e).indexOf('line') === -1; }
+        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError && e.message === "Unexpected token '='. Expected a parameter pattern or a ')' in parameter list." && e.line === 1 && e.column === 5 && e.byteOffset === 4 && Object.keys(e).indexOf('line') === -1; }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(
         \\var t = false;
-        \\try { eval("let ok = 1;\n'"); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval: UnterminatedString') && e.message.includes(' at 2:'); }
+        \\try { eval("let ok = 1;\n'"); } catch (e) { t = e instanceof SyntaxError && e.message === 'Unexpected end of script' && e.line === 2 && e.column === 2 && e.byteOffset === 13 && Object.keys(e).indexOf('line') === -1; }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(

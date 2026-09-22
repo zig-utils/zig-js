@@ -156,23 +156,23 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
     var param_lex_diagnostic: ?parser_mod.SourceLocation = null;
     var param_parser = Parser.initWithDiagnostic(self.arena, param_source, &param_lex_diagnostic) catch |err|
-        return self.throwParserSyntaxErrorAt("Function parameters", param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
+        return self.throwParserSyntaxErrorAt(param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
     param_parser.useRealmHashKeys(self.root_shape);
     param_parser.parseDynamicFunctionParams(false, false) catch |err|
-        return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
+        return self.throwParserSyntaxError(&param_parser, err);
     const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
-        return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
+        return self.throwParserSyntaxErrorAt(lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     parser.useRealmHashKeys(self.root_shape);
     const synthetic_suffix_start = source.len - 3;
     const prog = parser.parseProgram() catch |err| {
         parser.classifySyntheticSuffixAsEndOfScript(synthetic_suffix_start, err);
-        return self.throwParserSyntaxError("Function body", source, &parser, err);
+        return self.throwParserSyntaxError(&parser, err);
     };
     parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err| {
         parser.classifySyntheticSuffixAsEndOfScript(synthetic_suffix_start, err);
-        return self.throwParserSyntaxError("Function body", source, &parser, err);
+        return self.throwParserSyntaxError(&parser, err);
     };
     try self.registerParsedDynamicDebugScript(source, "Function", 1, &parser);
     // Create the function in the Function constructor's own realm (so its

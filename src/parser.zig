@@ -16,6 +16,37 @@ const synthetic_eof_token: Token = .{ .kind = .eof, .text = "", .pos = 0 };
 
 pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, InvalidAssignmentTarget };
 
+pub fn isSyntaxError(err: anyerror) bool {
+    return switch (err) {
+        error.UnexpectedCharacter,
+        error.UnterminatedString,
+        error.UnterminatedComment,
+        error.InvalidNumber,
+        error.UnexpectedToken,
+        error.ExpectedToken,
+        error.InvalidAssignmentTarget,
+        => true,
+        else => false,
+    };
+}
+
+/// Prose for a syntax failure that reached the boundary before the parser could
+/// attach a grammar-specific reason. Never expose the compact Zig error tag:
+/// JavaScriptCore keeps source coordinates on the Error object and reserves
+/// `.message` for the diagnostic itself.
+pub fn fallbackSyntaxErrorMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnexpectedCharacter => "Invalid character",
+        error.UnterminatedString => "Unexpected end of script",
+        error.UnterminatedComment => "Multiline comment was not closed properly",
+        error.InvalidNumber => "Invalid numeric literal",
+        error.UnexpectedToken => "Unexpected token",
+        error.ExpectedToken => "Unexpected end of script",
+        error.InvalidAssignmentTarget => "Left side of assignment is not a reference.",
+        else => @errorName(err),
+    };
+}
+
 /// A grammar check records its reason where the violation is known. Keep the
 /// compact ParseError ABI while letting JS boundaries render an actual message
 /// instead of guessing from the token at which parsing happened to stop.
@@ -1360,6 +1391,13 @@ pub const Parser = struct {
         if (reason == .unexpected_token or reason == .expected_token or reason == .arrow_parameter_keyword)
             return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}", .{ noun, quote, token.text, quote });
         return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. {s}", .{ noun, quote, token.text, quote, reason.message() });
+    }
+
+    pub fn diagnosticMessageForError(self: *const Parser, allocator: std.mem.Allocator, err: anyerror) std.mem.Allocator.Error![]const u8 {
+        if (self.last_error_reason) |reason| {
+            if (err == reason.parseError()) return self.diagnosticMessage(allocator, reason);
+        }
+        return fallbackSyntaxErrorMessage(err);
     }
 
     pub fn errorLocation(self: *const Parser) SourceLocation {

@@ -17176,20 +17176,6 @@ fn boxResult(ctx: *Context, exception: ExceptionRef, result: Value) JSValueRef {
     };
 }
 
-fn isEvaluationParseError(err: anyerror) bool {
-    return switch (err) {
-        error.UnexpectedCharacter,
-        error.UnterminatedString,
-        error.UnterminatedComment,
-        error.InvalidNumber,
-        error.UnexpectedToken,
-        error.ExpectedToken,
-        error.InvalidAssignmentTarget,
-        => true,
-        else => false,
-    };
-}
-
 fn setDiagnosticField(ctx: *Context, obj: *Object, name: []const u8, field_value: Value) !void {
     try obj.setOwn(ctx.arena(), ctx.root_shape, name, field_value);
     try obj.setAttr(ctx.arena(), name, .{ .writable = true, .enumerable = false, .configurable = true });
@@ -17270,17 +17256,18 @@ fn evaluationExceptionValue(ctx: *Context, err: anyerror, source_url: JSStringRe
         return makeEvaluationError(ctx, "RangeError", message) catch
             (Value.strAlloc(ctx.arena(), "RangeError: " ++ message) catch Value.staticStr("OutOfMemory"));
     }
-    if (isEvaluationParseError(err)) {
-        if (ctx.last_evaluation_diagnostic) |loc| {
+    if (parser_mod.isSyntaxError(err)) {
+        if (ctx.last_evaluation_diagnostic) |diagnostic| {
+            const loc = diagnostic.location;
             const source_name = evaluationSourceName(source_url);
             const base_line: usize = if (starting_line_number > 0) @intCast(starting_line_number) else 1;
             const line = loc.line + base_line - 1;
-            const message = std.fmt.allocPrint(ctx.arena(), "{s}: {s}:{d}:{d}", .{
-                @errorName(err), source_name, line, loc.column,
-            }) catch return Value.strAlloc(ctx.arena(), @errorName(err)) catch Value.staticStr("OutOfMemory");
-            return makeEvaluationSyntaxError(ctx, message, source_name, line, loc.column, loc.byte_offset) catch
-                (Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory"));
+            return makeEvaluationSyntaxError(ctx, diagnostic.message, source_name, line, loc.column, loc.byte_offset) catch
+                (Value.strAlloc(ctx.arena(), diagnostic.message) catch Value.staticStr("OutOfMemory"));
         }
+        const message = parser_mod.fallbackSyntaxErrorMessage(err);
+        return makeEvaluationError(ctx, "SyntaxError", message) catch
+            (Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory"));
     }
     return Value.strAlloc(ctx.arena(), @errorName(err)) catch Value.staticStr("OutOfMemory");
 }
@@ -29054,7 +29041,7 @@ test "C-API: JSEvaluateScript honors explicit thisObject" {
     try std.testing.expect(exception == null);
 }
 
-test "C-API: evaluation syntax exceptions include source URL and line" {
+test "C-API: evaluation syntax exceptions expose structured source metadata" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
 
@@ -29071,7 +29058,7 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
     defer JSStringRelease(msg);
     var buf: [128]u8 = undefined;
     const written = JSStringGetUTF8CString(msg, &buf, buf.len);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "app.js:41:12") != null);
+    try std.testing.expectEqualStrings("SyntaxError: Unexpected token ';'", buf[0 .. written - 1]);
 
     var prop_exception: JSValueRef = null;
     const source_key = JSStringCreateWithUTF8CString("sourceURL") orelse return error.StringInitFailed;
@@ -29097,11 +29084,11 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
 
     const column_value = JSObjectGetProperty(ctx, exception, column_key, &prop_exception) orelse return error.PropFailed;
     try std.testing.expect(prop_exception == null);
-    try std.testing.expectEqual(@as(f64, 12), JSValueToNumber(ctx, column_value, null));
+    try std.testing.expectEqual(@as(f64, 11), JSValueToNumber(ctx, column_value, null));
 
     const byte_offset_value = JSObjectGetProperty(ctx, exception, byte_offset_key, &prop_exception) orelse return error.PropFailed;
     try std.testing.expect(prop_exception == null);
-    try std.testing.expect(JSValueIsNumber(ctx, byte_offset_value));
+    try std.testing.expectEqual(@as(f64, 22), JSValueToNumber(ctx, byte_offset_value, null));
 
     const lex_script = JSStringCreateWithUTF8CString("let ok = 1;\n'") orelse return error.StringInitFailed;
     defer JSStringRelease(lex_script);
@@ -29113,7 +29100,27 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
     defer JSStringRelease(lex_msg);
     var lex_buf: [128]u8 = undefined;
     const lex_written = JSStringGetUTF8CString(lex_msg, &lex_buf, lex_buf.len);
-    try std.testing.expect(std.mem.indexOf(u8, lex_buf[0 .. lex_written - 1], "app.js:41:2") != null);
+    try std.testing.expectEqualStrings("SyntaxError: Unexpected end of script", lex_buf[0 .. lex_written - 1]);
+
+    const lex_source_value = JSObjectGetProperty(ctx, exception, source_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    const lex_source_out = JSValueToStringCopy(ctx, lex_source_value, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(lex_source_out);
+    var lex_source_buf: [64]u8 = undefined;
+    const lex_source_written = JSStringGetUTF8CString(lex_source_out, &lex_source_buf, lex_source_buf.len);
+    try std.testing.expectEqualStrings("app.js", lex_source_buf[0 .. lex_source_written - 1]);
+
+    const lex_line_value = JSObjectGetProperty(ctx, exception, line_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expectEqual(@as(f64, 41), JSValueToNumber(ctx, lex_line_value, null));
+
+    const lex_column_value = JSObjectGetProperty(ctx, exception, column_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, lex_column_value, null));
+
+    const lex_byte_offset_value = JSObjectGetProperty(ctx, exception, byte_offset_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expectEqual(@as(f64, 13), JSValueToNumber(ctx, lex_byte_offset_value, null));
 }
 
 test "C-API: syntax checking shares diagnostics and never executes" {
