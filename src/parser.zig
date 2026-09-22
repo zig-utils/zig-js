@@ -39,6 +39,17 @@ pub const DiagnosticReason = enum {
     async_function_single_statement,
     strict_function_single_statement,
     function_single_statement,
+    duplicate_let_binding,
+    duplicate_const_binding,
+    duplicate_class_binding,
+    duplicate_catch_binding,
+    duplicate_catch_destructuring,
+    catch_function_shadow,
+    invalid_strict_parameters,
+    function_name_required,
+    function_keyword_name,
+    strict_directive_non_simple_parameters,
+    strict_function_name,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -137,6 +148,13 @@ pub const DiagnosticReason = enum {
             .async_function_single_statement => "Cannot use async function declaration in single-statement context.",
             .strict_function_single_statement => "Function declarations are only allowed inside blocks or switch statements in strict mode.",
             .function_single_statement => "Function declarations are only allowed inside block statements or at the top level of a program.",
+            .duplicate_let_binding, .duplicate_const_binding, .duplicate_class_binding => "",
+            .duplicate_catch_binding, .duplicate_catch_destructuring, .catch_function_shadow => "",
+            .invalid_strict_parameters => "Invalid parameters or function name in strict mode.",
+            .function_name_required => "Function statements must have a name.",
+            .function_keyword_name => "",
+            .strict_directive_non_simple_parameters => "'use strict' directive not allowed inside a function with a non-simple parameter list.",
+            .strict_function_name => "",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -227,8 +245,10 @@ fn regexDiagnosticReason(reason: regex.CompileErrorReason) DiagnosticReason {
     };
 }
 
+const DiagnosticTokenKind = enum { identifier, keyword, number, string, token };
+
 const DiagnosticToken = struct {
-    kind: enum { identifier, keyword, number, string, token },
+    kind: DiagnosticTokenKind,
     text: []const u8,
     detail: ?[]const u8 = null,
 };
@@ -950,6 +970,43 @@ pub const Parser = struct {
         return err;
     }
 
+    fn failWithDiagnosticAt(
+        self: *Parser,
+        reason: DiagnosticReason,
+        kind: DiagnosticTokenKind,
+        text: []const u8,
+        detail: ?[]const u8,
+        offset: usize,
+    ) ParseError {
+        const err = self.failWithReasonAt(reason, offset);
+        self.last_error_token = .{ .kind = kind, .text = text, .detail = detail };
+        return err;
+    }
+
+    fn sourceOffsetForSlice(self: *const Parser, text: []const u8, fallback: usize) usize {
+        if (text.len == 0) return fallback;
+        const source_start = @intFromPtr(self.source.ptr);
+        const text_start = @intFromPtr(text.ptr);
+        if (text_start < source_start) return fallback;
+        const relative = text_start - source_start;
+        if (relative > self.source.len or text.len > self.source.len - relative) return fallback;
+        return relative;
+    }
+
+    fn statementStartOffset(self: *const Parser, node: *const Node) usize {
+        var index = self.statement_locations.items.len;
+        while (index > 0) {
+            index -= 1;
+            const entry = self.statement_locations.items[index];
+            if (entry.node == node) return entry.location.byte_offset;
+        }
+        return self.cur().pos;
+    }
+
+    fn failWithNameAt(self: *Parser, reason: DiagnosticReason, name: []const u8, fallback_offset: usize) ParseError {
+        return self.failWithDiagnosticAt(reason, .identifier, name, null, self.sourceOffsetForSlice(name, fallback_offset));
+    }
+
     pub fn diagnosticMessage(self: *const Parser, allocator: std.mem.Allocator, reason: DiagnosticReason) std.mem.Allocator.Error![]const u8 {
         const token = self.last_error_token orelse return reason.message();
         if (reason == .private_field_delete)
@@ -964,6 +1021,22 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot continue to the label '{s}' as it is not targeting a loop.", .{token.text});
         if (reason == .duplicate_label)
             return std.fmt.allocPrint(allocator, "Unexpected token '{s}'. Attempted to redeclare the label '{s}'.", .{ token.text, token.detail.? });
+        if (reason == .duplicate_let_binding)
+            return std.fmt.allocPrint(allocator, "Cannot declare a let variable twice: '{s}'.", .{token.text});
+        if (reason == .duplicate_const_binding)
+            return std.fmt.allocPrint(allocator, "Cannot declare a const variable twice: '{s}'.", .{token.text});
+        if (reason == .duplicate_class_binding)
+            return std.fmt.allocPrint(allocator, "Cannot declare a class twice: '{s}'.", .{token.text});
+        if (reason == .duplicate_catch_binding)
+            return std.fmt.allocPrint(allocator, "Unexpected identifier '{s}'. Cannot declare a lexical variable twice: '{s}'.", .{ token.text, token.text });
+        if (reason == .duplicate_catch_destructuring)
+            return std.fmt.allocPrint(allocator, "Unexpected token '{s}'. Cannot declare a lexical variable twice: '{s}'.", .{ token.text, token.detail.? });
+        if (reason == .catch_function_shadow)
+            return std.fmt.allocPrint(allocator, "Cannot declare a function that shadows a let/const/class/function variable '{s}'.", .{token.text});
+        if (reason == .function_keyword_name)
+            return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a function name.", .{token.text});
+        if (reason == .strict_function_name)
+            return std.fmt.allocPrint(allocator, "'{s}' is not a valid function name in strict mode.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
         if (reason == .unexpected_token or reason == .expected_token)
@@ -1444,21 +1517,36 @@ pub const Parser = struct {
         }
         if (pnames.count() == 0) return;
         for (body.block) |s| switch (s.*) {
-            .var_decl => |d| if (d.kind != .@"var" and pnames.contains(d.name)) return ParseError.UnexpectedToken,
+            .var_decl => |d| if (d.kind != .@"var" and pnames.contains(d.name)) {
+                const reason: DiagnosticReason = if (d.init != null and d.init.?.* == .class_expr)
+                    .duplicate_class_binding
+                else
+                    duplicateBindingReason(d.kind);
+                return self.failWithNameAt(reason, d.name, self.statementStartOffset(s));
+            },
             .destructure_decl => |d| if (d.kind != .@"var") {
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
                 try self.addPatternNames(&names, d.pattern);
-                for (names.items) |n| if (pnames.contains(n)) return ParseError.UnexpectedToken;
+                for (names.items) |n| if (pnames.contains(n))
+                    return self.failWithNameAt(duplicateBindingReason(d.kind), n, self.statementStartOffset(s));
             },
             .decl_group => |g| for (g) |d2| {
-                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and pnames.contains(d2.var_decl.name)) return ParseError.UnexpectedToken;
+                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and pnames.contains(d2.var_decl.name)) {
+                    const reason: DiagnosticReason = if (d2.var_decl.init != null and d2.var_decl.init.?.* == .class_expr)
+                        .duplicate_class_binding
+                    else
+                        duplicateBindingReason(d2.var_decl.kind);
+                    return self.failWithNameAt(reason, d2.var_decl.name, self.statementStartOffset(s));
+                }
                 if (d2.* == .destructure_decl and d2.destructure_decl.kind != .@"var") {
                     var names: std.ArrayListUnmanaged([]const u8) = .empty;
                     try self.addPatternNames(&names, d2.destructure_decl.pattern);
-                    for (names.items) |n| if (pnames.contains(n)) return ParseError.UnexpectedToken;
+                    for (names.items) |n| if (pnames.contains(n))
+                        return self.failWithNameAt(duplicateBindingReason(d2.destructure_decl.kind), n, self.statementStartOffset(s));
                 }
             },
-            .class_expr => |c| if (c.name.len > 0 and pnames.contains(c.name)) return ParseError.UnexpectedToken,
+            .class_expr => |c| if (c.name.len > 0 and pnames.contains(c.name))
+                return self.failWithNameAt(.duplicate_class_binding, c.name, self.statementStartOffset(s)),
             else => {},
         };
     }
@@ -2510,6 +2598,14 @@ pub const Parser = struct {
         return stmt;
     }
 
+    fn duplicateBindingReason(kind: ast.DeclKind) DiagnosticReason {
+        return switch (kind) {
+            .let => .duplicate_let_binding,
+            .@"const" => .duplicate_const_binding,
+            .@"var" => unreachable,
+        };
+    }
+
     /// A rejected single-statement function has already been parsed. Recover
     /// its grammar marker from the retained token stream only on that failure
     /// path; successful statements do no search or diagnostic formatting.
@@ -3232,25 +3328,50 @@ pub const Parser = struct {
         var bound = self.secureStringMap(void);
         for (names.items) |n| {
             if (n.len == 0) continue;
-            if (bound.contains(n)) return ParseError.UnexpectedToken;
+            if (bound.contains(n)) return self.failWithNameAt(.duplicate_catch_binding, n, self.cur().pos);
             try bound.put(self.arena, n, {});
         }
         if (bound.count() == 0 or block.* != .block) return;
         for (block.block) |s| switch (s.*) {
-            .var_decl => |d| if (d.kind != .@"var" and bound.contains(d.name)) return ParseError.UnexpectedToken,
+            .var_decl => |d| if (d.kind != .@"var" and bound.contains(d.name)) {
+                const reason: DiagnosticReason = if (d.init != null and d.init.?.* == .class_expr)
+                    .duplicate_class_binding
+                else
+                    duplicateBindingReason(d.kind);
+                return self.failWithNameAt(reason, d.name, self.statementStartOffset(s));
+            },
             .destructure_decl => |d| if (d.kind != .@"var") {
                 var bn: std.ArrayListUnmanaged([]const u8) = .empty;
                 try self.addPatternNames(&bn, d.pattern);
-                for (bn.items) |n| if (bound.contains(n)) return ParseError.UnexpectedToken;
+                for (bn.items) |n| {
+                    if (bound.contains(n)) {
+                        const closing: []const u8 = switch (d.pattern.*) {
+                            .obj_pattern => "}",
+                            .arr_pattern => "]",
+                            else => "",
+                        };
+                        return self.failWithDiagnosticAt(
+                            .duplicate_catch_destructuring,
+                            .token,
+                            closing,
+                            n,
+                            self.sourceOffsetForSlice(n, self.statementStartOffset(s)),
+                        );
+                    }
+                }
             },
             .decl_group => |g| for (g) |d2| {
-                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and bound.contains(d2.var_decl.name)) return ParseError.UnexpectedToken;
+                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and bound.contains(d2.var_decl.name))
+                    return self.failWithNameAt(duplicateBindingReason(d2.var_decl.kind), d2.var_decl.name, self.statementStartOffset(s));
             },
-            .func_decl => |fnode| if (fnode.name.len > 0 and bound.contains(fnode.name)) return ParseError.UnexpectedToken,
+            .func_decl => |fnode| if (fnode.name.len > 0 and bound.contains(fnode.name))
+                return self.failWithNameAt(.catch_function_shadow, fnode.name, self.statementStartOffset(s)),
             .labeled_stmt => if (statementFunctionDecl(s)) |fnode| {
-                if (fnode.name.len > 0 and bound.contains(fnode.name)) return ParseError.UnexpectedToken;
+                if (fnode.name.len > 0 and bound.contains(fnode.name))
+                    return self.failWithNameAt(.catch_function_shadow, fnode.name, self.statementStartOffset(s));
             },
-            .class_expr => |c| if (c.name.len > 0 and bound.contains(c.name)) return ParseError.UnexpectedToken,
+            .class_expr => |c| if (c.name.len > 0 and bound.contains(c.name))
+                return self.failWithNameAt(.duplicate_class_binding, c.name, self.statementStartOffset(s)),
             else => {},
         };
     }
@@ -3418,11 +3539,13 @@ pub const Parser = struct {
         for (params) |p| {
             if (p.pattern != null) continue;
             if (std.mem.eql(u8, p.name, "eval") or std.mem.eql(u8, p.name, "arguments"))
-                return ParseError.UnexpectedToken;
-            if (isStrictReservedBinding(p.name)) return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(.invalid_strict_parameters, self.sourceOffsetForSlice(p.name, self.cur().pos));
+            if (isStrictReservedBinding(p.name))
+                return self.failWithReasonAt(.invalid_strict_parameters, self.sourceOffsetForSlice(p.name, self.cur().pos));
             if (simple_count == 1) continue;
             const entry = try seen.getOrPut(self.scratch_allocator, p.name);
-            if (entry.found_existing) return ParseError.UnexpectedToken;
+            if (entry.found_existing)
+                return self.failWithReasonAt(.invalid_strict_parameters, self.sourceOffsetForSlice(p.name, self.cur().pos));
         }
     }
 
@@ -3483,8 +3606,10 @@ pub const Parser = struct {
         _ = self.advance(); // function
         const is_gen = self.match(.star); // `function*` / `async function*`
         const name_tok = self.advance();
-        if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
-        if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
+        if (name_tok.kind != .identifier) return self.failWithReasonAt(.function_name_required, name_tok.pos);
+        if (self.strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text)))
+            return self.failWithToken(.strict_function_name, name_tok);
+        if (self.isForbiddenBindingName(name_tok.text)) return self.failWithToken(.function_keyword_name, name_tok);
         var uses_arguments = false;
         var uses_direct_eval = false;
         var uses_direct_eval_in_parameters = false;
@@ -3499,14 +3624,17 @@ pub const Parser = struct {
         }
         const params = try self.parseFunctionParamList(is_gen, is_async);
         self.current_direct_eval_use = &uses_direct_eval_in_body;
-        const own_use_strict = self.peekUseStrict();
+        const own_use_strict_token = self.peekUseStrictToken();
+        const own_use_strict = own_use_strict_token != null;
         // This function's strictness: inherited OR its own "use strict" prologue.
         // Captured BEFORE parseFnBody, which clobbers `last_fn_strict` when it
         // parses nested functions (so it can't be used to stamp THIS function).
         const fn_strict = self.strict or own_use_strict;
         const body = try self.parseFnBody(is_gen, is_async);
-        if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
+        if (own_use_strict and hasNonSimpleParams(params))
+            return self.failWithReasonAt(.strict_directive_non_simple_parameters, own_use_strict_token.?.pos);
+        if (fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text)))
+            return self.failWithToken(.strict_function_name, name_tok);
         if (fn_strict) try self.validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
         // A generator/async function, or ANY function with a non-simple parameter
@@ -3635,9 +3763,9 @@ pub const Parser = struct {
     /// current token is the opening `{`; a directive prologue is a leading run of
     /// string-literal expression statements, so scan those (skipping the `{` and
     /// statement-separating `;`) and stop at the first non-directive token.
-    fn peekUseStrict(self: *Parser) bool {
+    fn peekUseStrictToken(self: *Parser) ?Token {
         var i = self.pos;
-        if (self.tokenAt(i).kind != .lbrace) return false;
+        if (self.tokenAt(i).kind != .lbrace) return null;
         i += 1;
         while (self.tokenAt(i).kind == .string) {
             const t = self.tokenAt(i);
@@ -3646,11 +3774,15 @@ pub const Parser = struct {
             // matching isn't enough (`'use \strict'` decodes to "use strict" but
             // is not a directive), so require the raw lexeme to be just the quoted
             // text: end - pos == text.len + 2 (the two quote characters).
-            if (std.mem.eql(u8, t.text, "use strict") and t.end - t.pos == t.text.len + 2) return true;
+            if (std.mem.eql(u8, t.text, "use strict") and t.end - t.pos == t.text.len + 2) return t;
             i += 1;
             if (self.tokenAt(i).kind == .semicolon) i += 1;
         }
-        return false;
+        return null;
+    }
+
+    fn peekUseStrict(self: *Parser) bool {
+        return self.peekUseStrictToken() != null;
     }
 
     /// `yield [expr]` / `yield* expr`. Only reached inside a generator body.
@@ -6411,6 +6543,47 @@ test "parser preserves every direct parameter body conflict shape" {
     _ = try nested.parseProgram();
 }
 
+test "parser retains binding and parameter conflict diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "function f(a) { let a; }", .reason = .duplicate_let_binding, .marker = "a", .message = "Cannot declare a let variable twice: 'a'." },
+        .{ .source = "function f({a}) { const a = 1; }", .reason = .duplicate_const_binding, .marker = "a", .message = "Cannot declare a const variable twice: 'a'." },
+        .{ .source = "function f(a) { const a = 1, b = 2; }", .reason = .duplicate_const_binding, .marker = "a", .message = "Cannot declare a const variable twice: 'a'." },
+        .{ .source = "function f(a) { class a {} }", .reason = .duplicate_class_binding, .marker = "a", .message = "Cannot declare a class twice: 'a'." },
+        .{ .source = "(a) => { let a; }", .reason = .duplicate_let_binding, .marker = "a", .message = "Cannot declare a let variable twice: 'a'." },
+        .{ .source = "try {} catch ([e, e]) {}", .reason = .duplicate_catch_binding, .marker = "e", .message = "Unexpected identifier 'e'. Cannot declare a lexical variable twice: 'e'." },
+        .{ .source = "try {} catch (e) { let e; }", .reason = .duplicate_let_binding, .marker = "e", .message = "Cannot declare a let variable twice: 'e'." },
+        .{ .source = "try {} catch ({e}) { const {e} = {}; }", .reason = .duplicate_catch_destructuring, .marker = "e", .message = "Unexpected token '}'. Cannot declare a lexical variable twice: 'e'." },
+        .{ .source = "try {} catch (e) { const e = 1, x = 2; }", .reason = .duplicate_const_binding, .marker = "e", .message = "Cannot declare a const variable twice: 'e'." },
+        .{ .source = "try {} catch (e) { function e() {} }", .reason = .catch_function_shadow, .marker = "e", .message = "Cannot declare a function that shadows a let/const/class/function variable 'e'." },
+        .{ .source = "try {} catch (e) { label: function e() {} }", .reason = .catch_function_shadow, .marker = "e", .message = "Cannot declare a function that shadows a let/const/class/function variable 'e'." },
+        .{ .source = "try {} catch (e) { class e {} }", .reason = .duplicate_class_binding, .marker = "e", .message = "Cannot declare a class twice: 'e'." },
+        .{ .source = "function f(eval) { \"use strict\"; }", .reason = .invalid_strict_parameters, .marker = "eval", .message = "Invalid parameters or function name in strict mode." },
+        .{ .source = "function f(interface) { \"use strict\"; }", .reason = .invalid_strict_parameters, .marker = "interface", .message = "Invalid parameters or function name in strict mode." },
+        .{ .source = "function f(a, a) { \"use strict\"; }", .reason = .invalid_strict_parameters, .marker = "a", .message = "Invalid parameters or function name in strict mode." },
+        .{ .source = "function () {}", .reason = .function_name_required, .marker = "(", .message = "Function statements must have a name." },
+        .{ .source = "function if() {}", .reason = .function_keyword_name, .marker = "if", .message = "Cannot use the keyword 'if' as a function name." },
+        .{ .source = "function f(a = 1) { \"use strict\"; }", .reason = .strict_directive_non_simple_parameters, .marker = "\"use strict\"", .message = "'use strict' directive not allowed inside a function with a non-simple parameter list." },
+        .{ .source = "\"use strict\"; function eval() {}", .reason = .strict_function_name, .marker = "eval", .message = "'eval' is not a valid function name in strict mode." },
+        .{ .source = "function arguments() { \"use strict\"; }", .reason = .strict_function_name, .marker = "arguments", .message = "'arguments' is not a valid function name in strict mode." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
 test "parser preserves completion-order locations across module exports and speculative for rewind" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -6729,6 +6902,11 @@ test "parser reserves strict parameter uniqueness storage once" {
     parser.scratch_allocator = measured.allocator();
     parser.secure_hash_state = .{};
     parser.shared_secure_hash_state = null;
+    parser.source = "";
+    parser.current_token = &synthetic_eof_token;
+    parser.last_error_offset = null;
+    parser.last_error_reason = null;
+    parser.last_error_token = null;
     try parser.validateStrictParams(&params);
     try std.testing.expectEqual(@as(usize, 1), measured.allocations);
     try std.testing.expectEqual(@as(usize, 1), measured.deallocations);

@@ -79,6 +79,36 @@ const frontend_cases = [_]Case{
         .expected = 32767,
     },
     .{
+        .name = "binding and parameter SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["function f(a) { let a; }", "Cannot declare a let variable twice: 'a'."],
+        \\  ["function f({a}) { const a = 1; }", "Cannot declare a const variable twice: 'a'."],
+        \\  ["function f(a) { const a = 1, b = 2; }", "Cannot declare a const variable twice: 'a'."],
+        \\  ["function f(a) { class a {} }", "Cannot declare a class twice: 'a'."],
+        \\  ["(a) => { let a; }", "Cannot declare a let variable twice: 'a'."],
+        \\  ["try {} catch ([e, e]) {}", "Unexpected identifier 'e'. Cannot declare a lexical variable twice: 'e'."],
+        \\  ["try {} catch (e) { let e; }", "Cannot declare a let variable twice: 'e'."],
+        \\  ["try {} catch ({e}) { const {e} = {}; }", "Unexpected token '}'. Cannot declare a lexical variable twice: 'e'."],
+        \\  ["try {} catch (e) { const e = 1, x = 2; }", "Cannot declare a const variable twice: 'e'."],
+        \\  ["try {} catch (e) { function e() {} }", "Cannot declare a function that shadows a let/const/class/function variable 'e'."],
+        \\  ["try {} catch (e) { class e {} }", "Cannot declare a class twice: 'e'."],
+        \\  ["function f(eval) { \"use strict\"; }", "Invalid parameters or function name in strict mode."],
+        \\  ["function f(a, a) { \"use strict\"; }", "Invalid parameters or function name in strict mode."],
+        \\  ["function () {}", "Function statements must have a name."],
+        \\  ["function if() {}", "Cannot use the keyword 'if' as a function name."],
+        \\  ["function f(a = 1) { \"use strict\"; }", "'use strict' directive not allowed inside a function with a non-simple parameter list."],
+        \\  ["\"use strict\"; function eval() {}", "'eval' is not a valid function name in strict mode."],
+        \\  ["function arguments() { \"use strict\"; }", "'arguments' is not a valid function name in strict mode."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 262143,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.
