@@ -188,6 +188,9 @@ pub const DiagnosticReason = enum {
     regexp_invalid_backreference_for_unicode_pattern,
     regexp_unrecognized_character_after_group_start,
     regexp_unmatched_parentheses,
+    regexp_invalid_quantifier,
+    regexp_incomplete_quantifier_for_unicode_pattern,
+    regexp_unmatched_bracket_for_unicode_pattern,
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
@@ -354,6 +357,9 @@ pub const DiagnosticReason = enum {
             .regexp_invalid_backreference_for_unicode_pattern => "Invalid regular expression: invalid backreference for Unicode pattern",
             .regexp_unrecognized_character_after_group_start => "Invalid regular expression: unrecognized character after (?",
             .regexp_unmatched_parentheses => "Invalid regular expression: unmatched parentheses",
+            .regexp_invalid_quantifier => "Invalid regular expression: invalid quantifier",
+            .regexp_incomplete_quantifier_for_unicode_pattern => "Invalid regular expression: incomplete {} quantifier for Unicode pattern",
+            .regexp_unmatched_bracket_for_unicode_pattern => "Invalid regular expression: unmatched ] or } bracket for Unicode pattern",
         };
     }
 };
@@ -378,6 +384,9 @@ fn regexDiagnosticReason(reason: regex.CompileErrorReason) DiagnosticReason {
         .invalid_backreference_for_unicode_pattern => .regexp_invalid_backreference_for_unicode_pattern,
         .unrecognized_character_after_group_start => .regexp_unrecognized_character_after_group_start,
         .unmatched_parentheses => .regexp_unmatched_parentheses,
+        .invalid_quantifier => .regexp_invalid_quantifier,
+        .incomplete_quantifier_for_unicode_pattern => .regexp_incomplete_quantifier_for_unicode_pattern,
+        .unmatched_bracket_for_unicode_pattern => .regexp_unmatched_bracket_for_unicode_pattern,
     };
 }
 

@@ -21,6 +21,9 @@ pub fn compileErrorMessage(reason: regex.CompileErrorReason) []const u8 {
         .invalid_backreference_for_unicode_pattern => "Invalid regular expression: invalid backreference for Unicode pattern",
         .unrecognized_character_after_group_start => "Invalid regular expression: unrecognized character after (?",
         .unmatched_parentheses => "Invalid regular expression: unmatched parentheses",
+        .invalid_quantifier => "Invalid regular expression: invalid quantifier",
+        .incomplete_quantifier_for_unicode_pattern => "Invalid regular expression: incomplete {} quantifier for Unicode pattern",
+        .unmatched_bracket_for_unicode_pattern => "Invalid regular expression: unmatched ] or } bracket for Unicode pattern",
     };
 }
 

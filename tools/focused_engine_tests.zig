@@ -1370,6 +1370,42 @@ const runtime_cases = [_]Case{
         .expected = 65535,
     },
     .{
+        // zig-regex#32: an Assertion takes no Quantifier (22.2.1) -- Annex B's
+        // QuantifiableAssertion covers a lookahead outside `u` and nothing
+        // else -- and after `(?` ECMAScript allows only `:`, `=`, `!` and `<`.
+        // `^*` and `(?P<x>a)` were accepted and matched; a quantified
+        // lookbehind and the `u`-mode readings of `a{`, `]` and `}` were
+        // refused but lost their reason to the "invalid regular expression"
+        // fallback. Every expected string is JavaScriptCore's own (home-tool).
+        .name = "quantified assertions and (? extensions report JavaScriptCore's reason",
+        .source =
+        \\function msg(fn) {
+        \\  try { fn(); return "OK"; } catch (e) { return e.name + ": " + e.message; }
+        \\}
+        \\var checks = [];
+        \\checks.push(msg(function () { new RegExp("^*"); }) === "SyntaxError: Invalid regular expression: nothing to repeat");
+        \\checks.push(msg(function () { new RegExp("$+"); }) === "SyntaxError: Invalid regular expression: nothing to repeat");
+        \\checks.push(msg(function () { new RegExp("\\b?"); }) === "SyntaxError: Invalid regular expression: nothing to repeat");
+        \\checks.push(msg(function () { new RegExp("\\B{2}"); }) === "SyntaxError: Invalid regular expression: nothing to repeat");
+        \\checks.push(msg(function () { eval("/^*/"); }) === "SyntaxError: Invalid regular expression: nothing to repeat");
+        \\checks.push(msg(function () { new RegExp("(?=a)*"); }) === "OK");
+        \\checks.push(msg(function () { new RegExp("(?!a){2}"); }) === "OK");
+        \\checks.push(msg(function () { new RegExp("(?=a)*", "u"); }) === "SyntaxError: Invalid regular expression: nothing to repeat");
+        \\checks.push(msg(function () { new RegExp("(?<=a)*"); }) === "SyntaxError: Invalid regular expression: invalid quantifier");
+        \\checks.push(msg(function () { new RegExp("(?<!a)?"); }) === "SyntaxError: Invalid regular expression: invalid quantifier");
+        \\checks.push(msg(function () { new RegExp("(?P<x>a)"); }) === "SyntaxError: Invalid regular expression: unrecognized character after (?");
+        \\checks.push(msg(function () { eval("/(?P<x>a)/"); }) === "SyntaxError: Invalid regular expression: unrecognized character after (?");
+        \\checks.push(msg(function () { new RegExp("(?i)a"); }) === "SyntaxError: Invalid regular expression: unrecognized character after (?");
+        \\checks.push(msg(function () { new RegExp("a{", "u"); }) === "SyntaxError: Invalid regular expression: incomplete {} quantifier for Unicode pattern");
+        \\checks.push(msg(function () { new RegExp("]", "u"); }) === "SyntaxError: Invalid regular expression: unmatched ] or } bracket for Unicode pattern");
+        \\checks.push(msg(function () { new RegExp("}", "u"); }) === "SyntaxError: Invalid regular expression: unmatched ] or } bracket for Unicode pattern");
+        \\checks.push(msg(function () { new RegExp("a{"); }) === "OK");
+        \\checks.push(msg(function () { new RegExp("]"); }) === "OK");
+        \\checks.reduce(function (bits, y, i) { return y ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 262143,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
