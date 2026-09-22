@@ -221,6 +221,39 @@ const frontend_cases = [_]Case{
         .expected = 511,
     },
     .{
+        .name = "lexical declaration conflict SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["for (let [a,a] of []) {}", "Unexpected identifier 'a'. Cannot declare a lexical variable twice: 'a'."],
+        \\  ["for (const [a,a] of []) {}", "Unexpected identifier 'a'. Cannot declare a lexical variable twice: 'a'."],
+        \\  ["for (let let of []) {}", "Unexpected keyword 'let'. Cannot use 'let' as an identifier name for a LexicalDeclaration."],
+        \\  ["let [a,a] = []", "Unexpected identifier 'a'. Cannot declare a lexical variable twice: 'a'."],
+        \\  ["const {a,a} = {}", "Unexpected token '}'. Cannot declare a lexical variable twice: 'a'."],
+        \\  ["for (let x of []) { var x; }", "Cannot declare a var variable that shadows a let/const/class variable: 'x'."],
+        \\  ["for (const x in {}) { if (0) var x; }", "Cannot declare a var variable that shadows a let/const/class variable: 'x'."],
+        \\  ["{ function* f(){} function* f(){} }", "Cannot declare a function that shadows a let/const/class/function variable 'f'."],
+        \\  ["{ async function f(){} async function f(){} }", "Cannot declare an async function that shadows a let/const/class/function variable 'f'."],
+        \\  ["'use strict'; { function f(){} function f(){} }", "Cannot declare a function that shadows a let/const/class/function variable 'f'."],
+        \\  ["{ function* f(){} let f; }", "Cannot declare a let variable twice: 'f'."],
+        \\  ["{ let f; function* f(){} }", "Cannot declare a function that shadows a let/const/class/function variable 'f'."],
+        \\  ["let x; { var x; }", "Cannot declare a var variable that shadows a let/const/class variable: 'x'."],
+        \\  ["{ let x; { var x; } }", "Cannot declare a var variable that shadows a let/const/class variable: 'x'."],
+        \\  ["{ let x; var x; }", "Cannot declare a var variable that shadows a let/const/class variable: 'x'."],
+        \\  ["function outer(){ let x; { var x; } }", "Cannot declare a var variable that shadows a let/const/class variable: 'x'."],
+        \\  ["let {a}={}; let a;", "Cannot declare a let variable twice: 'a'."],
+        \\  ["let a; let {a}={};", "Unexpected token '}'. Cannot declare a lexical variable twice: 'a'."],
+        \\  ["let a,a;", "Cannot declare a let variable twice: 'a'."],
+        \\  ["const a=1,a=2;", "Cannot declare a const variable twice: 'a'."],
+        \\  ["{ async function* f(){} async function* f(){} }", "Cannot declare an async function that shadows a let/const/class/function variable 'f'."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 2097151,
+    },
+    .{
         .name = "for head SyntaxErrors retain JSC prose",
         .source =
         \\var rows = [

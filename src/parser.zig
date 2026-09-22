@@ -45,6 +45,11 @@ pub const DiagnosticReason = enum {
     duplicate_catch_binding,
     duplicate_catch_destructuring,
     catch_function_shadow,
+    duplicate_lexical_binding,
+    duplicate_lexical_destructuring,
+    var_shadows_lexical,
+    function_shadows_lexical,
+    async_function_shadows_lexical,
     invalid_strict_parameters,
     strict_duplicate_parameter,
     strict_parameter_name,
@@ -220,6 +225,8 @@ pub const DiagnosticReason = enum {
             .function_single_statement => "Function declarations are only allowed inside block statements or at the top level of a program.",
             .duplicate_let_binding, .duplicate_const_binding, .duplicate_class_binding => "",
             .duplicate_catch_binding, .duplicate_catch_destructuring, .catch_function_shadow => "",
+            .duplicate_lexical_binding, .duplicate_lexical_destructuring, .var_shadows_lexical => "",
+            .function_shadows_lexical, .async_function_shadows_lexical => "",
             .invalid_strict_parameters => "Invalid parameters or function name in strict mode.",
             .strict_duplicate_parameter, .strict_parameter_name, .strict_reserved_parameter, .strict_arrow_reserved_parameter, .function_parameter_keyword, .arrow_parameter_keyword => "",
             .async_parameter_await => "Cannot use 'await' as a parameter name in an async function.",
@@ -1173,6 +1180,16 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Unexpected token '{s}'. Cannot declare a lexical variable twice: '{s}'.", .{ token.text, token.detail.? });
         if (reason == .catch_function_shadow)
             return std.fmt.allocPrint(allocator, "Cannot declare a function that shadows a let/const/class/function variable '{s}'.", .{token.text});
+        if (reason == .duplicate_lexical_binding)
+            return std.fmt.allocPrint(allocator, "Unexpected identifier '{s}'. Cannot declare a lexical variable twice: '{s}'.", .{ token.text, token.text });
+        if (reason == .duplicate_lexical_destructuring)
+            return std.fmt.allocPrint(allocator, "Unexpected token '{s}'. Cannot declare a lexical variable twice: '{s}'.", .{ token.text, token.detail.? });
+        if (reason == .var_shadows_lexical)
+            return std.fmt.allocPrint(allocator, "Cannot declare a var variable that shadows a let/const/class variable: '{s}'.", .{token.text});
+        if (reason == .function_shadows_lexical)
+            return std.fmt.allocPrint(allocator, "Cannot declare a function that shadows a let/const/class/function variable '{s}'.", .{token.text});
+        if (reason == .async_function_shadows_lexical)
+            return std.fmt.allocPrint(allocator, "Cannot declare an async function that shadows a let/const/class/function variable '{s}'.", .{token.text});
         if (reason == .strict_duplicate_parameter)
             return std.fmt.allocPrint(allocator, "Cannot declare a parameter named '{s}' in strict mode as it has already been declared.", .{token.text});
         if (reason == .strict_parameter_name)
@@ -1620,18 +1637,15 @@ pub const Parser = struct {
         var seen = self.secureStringMap(bool);
         for (stmts) |s| {
             switch (s.*) {
-                .var_decl => |d| if (d.kind != .@"var") try self.addDecl(&seen, d.name, true),
+                .var_decl => |d| if (d.kind != .@"var") try self.addDecl(&seen, d.name, true, duplicateBindingReason(d.kind)),
                 .destructure_decl => |d| if (d.kind != .@"var") {
-                    var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                    try self.addPatternNames(&names, d.pattern);
-                    for (names.items) |n| try self.addDecl(&seen, n, true);
+                    try self.addPatternDecl(&seen, d.pattern);
                 },
                 .decl_group => |g| for (g) |d2| {
-                    if (d2.* == .var_decl and d2.var_decl.kind != .@"var") try self.addDecl(&seen, d2.var_decl.name, true);
+                    if (d2.* == .var_decl and d2.var_decl.kind != .@"var")
+                        try self.addDecl(&seen, d2.var_decl.name, true, duplicateBindingReason(d2.var_decl.kind));
                     if (d2.* == .destructure_decl and d2.destructure_decl.kind != .@"var") {
-                        var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                        try self.addPatternNames(&names, d2.destructure_decl.pattern);
-                        for (names.items) |n| try self.addDecl(&seen, n, true);
+                        try self.addPatternDecl(&seen, d2.destructure_decl.pattern);
                     }
                 },
                 // A block-level function declaration is "rigid" (no duplicate
@@ -1639,10 +1653,20 @@ pub const Parser = struct {
                 // has no Annex B.3.3 plain-function duplicate allowance, so
                 // `{ function f(){} function f(){} }` is a strict SyntaxError.
                 .func_decl => |fnode| if (funcs_lexical and fnode.name.len > 0)
-                    try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator or self.strict),
+                    try self.addDecl(
+                        &seen,
+                        fnode.name,
+                        fnode.is_async or fnode.is_generator or self.strict,
+                        if (fnode.is_async) .async_function_shadows_lexical else .function_shadows_lexical,
+                    ),
                 .labeled_stmt => if (funcs_lexical) {
                     if (statementFunctionDecl(s)) |fnode| if (fnode.name.len > 0)
-                        try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator or self.strict);
+                        try self.addDecl(
+                            &seen,
+                            fnode.name,
+                            fnode.is_async or fnode.is_generator or self.strict,
+                            if (fnode.is_async) .async_function_shadows_lexical else .function_shadows_lexical,
+                        );
                 },
                 else => {},
             }
@@ -1801,6 +1825,54 @@ pub const Parser = struct {
         for (names.items) |n| if (n.len > 0) try out.put(self.arena, n, {});
     }
 
+    const BindingDiagnosticKind = enum { identifier, object };
+
+    fn sameSourceSlice(a: []const u8, b: []const u8) bool {
+        return a.len == b.len and a.ptr == b.ptr;
+    }
+
+    fn patternBindingDiagnosticKind(pattern: *const Node, name: []const u8) ?BindingDiagnosticKind {
+        return switch (pattern.*) {
+            .identifier => |bound| if (sameSourceSlice(bound, name)) .identifier else null,
+            .obj_pattern => |object| blk: {
+                for (object.props) |prop| {
+                    if (patternBindingDiagnosticKind(prop.target, name)) |kind|
+                        break :blk if (kind == .identifier) .object else kind;
+                }
+                if (object.rest) |rest| if (patternBindingDiagnosticKind(rest, name)) |kind|
+                    break :blk if (kind == .identifier) .object else kind;
+                break :blk null;
+            },
+            .arr_pattern => |array| blk: {
+                for (array.elems) |elem| if (elem.target) |target|
+                    if (patternBindingDiagnosticKind(target, name)) |kind| break :blk kind;
+                if (array.rest) |rest| if (patternBindingDiagnosticKind(rest, name)) |kind| break :blk kind;
+                break :blk null;
+            },
+            else => null,
+        };
+    }
+
+    fn declBindingDiagnosticKind(decl: *const Node, name: []const u8) ?BindingDiagnosticKind {
+        return switch (decl.*) {
+            .identifier, .obj_pattern, .arr_pattern => patternBindingDiagnosticKind(decl, name),
+            .var_decl => |d| if (sameSourceSlice(d.name, name)) .identifier else null,
+            .destructure_decl => |d| patternBindingDiagnosticKind(d.pattern, name),
+            .decl_group => |group| for (group) |item| {
+                if (declBindingDiagnosticKind(item, name)) |kind| break kind;
+            } else null,
+            else => null,
+        };
+    }
+
+    fn failDuplicateLexicalBinding(self: *Parser, owner: *const Node, name: []const u8) ParseError {
+        const offset = self.sourceOffsetForSlice(name, self.cur().pos);
+        return switch (declBindingDiagnosticKind(owner, name) orelse .identifier) {
+            .identifier => self.failWithNameAt(.duplicate_lexical_binding, name, offset),
+            .object => self.failWithDiagnosticAt(.duplicate_lexical_destructuring, .token, "}", name, offset),
+        };
+    }
+
     /// A lexical binding target's BoundNames must be unique (`let [x, x]` etc.).
     /// The BoundNames of a *lexical* (`let`/`const`/`using`) for-in/of head must
     /// be unique and must not contain `let` — `for (let [x, x] of …)` and
@@ -1812,8 +1884,9 @@ pub const Parser = struct {
         var seen = self.secureStringMap(void);
         for (names.items) |n| {
             if (n.len == 0) continue;
-            if (std.mem.eql(u8, n, "let")) return ParseError.UnexpectedToken;
-            if (seen.contains(n)) return ParseError.UnexpectedToken;
+            if (std.mem.eql(u8, n, "let"))
+                return self.failWithDiagnosticAt(.lexical_let_binding, .keyword, n, null, self.sourceOffsetForSlice(n, self.cur().pos));
+            if (seen.contains(n)) return self.failDuplicateLexicalBinding(target, n);
             try seen.put(self.arena, n, {});
         }
     }
@@ -1824,8 +1897,9 @@ pub const Parser = struct {
         var seen = self.secureStringMap(void);
         for (names.items) |n| {
             if (n.len == 0) continue;
-            if (std.mem.eql(u8, n, "let")) return ParseError.UnexpectedToken;
-            if (seen.contains(n)) return ParseError.UnexpectedToken;
+            if (std.mem.eql(u8, n, "let"))
+                return self.failWithDiagnosticAt(.lexical_let_binding, .keyword, n, null, self.sourceOffsetForSlice(n, self.cur().pos));
+            if (seen.contains(n)) return self.failDuplicateLexicalBinding(decl, n);
             try seen.put(self.arena, n, {});
         }
     }
@@ -1875,7 +1949,7 @@ pub const Parser = struct {
         const vars = self.for_body_vars.?;
         for (head) |name| {
             const declared = vars.names.get(name) orelse continue;
-            if (declared > started) return ParseError.UnexpectedToken;
+            if (declared > started) return self.failWithNameAt(.var_shadows_lexical, name, self.cur().pos);
         }
         return body;
     }
@@ -1892,13 +1966,28 @@ pub const Parser = struct {
         }
     }
 
-    fn addDecl(self: *Parser, seen: *SecureStringMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
+    fn addDecl(
+        self: *Parser,
+        seen: *SecureStringMapUnmanaged(bool),
+        name: []const u8,
+        rigid: bool,
+        collision_reason: DiagnosticReason,
+    ) ParseError!void {
         if (seen.get(name)) |existing_rigid| {
             // A collision is an early error unless BOTH are plain functions.
-            if (rigid or existing_rigid) return ParseError.UnexpectedToken;
+            if (rigid or existing_rigid) return self.failWithNameAt(collision_reason, name, self.cur().pos);
             return; // plain-function vs plain-function: allowed
         }
         try seen.put(self.arena, name, rigid);
+    }
+
+    fn addPatternDecl(self: *Parser, seen: *SecureStringMapUnmanaged(bool), pattern: *Node) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, pattern);
+        for (names.items) |name| {
+            if (seen.contains(name)) return self.failDuplicateLexicalBinding(pattern, name);
+            try seen.put(self.arena, name, true);
+        }
     }
 
     /// Descend into a statement's nested scopes, running `checkLexicalDupes` at
@@ -2094,12 +2183,11 @@ pub const Parser = struct {
     }
 
     fn checkVarAgainstLexical(self: *Parser, scope: *const LexicalScope, name: []const u8) ParseError!void {
-        _ = self;
         if (name.len == 0) return;
         if (scope.var_scope_names) |names| if (names.contains(name))
-            return ParseError.UnexpectedToken;
+            return self.failWithNameAt(.var_shadows_lexical, name, self.cur().pos);
         const depth = scope.names.get(name) orelse return;
-        if (depth >= scope.var_base) return ParseError.UnexpectedToken;
+        if (depth >= scope.var_base) return self.failWithNameAt(.var_shadows_lexical, name, self.cur().pos);
     }
 
     fn addModuleLexicalName(
@@ -6941,6 +7029,46 @@ test "parser retains binding and parameter conflict diagnostics" {
         try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains lexical declaration conflict diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "for (let [a,a] of []) {}", .reason = .duplicate_lexical_binding, .message = "Unexpected identifier 'a'. Cannot declare a lexical variable twice: 'a'." },
+        .{ .source = "for (const [a,a] of []) {}", .reason = .duplicate_lexical_binding, .message = "Unexpected identifier 'a'. Cannot declare a lexical variable twice: 'a'." },
+        .{ .source = "for (let let of []) {}", .reason = .lexical_let_binding, .message = "Unexpected keyword 'let'. Cannot use 'let' as an identifier name for a LexicalDeclaration." },
+        .{ .source = "let [a,a] = []", .reason = .duplicate_lexical_binding, .message = "Unexpected identifier 'a'. Cannot declare a lexical variable twice: 'a'." },
+        .{ .source = "const {a,a} = {}", .reason = .duplicate_lexical_destructuring, .message = "Unexpected token '}'. Cannot declare a lexical variable twice: 'a'." },
+        .{ .source = "for (let x of []) { var x; }", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "for (const x in {}) { if (0) var x; }", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "{ function* f(){} function* f(){} }", .reason = .function_shadows_lexical, .message = "Cannot declare a function that shadows a let/const/class/function variable 'f'." },
+        .{ .source = "{ async function f(){} async function f(){} }", .reason = .async_function_shadows_lexical, .message = "Cannot declare an async function that shadows a let/const/class/function variable 'f'." },
+        .{ .source = "\"use strict\"; { function f(){} function f(){} }", .reason = .function_shadows_lexical, .message = "Cannot declare a function that shadows a let/const/class/function variable 'f'." },
+        .{ .source = "{ function* f(){} let f; }", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'f'." },
+        .{ .source = "{ let f; function* f(){} }", .reason = .function_shadows_lexical, .message = "Cannot declare a function that shadows a let/const/class/function variable 'f'." },
+        .{ .source = "let x; { var x; }", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "{ let x; { var x; } }", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "{ let x; var x; }", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "function outer(){ let x; { var x; } }", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "let {a}={}; let a;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'a'." },
+        .{ .source = "let a; let {a}={};", .reason = .duplicate_lexical_destructuring, .message = "Unexpected token '}'. Cannot declare a lexical variable twice: 'a'." },
+        .{ .source = "let a,a;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'a'." },
+        .{ .source = "const a=1,a=2;", .reason = .duplicate_const_binding, .message = "Cannot declare a const variable twice: 'a'." },
+        .{ .source = "{ async function* f(){} async function* f(){} }", .reason = .async_function_shadows_lexical, .message = "Cannot declare an async function that shadows a let/const/class/function variable 'f'." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
     }
 }
