@@ -163,6 +163,21 @@ const frontend_cases = [_]Case{
         .expected = 127,
     },
     .{
+        .name = "malformed template escapes retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["`\\x0`", "\\x can only be followed by a hex character sequence"],
+        \\  ["`\\u0`", "\\u can only be followed by a Unicode character sequence"],
+        \\  ["`\\8`", "The only valid numeric escape in strict mode is '\\0'"],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 7,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.

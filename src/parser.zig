@@ -71,6 +71,9 @@ pub const DiagnosticReason = enum {
     expected_import_call_parenthesis,
     import_meta_module_only,
     import_meta_property,
+    malformed_template_hex_escape,
+    malformed_template_unicode_escape,
+    template_numeric_escape,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -197,6 +200,9 @@ pub const DiagnosticReason = enum {
             .expected_import_call_parenthesis => "import call expects one or two arguments.",
             .import_meta_module_only => "import.meta is only valid inside modules.",
             .import_meta_property => "\"import.\" can only be followed with meta.",
+            .malformed_template_hex_escape => "\\x can only be followed by a hex character sequence",
+            .malformed_template_unicode_escape => "\\u can only be followed by a Unicode character sequence",
+            .template_numeric_escape => "The only valid numeric escape in strict mode is '\\0'",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -4927,7 +4933,7 @@ pub const Parser = struct {
     /// Cook one already-delimited quasi. Validation and sizing complete before
     /// the exact allocation, so untagged errors and tagged invalid escapes do
     /// not retain a partial cooked buffer.
-    fn cookTemplateQuasi(self: *Parser, raw: []const u8, tagged: bool) ParseError!?[]const u8 {
+    fn cookTemplateQuasi(self: *Parser, raw: []const u8, tagged: bool, source_raw: ?[]const u8) ParseError!?[]const u8 {
         var decoded = false;
         var multiple_escapes = false;
         var first_escape_start: usize = undefined;
@@ -4944,10 +4950,12 @@ pub const Parser = struct {
                 if (tagged) return null;
                 return ParseError.UnexpectedToken;
             }
-            validateTemplateEscape(raw, cursor + 1) catch {
+            if (templateEscapeDiagnostic(raw, cursor + 1)) |reason| {
                 if (tagged) return null;
-                return ParseError.UnexpectedToken;
-            };
+                if (source_raw) |original|
+                    return self.failWithReasonAt(reason, self.templateEscapeSourceOffset(original, raw, cursor));
+                return reason.parseError();
+            }
             decoded_len += cursor - raw_start;
             const escape = lex.decodeEscape(raw, cursor + 1);
             if (!decoded) {
@@ -4997,7 +5005,7 @@ pub const Parser = struct {
 
     fn parseTemplate(self: *Parser, first: Token) ParseError!*Node {
         const first_raw = try normalizeTemplateRaw(self.arena, first.text);
-        var node = try self.concatStr(null, (try self.cookTemplateQuasi(first_raw, false)).?);
+        var node = try self.concatStr(null, (try self.cookTemplateQuasi(first_raw, false, first.text)).?);
         if (first.kind == .template_no_substitution) return node;
         std.debug.assert(first.kind == .template_head);
 
@@ -5007,7 +5015,7 @@ pub const Parser = struct {
                 return self.failWithTokenReason(.template_expression_tail);
             const quasi = self.advance();
             const raw = try normalizeTemplateRaw(self.arena, quasi.text);
-            node = try self.concatStr(node, (try self.cookTemplateQuasi(raw, false)).?);
+            node = try self.concatStr(node, (try self.cookTemplateQuasi(raw, false, quasi.text)).?);
             if (quasi.kind == .template_tail) return node;
         }
     }
@@ -5017,7 +5025,7 @@ pub const Parser = struct {
     /// before return; final arrays own exact arena-sized storage.
     fn parseTaggedTemplate(self: *Parser, tag: *Node, first: Token, start_token: usize) ParseError!*Node {
         const first_raw = try normalizeTemplateRaw(self.arena, first.text);
-        const first_cooked = try self.cookTemplateQuasi(first_raw, true);
+        const first_cooked = try self.cookTemplateQuasi(first_raw, true, first.text);
         if (first.kind == .template_no_substitution) {
             const cooked = try self.arena.alloc(?[]const u8, 1);
             cooked[0] = first_cooked;
@@ -5052,7 +5060,7 @@ pub const Parser = struct {
             const quasi = self.advance();
             const raw = try normalizeTemplateRaw(self.arena, quasi.text);
             try parts.append(self.scratch_allocator, .{
-                .cooked = try self.cookTemplateQuasi(raw, true),
+                .cooked = try self.cookTemplateQuasi(raw, true, quasi.text),
                 .raw = raw,
                 .expression_before = expression,
             });
@@ -5076,13 +5084,32 @@ pub const Parser = struct {
         } });
     }
 
-    fn validateTemplateEscape(raw: []const u8, i: usize) ParseError!void {
-        if (lex.lineTerminatorLen(raw, i) != null) return;
-        if (i >= raw.len) return ParseError.UnexpectedToken;
+    /// Convert a cursor in the normalized TV/TRV byte sequence back to the
+    /// original source. This only runs for a rejected untagged template; valid
+    /// templates and accepted tagged invalid escapes do no location work.
+    fn templateEscapeSourceOffset(self: *const Parser, original: []const u8, normalized: []const u8, normalized_offset: usize) usize {
+        const base = self.sourceOffsetForSlice(original, 0);
+        if (@intFromPtr(original.ptr) == @intFromPtr(normalized.ptr)) return base + normalized_offset;
+
+        var source_cursor: usize = 0;
+        var normalized_cursor: usize = 0;
+        while (normalized_cursor < normalized_offset and source_cursor < original.len) {
+            if (original[source_cursor] == '\r') {
+                source_cursor += if (source_cursor + 1 < original.len and original[source_cursor + 1] == '\n') 2 else 1;
+            } else {
+                source_cursor += 1;
+            }
+            normalized_cursor += 1;
+        }
+        return base + source_cursor;
+    }
+
+    fn templateEscapeDiagnostic(raw: []const u8, i: usize) ?DiagnosticReason {
+        if (lex.lineTerminatorLen(raw, i) != null or i >= raw.len) return null;
         switch (raw[i]) {
             'x' => {
                 if (i + 2 >= raw.len or templateHexVal(raw[i + 1]) == null or templateHexVal(raw[i + 2]) == null)
-                    return ParseError.UnexpectedToken;
+                    return .malformed_template_hex_escape;
             },
             'u' => {
                 if (i + 1 < raw.len and raw[i + 1] == '{') {
@@ -5090,21 +5117,22 @@ pub const Parser = struct {
                     var cp: u32 = 0;
                     var any = false;
                     while (j < raw.len and raw[j] != '}') : (j += 1) {
-                        const h = templateHexVal(raw[j]) orelse return ParseError.UnexpectedToken;
+                        const h = templateHexVal(raw[j]) orelse return .malformed_template_unicode_escape;
                         cp = cp * 16 + h;
-                        if (cp > 0x10FFFF) return ParseError.UnexpectedToken;
+                        if (cp > 0x10FFFF) return .malformed_template_unicode_escape;
                         any = true;
                     }
-                    if (!any or j >= raw.len or raw[j] != '}') return ParseError.UnexpectedToken;
+                    if (!any or j >= raw.len or raw[j] != '}') return .malformed_template_unicode_escape;
                 } else {
-                    if (i + 4 >= raw.len) return ParseError.UnexpectedToken;
-                    for (raw[i + 1 .. i + 5]) |c| if (templateHexVal(c) == null) return ParseError.UnexpectedToken;
+                    if (i + 4 >= raw.len) return .malformed_template_unicode_escape;
+                    for (raw[i + 1 .. i + 5]) |c| if (templateHexVal(c) == null) return .malformed_template_unicode_escape;
                 }
             },
-            '0' => if (i + 1 < raw.len and std.ascii.isDigit(raw[i + 1])) return ParseError.UnexpectedToken,
-            '1'...'9' => return ParseError.UnexpectedToken,
+            '0' => if (i + 1 < raw.len and std.ascii.isDigit(raw[i + 1])) return .template_numeric_escape,
+            '1'...'9' => return .template_numeric_escape,
             else => {},
         }
+        return null;
     }
 
     fn templateHexVal(c: u8) ?u32 {
@@ -7401,28 +7429,40 @@ test "parser lexical goals distinguish regex literals from division in grammar c
 }
 
 test "parser rejects malformed untagged template escapes" {
-    const invalid = [_][]const u8{
-        "`\\x0`",
-        "`\\x0G`",
-        "`\\xG`",
-        "`\\u0`",
-        "`\\u0g`",
-        "`\\u00g`",
-        "`\\u000g`",
-        "`\\u{g`",
-        "`\\u{0`",
-        "`\\u{10FFFFF}`",
-        "`\\u{1F_639}`",
-        "`\\u`",
-        "`\\00`",
-        "`\\8`",
-        "`\\9`",
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        message: []const u8,
     };
-    for (invalid) |src| {
+    const invalid = [_]Case{
+        .{ .source = "`\\x0`", .reason = .malformed_template_hex_escape, .message = "\\x can only be followed by a hex character sequence" },
+        .{ .source = "`\\x0G`", .reason = .malformed_template_hex_escape, .message = "\\x can only be followed by a hex character sequence" },
+        .{ .source = "`\\xG`", .reason = .malformed_template_hex_escape, .message = "\\x can only be followed by a hex character sequence" },
+        .{ .source = "`\\u0`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u0g`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u00g`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u000g`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u{g`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u{0`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u{10FFFFF}`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u{1F_639}`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\u`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "`\\00`", .reason = .template_numeric_escape, .message = "The only valid numeric escape in strict mode is '\\0'" },
+        .{ .source = "`\\8`", .reason = .template_numeric_escape, .message = "The only valid numeric escape in strict mode is '\\0'" },
+        .{ .source = "`\\9`", .reason = .template_numeric_escape, .message = "The only valid numeric escape in strict mode is '\\0'" },
+        .{ .source = "`head${1}mid\r\\u0${2}tail`", .reason = .malformed_template_unicode_escape, .message = "\\u can only be followed by a Unicode character sequence" },
+        // The invalid tail is normalized before cooking. Its retained source
+        // offset must still cross the original two-byte CRLF exactly.
+        .{ .source = "`head${1}tail\r\n\\x0`", .reason = .malformed_template_hex_escape, .message = "\\x can only be followed by a hex character sequence" },
+    };
+    for (invalid) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        var p = try Parser.init(arena.allocator(), src);
+        var p = try Parser.init(arena.allocator(), case.source);
         try std.testing.expectError(ParseError.UnexpectedToken, p.parseProgram());
+        try std.testing.expectEqual(case.reason, p.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOfScalar(u8, case.source, '\\').?, p.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try p.diagnosticMessage(arena.allocator(), case.reason));
     }
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -7527,7 +7567,7 @@ test "parser cooks template quasis with exact failure-atomic storage" {
     var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
     var borrowing: Parser = undefined;
     borrowing.arena = fixed.allocator();
-    const borrowed = (try borrowing.cookTemplateQuasi(plain, false)).?;
+    const borrowed = (try borrowing.cookTemplateQuasi(plain, false, null)).?;
     try std.testing.expectEqual(@intFromPtr(plain.ptr), @intFromPtr(borrowed.ptr));
 
     const raw = "raw\\nspan\\u0021\\uD83D\\uDE00\\uD800\\\ntail";
@@ -7537,7 +7577,7 @@ test "parser cooks template quasis with exact failure-atomic storage" {
     var measured = std.testing.FailingAllocator.init(arena.allocator(), .{});
     var cooking: Parser = undefined;
     cooking.arena = measured.allocator();
-    const cooked = (try cooking.cookTemplateQuasi(raw, false)).?;
+    const cooked = (try cooking.cookTemplateQuasi(raw, false, null)).?;
     try std.testing.expectEqualStrings(expected, cooked);
     try std.testing.expectEqual(@as(usize, 1), measured.allocations);
     try std.testing.expectEqual(@as(usize, 0), measured.resize_index);
@@ -7545,17 +7585,17 @@ test "parser cooks template quasis with exact failure-atomic storage" {
 
     var invalid_tagged: Parser = undefined;
     invalid_tagged.arena = fixed.allocator();
-    try std.testing.expectEqual(@as(?[]const u8, null), try invalid_tagged.cookTemplateQuasi("raw\\u{110000}tail", true));
-    try std.testing.expectError(ParseError.UnexpectedToken, invalid_tagged.cookTemplateQuasi("raw\\u{110000}tail", false));
+    try std.testing.expectEqual(@as(?[]const u8, null), try invalid_tagged.cookTemplateQuasi("raw\\u{110000}tail", true, null));
+    try std.testing.expectError(ParseError.UnexpectedToken, invalid_tagged.cookTemplateQuasi("raw\\u{110000}tail", false, null));
 
     var failure_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer failure_arena.deinit();
     var allocation_failure = std.testing.FailingAllocator.init(failure_arena.allocator(), .{ .fail_index = 0 });
     var failing: Parser = undefined;
     failing.arena = allocation_failure.allocator();
-    try std.testing.expectError(error.OutOfMemory, failing.cookTemplateQuasi(raw, false));
+    try std.testing.expectError(error.OutOfMemory, failing.cookTemplateQuasi(raw, false, null));
     failing.arena = failure_arena.allocator();
-    try std.testing.expectEqualStrings(expected, (try failing.cookTemplateQuasi(raw, false)).?);
+    try std.testing.expectEqualStrings(expected, (try failing.cookTemplateQuasi(raw, false, null)).?);
 }
 
 test "parser preserves raw and cooked template quasis across substitutions" {
@@ -7574,12 +7614,16 @@ test "parser preserves raw and cooked template quasis across substitutions" {
     try std.testing.expectEqualStrings("right\\u0021", template.raw[1]);
     try std.testing.expectEqualStrings("tail\\uD800", template.raw[2]);
 
-    var invalid = try Parser.init(arena.allocator(), "tag`bad\\u{110000}${value}ok`");
+    var invalid = try Parser.init(arena.allocator(), "tag`hex\\x0${value}unicode\\u0${other}numeric\\8`");
     const invalid_program = try invalid.parseProgram();
     const invalid_template = invalid_program.program[0].expr_stmt.tagged_template;
+    try std.testing.expectEqual(@as(usize, 3), invalid_template.cooked.len);
     try std.testing.expectEqual(@as(?[]const u8, null), invalid_template.cooked[0]);
-    try std.testing.expectEqualStrings("bad\\u{110000}", invalid_template.raw[0]);
-    try std.testing.expectEqualStrings("ok", invalid_template.cooked[1].?);
+    try std.testing.expectEqual(@as(?[]const u8, null), invalid_template.cooked[1]);
+    try std.testing.expectEqual(@as(?[]const u8, null), invalid_template.cooked[2]);
+    try std.testing.expectEqualStrings("hex\\x0", invalid_template.raw[0]);
+    try std.testing.expectEqualStrings("unicode\\u0", invalid_template.raw[1]);
+    try std.testing.expectEqualStrings("numeric\\8", invalid_template.raw[2]);
 }
 
 test "tagged template assembly uses one scratch allocation and untagged templates use none" {
