@@ -82,6 +82,13 @@ pub const DiagnosticReason = enum {
     throw_newline,
     try_requires_handler,
     do_while_while,
+    coalescing_logical_mix,
+    strict_delete_identifier,
+    unary_exponentiation,
+    optional_chain_tagged_template,
+    new_import,
+    new_optional_chain,
+    expected_property_after_dot,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -219,6 +226,13 @@ pub const DiagnosticReason = enum {
             .throw_newline => "Cannot have a newline after 'throw'.",
             .try_requires_handler => "Try statements must have at least a catch or finally block.",
             .do_while_while => "Expected 'while' to end a do-while loop.",
+            .coalescing_logical_mix => "Coalescing and logical operators used together in the same expression; parentheses must be used to disambiguate.",
+            .strict_delete_identifier => "",
+            .unary_exponentiation => "Ambiguous unary expression in the left hand side of the exponentiation expression; parentheses must be used to disambiguate the expression.",
+            .optional_chain_tagged_template => "Cannot use tagged templates in an optional chain.",
+            .new_import => "Cannot use new with import.",
+            .new_optional_chain => "Cannot call constructor in an optional chain.",
+            .expected_property_after_dot => "Expected a property name after '.'.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -1116,6 +1130,8 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a lexical variable name.", .{token.text});
         if (reason == .strict_destructure_binding)
             return std.fmt.allocPrint(allocator, "Cannot destructure to a variable named '{s}' in strict mode.", .{token.text});
+        if (reason == .strict_delete_identifier)
+            return std.fmt.allocPrint(allocator, "Cannot delete unqualified property '{s}' in strict mode.", .{token.text});
         if (reason == .shorthand_keyword)
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a shorthand property name.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
@@ -4625,10 +4641,10 @@ pub const Parser = struct {
             if (info.bp < min_bp) break;
             if (info.logical) |lop| {
                 if (lop == .nullish) {
-                    if (seen_logical) return ParseError.UnexpectedToken;
+                    if (seen_logical) return self.failWithTokenReason(.coalescing_logical_mix);
                     seen_coalesce = true;
                 } else {
-                    if (seen_coalesce) return ParseError.UnexpectedToken;
+                    if (seen_coalesce) return self.failWithTokenReason(.coalescing_logical_mix);
                     seen_logical = true;
                 }
             }
@@ -4681,7 +4697,8 @@ pub const Parser = struct {
             _ = self.advance();
             const operand = try self.parseUnaryOperand();
             // Strict mode: `delete` of an unqualified identifier is a SyntaxError.
-            if (self.strict and operand.* == .identifier) return ParseError.UnexpectedToken;
+            if (self.strict and operand.* == .identifier)
+                return self.failWithNameAt(.strict_delete_identifier, operand.identifier, self.cur().pos);
             // ECMA-262 13.5.1.1 includes private OptionalChain references. Only
             // unwrap the chain boundary: a public outer property, call result,
             // or comma-expression value is not itself a private reference.
@@ -4727,7 +4744,7 @@ pub const Parser = struct {
     /// parenthesizing (`(-x) ** 2`) or using an UpdateExpression (`++x ** 2`)
     /// avoids it. (Prefix `++`/`--` do not call this — they are UpdateExpressions.)
     fn rejectExponentAfterUnary(self: *Parser) ParseError!void {
-        if (self.check(.star_star)) return ParseError.UnexpectedToken;
+        if (self.check(.star_star)) return self.failWithTokenReason(.unary_exponentiation);
     }
 
     fn parsePostfix(self: *Parser) ParseError!*Node {
@@ -4763,7 +4780,7 @@ pub const Parser = struct {
 
     fn parseMemberName(self: *Parser) ParseError!MemberName {
         const name = self.advance();
-        if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
+        if (name.kind != .identifier and name.kind != .private_name) return self.failWithToken(.expected_property_after_dot, name);
         if (name.kind == .private_name and !self.in_class) return self.failUndeclaredPrivateName(name);
         return .{ .text = name.text, .offset = name.pos };
     }
@@ -4842,7 +4859,7 @@ pub const Parser = struct {
                 // A tagged template may not appear in an optional chain
                 // (`a?.b`tmpl`` is a SyntaxError) — short-circuiting a tag call is
                 // disallowed.
-                if (has_optional) return ParseError.UnexpectedToken;
+                if (has_optional) return self.failWithReasonAt(.optional_chain_tagged_template, self.cur().pos);
                 // Tagged template: `tag`...`` — call `tag` with the cooked-string
                 // array (carrying `raw`) and the substitution values.
                 const tmpl = self.advance();
@@ -4879,8 +4896,8 @@ pub const Parser = struct {
     fn parseNew(self: *Parser) ParseError!*Node {
         try self.checkNesting();
         const new_start_token = self.pos;
-        _ = self.advance(); // new
-        if (self.in_async and isKeyword(self.cur(), "await")) return ParseError.UnexpectedToken;
+        const new_token = self.advance();
+        if (self.in_async and isKeyword(self.cur(), "await")) return self.failWithTokenReason(.unexpected_token);
         // `new.target` meta-property.
         if (self.match(.dot)) {
             const m = self.cur();
@@ -4889,7 +4906,7 @@ pub const Parser = struct {
             if (m.kind == .identifier and (m.escaped_identifier or !std.mem.eql(u8, m.text, "target")))
                 return self.failWithTokenReason(.new_target_invalid_identifier);
             _ = self.advance();
-            if (m.kind != .identifier) return ParseError.UnexpectedToken;
+            if (m.kind != .identifier) return self.failWithToken(.unexpected_token, m);
             // Keep the NewTarget early error attached to its own source token.
             // Template substitutions now share this parser and its offsets.
             if (self.new_target_depth == 0)
@@ -4909,7 +4926,7 @@ pub const Parser = struct {
         // therefore valid syntax (`new (import(x))`), failing later at runtime.
         // (`import.meta` parses to `.import_meta`, so `new import.meta.x()` is
         // unaffected.)
-        if (!parenthesized_callee and callee.* == .import_call) return ParseError.UnexpectedToken;
+        if (!parenthesized_callee and callee.* == .import_call) return self.failWithReasonAt(.new_import, new_token.pos);
         while (true) {
             if (self.match(.dot)) {
                 // `new MemberExpression Arguments` includes private property
@@ -4919,7 +4936,7 @@ pub const Parser = struct {
             } else if (self.check(.question_dot)) {
                 // `new o?.C()` / `new C?.()` is syntactically invalid; callers
                 // must parenthesize the optional chain (`new (o?.C)()`).
-                return ParseError.UnexpectedToken;
+                return self.failWithReasonAt(.new_optional_chain, self.cur().pos);
             } else if (self.match(.lbracket)) {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
@@ -8611,6 +8628,42 @@ test "new target diagnostics retain the rejection context and original source po
         var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
         _ = if (module) try parser.parseModule() else try parser.parseProgram();
     };
+}
+
+test "parser retains operator optional-chain and new-expression diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "null ?? true || false", .reason = .coalescing_logical_mix, .marker = "||", .message = "Unexpected token '||'. Coalescing and logical operators used together in the same expression; parentheses must be used to disambiguate." },
+        .{ .source = "true || null ?? false", .reason = .coalescing_logical_mix, .marker = "??", .message = "Unexpected token '??'. Coalescing and logical operators used together in the same expression; parentheses must be used to disambiguate." },
+        .{ .source = "\"use strict\"; delete value", .reason = .strict_delete_identifier, .marker = "value", .message = "Cannot delete unqualified property 'value' in strict mode." },
+        .{ .source = "-1 ** 2", .reason = .unary_exponentiation, .marker = "**", .message = "Unexpected token '**'. Ambiguous unary expression in the left hand side of the exponentiation expression; parentheses must be used to disambiguate the expression." },
+        .{ .source = "tag?.value``", .reason = .optional_chain_tagged_template, .marker = "`", .message = "Cannot use tagged templates in an optional chain." },
+        .{ .source = "new import('x')", .reason = .new_import, .marker = "new", .message = "Cannot use new with import." },
+        .{ .source = "new value?.member()", .reason = .new_optional_chain, .marker = "?", .message = "Cannot call constructor in an optional chain." },
+        .{ .source = "new value?.()", .reason = .new_optional_chain, .marker = "?", .message = "Cannot call constructor in an optional chain." },
+        .{ .source = "value . 1", .reason = .expected_property_after_dot, .marker = "1", .message = "Unexpected number '1'. Expected a property name after '.'." },
+        .{ .source = "value . +", .reason = .expected_property_after_dot, .marker = "+", .message = "Unexpected token '+'. Expected a property name after '.'." },
+        .{ .source = "new . 1", .reason = .unexpected_token, .marker = "1", .message = "Unexpected number '1'" },
+        .{ .source = "new . +", .reason = .unexpected_token, .marker = "+", .message = "Unexpected token '+'" },
+        // JavaScriptCore 625.1.22 accepts this form, but Node 24.18 rejects it
+        // as required by the async-function grammar. Retain that correct gate.
+        .{ .source = "async function f() { new await value; }", .reason = .unexpected_token, .marker = "await", .message = "Unexpected identifier 'await'" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
 }
 
 test "parser validates module string export names" {

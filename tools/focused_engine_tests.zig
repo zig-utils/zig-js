@@ -219,6 +219,31 @@ const frontend_cases = [_]Case{
         .expected = 511,
     },
     .{
+        .name = "expression grammar SyntaxErrors retain engine-oracle prose",
+        .source =
+        \\var rows = [
+        \\  ["null ?? true || false", "Unexpected token '||'. Coalescing and logical operators used together in the same expression; parentheses must be used to disambiguate."],
+        \\  ["true || null ?? false", "Unexpected token '??'. Coalescing and logical operators used together in the same expression; parentheses must be used to disambiguate."],
+        \\  ["\"use strict\"; delete value", "Cannot delete unqualified property 'value' in strict mode."],
+        \\  ["-1 ** 2", "Unexpected token '**'. Ambiguous unary expression in the left hand side of the exponentiation expression; parentheses must be used to disambiguate the expression."],
+        \\  ["tag?.value``", "Cannot use tagged templates in an optional chain."],
+        \\  ["new import('x')", "Cannot use new with import."],
+        \\  ["new value?.member()", "Cannot call constructor in an optional chain."],
+        \\  ["new value?.()", "Cannot call constructor in an optional chain."],
+        \\  ["value . 1", "Unexpected number '1'. Expected a property name after '.'."],
+        \\  ["value . +", "Unexpected token '+'. Expected a property name after '.'."],
+        \\  ["new . 1", "Unexpected number '1'"],
+        \\  ["new . +", "Unexpected token '+'"],
+        \\  ["async function f() { new await value; }", "Unexpected identifier 'await'"],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 8191,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.
