@@ -1285,6 +1285,61 @@ test "Thread completion result is precisely rooted before done despite exhausted
     try std.testing.expectEqual(baseline, heap.live_cells);
 }
 
+test "Thread completion root survives actual moving GC after temp-root OOM" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.gc_scan_native_stack = false;
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    const heap = ctx.gc.?;
+    heap.collect();
+    const baseline = heap.live_cells;
+
+    // Fill multiple backing chunks with unreachable cells so the result graph
+    // is allocated in a tail chunk that the real compactor can evacuate.
+    for (0..4096) |_| _ = try gc_mod.allocObj(ctx.arena());
+
+    var record = ThreadRecord{ .id = 1, .gil = undefined, .ctx = ctx };
+    try ctx.js_threads.append(ctx.gpa, &record);
+    defer _ = ctx.js_threads.pop();
+    const result = try gc_mod.allocObj(ctx.arena());
+    const child = try gc_mod.allocObj(ctx.arena());
+    try result.setOwn(ctx.arena(), ctx.root_shape, "child", Value.obj(child));
+    try child.setOwn(ctx.arena(), ctx.root_shape, "marker", Value.num(887));
+
+    var unavailable = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    var machine = ctx.interpreter();
+    machine.arena = unavailable.allocator();
+    try std.testing.expectError(error.OutOfMemory, machine.pushTempRoot(Value.obj(result)));
+    rootThreadResult(&record, Value.obj(result));
+    try std.testing.expect(!record.done);
+
+    const old_result = @intFromPtr(result);
+    const old_child = @intFromPtr(child);
+    // This synthetic record has no OS peer. Open the same planning/token pair
+    // Context uses after stopping every mutator; the public quiescent entry
+    // deliberately rejects the pre-`done` record as a running Thread.
+    const backing = ctx.gc_cell_backing.?;
+    ctx.gc_relocation_active.store(true, .release);
+    defer ctx.gc_relocation_active.store(false, .release);
+    backing.beginRelocationPlanning();
+    defer backing.endRelocationPlanning();
+    const compacted = heap.collectAndCompact();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+
+    const moved_result = threadResult(&record).asObj();
+    const moved_child = moved_result.getOwn("child").?.asObj();
+    try std.testing.expect(old_result != @intFromPtr(moved_result));
+    try std.testing.expect(old_child != @intFromPtr(moved_child));
+    try std.testing.expectEqual(@as(f64, 887), moved_child.getOwn("marker").?.asNum());
+    try std.testing.expect(!record.done);
+
+    rootThreadResult(&record, Value.undef());
+    heap.collect();
+    try std.testing.expectEqual(baseline, heap.live_cells);
+}
+
 test "Thread asyncJoin commits exact OOM for every pending capability before settlement completion" {
     for (0..4) |phase| {
         const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_threads = true });
