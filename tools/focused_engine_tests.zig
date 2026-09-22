@@ -109,9 +109,37 @@ const frontend_cases = [_]Case{
         \\if (tag`${typeof /}/}` === "object") bits |= 64;
         \\var escaped = `a${"a\"b".split("").map(c => { return /\"/.test(c) ? "&quot;" : c }).join("")}z`;
         \\if (escaped === "aa&quot;bz") bits |= 128;
+        \\var i = 1; if (`${i++ / 2}` === "0.5") bits |= 256;
         \\bits
         ,
-        .expected = 255,
+        .expected = 511,
+    },
+    .{
+        .name = "division and regex remain distinct after updates properties and control heads",
+        .source =
+        \\var bits = 0;
+        \\var i = 1; if (i++ / 2 === 0.5) bits |= 1;
+        \\var t = 4; if (t--/2 === 2) bits |= 2;
+        \\var x = 10, y = 2; if (x++ /y/ 1 === 5) bits |= 4;
+        \\var n = 3; if (n-- / 3 === 1) bits |= 8;
+        \\var o = { default: 8 }; if (o.default / 2 === 4) bits |= 16;
+        \\var s = { delete: 12, total: 3, in: 9 }; if (s.delete / s.total === 4) bits |= 32; if (s.in / 3 === 3) bits |= 64;
+        \\var r = { return: 10 }; if (r.return / 2 === 5) bits |= 128;
+        \\var m = { default: 10 }; if (m?.default / 5 === 2) bits |= 256;
+        \\var a = 0; if (1) /"/.test("\"") && (a = 1); if (a === 1) bits |= 512;
+        \\var b = 0; if (1) /}/.test("}") && (b = 1); if (b === 1) bits |= 1024;
+        \\var c = 0, wi = 0; while (wi++ < 1) /}/.test("}") && (c = 1); if (c === 1) bits |= 2048;
+        \\var d = 0; for (var fi = 0; fi < 1; fi++) /"/.test("\"") && (d = 1); if (d === 1) bits |= 4096;
+        \\function min(a){if(a)/"/.test(a)&&(a=1);return a} if (min("\"") === 1) bits |= 8192;
+        \\function* gen(){ yield /a/.source; } if (gen().next().value === "a") bits |= 16384;
+        \\async function asyncRegex(){ return await /a/.source; } bits |= 32768;
+        \\if (++/a/g.lastIndex === 1) bits |= 65536;
+        \\function returned(){ return /a/.source; } if (returned() === "a") bits |= 131072;
+        \\var dw = 0; do {} while (0) /x/.test("x") && (dw = 1); if (dw === 1) bits |= 262144;
+        \\var w = 0; with ({}) /x/.test("x") && (w = 1); if (w === 1) bits |= 524288;
+        \\bits
+        ,
+        .expected = 1048575,
     },
     .{
         .name = "class private field",

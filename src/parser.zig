@@ -3323,7 +3323,7 @@ pub const Parser = struct {
         // `yield \n x` yields undefined. `yield*` always takes an operand (its
         // newline restriction, before the `*`, was already enforced above).
         if (delegate or (self.noNewlineBefore(0) and self.startsExpression())) {
-            arg = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseAssignment();
+            arg = try self.parseAssignment();
         }
         return self.alloc(.{ .yield_expr = .{ .argument = arg, .delegate = delegate } });
     }
@@ -3841,7 +3841,7 @@ pub const Parser = struct {
         // identifier is then rejected as a reserved reference in its context).
         if (self.in_async and !self.cur().escaped_identifier and isKeyword(self.cur(), "await")) {
             const await_token = self.advance();
-            const operand = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseUnaryOperand();
+            const operand = try self.parseUnaryOperand();
             try self.rejectExponentAfterUnary();
             return self.alloc(.{ .await_expr = .{ .argument = operand, .offset = await_token.pos } });
         }
@@ -6357,6 +6357,19 @@ test "parser keeps class field initializers out of enclosing await context" {
     try std.testing.expectError(ParseError.UnexpectedToken, await_expr.parseProgram());
 }
 
+test "yield and await regex operands retain postfix member tails" {
+    const sources = [_][]const u8{
+        "function* g(){ yield /a/.source; }",
+        "async function f(){ return await /a/.source; }",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+}
+
 test "parser rejects malformed untagged template escapes" {
     const invalid = [_][]const u8{
         "`\\x0`",
@@ -6647,6 +6660,7 @@ test "template substitutions use the ordinary expression token stream" {
         "var x = `${ (function(v){ switch (v) { case /}/.source: return 12 } })(\"}\") }`; x",
         "function t(s, v){ return v; } var x = t`${ typeof /}/ }`; x",
         "var s = 'a\"b'; var x = `${s.split(\"\").map(c => { return /\"/.test(c) ? \"&quot;\" : c }).join(\"\")}`; x",
+        "var i = 1; var x = `${i++ / 2}`; x",
     };
     for (sources) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

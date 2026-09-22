@@ -104,6 +104,11 @@ pub const Token = struct {
 /// report it as `RangeError: Maximum call stack size exceeded.`.
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory, StackExhausted };
 
+const identifier_property: u8 = 1 << 0;
+const identifier_escaped: u8 = 1 << 1;
+const identifier_for_await: u8 = 1 << 2;
+const identifier_expression_flags = identifier_property | identifier_escaped;
+
 /// A single-pass JavaScript tokenizer for the v1 expression/statement subset.
 /// String escapes are decoded into freshly allocated buffers in `arena`.
 pub const Lexer = struct {
@@ -114,6 +119,20 @@ pub const Lexer = struct {
     /// start of a regex literal).
     prev_kind: TokenKind = .eof,
     prev_text: []const u8 = "",
+    prev_identifier_context: u8 = 0,
+    last_update_postfix: bool = false,
+    /// Set while trivia before the next token is consumed. This lets `++` and
+    /// `--` distinguish their restricted postfix form without rescanning the
+    /// source gap.
+    line_terminator_before_token: bool = false,
+    /// Parenthesis depth plus the innermost depth opened by a control statement
+    /// head. The scalar covers ordinary control flow; only simultaneously open
+    /// control heads need overflow storage. A closing control `)` can then admit
+    /// the following statement's regular-expression literal.
+    paren_depth: usize = 0,
+    control_paren_depth: usize = 0,
+    outer_control_paren_depths: std.ArrayListUnmanaged(usize) = .empty,
+    last_rparen_control: bool = false,
     last_identifier_escaped: bool = false,
     last_error_offset: ?usize = null,
     /// Brace depth for each active TemplateSubstitution. A zero top entry means
@@ -176,6 +195,7 @@ pub const Lexer = struct {
             if (c == '\r' or c == '\n') {
                 self.i += 1;
                 self.at_line_start = true; // a `-->` after this is an HTML close comment
+                self.line_terminator_before_token = true;
             } else if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
                 self.i += 1;
             } else if (c == '/' and self.peek2() == '/') {
@@ -185,7 +205,10 @@ pub const Lexer = struct {
                 const had_nl = self.skipBlockComment() catch return LexError.UnterminatedComment;
                 // A block comment containing a line terminator counts as a
                 // LineTerminatorSequence for the purpose of a following `-->`.
-                if (had_nl) self.at_line_start = true;
+                if (had_nl) {
+                    self.at_line_start = true;
+                    self.line_terminator_before_token = true;
+                }
             } else if (self.html_comments and c == '<' and self.peek2() == '!' and
                 self.i + 3 < self.src.len and self.src[self.i + 2] == '-' and self.src[self.i + 3] == '-')
             {
@@ -210,6 +233,7 @@ pub const Lexer = struct {
                 if (isLineTermCp(cp)) {
                     self.i += len;
                     self.at_line_start = true;
+                    self.line_terminator_before_token = true;
                 } else if (isSpaceCp(cp)) {
                     self.i += len;
                 } else break;
@@ -473,6 +497,8 @@ pub const Lexer = struct {
     pub fn next(self: *Lexer) LexError!Token {
         const prev = self.prev_kind;
         const prev_text = self.prev_text;
+        const prev_identifier_context = self.prev_identifier_context;
+        self.line_terminator_before_token = false;
         var t = self.nextRaw() catch |err| {
             self.last_error_offset = @min(self.i, self.src.len);
             return err;
@@ -505,10 +531,47 @@ pub const Lexer = struct {
                 self.brace_top -= 1;
                 break :blk self.brace_obj[self.brace_top];
             } else false;
-        } else if (t.kind == .identifier and std.mem.eql(u8, t.text, "function")) {
-            self.pending_function_expr = functionExprAllowed(prev, prev_text);
+        } else if (t.kind == .identifier) {
+            if (std.mem.eql(u8, t.text, "function"))
+                self.pending_function_expr = functionExprAllowed(prev, prev_text);
+            var identifier_context: u8 = 0;
+            if (prev == .dot or prev == .question_dot)
+                identifier_context |= identifier_property;
+            if (t.escaped_identifier) identifier_context |= identifier_escaped;
+            if (!t.escaped_identifier and t.text.len == 5 and t.text[0] == 'a' and
+                std.mem.eql(u8, t.text, "await") and
+                prev == .identifier and prev_identifier_context == 0 and
+                std.mem.eql(u8, prev_text, "for"))
+                identifier_context |= identifier_for_await;
+            if (identifier_context != 0 or self.prev_identifier_context != 0)
+                self.prev_identifier_context = identifier_context;
+        } else if (t.kind == .lparen) {
+            self.paren_depth += 1;
+            if (controlHeadBeforeParen(prev, prev_text, prev_identifier_context)) {
+                if (self.control_paren_depth != 0)
+                    try self.outer_control_paren_depths.append(self.arena, self.control_paren_depth);
+                self.control_paren_depth = self.paren_depth;
+            }
+        } else if (t.kind == .rparen) {
+            self.last_rparen_control = false;
+            if (self.paren_depth != 0) {
+                if (self.control_paren_depth == self.paren_depth) {
+                    self.last_rparen_control = true;
+                    self.control_paren_depth = self.outer_control_paren_depths.pop() orelse 0;
+                }
+                self.paren_depth -= 1;
+            }
         } else if (self.pending_function_expr and (t.kind == .semicolon or t.kind == .colon or t.kind == .eof)) {
             self.pending_function_expr = false;
+        }
+        if (t.kind == .plus_plus or t.kind == .minus_minus) {
+            self.last_update_postfix = !self.line_terminator_before_token and tokenEndsExpression(
+                prev,
+                prev_text,
+                prev_identifier_context,
+                self.last_rbrace_object,
+                self.last_rparen_control,
+            );
         }
         self.prev_kind = t.kind;
         self.prev_text = t.text;
@@ -519,11 +582,16 @@ pub const Lexer = struct {
     /// the previous token does not end an expression.
     fn regexAllowed(self: *Lexer) bool {
         return switch (self.prev_kind) {
-            .number, .string, .template_no_substitution, .template_tail, .regex, .private_name, .rparen, .rbracket => false,
+            .number, .string, .template_no_substitution, .template_tail, .regex, .private_name, .rbracket => false,
+            .rparen => self.last_rparen_control,
+            .plus_plus, .minus_minus => !self.last_update_postfix,
             // A `}` that closed an object literal ends an expression (division);
             // one that closed a block does not (regex allowed).
             .rbrace => !self.last_rbrace_object,
-            .identifier => isOperandKeyword(self.prev_text), // `return /re/` yes, `x / y` no
+            // `return /re/` starts a literal, while `x / y` and
+            // `object.return / y` use division.
+            .identifier => (self.prev_identifier_context & identifier_expression_flags) == 0 and
+                isOperandKeyword(self.prev_text),
             else => true,
         };
     }
@@ -1493,6 +1561,45 @@ fn functionExprAllowed(prev_kind: TokenKind, prev_text: []const u8) bool {
     };
 }
 
+fn tokenEndsExpression(
+    kind: TokenKind,
+    text: []const u8,
+    identifier_context: u8,
+    rbrace_is_object: bool,
+    rparen_is_control: bool,
+) bool {
+    return switch (kind) {
+        .number,
+        .string,
+        .template_no_substitution,
+        .template_tail,
+        .regex,
+        .private_name,
+        .rbracket,
+        => true,
+        .rparen => !rparen_is_control,
+        .rbrace => rbrace_is_object,
+        .identifier => (identifier_context & identifier_expression_flags) != 0 or
+            !isOperandKeyword(text),
+        else => false,
+    };
+}
+
+fn controlHeadBeforeParen(
+    prev_kind: TokenKind,
+    prev_text: []const u8,
+    prev_identifier_context: u8,
+) bool {
+    if (prev_kind != .identifier or
+        (prev_identifier_context & identifier_expression_flags) != 0) return false;
+    if (std.mem.eql(u8, prev_text, "if") or
+        std.mem.eql(u8, prev_text, "while") or
+        std.mem.eql(u8, prev_text, "for") or
+        std.mem.eql(u8, prev_text, "with")) return true;
+    return std.mem.eql(u8, prev_text, "await") and
+        (prev_identifier_context & identifier_for_await) != 0;
+}
+
 fn isOperandKeyword(text: []const u8) bool {
     const words = [_][]const u8{
         "return", "typeof",  "instanceof", "in",   "new",
@@ -1519,6 +1626,53 @@ test "lexer tokenizes arithmetic" {
     try std.testing.expectEqual(TokenKind.star, (try lx.next()).kind);
     try std.testing.expectEqual(@as(f64, 3), (try lx.next()).number);
     try std.testing.expectEqual(TokenKind.eof, (try lx.next()).kind);
+}
+
+test "lexer distinguishes update division property names and control-head regex" {
+    const cases = [_]struct {
+        source: []const u8,
+        expected: []const TokenKind,
+    }{
+        .{ .source = "i++ / 2", .expected = &.{ .identifier, .plus_plus, .slash, .number, .eof } },
+        .{ .source = "t--/2", .expected = &.{ .identifier, .minus_minus, .slash, .number, .eof } },
+        .{ .source = "i/*same line*/++ / 2", .expected = &.{ .identifier, .plus_plus, .slash, .number, .eof } },
+        .{ .source = "++/a/g.lastIndex", .expected = &.{ .plus_plus, .regex, .dot, .identifier, .eof } },
+        .{ .source = "i\n++/a/g.lastIndex", .expected = &.{ .identifier, .plus_plus, .regex, .dot, .identifier, .eof } },
+        .{ .source = "i/*\n*/++/a/g.lastIndex", .expected = &.{ .identifier, .plus_plus, .regex, .dot, .identifier, .eof } },
+        .{ .source = "i\u{2028}++/a/g.lastIndex", .expected = &.{ .identifier, .plus_plus, .regex, .dot, .identifier, .eof } },
+        .{ .source = "o.default / 2", .expected = &.{ .identifier, .dot, .identifier, .slash, .number, .eof } },
+        .{ .source = "o.\\u0064efault / 2", .expected = &.{ .identifier, .dot, .identifier, .slash, .number, .eof } },
+        .{ .source = "o?.return / 2", .expected = &.{ .identifier, .question_dot, .identifier, .slash, .number, .eof } },
+        .{ .source = "if (f((1))) /}/.source", .expected = &.{ .identifier, .lparen, .identifier, .lparen, .lparen, .number, .rparen, .rparen, .rparen, .regex, .dot, .identifier, .eof } },
+        .{ .source = "while (i++ < 1) /\"/.source", .expected = &.{ .identifier, .lparen, .identifier, .plus_plus, .lt, .number, .rparen, .regex, .dot, .identifier, .eof } },
+        .{ .source = "do {} while (0) /x/.source", .expected = &.{ .identifier, .lbrace, .rbrace, .identifier, .lparen, .number, .rparen, .regex, .dot, .identifier, .eof } },
+        .{ .source = "with ({}) /x/.source", .expected = &.{ .identifier, .lparen, .lbrace, .rbrace, .rparen, .regex, .dot, .identifier, .eof } },
+        .{ .source = "for await (x of y) /}/.source", .expected = &.{ .identifier, .identifier, .lparen, .identifier, .identifier, .identifier, .rparen, .regex, .dot, .identifier, .eof } },
+        .{ .source = "f(1) / 2", .expected = &.{ .identifier, .lparen, .number, .rparen, .slash, .number, .eof } },
+        .{ .source = "if (1) ++/a/g.lastIndex", .expected = &.{ .identifier, .lparen, .number, .rparen, .plus_plus, .regex, .dot, .identifier, .eof } },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), case.source);
+        for (case.expected) |expected| try std.testing.expectEqual(expected, (try lx.next()).kind);
+    }
+}
+
+test "lexer restores an outer control head after a nested control head" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = Lexer.init(
+        arena.allocator(),
+        "if ((function(){ if (1) /}/.test('}') })()) /\"/.test('\\\"')",
+    );
+    var regex_count: usize = 0;
+    while (true) {
+        const token = try lexer.next();
+        if (token.kind == .regex) regex_count += 1;
+        if (token.kind == .eof) break;
+    }
+    try std.testing.expectEqual(@as(usize, 2), regex_count);
 }
 
 test "lexer normalizes numeric separators in one exact allocation" {
