@@ -1267,7 +1267,7 @@ phases in order:
 
 1. a clean library/header build;
 2. the immediate incremental cache-hit build;
-3. the production-module frontend artifact from an empty cache, running all 12
+3. the production-module frontend artifact from an empty cache, running all 79
    focused cases;
 4. an exact one-case runtime filter against that cached focused artifact;
 5. the combined Debug unit artifact from a separate empty cache, running one
@@ -1284,7 +1284,7 @@ full-suite phases) the exact `plan.tsv`. `/usr/bin/time -lp` observes the whole
 build process and its children; these are scenario-level process resources,
 not invented compiler-internal phase counters. Samples run sequentially and no
 outlier is discarded. V2 additionally rejects any cache-group drift, any
-focused-engine denominator other than 12 for the cold run or one for the cached
+focused-engine denominator other than 79 for the cold run or one for the cached
 and TSan runs, and any combined focused run that does not select exactly one
 test from a positive linked inventory with zero skips, failures, or leaks. A
 preflight before and postflight after every phase reject another active Zig

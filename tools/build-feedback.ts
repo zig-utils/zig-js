@@ -17,6 +17,8 @@ import {
 
 declare const __filename: string;
 
+const FOCUSED_ENGINE_CASE_COUNT = 79;
+
 type ScenarioName =
   | "clean_library"
   | "incremental_library"
@@ -209,7 +211,7 @@ function scenarios(jobs: number): Scenario[] {
     },
     {
       name: "focused_engine_relink",
-      description: "build the production-module frontend artifact in an empty isolated cache and run all 12 cases",
+      description: `build the production-module frontend artifact in an empty isolated cache and run all ${FOCUSED_ENGINE_CASE_COUNT} cases`,
       args: ["test-frontend"],
       cache_group: "focused_engine",
     },
@@ -409,7 +411,10 @@ export function validate(artifact: Artifact): void {
         );
         const output = `${row.stdout}\n${row.stderr}`;
         if (name === "focused_engine_relink")
-          requireValue(output.includes("focused engine frontend: 12 cases passed"), `${name}: exact denominator drift`);
+          requireValue(
+            output.includes(`focused engine frontend: ${FOCUSED_ENGINE_CASE_COUNT} cases passed`),
+            `${name}: exact denominator drift`,
+          );
         else if (name === "focused_engine_cached" || name === "focused_engine_tsan")
           requireValue(output.includes("focused engine frontend: 1 case passed"), `${name}: exact denominator drift`);
         else if (name === "focused_test_relink" || name === "focused_test_cached" || name === "tsan_focused") {
@@ -542,7 +547,7 @@ export function selfTest(): void {
   const v2Scenarios = scenarios(2),
     v2Samples = v2Scenarios.map((entry): Sample => {
       const group = entry.cache_group!, output = entry.name === "focused_engine_relink"
-        ? "focused engine frontend: 12 cases passed\n"
+        ? `focused engine frontend: ${FOCUSED_ENGINE_CASE_COUNT} cases passed\n`
         : entry.name === "focused_engine_cached" || entry.name === "focused_engine_tsan"
         ? "focused engine frontend: 1 case passed\n"
         : entry.name === "focused_test_relink" || entry.name === "focused_test_cached" || entry.name === "tsan_focused"
