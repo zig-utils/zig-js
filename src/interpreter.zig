@@ -12687,14 +12687,24 @@ pub const Interpreter = struct {
     /// result, otherwise fall back to the built-in matcher only for true RegExp
     /// instances.
     fn regexpExecGeneric(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
+        return self.regexpExecGenericValue(rx, try Value.strAlloc(self.arena, s));
+    }
+
+    /// RegExpExec(R, S) for a string value S. A loop over matches passes the
+    /// same value every time: a string has no identity, so copying S for each
+    /// exec only made the loop quadratic, and the copy dropped the cell's
+    /// cached ASCII flag the built-in exec uses for O(1) index conversion (#971).
+    fn regexpExecGenericValue(self: *Interpreter, rx: Value, s_value: Value) EvalError!Value {
         if (!rx.isObject()) return self.throwError("TypeError", "RegExpExec receiver must be an object");
+        const s_root = try self.pushTempRoot(s_value);
+        defer self.restoreTempRoots(s_root);
         const exec = try self.getProperty(rx, "exec");
         if (exec.isCallable()) {
-            const result = try self.callValueWithThis(exec, &.{try Value.strAlloc(self.arena, s)}, rx);
+            const result = try self.callValueWithThis(exec, &.{self.tempRoot(s_root, s_value)}, rx);
             if (result.isNull() or (result.isObject() and !result.asObj().is_symbol and !result.asObj().is_bigint)) return result;
             return self.throwError("TypeError", "RegExp exec result must be an object or null");
         }
-        if (rx.asObj().behavior.is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{try Value.strAlloc(self.arena, s)})).?;
+        if (rx.asObj().behavior.is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{self.tempRoot(s_root, s_value)})).?;
         return self.throwError("TypeError", "RegExp exec property is not callable");
     }
 
@@ -13629,6 +13639,10 @@ pub const Interpreter = struct {
         const input_ascii = fast and input_value.strIsAscii();
         const input_u16 = if (fast) utf16LenOfStringA(s, input_ascii) else 0;
         var cursor: RxCursor = .{ .ascii = input_ascii };
+        // The generic path (a user `exec`) gets one string value for every call.
+        const exec_input = if (fast) input_value else try Value.strAlloc(self.arena, s);
+        const exec_input_root = try self.pushTempRoot(exec_input);
+        defer self.restoreTempRoots(exec_input_root);
 
         try self.setRegExpLikeLastIndex(rx, 0);
         const arr = try self.newArray();
@@ -13636,7 +13650,7 @@ pub const Interpreter = struct {
             const result = if (fast)
                 try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor)
             else
-                try self.regexpExecGeneric(rx, s);
+                try self.regexpExecGenericValue(rx, self.tempRoot(exec_input_root, exec_input));
             if (result.isNull()) return if (arr.asObj().elementsLen() == 0) Value.nul() else arr;
 
             const match_v = try self.getProperty(result, "0");
@@ -13681,13 +13695,18 @@ pub const Interpreter = struct {
         const input_ascii = fast and input_value.strIsAscii();
         const input_u16 = if (fast) utf16LenOfStringA(s, input_ascii) else 0;
         var cursor: RxCursor = .{ .ascii = input_ascii };
+        // One string value serves every generic exec and every replacer call's
+        // `string` argument (#971).
+        const exec_input = if (fast) input_value else try Value.strAlloc(self.arena, s);
+        const exec_input_root = try self.pushTempRoot(exec_input);
+        defer self.restoreTempRoots(exec_input_root);
 
         var results: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
             const result = if (fast)
                 try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor)
             else
-                try self.regexpExecGeneric(rx, s);
+                try self.regexpExecGenericValue(rx, self.tempRoot(exec_input_root, exec_input));
             if (result.isNull()) break;
             try results.append(self.arena, result);
             if (!global) break;
@@ -13730,7 +13749,7 @@ pub const Interpreter = struct {
                 try call_args.append(self.arena, try Value.strAlloc(self.arena, matched));
                 try call_args.appendSlice(self.arena, captures.items);
                 try call_args.append(self.arena, Value.num(@floatFromInt(position)));
-                try call_args.append(self.arena, try Value.strAlloc(self.arena, s));
+                try call_args.append(self.arena, self.tempRoot(exec_input_root, exec_input));
                 if (!named_captures.isUndefined()) try call_args.append(self.arena, named_captures);
                 replacement = try self.toStringWtf8(try self.callValue(replace_value, call_args.items));
             } else {
@@ -13789,6 +13808,9 @@ pub const Interpreter = struct {
         const input_u16 = if (fast) size else 0;
         var exec_cursor: RxCursor = .{ .ascii = input_ascii };
         var seg_cursor: RxCursor = .{ .ascii = input_ascii };
+        const exec_input = if (fast) input_value else try Value.strAlloc(self.arena, s);
+        const exec_input_root = try self.pushTempRoot(exec_input);
+        defer self.restoreTempRoots(exec_input_root);
 
         var p: usize = 0;
         var q: usize = 0;
@@ -13797,7 +13819,7 @@ pub const Interpreter = struct {
             const z = if (fast)
                 try self.regexBuiltinExecWith(splitter.asObj(), s, input_value, search_input, splitter_flags, input_u16, &exec_cursor)
             else
-                try self.regexpExecGeneric(splitter, s);
+                try self.regexpExecGenericValue(splitter, self.tempRoot(exec_input_root, exec_input));
             if (z.isNull()) {
                 q = advanceStringIndex(s, q, full_unicode);
                 continue;
@@ -38433,10 +38455,11 @@ fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value
     const matcher = o.getOwn("__re") orelse
         return self.throwError("TypeError", "next called on an incompatible receiver");
     if (o.getOwn("__done")) |d| if (d.toBoolean()) return self.iterResultObj(Value.undef(), true);
-    const s = try (o.getOwn("__str") orelse Value.str("")).asWtf8(self.arena);
     const global = (o.getOwn("__g") orelse Value.boolVal(false)).toBoolean();
     const unicode = (o.getOwn("__u") orelse Value.boolVal(false)).toBoolean();
-    const match = try self.regexpExecGeneric(matcher, s);
+    // Hand exec the iterator's own string value: copying it (and transcoding a
+    // flat one) on every `next()` made iterating all matches quadratic (#971).
+    const match = try self.regexpExecGenericValue(matcher, o.getOwn("__str") orelse Value.str(""));
     if (match.isNull()) {
         try self.setProp(o, "__done", Value.boolVal(true));
         return self.iterResultObj(Value.undef(), true);
@@ -38450,7 +38473,11 @@ fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value
     const match_str = try self.toStringWtf8(try self.getProperty(match, "0"));
     if (match_str.len == 0) {
         const this_index = toLen(try self.toNumberV(try self.getProperty(matcher, "lastIndex")));
-        const next_index = Interpreter.advanceStringIndex(s, this_index, unicode);
+        // AdvanceStringIndex reads the string only for a unicode matcher.
+        const next_index = if (unicode)
+            Interpreter.advanceStringIndex(try (o.getOwn("__str") orelse Value.str("")).asWtf8(self.arena), this_index, true)
+        else
+            this_index + 1;
         try self.setRegExpLikeLastIndex(matcher, @floatFromInt(next_index));
     }
     return self.iterResultObj(match, false);

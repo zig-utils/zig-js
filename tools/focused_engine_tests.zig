@@ -1164,6 +1164,43 @@ const runtime_cases = [_]Case{
         .expected = 255,
     },
     .{
+        // #971: `matchAll` and a function `replace` now hand exec and the
+        // replacer one string value instead of a fresh copy per match; results,
+        // positions, empty-match advancing and user-defined exec paths are
+        // unchanged. node v24.4.1 passes all eight checks.
+        .name = "matchAll and function replace keep their results without per-match copies",
+        .source =
+        \\var checks = [];
+        \\var s = "xbyb" + "zb".repeat(50);
+        \\// matchAll yields every match with its index, as before.
+        \\var found = [];
+        \\for (var m of s.matchAll(/b/g)) found.push(m.index);
+        \\checks.push(found.length === 52 && found[0] === 1 && found[1] === 3 && found[51] === 103);
+        \\// The replacer sees the whole input as `string`, with the right positions.
+        \\var seen = [];
+        \\var out = "a-b-c".replace(/-/g, function (match, position, string) { seen.push(position + ":" + string); return "+"; });
+        \\checks.push(out === "a+b+c" && seen.join(",") === "1:a-b-c,3:a-b-c");
+        \\// Captures and named groups still reach the replacer.
+        \\checks.push("k1=v1;k2=v2".replace(/(?<k>\w+)=(\w+)/g, function (m, k, v, p, str, groups) { return groups.k + v.toUpperCase(); }) === "k1V1;k2V2");
+        \\// A user-defined exec (the generic path) gets the same string on every call.
+        \\var inputs = [];
+        \\var calls = 0;
+        \\var rx = /b/g;
+        \\rx.exec = function (str) { inputs.push(str); calls++; return calls <= 2 ? { 0: "b", index: calls, length: 1 } : null; };
+        \\checks.push(RegExp.prototype[Symbol.replace].call(rx, "abb", function () { return "c"; }) === "acc" && inputs.length === 3 && inputs.every(function (x) { return x === "abb"; }));
+        \\calls = 0; inputs = [];
+        \\checks.push(JSON.stringify(RegExp.prototype[Symbol.match].call(rx, "abb")) === '["b","b"]' && inputs.every(function (x) { return x === "abb"; }));
+        \\// Empty matches still advance, by one unit, or by a surrogate pair under `u`.
+        \\checks.push(Array.from("ab".matchAll(/(?:)/g), function (m) { return m.index; }).join() === "0,1,2");
+        \\checks.push(Array.from("😀a".matchAll(/(?:)/gu), function (m) { return m.index; }).join() === "0,2,3");
+        \\// split on a subclassed RegExp (a user exec path) still splits.
+        \\class R extends RegExp {}
+        \\checks.push("a1b2c".split(new R("\\d")).join() === "a,b,c");
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 255,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
