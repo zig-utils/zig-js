@@ -200,6 +200,27 @@ const frontend_cases = [_]Case{
         .expected = 7,
     },
     .{
+        .name = "escaped strict literal and RegExp flag SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["void v\\u0061r", "Unexpected escaped characters in keyword token: 'v\\u0061r'"],
+        \\  ["void i\\u0066", "Unexpected escaped characters in keyword token: 'i\\u0066'"],
+        \\  ["\"use strict\"; 010", "Decimal integer literals with a leading zero are forbidden in strict mode"],
+        \\  ["\"use strict\"; 08", "Decimal integer literals with a leading zero are forbidden in strict mode"],
+        \\  ["\"use strict\"; \"\\1\"", "The only valid numeric escape in strict mode is '\\0'"],
+        \\  ["\"use strict\"; \"\\8\"", "The only valid numeric escape in strict mode is '\\0'"],
+        \\  ["/a/gg", "Invalid regular expression: invalid flags"],
+        \\  ["/a/z", "Invalid regular expression: invalid flags"],
+        \\  ["/a/uv", "Invalid regular expression: invalid flags"],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 511,
+    },
+    .{
         .name = "for head SyntaxErrors retain JSC prose",
         .source =
         \\var rows = [

@@ -93,6 +93,8 @@ pub const DiagnosticReason = enum {
     malformed_template_hex_escape,
     malformed_template_unicode_escape,
     template_numeric_escape,
+    strict_legacy_decimal,
+    invalid_regexp_flags,
     for_await_in,
     using_for_in,
     for_of_initializer,
@@ -251,6 +253,8 @@ pub const DiagnosticReason = enum {
             .malformed_template_hex_escape => "\\x can only be followed by a hex character sequence",
             .malformed_template_unicode_escape => "\\u can only be followed by a Unicode character sequence",
             .template_numeric_escape => "The only valid numeric escape in strict mode is '\\0'",
+            .strict_legacy_decimal => "Decimal integer literals with a leading zero are forbidden in strict mode",
+            .invalid_regexp_flags => "Invalid regular expression: invalid flags",
             .for_await_in => "Expected 'of' in for-await syntax.",
             .using_for_in => "Expected either 'in' or 'of' in enumeration syntax.",
             .for_of_initializer => "Cannot assign to the loop variable inside a for-of loop header.",
@@ -935,9 +939,12 @@ pub const Parser = struct {
     fn validateRegexLiteral(self: *Parser, pattern: []const u8, flags: []const u8, offset: usize) ParseError!void {
         var diagnostic: ?regex.CompileErrorReason = null;
         if (self.regex_validation_arena) |validation_arena| {
-            validateRegexLiteralWithArena(validation_arena, pattern, flags, &diagnostic) catch |err| {
-                if (diagnostic) |reason| return self.failWithReasonAt(regexDiagnosticReason(reason), offset);
-                return self.fail(err);
+            validateRegexLiteralWithArena(validation_arena, pattern, flags, &diagnostic) catch |err| switch (err) {
+                error.InvalidRegexFlags => return self.failWithReasonAt(.invalid_regexp_flags, offset),
+                else => {
+                    if (diagnostic) |reason| return self.failWithReasonAt(regexDiagnosticReason(reason), offset);
+                    return self.fail(@errorCast(err));
+                },
             };
             return;
         }
@@ -947,9 +954,12 @@ pub const Parser = struct {
         // the caller to establish the Program/Module parse scope first.
         var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
         defer validation_arena.deinit();
-        validateRegexLiteralWithArena(&validation_arena, pattern, flags, &diagnostic) catch |err| {
-            if (diagnostic) |reason| return self.failWithReasonAt(regexDiagnosticReason(reason), offset);
-            return self.fail(err);
+        validateRegexLiteralWithArena(&validation_arena, pattern, flags, &diagnostic) catch |err| switch (err) {
+            error.InvalidRegexFlags => return self.failWithReasonAt(.invalid_regexp_flags, offset),
+            else => {
+                if (diagnostic) |reason| return self.failWithReasonAt(regexDiagnosticReason(reason), offset);
+                return self.fail(@errorCast(err));
+            },
         };
     }
 
@@ -6649,7 +6659,7 @@ pub const Parser = struct {
 
     fn parsePrimary(self: *Parser) ParseError!*Node {
         if (self.check(.identifier)) {
-            if (self.isEscapedReservedWord(self.cur())) return ParseError.UnexpectedToken;
+            if (self.isEscapedReservedWord(self.cur())) return self.failWithTokenReason(.escaped_keyword);
             const w = self.cur().text;
             if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr(false);
             // `async [no LineTerminator here] function` — a newline after `async`
@@ -6673,14 +6683,14 @@ pub const Parser = struct {
         switch (t.kind) {
             .number => {
                 // Legacy octal / non-octal-decimal literals are SyntaxErrors in strict mode.
-                if (self.strict and t.legacy_octal) return ParseError.UnexpectedToken;
+                if (self.strict and t.legacy_octal) return self.failWithReasonAt(.strict_legacy_decimal, t.pos);
                 if (t.is_bigint) return self.alloc(.{ .bigint_lit = .{ .value = t.bigint, .text = t.bigint_text } });
                 return self.alloc(.{ .number = t.number });
             },
             .string => {
                 // A string with a legacy octal / non-octal-decimal escape is a
                 // SyntaxError in strict mode.
-                if (self.strict and t.legacy_octal) return ParseError.UnexpectedToken;
+                if (self.strict and t.legacy_octal) return self.failWithReasonAt(.template_numeric_escape, t.pos);
                 return self.alloc(.{ .string = t.text });
             },
             .template_no_substitution, .template_head => return self.parseTemplate(t),
@@ -6729,19 +6739,21 @@ pub const Parser = struct {
 /// Validate a regex literal's flags and pattern, returning a parse error for an
 /// invalid one. Mirrors the interpreter's eager compile so the result is the
 /// same whether the literal is rejected at parse or at evaluation.
-fn validateRegexLiteralWithArena(validation_arena: *std.heap.ArenaAllocator, pattern: []const u8, flags: []const u8, diagnostic: *?regex.CompileErrorReason) ParseError!void {
+const RegexValidationError = ParseError || error{InvalidRegexFlags};
+
+fn validateRegexLiteralWithArena(validation_arena: *std.heap.ArenaAllocator, pattern: []const u8, flags: []const u8, diagnostic: *?regex.CompileErrorReason) RegexValidationError!void {
     _ = validation_arena.reset(.retain_capacity);
     defer _ = validation_arena.reset(.retain_capacity);
     _ = try compileRegexLiteralForValidation(validation_arena.allocator(), pattern, flags, diagnostic);
 }
 
-fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8, diagnostic: *?regex.CompileErrorReason) ParseError!regex.Regex {
+fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8, diagnostic: *?regex.CompileErrorReason) RegexValidationError!regex.Regex {
     var seen = std.mem.zeroes([128]bool);
     for (flags) |f| {
-        if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f]) return ParseError.UnexpectedToken;
+        if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f]) return error.InvalidRegexFlags;
         seen[f] = true;
     }
-    if (seen['u'] and seen['v']) return ParseError.UnexpectedToken;
+    if (seen['u'] and seen['v']) return error.InvalidRegexFlags;
     const cf = regex.common.CompileFlags{
         .case_insensitive = seen['i'],
         .multiline = seen['m'],
@@ -9923,6 +9935,36 @@ test "regex literal validation preserves exact compile diagnostics" {
         var parser = try Parser.init(arena.allocator(), case.source);
         try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains escaped strict literal and regexp flag diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "void v\\u0061r", .reason = .escaped_keyword, .marker = "v\\u0061r", .message = "Unexpected escaped characters in keyword token: 'v\\u0061r'" },
+        .{ .source = "void i\\u0066", .reason = .escaped_keyword, .marker = "i\\u0066", .message = "Unexpected escaped characters in keyword token: 'i\\u0066'" },
+        .{ .source = "\"use strict\"; 010;", .reason = .strict_legacy_decimal, .marker = "010", .message = "Decimal integer literals with a leading zero are forbidden in strict mode" },
+        .{ .source = "\"use strict\"; 08;", .reason = .strict_legacy_decimal, .marker = "08", .message = "Decimal integer literals with a leading zero are forbidden in strict mode" },
+        .{ .source = "\"use strict\"; \"\\1\";", .reason = .template_numeric_escape, .marker = "\"\\1\"", .message = "The only valid numeric escape in strict mode is '\\0'" },
+        .{ .source = "\"use strict\"; \"\\8\";", .reason = .template_numeric_escape, .marker = "\"\\8\"", .message = "The only valid numeric escape in strict mode is '\\0'" },
+        .{ .source = "/a/gg", .reason = .invalid_regexp_flags, .marker = "/a/gg", .message = "Invalid regular expression: invalid flags" },
+        .{ .source = "/a/z", .reason = .invalid_regexp_flags, .marker = "/a/z", .message = "Invalid regular expression: invalid flags" },
+        .{ .source = "/a/uv", .reason = .invalid_regexp_flags, .marker = "/a/uv", .message = "Invalid regular expression: invalid flags" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
     }
 }
