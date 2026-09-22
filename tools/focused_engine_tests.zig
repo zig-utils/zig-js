@@ -1201,6 +1201,100 @@ const runtime_cases = [_]Case{
         .expected = 255,
     },
     .{
+        // zig-regex#28: multiline ^ and $ treat every LineTerminator (LF, CR, U+2028,
+        // U+2029) as a line boundary, whichever engine runs the pattern. node v24.4.1
+        // passes all sixteen checks.
+        .name = "multiline anchors see CR, U+2028 and U+2029 as line ends",
+        .source =
+        \\function at(m) { return m === null ? -1 : m.index; }
+        \\var checks = [];
+        \\checks.push(at(/^b/m.exec("a\rb")) === 2);
+        \\checks.push(at(/a$/m.exec("a\r\nb")) === 0);
+        \\checks.push(at(/^b/m.exec("a\u2028b")) === 2);
+        \\checks.push(at(/a$/m.exec("a\u2029b")) === 0);
+        \\checks.push(Array.from("\r\n".matchAll(/^$/mg), function (m) { return m.index; }).join() === "0,1,2");
+        \\checks.push(JSON.stringify("a\r\nb\rc\u2028d".match(/^\w$/gm)) === '["a","b","c","d"]');
+        \\checks.push(at(/(?=b)^b/m.exec("a\rb")) === 2);
+        \\checks.push("l1\r\nl2\r\nl3".replace(/^/gm, "> ") === "> l1\r> \n> l2\r> \n> l3");
+        \\checks.push(JSON.stringify("x\r\ny".split(/$/m)) === '["x","\\r","\\ny"]');
+        \\checks.push(at(/x.^b/ms.exec("x\u2028b")) === 0);
+        \\checks.push(/x.^b/ms.exec("x\u00e9b") === null && /x.^b/ms.exec("x\u20acb") === null);
+        \\checks.push(/^b/.exec("a\rb") === null);
+        \\checks.push(at(/a(?=$)/m.exec("a\u2028")) === 0);
+        \\var sticky = /^b/my;
+        \\sticky.lastIndex = 2;
+        \\checks.push(at(sticky.exec("a\rb")) === 2);
+        \\checks.push(at(/(?m:a$)/.exec("a\rb")) === 0 && /(?-m:a$)/m.exec("a\rb") === null);
+        \\checks.push(at(/.$/m.exec("ab\rcd")) === 1);
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 65535,
+    },
+    .{
+        // zig-regex#29: an ignoreCase backreference compares characters after
+        // Canonicalize -- simple case folding with u, the single-code-unit toUppercase
+        // rule without it -- so folded pairs of different byte lengths match. Each
+        // row is [pattern, flags, input, the match node v24.4.1 returns].
+        .name = "ignoreCase backreferences compare canonicalized characters",
+        .source =
+        \\var rows = [
+        \\  ["(\u00e0)\\1", "i", "\u00e0\u00c0", "\u00e0\u00c0"],
+        \\  ["(\u03c3)\\1", "i", "\u03c3\u03c2", "\u03c3\u03c2"],
+        \\  ["(\u03a3)\\1\\1", "i", "\u03a3\u03c3\u03c2", "\u03a3\u03c3\u03c2"],
+        \\  ["(\u0101)\\1", "i", "\u0101\u0100", "\u0101\u0100"],
+        \\  ["(\u0434)\\1", "i", "\u0434\u0414", "\u0434\u0414"],
+        \\  ["(\u01c6)\\1", "i", "\u01c6\u01c5", "\u01c6\u01c5"],
+        \\  ["(?<n>\u03c3)\\k<n>", "i", "\u03c2\u03a3", "\u03c2\u03a3"],
+        \\  ["(.)\\1", "i", "\u023a\u2c65", "\u023a\u2c65"],
+        \\  ["(.)\\1", "i", "\u1fbe\u0399", "\u1fbe\u0399"],
+        \\  ["(\u00df)\\1", "i", "\u00df\u1e9e", null],
+        \\  ["(.)\\1", "i", "\u017fs", null],
+        \\  ["(.)\\1", "i", "\u212ak", null],
+        \\  ["(.)\\1", "i", "\u2126\u03c9", null],
+        \\  ["(\u00e9+)x\\1", "i", "\u00e9\u00e9x\u00c9\u00c9", "\u00e9\u00e9x\u00c9\u00c9"],
+        \\  ["(\u017f)\\1", "iu", "\u017fs", "\u017fs"],
+        \\  ["(s)\\1", "iu", "s\u017f", "s\u017f"],
+        \\  ["(k)\\1", "iu", "\u212aK", "\u212aK"],
+        \\];
+        \\rows.reduce(function (bits, r, i) {
+        \\  var m = new RegExp(r[0], r[1]).exec(r[2]);
+        \\  return (m === null ? null : m[0]) === r[3] ? bits | (1 << i) : bits;
+        \\}, 0)
+        ,
+        .expected = 131071,
+    },
+    .{
+        // zig-regex#29, continued: u-mode folds (ſ/s, Kelvin sign, ß/ẞ, astral)
+        // and backreferences inside lookbehinds, checked against node v24.4.1.
+        .name = "ignoreCase backreferences fold under u and inside lookbehinds",
+        .source =
+        \\var rows = [
+        \\  ["(K)\\1", "iu", "K\u212a", "K\u212a"],
+        \\  ["(\u00df)\\1", "iu", "\u00df\u1e9e", "\u00df\u1e9e"],
+        \\  ["(\u1e9e)\\1", "iu", "\u1e9e\u00df", "\u1e9e\u00df"],
+        \\  ["(\u00df)\\1", "iu", "\u00dfss", null],
+        \\  ["(\u017f)\\1", "iu", "\u017f", null],
+        \\  ["(.)\\1", "iu", "\ud801\udc00\ud801\udc28", "\ud801\udc00\ud801\udc28"],
+        \\  ["^(\u017fK)\\1x$", "iu", "\u017fKsKx", "\u017fKsKx"],
+        \\  ["(?<n>k)\\k<n>", "iu", "\u212ak", "\u212ak"],
+        \\  ["(?<=\\1(k))x", "iu", "\u212akx", "x"],
+        \\  ["(?<=\\1(k))x", "i", "\u212akx", null],
+        \\  ["(?<=\\1(\u017f))x", "iu", "s\u017fx", "x"],
+        \\  ["(?<=\\1(s))x", "iu", "\u017fsx", "x"],
+        \\  ["(?<=\\1(s))x", "i", "\u017fsx", null],
+        \\  ["(?<=\\1(\u00e0))x", "i", "\u00c0\u00e0x", "x"],
+        \\  ["(?<=\\1(\u00df))x", "i", "\u1e9e\u00dfx", null],
+        \\  ["(?<=\\1(\u00df))x", "iu", "\u1e9e\u00dfx", "x"],
+        \\  ["(?<=\\1(.))x", "i", "\u023a\u2c65x", "x"],
+        \\];
+        \\rows.reduce(function (bits, r, i) {
+        \\  var m = new RegExp(r[0], r[1]).exec(r[2]);
+        \\  return (m === null ? null : m[0]) === r[3] ? bits | (1 << i) : bits;
+        \\}, 0)
+        ,
+        .expected = 131071,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
