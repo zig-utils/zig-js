@@ -1335,6 +1335,41 @@ const runtime_cases = [_]Case{
         .expected = 4194303,
     },
     .{
+        // zig-regex#31: the regex engine's ReDoS analyzer ran on every compile
+        // and refused "critical" patterns outright, so nested quantifiers --
+        // ordinary JavaScript -- threw a SyntaxError before they could match.
+        // Exponential backtracking is a property of the backtracking engine
+        // alone; these patterns run on the linear Thompson engines, which are
+        // bounded by NFA size instead. Every answer below is node v24.4.1's.
+        .name = "nested quantifiers compile and match instead of being refused",
+        .source =
+        \\function ex(re, s) {
+        \\  var m = re.exec(s);
+        \\  return m === null ? "null" : JSON.stringify([m.index].concat(Array.prototype.slice.call(m)));
+        \\}
+        \\function ok(fn) { try { fn(); return true; } catch (e) { return false; } }
+        \\var checks = [];
+        \\checks.push(ex(/(a*)*/, "b") === '[0,"",null]');
+        \\checks.push(ex(/(a*)*/, "aa") === '[0,"aa","aa"]');
+        \\checks.push(ex(/(a+)+/, "aaa") === '[0,"aaa","aaa"]');
+        \\checks.push(ex(/(a+)+b/, "aaab") === '[0,"aaab","aaa"]');
+        \\checks.push(ex(/(?:a*)+b/, "aab") === '[0,"aab"]');
+        \\checks.push(ex(/(?:a*)*b/, "b") === '[0,"b"]');
+        \\checks.push(ex(/((a)|(b))+/, "ab") === '[0,"ab","b",null,"b"]');
+        \\checks.push(ex(/(a|aa)+c/, "aaac") === '[0,"aaac","a"]');
+        \\checks.push(/(a+)+$/.test("aaaa") === true);
+        \\checks.push("aaa".replace(/(a*)*/, "[$1]") === "[aaa]");
+        \\checks.push(JSON.stringify("xaay".split(/(a*)*/)) === '["x","aa","y"]');
+        \\checks.push(JSON.stringify("aab".match(/(?:a*)+/g)) === '["aa","",""]');
+        \\checks.push(ok(function () { new RegExp("(a*)*"); }));
+        \\checks.push(ok(function () { new RegExp("(\\w+\\s?)*"); }));
+        \\checks.push(ok(function () { new RegExp("^(a+)+$"); }));
+        \\checks.push(ex(/^(a+)+$/, "aaaa") === '[0,"aaaa","aaaa"]');
+        \\checks.reduce(function (bits, y, i) { return y ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 65535,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
