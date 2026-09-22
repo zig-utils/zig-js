@@ -167,6 +167,8 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err|
         return self.throwParserSyntaxError("Function body", source, &parser, err);
+    parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err|
+        return self.throwParserSyntaxError("Function body", source, &parser, err);
     try self.registerParsedDynamicDebugScript(source, "Function", 1, &parser);
     // Create the function in the Function constructor's own realm (so its
     // closure — and thus [[Realm]] — is that realm).

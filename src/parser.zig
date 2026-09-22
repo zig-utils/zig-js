@@ -3058,6 +3058,20 @@ pub const Parser = struct {
         if (!self.check(.eof)) return ParseError.UnexpectedToken;
     }
 
+    /// CreateDynamicFunction requires the supplied body text to remain inside
+    /// the synthesized function. A body that closes the function early can make
+    /// the assembled wrapper parse successfully, so require the parse to contain
+    /// exactly that one function expression with the complete expected span.
+    pub fn validateDynamicFunctionProgram(self: *Parser, program: *const Node, expected_source: []const u8) ParseError!void {
+        if (program.* != .program or program.program.len != 1) return self.fail(ParseError.UnexpectedToken);
+        const statement = program.program[0];
+        if (statement.* != .expr_stmt or statement.expr_stmt.* != .function)
+            return self.fail(ParseError.UnexpectedToken);
+        const parsed_source = statement.expr_stmt.function.source;
+        if (parsed_source.len != expected_source.len or parsed_source.ptr != expected_source.ptr)
+            return self.fail(ParseError.UnexpectedToken);
+    }
+
     fn isEvalOrArguments(name: []const u8) bool {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
     }
@@ -6152,6 +6166,32 @@ test "parser reserves strict parameter uniqueness storage once" {
         &.{ .{ .name = "first" }, .{ .name = "implements" } },
     };
     for (invalid) |case| try std.testing.expectError(ParseError.UnexpectedToken, parser.validateStrictParams(case));
+}
+
+test "dynamic function validation pins the synthesized function boundary" {
+    const valid_source = "(function(a\n) {\nreturn a;\n})";
+    var valid_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer valid_arena.deinit();
+    var valid = try Parser.initWithScratch(valid_arena.allocator(), std.testing.allocator, valid_source);
+    const valid_program = try valid.parseProgram();
+    try valid.validateDynamicFunctionProgram(valid_program, valid_source[1 .. valid_source.len - 1]);
+
+    const injected = [_][]const u8{
+        "(function(\n) {\n}); globalThis.injected = 1; (function(){\n})",
+        "(function(\n) {\n}, function(){ return 'inj'\n})",
+        "(function(\n) {\n}, function(){\n})",
+        "(function(\n) {\n})(); (function(){\n})",
+    };
+    for (injected) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        const program = try parser.parseProgram();
+        try std.testing.expectError(
+            ParseError.UnexpectedToken,
+            parser.validateDynamicFunctionProgram(program, source[1 .. source.len - 1]),
+        );
+    }
 }
 
 test "parser source-name indexes share one lazy secure parse-root context" {

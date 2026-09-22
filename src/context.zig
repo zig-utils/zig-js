@@ -16708,6 +16708,35 @@ test "Function constructor builds callable functions from source" {
     )).asBool());
 }
 
+test "dynamic Function constructors reject body boundary injection" {
+    try std.testing.expect((try evalIn(
+        \\var GeneratorFunction = Object.getPrototypeOf(function*(){}).constructor;
+        \\var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+        \\var AsyncGeneratorFunction = Object.getPrototypeOf(async function*(){}).constructor;
+        \\var constructors = [Function, GeneratorFunction, AsyncFunction, AsyncGeneratorFunction];
+        \\var bodies = [
+        \\  '}); globalThis.injected = 1; (function(){',
+        \\  '}, function(){ return "inj" ',
+        \\  '}, function(){',
+        \\  '})(); (function(){'
+        \\];
+        \\globalThis.injected = 0;
+        \\var rejected = 0;
+        \\for (var i = 0; i < constructors.length; i++) {
+        \\  for (var j = 0; j < bodies.length; j++) {
+        \\    try { constructors[i](bodies[j]); }
+        \\    catch (e) { if (e instanceof SyntaxError) rejected++; }
+        \\  }
+        \\}
+        \\var valid = 0;
+        \\for (var k = 0; k < constructors.length; k++) {
+        \\  try { constructors[k]('return 1; // trailing'); valid++; } catch (e) {}
+        \\  try { constructors[k]('--> leading comment\\nreturn 1;'); valid++; } catch (e) {}
+        \\}
+        \\rejected === 16 && globalThis.injected === 0 && valid === 8
+    )).asBool());
+}
+
 test "String.prototype.split: limit + regex separators" {
     // `limit` truncates the result.
     try expectEvalStr("a|b", "'a,b,c'.split(',', 2).join('|')");

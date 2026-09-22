@@ -22,6 +22,36 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "dynamic function bodies cannot escape their synthesized boundary",
+        .source =
+        \\var GeneratorFunction = Object.getPrototypeOf(function*(){}).constructor;
+        \\var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+        \\var AsyncGeneratorFunction = Object.getPrototypeOf(async function*(){}).constructor;
+        \\var constructors = [Function, GeneratorFunction, AsyncFunction, AsyncGeneratorFunction];
+        \\var bodies = [
+        \\  '}); globalThis.injected = 1; (function(){',
+        \\  '}, function(){ return "inj" ',
+        \\  '}, function(){',
+        \\  '})(); (function(){'
+        \\];
+        \\globalThis.injected = 0;
+        \\var rejected = 0;
+        \\for (var i = 0; i < constructors.length; i++) {
+        \\  for (var j = 0; j < bodies.length; j++) {
+        \\    try { constructors[i](bodies[j]); }
+        \\    catch (e) { if (e instanceof SyntaxError) rejected++; }
+        \\  }
+        \\}
+        \\var valid = 0;
+        \\for (var k = 0; k < constructors.length; k++) {
+        \\  try { constructors[k]('return 1; // trailing'); valid++; } catch (e) {}
+        \\  try { constructors[k]('--> leading comment\\nreturn 1;'); valid++; } catch (e) {}
+        \\}
+        \\rejected === 16 && globalThis.injected === 0 && valid === 8 ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.

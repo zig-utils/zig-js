@@ -27093,6 +27093,8 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             parser.useRealmHashKeys(self.root_shape);
             const prog = parser.parseProgram() catch |err|
                 return self.throwParserSyntaxError("Function body", source, &parser, err);
+            parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err|
+                return self.throwParserSyntaxError("Function body", source, &parser, err);
             const fallback_url = switch (kind) {
                 .generator => "GeneratorFunction",
                 .async_fn => "AsyncFunction",
