@@ -64,6 +64,13 @@ pub const DiagnosticReason = enum {
     yield_shorthand_generator,
     await_shorthand_async,
     expected_identifier_property_name,
+    expected_module_specifier,
+    expected_import_binding,
+    string_import_requires_alias,
+    import_call_arguments,
+    expected_import_call_parenthesis,
+    import_meta_module_only,
+    import_meta_property,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -129,7 +136,7 @@ pub const DiagnosticReason = enum {
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
-            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name => ParseError.ExpectedToken,
+            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name, .expected_import_call_parenthesis => ParseError.ExpectedToken,
             .invalid_assignment,
             .invalid_destructuring_assignment,
             .array_rest_pattern_closing,
@@ -183,6 +190,13 @@ pub const DiagnosticReason = enum {
             .yield_shorthand_generator => "Cannot use 'yield' as a shorthand property name in a generator function.",
             .await_shorthand_async => "Cannot use 'await' as a shorthand property name in an async function.",
             .expected_identifier_property_name => "Expected an identifier as property name.",
+            .expected_module_specifier => "Expected a string literal for module specifier.",
+            .expected_import_binding => "Expected an identifier for import binding.",
+            .string_import_requires_alias => "A string import name requires an 'as' binding.",
+            .import_call_arguments => "import call expects one or two arguments.",
+            .expected_import_call_parenthesis => "import call expects one or two arguments.",
+            .import_meta_module_only => "import.meta is only valid inside modules.",
+            .import_meta_property => "\"import.\" can only be followed with meta.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -2228,11 +2242,12 @@ pub const Parser = struct {
         // present, so `import source from "mod"` remains a default import.
         if (self.checkContextual("source") and self.peekKind(1) == .identifier and self.peekIsKeyword(2, "from")) {
             _ = self.advance(); // source
-            const name = self.advance().text;
-            if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
+            const name_token = self.advance();
+            const name = name_token.text;
+            if (self.isForbiddenBindingName(name)) return self.failWithToken(.unexpected_token, name_token);
             try entries.append(self.arena, .{ .imported = "source", .local = name });
             try self.expectContextual("from");
-            const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
+            const spec = if (self.check(.string)) self.advance().text else return self.failWithTokenReason(.expected_module_specifier);
             const at = try self.parseImportAttributesOpt();
             try self.consumeStatementTerminator();
             return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at } });
@@ -2244,8 +2259,9 @@ pub const Parser = struct {
         if (deferred) _ = self.advance(); // consume `defer`
         // Default binding: `import name ...`
         if (self.check(.identifier)) {
-            const name = self.advance().text;
-            if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
+            const name_token = self.advance();
+            const name = name_token.text;
+            if (self.isForbiddenBindingName(name)) return self.failWithToken(.unexpected_token, name_token);
             try entries.append(self.arena, .{ .imported = "default", .local = name });
             _ = self.match(.comma);
         }
@@ -2253,14 +2269,16 @@ pub const Parser = struct {
         if (self.check(.star)) {
             _ = self.advance();
             try self.expectContextual("as");
-            const ns = self.advance().text;
-            if (self.isForbiddenBindingName(ns)) return ParseError.UnexpectedToken;
+            const ns_token = self.advance();
+            if (ns_token.kind != .identifier) return self.failWithToken(.expected_import_binding, ns_token);
+            const ns = ns_token.text;
+            if (self.isForbiddenBindingName(ns)) return self.failWithToken(.unexpected_token, ns_token);
             try entries.append(self.arena, .{ .imported = "*", .local = ns, .namespace = true });
         } else if (self.check(.lbrace)) {
             try self.parseNamedImports(&entries);
         }
         try self.expectContextual("from");
-        const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
+        const spec = if (self.check(.string)) self.advance().text else return self.failWithTokenReason(.expected_module_specifier);
         const at = try self.parseImportAttributesOpt();
         try self.consumeStatementTerminator();
         return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at, .deferred = deferred } });
@@ -2294,17 +2312,20 @@ pub const Parser = struct {
     fn parseNamedImports(self: *Parser, entries: *std.ArrayListUnmanaged(ast.ImportEntry)) ParseError!void {
         try self.expect(.lbrace);
         while (!self.check(.rbrace)) {
+            const imported_token = self.cur();
             const imported_is_string = self.cur().kind == .string;
             const imported = try self.moduleExportName();
             var local = imported;
+            var local_token = imported_token;
             if (self.checkContextual("as")) {
                 _ = self.advance();
-                if (!self.check(.identifier)) return ParseError.UnexpectedToken;
-                local = self.advance().text;
+                if (!self.check(.identifier)) return self.failWithTokenReason(.expected_import_binding);
+                local_token = self.advance();
+                local = local_token.text;
             } else if (imported_is_string) {
-                return ParseError.UnexpectedToken;
+                return self.failWithTokenReason(.string_import_requires_alias);
             }
-            if (self.isForbiddenBindingName(local)) return ParseError.UnexpectedToken;
+            if (self.isForbiddenBindingName(local)) return self.failWithToken(.unexpected_token, local_token);
             try entries.append(self.arena, .{ .imported = imported, .local = local });
             if (!self.match(.comma)) break;
         }
@@ -5293,7 +5314,7 @@ pub const Parser = struct {
         var phase: []const u8 = "";
         if (self.match(.dot)) {
             const m = self.advance();
-            if (m.kind != .identifier) return ParseError.UnexpectedToken;
+            if (m.kind != .identifier) return self.failWithToken(.import_call_arguments, m);
             // `import.meta` — meta-property. `import.source(x)` / `import.defer(x)`
             // — the source-phase-import / import-defer proposals; parse them as a
             // phased dynamic import (the phase doesn't change the AST here).
@@ -5301,23 +5322,24 @@ pub const Parser = struct {
             // eval, which is always Script goal — is a SyntaxError), and `meta`
             // may not be spelled with a Unicode escape.
             if (std.mem.eql(u8, m.text, "meta")) {
-                if (!self.module or m.escaped_identifier) return ParseError.UnexpectedToken;
+                if (m.escaped_identifier) return self.failWithToken(.import_meta_property, m);
+                if (!self.module) return self.failWithReasonAt(.import_meta_module_only, m.pos);
                 return self.alloc(.import_meta);
             }
             if (std.mem.eql(u8, m.text, "source") or std.mem.eql(u8, m.text, "defer")) {
                 phase = m.text; // phased dynamic import; fall through to the call form
-            } else return ParseError.UnexpectedToken;
+            } else return self.failWithToken(.import_meta_property, m);
         }
-        try self.expect(.lparen);
+        try self.expectWithTokenReason(.lparen, .expected_import_call_parenthesis);
         // ImportCall requires exactly one AssignmentExpression specifier (no
         // empty `import()`, no leading spread), plus an optional second options
         // argument, plus an optional trailing comma.
-        if (self.check(.rparen) or self.check(.ellipsis)) return ParseError.UnexpectedToken;
+        if (self.check(.rparen) or self.check(.ellipsis)) return self.failWithTokenReason(.unexpected_token);
         const spec = try self.parseAssignment();
         var options: ?*Node = null;
         if (self.match(.comma)) {
             if (!self.check(.rparen)) {
-                if (self.check(.ellipsis)) return ParseError.UnexpectedToken;
+                if (self.check(.ellipsis)) return self.failWithTokenReason(.unexpected_token);
                 options = try self.parseAssignment();
                 _ = self.match(.comma); // optional trailing comma after 2nd arg
             }
@@ -6695,6 +6717,47 @@ test "parser retains object and destructuring pattern diagnostics" {
         defer arena.deinit();
         var parser = try Parser.init(arena.allocator(), case.source);
         try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains static and dynamic import diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        module: bool = false,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "import.1", .reason = .expected_import_call_parenthesis, .marker = ".1", .message = "Unexpected number '.1'. import call expects one or two arguments." },
+        .{ .source = "import.meta", .reason = .import_meta_module_only, .marker = "meta", .message = "import.meta is only valid inside modules." },
+        .{ .source = "import.\\u006deta", .reason = .import_meta_property, .marker = "\\u006deta", .message = "Unexpected identifier '\\u006deta'. \"import.\" can only be followed with meta." },
+        .{ .source = "import.foo('x')", .reason = .import_meta_property, .marker = "foo", .message = "Unexpected identifier 'foo'. \"import.\" can only be followed with meta." },
+        .{ .source = "import()", .reason = .unexpected_token, .marker = ")", .message = "Unexpected token ')'" },
+        .{ .source = "import(...x)", .reason = .unexpected_token, .marker = "...", .message = "Unexpected token '...'" },
+        .{ .source = "import('x', ...y)", .reason = .unexpected_token, .marker = "...", .message = "Unexpected token '...'" },
+        .{ .source = "import break from 'm';", .module = true, .reason = .unexpected_token, .marker = "break", .message = "Unexpected keyword 'break'" },
+        .{ .source = "import value from name;", .module = true, .reason = .expected_module_specifier, .marker = "name", .message = "Unexpected identifier 'name'. Expected a string literal for module specifier." },
+        .{ .source = "import * as break from 'm';", .module = true, .reason = .unexpected_token, .marker = "break", .message = "Unexpected keyword 'break'" },
+        .{ .source = "import * as ns from name;", .module = true, .reason = .expected_module_specifier, .marker = "name", .message = "Unexpected identifier 'name'. Expected a string literal for module specifier." },
+        .{ .source = "import * as 1 from 'm';", .module = true, .reason = .expected_import_binding, .marker = "1", .message = "Unexpected number '1'. Expected an identifier for import binding." },
+        .{ .source = "import { value as } from 'm';", .module = true, .reason = .expected_import_binding, .marker = "}", .message = "Unexpected token '}'. Expected an identifier for import binding." },
+        .{ .source = "import { 'value' } from 'm';", .module = true, .reason = .string_import_requires_alias, .marker = "}", .message = "Unexpected token '}'. A string import name requires an 'as' binding." },
+        .{ .source = "import { value as break } from 'm';", .module = true, .reason = .unexpected_token, .marker = "break", .message = "Unexpected keyword 'break'" },
+        .{ .source = "import source break from 'm';", .module = true, .reason = .unexpected_token, .marker = "break", .message = "Unexpected keyword 'break'" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        if (case.module)
+            try std.testing.expectError(case.reason.parseError(), parser.parseModule())
+        else
+            try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));

@@ -144,6 +144,25 @@ const frontend_cases = [_]Case{
         .expected = 8388607,
     },
     .{
+        .name = "dynamic import SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["import.1", "Unexpected number '.1'. import call expects one or two arguments."],
+        \\  ["import.meta", "import.meta is only valid inside modules."],
+        \\  ["import.\\u006deta", "Unexpected identifier '\\u006deta'. \"import.\" can only be followed with meta."],
+        \\  ["import.foo('x')", "Unexpected identifier 'foo'. \"import.\" can only be followed with meta."],
+        \\  ["import()", "Unexpected token ')'"],
+        \\  ["import(...x)", "Unexpected token '...'"],
+        \\  ["import('x', ...y)", "Unexpected token '...'"],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 127,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.
