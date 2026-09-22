@@ -14195,6 +14195,44 @@ test "private brand failures distinguish fields from methods and accessors like 
     }
 }
 
+test "present private elements use JavaScriptCore getter and setter diagnostics" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{
+            .source = "class C { set #x(v) {} read() { return this.#x; } } new C().read()",
+            .message = "Trying to access an undefined private getter",
+        },
+        .{
+            .source = "class C { get #x() { return 1; } write() { this.#x = 2; } } new C().write()",
+            .message = "Trying to access an undefined private setter",
+        },
+        .{
+            .source = "class C { #x() {} write() { this.#x = 2; } } new C().write()",
+            .message = "Trying to access an undefined private setter",
+        },
+    };
+
+    var buffer: [512]u8 = undefined;
+    for (cases) |case| {
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+
+        const tree_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const tree_ctx = try Context.create(std.testing.allocator);
+        defer tree_ctx.destroy();
+        tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+        try std.testing.expectEqualStrings(expected, (try tree_ctx.evaluate(tree_probe)).asStr());
+
+        const vm_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; function* g() {{ {s} }} try {{ g().next(); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        for ([_]bool{ false, true }) |enable_jit| {
+            const vm_ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = enable_jit });
+            defer vm_ctx.destroy();
+            vm_ctx.setBytecodeExecutionModeForTesting(.required);
+            try std.testing.expectEqualStrings(expected, (try vm_ctx.evaluate(vm_probe)).asStr());
+        }
+    }
+}
+
 test "class diagnostic reasons render prose through eval and Function" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{

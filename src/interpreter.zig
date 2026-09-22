@@ -15628,7 +15628,7 @@ pub const Interpreter = struct {
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
                 if (acc.get) |g| if (!g.isUndefined()) return self.callValueWithThis(g, &.{}, recv);
-                return self.throwError("TypeError", "Cannot read private member: accessor has no getter");
+                return self.throwError("TypeError", "Trying to access an undefined private getter");
             }
             if (c.getOwn(key)) |v| return v; // private field (own) or method (on home)
             // A private method lives on the declaring class's prototype; when the
@@ -15658,7 +15658,7 @@ pub const Interpreter = struct {
                     _ = try self.callValueWithThis(s, &.{v}, recv);
                     return;
                 };
-                return self.throwError("TypeError", "Cannot write private member: accessor has no setter");
+                return self.throwError("TypeError", "Trying to access an undefined private setter");
             }
             if (c.getOwn(key)) |_| {
                 // A private field is an own, writable property of the instance; an
@@ -15668,7 +15668,9 @@ pub const Interpreter = struct {
                     try o.setOwn(self.arena, self.root_shape, key, v);
                     return;
                 }
-                return self.throwError("TypeError", "Cannot write private method");
+                // JavaScriptCore deliberately uses the missing-setter diagnostic
+                // for writes to private methods as well as getter-only accessors.
+                return self.throwError("TypeError", "Trying to access an undefined private setter");
             }
             // See privateGet: reach a Proxy instance's private accessor (on the
             // declaring class's prototype) through the proxy's target chain.
