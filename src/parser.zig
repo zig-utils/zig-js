@@ -945,6 +945,34 @@ pub const Parser = struct {
         return false;
     }
 
+    const LabelContext = struct {
+        active: std.ArrayListUnmanaged([]const u8),
+        pending: std.ArrayListUnmanaged([]const u8),
+        continue_targets: std.ArrayListUnmanaged([]const u8),
+    };
+
+    /// Move the complete label lists aside before entering a fresh control-flow
+    /// boundary. Truncating them would let nested labels overwrite the outer
+    /// lists' retained backing slots, so restoring only the old lengths would
+    /// resurrect the wrong names (#950).
+    fn takeLabelContext(self: *Parser) LabelContext {
+        const saved = LabelContext{
+            .active = self.active_labels,
+            .pending = self.pending_labels,
+            .continue_targets = self.continue_labels,
+        };
+        self.active_labels = .empty;
+        self.pending_labels = .empty;
+        self.continue_labels = .empty;
+        return saved;
+    }
+
+    fn restoreLabelContext(self: *Parser, saved: LabelContext) void {
+        self.active_labels = saved.active;
+        self.pending_labels = saved.pending;
+        self.continue_labels = saved.continue_targets;
+    }
+
     fn statementCanInheritPendingLabels(self: *Parser) bool {
         const t = self.cur();
         if (t.kind != .identifier) return false;
@@ -3246,9 +3274,7 @@ pub const Parser = struct {
         const saved_strict = self.strict;
         const saved_iter = self.iter_depth;
         const saved_switch = self.switch_depth;
-        const saved_active_labels = self.active_labels.items.len;
-        const saved_pending_labels = self.pending_labels.items.len;
-        const saved_continue_labels = self.continue_labels.items.len;
+        const saved_labels = self.takeLabelContext();
         self.in_generator = is_gen;
         self.in_async = is_async;
         // A function body opens a fresh control-flow context: `return` is now
@@ -3257,9 +3283,6 @@ pub const Parser = struct {
         self.new_target_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
-        self.active_labels.items.len = 0;
-        self.pending_labels.items.len = 0;
-        self.continue_labels.items.len = 0;
         // A function is strict if it lexically inherits strictness or its own
         // body opens with a `"use strict"` directive prologue. Detect it up
         // front so nested functions parsed within inherit correctly.
@@ -3276,9 +3299,7 @@ pub const Parser = struct {
             self.new_target_depth -= 1;
             self.iter_depth = saved_iter;
             self.switch_depth = saved_switch;
-            self.active_labels.items.len = saved_active_labels;
-            self.pending_labels.items.len = saved_pending_labels;
-            self.continue_labels.items.len = saved_continue_labels;
+            self.restoreLabelContext(saved_labels);
             self.no_in = saved_no_in;
         }
         const body = try self.parseBlock();
@@ -3672,21 +3693,26 @@ pub const Parser = struct {
         // An arrow's body opens its own async context (so `await` inside an
         // `async () => …` is recognized), restored on exit.
         const saved_async = self.in_async;
+        const saved_gen = self.in_generator;
         const saved_strict = self.strict;
         const saved_iter = self.iter_depth;
         const saved_switch = self.switch_depth;
         const saved_no_in = self.no_in;
+        const saved_labels = self.takeLabelContext();
         self.in_async = is_async;
+        self.in_generator = false;
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
         defer {
             self.in_async = saved_async;
+            self.in_generator = saved_gen;
             self.strict = saved_strict;
             self.fn_depth -= 1;
             self.iter_depth = saved_iter;
             self.switch_depth = saved_switch;
             self.no_in = saved_no_in;
+            self.restoreLabelContext(saved_labels);
             self.current_direct_eval_use = saved_direct_eval_use;
         }
         if (self.check(.lbrace)) {
@@ -3696,6 +3722,7 @@ pub const Parser = struct {
             const own_use_strict = self.peekUseStrict();
             if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
             self.strict = saved_strict or own_use_strict;
+            if (own_use_strict) try self.validateStrictParams(params);
             // Its own var scope, like any function body (#933 item 8).
             const saved_for_body_vars = self.for_body_vars;
             self.for_body_vars = null;
@@ -4706,9 +4733,7 @@ pub const Parser = struct {
                 const saved_for_body_vars = self.for_body_vars;
                 self.for_body_vars = null;
                 defer self.for_body_vars = saved_for_body_vars;
-                const saved_active = self.active_labels.items.len;
-                const saved_pending = self.pending_labels.items.len;
-                const saved_continue = self.continue_labels.items.len;
+                const saved_labels = self.takeLabelContext();
                 self.in_async = true; // [+Await]: `await` reserved in a static block
                 self.in_generator = false;
                 self.fn_depth = 0; // `return` is a SyntaxError in a static block
@@ -4716,9 +4741,6 @@ pub const Parser = struct {
                 // `continue` may not target a loop/switch/label outside it.
                 self.iter_depth = 0;
                 self.switch_depth = 0;
-                self.active_labels.items.len = 0;
-                self.pending_labels.items.len = 0;
-                self.continue_labels.items.len = 0;
                 self.new_target_depth += 1;
                 defer {
                     self.in_async = saved_async;
@@ -4726,9 +4748,7 @@ pub const Parser = struct {
                     self.fn_depth = saved_fn;
                     self.iter_depth = saved_iter;
                     self.switch_depth = saved_switch;
-                    self.active_labels.items.len = saved_active;
-                    self.pending_labels.items.len = saved_pending;
-                    self.continue_labels.items.len = saved_continue;
+                    self.restoreLabelContext(saved_labels);
                     self.new_target_depth -= 1;
                 }
                 const block = try self.parseBlock();
@@ -7168,6 +7188,58 @@ test "parser arrow boundaries keep lexical and suspension queries independent" {
             errdefer std.debug.print("valid arrow boundary: {s}\n", .{source});
             _ = if (module) try parser.parseModule() else try parser.parseProgram();
         }
+    }
+}
+
+test "parser arrows open fresh label and yield contexts and validate strict parameters" {
+    const invalid = [_][]const u8{
+        "outer: { (() => { break outer; })(); }",
+        "outer: for (;;) { (() => { continue outer; })(); }",
+        "outer: { async () => { break outer; }; }",
+        "function* g(){ () => { yield 1; }; }",
+        "(eval) => { 'use strict'; }",
+        "eval => { 'use strict'; }",
+        "async (arguments) => { 'use strict'; }",
+        "(yield) => { 'use strict'; }",
+        "(interface) => { 'use strict'; }",
+        "(let) => { 'use strict'; }",
+        "static => { 'use strict'; }",
+    };
+    const valid = [_][]const u8{
+        "outer: for (;;) { (() => { outer: for (;;) break outer; })(); break outer; }",
+        "function* g(){ () => { var yield; }; }",
+        "function* g(){ () => { yield.x; }; }",
+        "function* g(){ () => { yield = 1; }; }",
+        "function* g(){ var f = () => { return yield; }; }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        errdefer std.debug.print("invalid arrow context: {s}\n", .{source});
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        errdefer std.debug.print("valid arrow context: {s}\n", .{source});
+        _ = try parser.parseProgram();
+    }
+}
+
+test "parser restores outer label storage after fresh control-flow boundaries" {
+    const sources = [_][]const u8{
+        "outer: for (;;) { function f(){ inner: { break inner; } } break outer; }",
+        "outer: for (;;) { (() => { inner: { break inner; } }); break outer; }",
+        "outer: for (;;) { class C { static { inner: { break inner; } } } break outer; }",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, source);
+        errdefer std.debug.print("label restoration: {s}\n", .{source});
+        _ = try parser.parseProgram();
     }
 }
 

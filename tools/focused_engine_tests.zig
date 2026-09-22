@@ -22,6 +22,41 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        // #945/#950: arrows and other function-like boundaries own their label
+        // and generator contexts, while arrow parameters still inherit [Yield].
+        // A nested label must not overwrite the outer list's retained storage.
+        .name = "function boundaries isolate and restore labels yield and strict parameters",
+        .source =
+        \\var rows = [
+        \\  ["var n=0; l: for(var i=0;i<3;i++){ [1].forEach(()=>{ n++; if(i===1) break l; }); } 1", false],
+        \\  ["outer: { (() => { break outer; })(); } 1", false],
+        \\  ["outer: for(;;){ (() => { continue outer; })(); } 1", false],
+        \\  ["outer: { async () => { break outer; }; } 1", false],
+        \\  ["function* g(){ () => { yield 1; }; } 1", false],
+        \\  ["(eval) => { 'use strict'; }", false],
+        \\  ["eval => { 'use strict'; }", false],
+        \\  ["async (arguments) => { 'use strict'; }", false],
+        \\  ["(yield) => { 'use strict'; }", false],
+        \\  ["(interface) => { 'use strict'; }", false],
+        \\  ["(let) => { 'use strict'; }", false],
+        \\  ["static => { 'use strict'; }", false],
+        \\  ["outer: for(;;){ (()=>{ outer: for(;;) break outer; }); break outer; } 1", true],
+        \\  ["function* g(){ () => { var yield; }; } 1", true],
+        \\  ["function* g(){ () => { yield.x; }; } 1", true],
+        \\  ["function* g(){ () => { yield = 1; }; } 1", true],
+        \\  ["globalThis['yield']=7; function* g(){ var f=()=>yield; return f(); } g().next().value===7 ? 1 : 0", true],
+        \\  ["outer: for(;;){ function f(){ inner:{ break inner; } } break outer; } 1", true],
+        \\  ["outer: for(;;){ (()=>{ inner:{ break inner; } }); break outer; } 1", true],
+        \\  ["outer: for(;;){ class C { static { inner:{ break inner; } } } break outer; } 1", true],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { var value = (0, eval)(row[0]); return row[1] && value === 1 ? bits | (1 << i) : bits; }
+        \\  catch (e) { return !row[1] && e instanceof SyntaxError ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 1048575,
+    },
+    .{
         // #930 family 1: what node accepts beside those rejections -- distinct
         // names, duplicate vars, a lexical shadow in a nested block, a var that
         // repeats an outer function's lexical name, sloppy Annex B duplicate
