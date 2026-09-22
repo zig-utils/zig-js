@@ -5811,6 +5811,46 @@ pub const Context = struct {
         debug_registry: interp.DebugRegistrySnapshot,
         heap: RuntimeHeapAccounting,
         runtime: RuntimeAttributionProfiler.Snapshot,
+        memory: ?MemoryInventorySnapshot,
+    };
+
+    /// Versioned owned-byte checkpoint for attribution runs (#974). Top-level
+    /// byte domains are disjoint requested/mapped bytes and reconcile to
+    /// `accounted_owned_current_bytes`. Logical heap/cell/side-storage fields
+    /// overlap allocator backing (or observe the owner's shared heap) and must
+    /// not be added again.
+    /// A precise heap owner currently leaves collector auxiliary scratch outside
+    /// the Context allocator, so `complete` makes that coverage gap explicit.
+    pub const MemoryInventorySnapshot = struct {
+        pub const schema_version = 1;
+
+        schema: u32 = schema_version,
+        accounted_owned_bytes_complete: bool,
+        owns_precise_heap: bool,
+        owns_native_code: bool,
+        context_backing_current_bytes: u64,
+        context_backing_peak_bytes: u64,
+        external_control_current_bytes: u64,
+        profiler_control_bytes: u64,
+        budget_control_bytes: u64,
+        serialized_allocator_control_bytes: u64,
+        recovery_reserve_current_bytes: u64,
+        owned_native_live_bytes: u64,
+        owned_native_retired_bytes: u64,
+        observed_shared_native_live_bytes: u64,
+        observed_shared_native_retired_bytes: u64,
+        accounted_owned_current_bytes: u64,
+        collector_auxiliary_owned_but_untracked: bool,
+        heap_logical_live_bytes: u64,
+        heap_last_full_collection_bytes: u64,
+        gc_cell_net_issued_bytes: u64,
+        gc_string_bytes_live: u64,
+        gc_array_buffer_bytes_live: u64,
+        gc_environment_name_bytes_live: u64,
+        gc_object_backing_store_bytes_live: u64,
+        gc_generator_backing_store_bytes_live: u64,
+        gc_promise_reaction_entries_live: u64,
+        budget: ?HeapBudgetStats,
     };
 
     pub const NativeCodeAttributionSnapshot = struct {
@@ -5846,6 +5886,10 @@ pub const Context = struct {
     pub fn tierAttributionSnapshot(self: *Context) TierAttributionSnapshot {
         const owner = self.shared_jit_owner orelse &self.jit_owner;
         const code = owner.stats();
+        const runtime = if (self.runtime_attribution_profiler) |profile|
+            profile.snapshot()
+        else
+            RuntimeAttributionProfiler.Snapshot{};
         return .{
             .execution = self.execution_tier_inventory.snapshot(),
             .quick_binary = self.execution_tier_inventory.quickBinarySnapshot(),
@@ -5874,10 +5918,90 @@ pub const Context = struct {
             else
                 .{},
             .heap = self.runtimeHeapAccounting(),
-            .runtime = if (self.runtime_attribution_profiler) |profile|
-                profile.snapshot()
+            .runtime = runtime,
+            .memory = if (self.runtime_attribution_profiler != null)
+                self.memoryInventorySnapshotFrom(runtime, code)
             else
-                .{},
+                null,
+        };
+    }
+
+    /// Allocation-free phase-boundary memory inventory. Profiling remains
+    /// opt-in; callers that did not request execution attribution receive null.
+    pub fn memoryInventorySnapshot(self: *Context) ?MemoryInventorySnapshot {
+        const profile = self.runtime_attribution_profiler orelse return null;
+        const owner = self.shared_jit_owner orelse &self.jit_owner;
+        return self.memoryInventorySnapshotFrom(profile.snapshot(), owner.stats());
+    }
+
+    fn memoryInventorySnapshotFrom(
+        self: *Context,
+        runtime: RuntimeAttributionProfiler.Snapshot,
+        code: jit.OwnerStats,
+    ) MemoryInventorySnapshot {
+        const add = struct {
+            fn checked(left: u64, right: u64) u64 {
+                return std.math.add(u64, left, right) catch
+                    @panic("memory inventory byte total overflow");
+            }
+        }.checked;
+        const allocation = runtime.allocation;
+        const cell_net = std.math.sub(
+            u64,
+            allocation.gc_cell_bytes,
+            allocation.gc_cell_freed_bytes,
+        ) catch @panic("memory inventory GC cell accounting underflow");
+        const budget = self.heapBudgetStats();
+        const recovery_reserve_current: u64 = if (budget) |stats| @intCast(std.math.sub(
+            usize,
+            stats.recovery_reserve_bytes,
+            stats.recovery_reserve_released_bytes,
+        ) catch @panic("memory inventory recovery reserve accounting underflow")) else 0;
+        const profiler_control: u64 = @sizeOf(RuntimeAttributionProfiler);
+        const budget_control: u64 = if (self.budget_allocator != null) @sizeOf(BudgetAllocator) else 0;
+        const serialized_control: u64 = if (self.host_allocator_lock != null) @sizeOf(SerializedAllocator) else 0;
+        var external_control = add(profiler_control, budget_control);
+        external_control = add(external_control, serialized_control);
+        external_control = add(external_control, recovery_reserve_current);
+
+        const owns_native_code = self.shared_jit_owner == null;
+        const owned_native_live: u64 = if (owns_native_code) @intCast(code.live_bytes) else 0;
+        const owned_native_retired: u64 = if (owns_native_code) @intCast(code.retired_bytes) else 0;
+        const observed_shared_native_live: u64 = if (owns_native_code) 0 else @intCast(code.live_bytes);
+        const observed_shared_native_retired: u64 = if (owns_native_code) 0 else @intCast(code.retired_bytes);
+        var accounted_owned = add(allocation.backing_current_bytes, external_control);
+        accounted_owned = add(accounted_owned, owned_native_live);
+        accounted_owned = add(accounted_owned, owned_native_retired);
+
+        const owns_precise_heap = if (self.gc_state) |state| state.realms.owner == self else false;
+        const heap = self.runtimeHeapAccounting();
+        return .{
+            .accounted_owned_bytes_complete = !owns_precise_heap,
+            .owns_precise_heap = owns_precise_heap,
+            .owns_native_code = owns_native_code,
+            .context_backing_current_bytes = allocation.backing_current_bytes,
+            .context_backing_peak_bytes = allocation.backing_peak_bytes,
+            .external_control_current_bytes = external_control,
+            .profiler_control_bytes = profiler_control,
+            .budget_control_bytes = budget_control,
+            .serialized_allocator_control_bytes = serialized_control,
+            .recovery_reserve_current_bytes = recovery_reserve_current,
+            .owned_native_live_bytes = owned_native_live,
+            .owned_native_retired_bytes = owned_native_retired,
+            .observed_shared_native_live_bytes = observed_shared_native_live,
+            .observed_shared_native_retired_bytes = observed_shared_native_retired,
+            .accounted_owned_current_bytes = accounted_owned,
+            .collector_auxiliary_owned_but_untracked = owns_precise_heap,
+            .heap_logical_live_bytes = @intCast(heap.live_bytes),
+            .heap_last_full_collection_bytes = @intCast(heap.last_full_collection_bytes),
+            .gc_cell_net_issued_bytes = cell_net,
+            .gc_string_bytes_live = @intCast(@atomicLoad(usize, &self.gc_string_bytes_live, .acquire)),
+            .gc_array_buffer_bytes_live = @intCast(@atomicLoad(usize, &self.gc_array_buffer_bytes_live, .acquire)),
+            .gc_environment_name_bytes_live = @intCast(@atomicLoad(usize, &self.gc_environment_name_bytes_live, .acquire)),
+            .gc_object_backing_store_bytes_live = @intCast(@atomicLoad(usize, &self.gc_object_backing_stores_live, .acquire)),
+            .gc_generator_backing_store_bytes_live = @intCast(@atomicLoad(usize, &self.gc_generator_backing_stores_live, .acquire)),
+            .gc_promise_reaction_entries_live = @intCast(@atomicLoad(usize, &self.gc_promise_reactions_live, .acquire)),
+            .budget = budget,
         };
     }
 
@@ -37136,6 +37260,13 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expect(snapshot.execution.count(.vm_quick_kernel_hits) > 0);
     try std.testing.expect(snapshot.heap.live_bytes > 0);
     try std.testing.expectEqual(snapshot.generated_code_bytes, snapshot.native_code.live_bytes);
+    const vm_memory = snapshot.memory.?;
+    try std.testing.expectEqual(@as(u64, @intCast(snapshot.native_code.live_bytes)), vm_memory.owned_native_live_bytes);
+    try std.testing.expectEqual(
+        vm_memory.context_backing_current_bytes + vm_memory.external_control_current_bytes +
+            vm_memory.owned_native_live_bytes + vm_memory.owned_native_retired_bytes,
+        vm_memory.accounted_owned_current_bytes,
+    );
     if (jit.supported and builtin.cpu.arch == .aarch64) {
         try std.testing.expect(snapshot.execution.count(.optimizer_entries) > 0);
         try std.testing.expect(snapshot.optimizer_publications > 0);
@@ -37176,6 +37307,76 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
         @as(u64, 1),
         profiled_host.tierAttributionSnapshot().execution.count(.host_callbacks),
     );
+}
+
+test "memory inventory reconciles disjoint owned domains and exposes coverage" {
+    const ordinary = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
+    defer ordinary.destroy();
+    try std.testing.expect(ordinary.memoryInventorySnapshot() == null);
+    try std.testing.expect(ordinary.tierAttributionSnapshot().memory == null);
+
+    const arena = try Context.createWith(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer arena.destroy();
+    _ = try arena.evaluate("({ inventory: 42 })");
+    const arena_memory = arena.memoryInventorySnapshot().?;
+    try std.testing.expectEqual(@as(u32, Context.MemoryInventorySnapshot.schema_version), arena_memory.schema);
+    try std.testing.expect(arena_memory.accounted_owned_bytes_complete);
+    try std.testing.expect(!arena_memory.owns_precise_heap);
+    try std.testing.expect(arena_memory.owns_native_code);
+    try std.testing.expect(!arena_memory.collector_auxiliary_owned_but_untracked);
+    try std.testing.expect(arena_memory.context_backing_current_bytes > 0);
+    try std.testing.expectEqual(
+        @as(u64, @sizeOf(RuntimeAttributionProfiler)),
+        arena_memory.external_control_current_bytes,
+    );
+    try std.testing.expectEqual(
+        arena_memory.context_backing_current_bytes + arena_memory.external_control_current_bytes,
+        arena_memory.accounted_owned_current_bytes,
+    );
+
+    const precise = try Context.createWith(std.testing.allocator, .{
+        .enable_jit = false,
+        .enable_gc = true,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+        .profile_execution_tiers = true,
+    });
+    defer precise.destroy();
+    _ = try precise.evaluate(
+        \\globalThis.inventoryBuffer = new ArrayBuffer(257);
+        \\globalThis.inventoryText = "inventory-owned-string-" + String(42);
+    );
+    const precise_memory = precise.tierAttributionSnapshot().memory.?;
+    try std.testing.expect(!precise_memory.accounted_owned_bytes_complete);
+    try std.testing.expect(precise_memory.owns_precise_heap);
+    try std.testing.expect(precise_memory.collector_auxiliary_owned_but_untracked);
+    try std.testing.expect(precise_memory.gc_cell_net_issued_bytes > 0);
+    try std.testing.expect(precise_memory.gc_array_buffer_bytes_live >= 257);
+    try std.testing.expect(precise_memory.gc_string_bytes_live > 0);
+    try std.testing.expectEqual(@as(u64, @sizeOf(BudgetAllocator)), precise_memory.budget_control_bytes);
+    try std.testing.expect(precise_memory.recovery_reserve_current_bytes > 0);
+    try std.testing.expectEqual(
+        precise_memory.context_backing_current_bytes + precise_memory.recovery_reserve_current_bytes,
+        precise_memory.budget.?.used_bytes,
+    );
+    try std.testing.expectEqual(
+        precise_memory.context_backing_current_bytes + precise_memory.external_control_current_bytes,
+        precise_memory.accounted_owned_current_bytes,
+    );
+
+    const sibling = try Context.createSharedPreciseRealm(precise);
+    var sibling_destroyed = false;
+    defer if (!sibling_destroyed) sibling.destroySharedPreciseRealm() catch unreachable;
+    const sibling_memory = sibling.memoryInventorySnapshot().?;
+    try std.testing.expect(sibling_memory.accounted_owned_bytes_complete);
+    try std.testing.expect(!sibling_memory.owns_precise_heap);
+    try std.testing.expect(!sibling_memory.owns_native_code);
+    try std.testing.expectEqual(@as(u64, 0), sibling_memory.owned_native_live_bytes);
+    try std.testing.expectEqual(@as(u64, 0), sibling_memory.owned_native_retired_bytes);
+    try sibling.destroySharedPreciseRealm();
+    sibling_destroyed = true;
 }
 
 test "vm admission: strict named-property loops reach the optimizer" {
