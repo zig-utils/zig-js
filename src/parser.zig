@@ -93,6 +93,18 @@ pub const DiagnosticReason = enum {
     expected_module_specifier,
     expected_import_binding,
     string_import_requires_alias,
+    duplicate_import_binding,
+    duplicate_export_name,
+    duplicate_default_export,
+    unresolved_export_binding,
+    module_export_name_local_reference,
+    duplicate_import_attribute,
+    expected_import_attribute_value,
+    expected_import_attribute_key,
+    expected_imported_name,
+    expected_local_export_name,
+    expected_exported_name,
+    malformed_module_export_name,
     import_call_arguments,
     expected_import_call_parenthesis,
     import_meta_module_only,
@@ -261,6 +273,15 @@ pub const DiagnosticReason = enum {
             .expected_module_specifier => "Expected a string literal for module specifier.",
             .expected_import_binding => "Expected an identifier for import binding.",
             .string_import_requires_alias => "A string import name requires an 'as' binding.",
+            .duplicate_import_binding, .duplicate_export_name, .unresolved_export_binding, .duplicate_import_attribute => "",
+            .duplicate_default_export => "Only one 'default' export is allowed.",
+            .module_export_name_local_reference => "Cannot use module export names if they reference variable names in the current module.",
+            .expected_import_attribute_value => "Expected an attribute value.",
+            .expected_import_attribute_key => "Expected an attribute key.",
+            .expected_imported_name => "Expected an imported name or a module export name string for the import declaration.",
+            .expected_local_export_name => "Expected a variable name or a module export name string for the export declaration.",
+            .expected_exported_name => "Expected an exported name or a module export name string for the export declaration.",
+            .malformed_module_export_name => "Expected a well-formed-unicode string for the module export name.",
             .import_call_arguments => "import call expects one or two arguments.",
             .expected_import_call_parenthesis => "import call expects one or two arguments.",
             .import_meta_module_only => "import.meta is only valid inside modules.",
@@ -399,6 +420,7 @@ const DiagnosticToken = struct {
 };
 
 const DuplicateParameterContext = enum { function, arrow, method };
+const ModuleExportNameContext = enum { imported, local_export, exported, import_attribute };
 
 pub const SourceLocation = struct {
     byte_offset: usize,
@@ -935,10 +957,7 @@ pub const Parser = struct {
         const html_offset = if (self.module) self.html_comment_offset else null;
         if (html_offset) |offset| {
             if (self.lex_error == null or offset <= self.lex_error_offset) {
-                self.last_error_offset = offset;
-                self.last_error_reason = null;
-                self.last_error_token = null;
-                return ParseError.UnexpectedToken;
+                return self.failModuleHtmlComment(offset);
             }
         }
         if (self.lex_error) |err| {
@@ -948,6 +967,17 @@ pub const Parser = struct {
             return err;
         }
         return fallback;
+    }
+
+    fn failModuleHtmlComment(self: *Parser, offset: usize) ParseError {
+        const marker_offset = if (std.mem.startsWith(u8, self.source[offset..], "-->")) offset + 2 else offset;
+        return self.failWithDiagnosticAt(
+            .unexpected_token,
+            .token,
+            self.source[marker_offset .. marker_offset + 1],
+            null,
+            marker_offset,
+        );
     }
 
     fn secureStringMap(self: *Parser, comptime Value: type) SecureStringMapUnmanaged(Value) {
@@ -1184,6 +1214,21 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Unexpected escaped characters in keyword token: '{s}'", .{token.text});
         if (reason == .unterminated_regexp_literal)
             return std.fmt.allocPrint(allocator, "Unterminated regular expression literal '{s}'", .{token.text});
+        if (reason == .duplicate_import_binding)
+            return std.fmt.allocPrint(allocator, "Cannot declare an imported binding name twice: '{s}'.", .{token.text});
+        if (reason == .duplicate_export_name)
+            return std.fmt.allocPrint(allocator, "Cannot export a duplicate name '{s}'.", .{token.text});
+        if (reason == .unresolved_export_binding)
+            return std.fmt.allocPrint(allocator, "Exported binding '{s}' needs to refer to a top-level declared variable.", .{token.text});
+        if (reason == .duplicate_import_attribute) {
+            const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
+            const quote = if (token.kind == .string) "" else "'";
+            return std.fmt.allocPrint(
+                allocator,
+                "Unexpected {s} {s}{s}{s}. A duplicate key for import attributes '{s}'.",
+                .{ noun, quote, token.text, quote, token.detail.? },
+            );
+        }
         if (reason == .undeclared_label)
             return std.fmt.allocPrint(allocator, "Cannot use the undeclared label '{s}'.", .{token.text});
         if (reason == .continue_non_loop_label)
@@ -2217,9 +2262,11 @@ pub const Parser = struct {
         lexical: *SecureStringMapUnmanaged(void),
         vars: *SecureStringMapUnmanaged(void),
         name: []const u8,
+        collision_reason: DiagnosticReason,
     ) ParseError!void {
         if (name.len == 0) return;
-        if (lexical.contains(name) or vars.contains(name)) return ParseError.UnexpectedToken;
+        if (lexical.contains(name) or vars.contains(name))
+            return self.failWithNameAt(collision_reason, name, self.cur().pos);
         try lexical.put(self.arena, name, {});
     }
 
@@ -2230,8 +2277,23 @@ pub const Parser = struct {
         name: []const u8,
     ) ParseError!void {
         if (name.len == 0) return;
-        if (lexical.contains(name)) return ParseError.UnexpectedToken;
+        if (lexical.contains(name)) return self.failWithNameAt(.var_shadows_lexical, name, self.cur().pos);
         try vars.put(self.arena, name, {});
+    }
+
+    fn addModulePatternLexicalNames(
+        self: *Parser,
+        lexical: *SecureStringMapUnmanaged(void),
+        vars: *SecureStringMapUnmanaged(void),
+        pattern: *Node,
+    ) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, pattern);
+        for (names.items) |name| {
+            if (lexical.contains(name) or vars.contains(name))
+                return self.failDuplicateLexicalBinding(pattern, name);
+            try lexical.put(self.arena, name, {});
+        }
     }
 
     fn addPatternNames(
@@ -2263,30 +2325,47 @@ pub const Parser = struct {
     ) ParseError!void {
         switch (node.*) {
             .import_decl => |i| for (i.entries) |entry|
-                try self.addModuleLexicalName(lexical, vars, entry.local),
+                try self.addModuleLexicalName(lexical, vars, entry.local, .duplicate_import_binding),
             .export_decl => |e| {
                 if (e.declaration) |decl| try self.collectModuleDeclNames(decl, lexical, vars);
-                if (e.default_name.len > 0) try self.addModuleLexicalName(lexical, vars, e.default_name);
+                if (e.default_name.len > 0) {
+                    const reason: DiagnosticReason = switch (e.default_expr.?.*) {
+                        .function => |function| if (function.is_async) .async_function_shadows_lexical else .function_shadows_lexical,
+                        .class_expr => .duplicate_class_binding,
+                        else => unreachable,
+                    };
+                    try self.addModuleLexicalName(lexical, vars, e.default_name, reason);
+                }
             },
             .var_decl => |d| {
                 if (d.kind == .@"var")
                     try self.addModuleVarName(lexical, vars, d.name)
-                else
-                    try self.addModuleLexicalName(lexical, vars, d.name);
+                else {
+                    const reason: DiagnosticReason = if (d.init != null and d.init.?.* == .class_expr)
+                        .duplicate_class_binding
+                    else
+                        duplicateBindingReason(d.kind);
+                    try self.addModuleLexicalName(lexical, vars, d.name, reason);
+                }
             },
             .decl_group => |group| for (group) |decl|
                 try self.collectModuleDeclNames(decl, lexical, vars),
             .destructure_decl => |d| {
-                var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                try self.addPatternNames(&names, d.pattern);
-                for (names.items) |name| {
-                    if (d.kind == .@"var")
-                        try self.addModuleVarName(lexical, vars, name)
-                    else
-                        try self.addModuleLexicalName(lexical, vars, name);
+                if (d.kind == .@"var") {
+                    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                    try self.addPatternNames(&names, d.pattern);
+                    for (names.items) |name|
+                        try self.addModuleVarName(lexical, vars, name);
+                } else {
+                    try self.addModulePatternLexicalNames(lexical, vars, d.pattern);
                 }
             },
-            .func_decl => |f| try self.addModuleLexicalName(lexical, vars, f.name),
+            .func_decl => |f| try self.addModuleLexicalName(
+                lexical,
+                vars,
+                f.name,
+                if (f.is_async) .async_function_shadows_lexical else .function_shadows_lexical,
+            ),
             else => {},
         }
     }
@@ -2297,7 +2376,10 @@ pub const Parser = struct {
         name: []const u8,
     ) ParseError!void {
         if (name.len == 0) return;
-        if (exported.contains(name)) return ParseError.UnexpectedToken;
+        if (exported.contains(name)) {
+            if (std.mem.eql(u8, name, "default")) return self.failWithReasonAt(.duplicate_default_export, self.cur().pos);
+            return self.failWithNameAt(.duplicate_export_name, name, self.cur().pos);
+        }
         try exported.put(self.arena, name, {});
     }
 
@@ -2333,6 +2415,7 @@ pub const Parser = struct {
     }
 
     fn checkLocalExportedBindings(
+        self: *Parser,
         node: *Node,
         lexical: *const SecureStringMapUnmanaged(void),
         vars: *const SecureStringMapUnmanaged(void),
@@ -2342,7 +2425,7 @@ pub const Parser = struct {
         if (e.from.len != 0) return;
         for (e.entries) |entry| {
             if (!lexical.contains(entry.local) and !vars.contains(entry.local))
-                return ParseError.UnexpectedToken;
+                return self.failWithNameAt(.unresolved_export_binding, entry.local, self.cur().pos);
         }
     }
 
@@ -2354,7 +2437,7 @@ pub const Parser = struct {
             try self.collectModuleDeclNames(stmt, &lexical, &vars);
             try self.collectExportedNames(&exported, stmt);
         }
-        for (stmts) |stmt| try checkLocalExportedBindings(stmt, &lexical, &vars);
+        for (stmts) |stmt| try self.checkLocalExportedBindings(stmt, &lexical, &vars);
         var lexical_scope = self.lexicalScope();
         defer lexical_scope.undo.deinit(self.scratch_allocator);
         // ModuleBody's LexicallyDeclaredNames remain visible while nested
@@ -2438,8 +2521,7 @@ pub const Parser = struct {
         // rejecting that observation preserves the Module lexical goal without
         // discarding and rebuilding an attacker-proportional token stream.
         if (self.html_comment_offset) |offset| {
-            self.last_error_offset = offset;
-            return ParseError.UnexpectedToken;
+            return self.failModuleHtmlComment(offset);
         }
         // A Module is an async context for `await` at the top level (top-level
         // await). Nested non-async functions reset this via `parseFnBody`.
@@ -2537,11 +2619,12 @@ pub const Parser = struct {
         var keys = self.secureStringMap(void);
         var type_value: []const u8 = "";
         while (!self.check(.rbrace)) {
-            const key = try self.moduleExportName();
-            if (keys.contains(key)) return ParseError.UnexpectedToken;
+            const key_token = self.cur();
+            const key = try self.moduleExportName(.import_attribute);
+            if (keys.contains(key)) return self.failWithTokenDetail(.duplicate_import_attribute, key_token, key);
             try keys.put(self.arena, key, {});
             try self.expect(.colon);
-            if (!self.check(.string)) return ParseError.UnexpectedToken;
+            if (!self.check(.string)) return self.failWithTokenReason(.expected_import_attribute_value);
             const val = self.advance().text;
             if (std.mem.eql(u8, key, "type")) type_value = val;
             if (!self.match(.comma)) break;
@@ -2556,7 +2639,7 @@ pub const Parser = struct {
         while (!self.check(.rbrace)) {
             const imported_token = self.cur();
             const imported_is_string = self.cur().kind == .string;
-            const imported = try self.moduleExportName();
+            const imported = try self.moduleExportName(.imported);
             var local = imported;
             var local_token = imported_token;
             if (self.checkContextual("as")) {
@@ -2586,7 +2669,7 @@ pub const Parser = struct {
             node.star = true;
             if (self.checkContextual("as")) {
                 _ = self.advance();
-                node.star_as = try self.moduleExportName();
+                node.star_as = try self.moduleExportName(.exported);
             }
             try self.expectContextual("from");
             node.from = self.advance().text;
@@ -2597,15 +2680,16 @@ pub const Parser = struct {
         if (self.check(.lbrace)) {
             // `export { a, b as c }` [from "m"]
             var entries: std.ArrayListUnmanaged(ast.ExportEntry) = .empty;
-            var referenced_module_export_name = false;
+            var referenced_module_export_offset: ?usize = null;
             _ = self.advance(); // `{`
             while (!self.check(.rbrace)) {
-                if (self.cur().kind == .string) referenced_module_export_name = true;
-                const first = try self.moduleExportName();
+                if (self.cur().kind == .string and referenced_module_export_offset == null)
+                    referenced_module_export_offset = self.cur().pos;
+                const first = try self.moduleExportName(.local_export);
                 var exported = first;
                 if (self.checkContextual("as")) {
                     _ = self.advance();
-                    exported = try self.moduleExportName();
+                    exported = try self.moduleExportName(.exported);
                 }
                 try entries.append(self.arena, .{ .local = first, .exported = exported });
                 if (!self.match(.comma)) break;
@@ -2620,8 +2704,8 @@ pub const Parser = struct {
                     e.imported = e.local;
                     e.local = "";
                 }
-            } else if (referenced_module_export_name) {
-                return ParseError.UnexpectedToken;
+            } else if (referenced_module_export_offset) |offset| {
+                return self.failWithReasonAt(.module_export_name_local_reference, offset);
             }
             node.entries = entries.items;
             try self.consumeStatementTerminator();
@@ -2660,10 +2744,16 @@ pub const Parser = struct {
     }
 
     /// A ModuleExportName: an identifier or a string literal (ES2022).
-    fn moduleExportName(self: *Parser) ParseError![]const u8 {
+    fn moduleExportName(self: *Parser, context: ModuleExportNameContext) ParseError![]const u8 {
         const t = self.cur();
-        if (t.kind != .identifier and t.kind != .string) return ParseError.UnexpectedToken;
-        if (t.kind == .string and !isWellFormedStringValue(t.text)) return ParseError.UnexpectedToken;
+        if (t.kind != .identifier and t.kind != .string) return self.failWithToken(switch (context) {
+            .imported => .expected_imported_name,
+            .local_export => .expected_local_export_name,
+            .exported => .expected_exported_name,
+            .import_attribute => .expected_import_attribute_key,
+        }, t);
+        if (t.kind == .string and !isWellFormedStringValue(t.text))
+            return self.failWithToken(.malformed_module_export_name, t);
         return self.advance().text;
     }
 
@@ -7289,6 +7379,62 @@ test "parser retains static and dynamic import diagnostics" {
     }
 }
 
+test "parser retains module early error diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "let x; let x;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'x'." },
+        .{ .source = "var x; let x;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'x'." },
+        .{ .source = "let x; var x;", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "function x(){} let x;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'x'." },
+        .{ .source = "import x from \"m\"; let x;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'x'." },
+        .{ .source = "let x; export {x}; export {x};", .reason = .duplicate_export_name, .message = "Cannot export a duplicate name 'x'." },
+        .{ .source = "export default 1; export default 2;", .reason = .duplicate_default_export, .message = "Only one 'default' export is allowed." },
+        .{ .source = "export {x};", .reason = .unresolved_export_binding, .message = "Exported binding 'x' needs to refer to a top-level declared variable." },
+        .{ .source = "<!-- comment", .reason = .unexpected_token, .message = "Unexpected token '<'" },
+        .{ .source = "--> comment", .reason = .unexpected_token, .message = "Unexpected token '>'" },
+        .{ .source = "import \"m\" with {type:\"json\",type:\"json\"};", .reason = .duplicate_import_attribute, .message = "Unexpected identifier 'type'. A duplicate key for import attributes 'type'." },
+        .{ .source = "import \"m\" with {type: json};", .reason = .expected_import_attribute_value, .message = "Unexpected identifier 'json'. Expected an attribute value." },
+        .{ .source = "import \"m\" with {1:\"x\"};", .reason = .expected_import_attribute_key, .message = "Unexpected number '1'. Expected an attribute key." },
+        .{ .source = "import \"m\" with {\"type\":\"json\",type:\"json\"};", .reason = .duplicate_import_attribute, .message = "Unexpected identifier 'type'. A duplicate key for import attributes 'type'." },
+        .{ .source = "export {\"x\"};", .reason = .module_export_name_local_reference, .message = "Cannot use module export names if they reference variable names in the current module." },
+        .{ .source = "export {1};", .reason = .expected_local_export_name, .message = "Unexpected number '1'. Expected a variable name or a module export name string for the export declaration." },
+        .{ .source = "export {\"\\uD800\" as x} from \"m\";", .reason = .malformed_module_export_name, .message = "Unexpected string literal \"\\uD800\". Expected a well-formed-unicode string for the module export name." },
+        .{ .source = "export * as 1 from \"m\";", .reason = .expected_exported_name, .message = "Unexpected number '1'. Expected an exported name or a module export name string for the export declaration." },
+        .{ .source = "export {x as 1};", .reason = .expected_exported_name, .message = "Unexpected number '1'. Expected an exported name or a module export name string for the export declaration." },
+        .{ .source = "export {x} from \"m\" with {type:\"json\",type:\"json\"};", .reason = .duplicate_import_attribute, .message = "Unexpected identifier 'type'. A duplicate key for import attributes 'type'." },
+        .{ .source = "import x from \"a\"; import x from \"b\";", .reason = .duplicate_import_binding, .message = "Cannot declare an imported binding name twice: 'x'." },
+        .{ .source = "let x; import x from \"m\";", .reason = .duplicate_import_binding, .message = "Cannot declare an imported binding name twice: 'x'." },
+        .{ .source = "const x=1; const x=2;", .reason = .duplicate_const_binding, .message = "Cannot declare a const variable twice: 'x'." },
+        .{ .source = "class x{} class x{}", .reason = .duplicate_class_binding, .message = "Cannot declare a class twice: 'x'." },
+        .{ .source = "function x(){} function x(){}", .reason = .function_shadows_lexical, .message = "Cannot declare a function that shadows a let/const/class/function variable 'x'." },
+        .{ .source = "export let {x}=a; export let x;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'x'." },
+        .{ .source = "export {\"a\" as x} from \"a\"; export {\"b\" as x} from \"b\";", .reason = .duplicate_export_name, .message = "Cannot export a duplicate name 'x'." },
+        .{ .source = "let x; let {x}=a;", .reason = .duplicate_lexical_destructuring, .message = "Unexpected token '}'. Cannot declare a lexical variable twice: 'x'." },
+        .{ .source = "let x; let [x]=a;", .reason = .duplicate_lexical_binding, .message = "Unexpected identifier 'x'. Cannot declare a lexical variable twice: 'x'." },
+        .{ .source = "let [x]=a; var x;", .reason = .var_shadows_lexical, .message = "Cannot declare a var variable that shadows a let/const/class variable: 'x'." },
+        .{ .source = "let x; export default function x(){}", .reason = .function_shadows_lexical, .message = "Cannot declare a function that shadows a let/const/class/function variable 'x'." },
+        .{ .source = "let x; export default async function x(){}", .reason = .async_function_shadows_lexical, .message = "Cannot declare an async function that shadows a let/const/class/function variable 'x'." },
+        .{ .source = "let x; export default class x{}", .reason = .duplicate_class_binding, .message = "Cannot declare a class twice: 'x'." },
+        .{ .source = "export default function x(){} let x;", .reason = .duplicate_let_binding, .message = "Cannot declare a let variable twice: 'x'." },
+        .{ .source = "import * as x from \"a\"; import {y as x} from \"b\";", .reason = .duplicate_import_binding, .message = "Cannot declare an imported binding name twice: 'x'." },
+        .{ .source = "async function x(){} async function x(){}", .reason = .async_function_shadows_lexical, .message = "Cannot declare an async function that shadows a let/const/class/function variable 'x'." },
+        .{ .source = "import {1 as x} from \"m\";", .reason = .expected_imported_name, .message = "Unexpected number '1'. Expected an imported name or a module export name string for the import declaration." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseModule());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
 test "parser preserves completion-order locations across module exports and speculative for rewind" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -10052,7 +10198,8 @@ test "module parsing extends one goal-bounded token stream and rejects Script HT
 
     var rejected = try Parser.init(arena.allocator(), source);
     try std.testing.expectError(ParseError.UnexpectedToken, rejected.parseModule());
-    try std.testing.expectEqual(std.mem.indexOf(u8, source, "-->").?, rejected.errorLocation().byte_offset);
+    try std.testing.expectEqual(std.mem.indexOf(u8, source, "-->").? + 2, rejected.errorLocation().byte_offset);
+    try std.testing.expectEqualStrings("Unexpected token '>'", try rejected.diagnosticMessage(arena.allocator(), rejected.last_error_reason.?));
 }
 
 fn exerciseRegexValidationScratch(allocator: std.mem.Allocator) !void {
