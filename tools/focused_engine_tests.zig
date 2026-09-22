@@ -1129,6 +1129,41 @@ const runtime_cases = [_]Case{
         .expected = 4095,
     },
     .{
+        // #970: `padStart`/`padEnd` and `join` produce output proportional to a
+        // numeric argument, the shape the string cap exists for, so past the cap
+        // they throw as `repeat` does instead of growing until the process is
+        // killed. node v24.4.1 passes six of the eight checks; the first two
+        // assert zig-js's own 2^26-byte cap, which is smaller than V8's.
+        .name = "amplified string builders respect the string length cap",
+        .source =
+        \\function outcome(run) {
+        \\  try { return run(); }
+        \\  catch (e) { return e instanceof RangeError ? "range" : "other: " + e; }
+        \\}
+        \\var checks = [];
+        \\// A result longer than the string cap throws before anything is built, the
+        \\// same as `repeat` does at that length.
+        \\checks.push(outcome(function () { return "a".repeat(2 ** 26 + 1); }) === "range");
+        \\checks.push(outcome(function () { return "a".padStart(2 ** 26 + 1); }) === "range");
+        \\checks.push(outcome(function () { return "a".padEnd(2 ** 53 - 1); }) === "range");
+        \\checks.push(outcome(function () { return "a".padStart(2 ** 31, "é"); }) === "range");
+        \\// Ordinary padding is unchanged, including a non-ASCII pad.
+        \\checks.push("5".padStart(3, "0") === "005" && "ab".padEnd(5, "éx") === "abéxé");
+        \\// A join whose separators alone pass the cap throws after reading element 0,
+        \\// without walking the rest of a billion holes.
+        \\var reads = "";
+        \\Object.defineProperty(Array.prototype, 0, { get: function () { reads += "0"; return "x"; }, configurable: true });
+        \\checks.push(outcome(function () { return new Array(2 ** 30).join("ab"); }) === "range" && reads === "0");
+        \\reads = "";
+        \\checks.push(outcome(function () { return new Array(2 ** 30).toLocaleString(); }) === "range" && reads === "0");
+        \\delete Array.prototype[0];
+        \\// Ordinary joins are unchanged.
+        \\checks.push([1, null, "b", undefined].join("-") === "1--b-" && new Array(4).join("ab") === "ababab");
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 255,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty

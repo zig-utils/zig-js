@@ -12919,6 +12919,13 @@ pub const Interpreter = struct {
             return self.throwError("RangeError", "Invalid string length");
     }
 
+    /// `remaining` more separators of `sep_len` bytes will follow what `buf`
+    /// holds; throw now if they alone would pass the string cap.
+    fn ensureJoinSeparators(self: *Interpreter, buf: *const std.ArrayListUnmanaged(u8), sep_len: usize, remaining: usize) EvalError!void {
+        const floor = std.math.mul(usize, sep_len, remaining) catch return self.throwError("RangeError", "Invalid string length");
+        try self.ensureStringAppend(buf, floor);
+    }
+
     fn appendStringByte(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), byte: u8) EvalError!void {
         try self.ensureStringAppend(buf, 1);
         try buf.append(self.arena, byte);
@@ -18913,11 +18920,20 @@ pub const Interpreter = struct {
             const sep_root = try self.pushTempRoot(sep);
             defer self.restoreTempRoots(sep_root);
             var buf: std.ArrayListUnmanaged(u8) = .empty;
+            const sep_len = (try self.tempRoot(sep_root, sep).asWtf8(self.arena)).len;
             // Walk the logical length: a hole reads as `undefined` (via [[Get]])
             // and — like `undefined`/`null` — renders as the empty string.
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (i != 0) try buf.appendSlice(self.arena, try self.tempRoot(sep_root, sep).asWtf8(self.arena));
+                if (i != 0) {
+                    // The separators still to come are a floor on the result's
+                    // length, so once they would carry it past the string cap
+                    // the join can only throw. `new Array(2**30).join("ab")`
+                    // then throws after element 0, as V8 does, instead of
+                    // walking a billion holes first (#970).
+                    try self.ensureJoinSeparators(&buf, sep_len, ilen - i);
+                    try buf.appendSlice(self.arena, try self.tempRoot(sep_root, sep).asWtf8(self.arena));
+                }
                 const el = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
                 const element_root = try self.pushTempRoot(el);
                 defer self.restoreTempRoots(element_root);
@@ -18944,7 +18960,10 @@ pub const Interpreter = struct {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (i != 0) try buf.append(self.arena, ',');
+                if (i != 0) {
+                    try self.ensureJoinSeparators(&buf, 1, ilen - i); // as in join
+                    try buf.append(self.arena, ',');
+                }
                 const el = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
                 const element_root = try self.pushTempRoot(el);
                 defer self.restoreTempRoots(element_root);
@@ -20531,6 +20550,11 @@ pub const Interpreter = struct {
             const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringWtf8(args[1]) else " ";
             const pad_units = utf16LenOfString(pad);
             if (pad_units == 0) return try self.stringReceiverValue(s, s_cell);
+            // The result has `target` code units, each at least one byte, so a
+            // target past the string cap can only throw -- decide that before
+            // the fill is allocated, as `repeat` does, instead of building a
+            // multi-gigabyte buffer first (#970).
+            if (target > max_string_bytes) return self.throwError("RangeError", "Invalid string length");
             const fill_units = target - len;
 
             // A flat receiver with an ASCII pad — including the default " " — is a
@@ -20559,9 +20583,16 @@ pub const Interpreter = struct {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             var fill_len = fill_units;
             if (!start) try buf.appendSlice(self.arena, body);
-            while (fill_len >= pad_units) : (fill_len -= pad_units) try buf.appendSlice(self.arena, pad);
+            while (fill_len >= pad_units) : (fill_len -= pad_units) {
+                // A non-ASCII pad takes up to three bytes a code unit.
+                try self.ensureStringAppend(&buf, pad.len);
+                try buf.appendSlice(self.arena, pad);
+            }
             if (fill_len > 0) try self.appendStringUtf16Prefix(&buf, pad, fill_len);
-            if (start) try buf.appendSlice(self.arena, body);
+            if (start) {
+                try self.ensureStringAppend(&buf, body.len);
+                try buf.appendSlice(self.arena, body);
+            }
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "replace") or eq(name, "replaceAll")) {
