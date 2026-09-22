@@ -20,6 +20,10 @@ export type ProcessResourceSnapshot = {
   peak_rss_bytes: number;
   retained_rss_bytes: number;
 };
+export type MemoryInventorySnapshot = Record<string, any> & {
+  gc_generation: CounterMap | null;
+  budget: CounterMap | null;
+};
 export type TierSnapshot = {
   kind: "zig-js-tier-attribution";
   mode: "single" | "shared" | "module_cold";
@@ -42,6 +46,7 @@ export type TierSnapshot = {
   generated_code_bytes: number;
   native_code: CounterMap;
   heap: CounterMap;
+  memory: MemoryInventorySnapshot;
   process: ProcessResourceSnapshot;
 };
 export type TierDelta = {
@@ -296,9 +301,145 @@ const processMetrics = [
   "peak_rss_bytes",
   "retained_rss_bytes",
 ];
+const memoryNumberMetrics = [
+  "schema",
+  "context_backing_current_bytes",
+  "context_backing_peak_bytes",
+  "collector_auxiliary_current_bytes",
+  "collector_auxiliary_peak_bytes",
+  "external_control_current_bytes",
+  "profiler_control_bytes",
+  "budget_control_bytes",
+  "serialized_allocator_control_bytes",
+  "recovery_reserve_current_bytes",
+  "owned_native_live_bytes",
+  "owned_native_retired_bytes",
+  "observed_shared_native_live_bytes",
+  "observed_shared_native_retired_bytes",
+  "accounted_owned_current_bytes",
+  "heap_logical_live_bytes",
+  "heap_last_full_collection_bytes",
+  "gc_cell_net_issued_bytes",
+  "gc_string_bytes_live",
+  "gc_array_buffer_bytes_live",
+  "gc_environment_name_bytes_live",
+  "gc_object_backing_store_bytes_live",
+  "gc_generator_backing_store_bytes_live",
+  "gc_promise_reaction_entries_live",
+];
+const memoryBooleanMetrics = [
+  "accounted_owned_bytes_complete",
+  "owns_precise_heap",
+  "owns_native_code",
+  "collector_auxiliary_owned_but_untracked",
+];
+const generationMemoryMetrics = [
+  "live_cells",
+  "live_bytes",
+  "young_cells",
+  "young_bytes",
+  "old_cells",
+  "old_bytes",
+  "promoted_cells_total",
+  "promoted_bytes_total",
+  "tenuring_age",
+  "minor_collections",
+  "last_minor_young_bytes",
+  "last_minor_reclaimed_bytes",
+  "last_minor_survived_cells",
+  "last_minor_survived_bytes",
+  "last_minor_promoted_bytes",
+  "total_minor_young_bytes",
+  "total_minor_reclaimed_bytes",
+  "total_minor_survived_bytes",
+  "total_minor_promoted_bytes",
+];
+const budgetMemoryMetrics = [
+  "limit_bytes",
+  "used_bytes",
+  "peak_bytes",
+  "remaining_bytes",
+  "recovery_reserve_bytes",
+  "recovery_reserve_released_bytes",
+];
 
 function requireValue(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+function exactInventory(value: Record<string, any>, fields: string[]): boolean {
+  return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...fields].sort());
+}
+
+function nonnegativeSafeIntegers(value: Record<string, any>, fields: string[]): boolean {
+  return fields.every((name) => Number.isSafeInteger(value[name]) && value[name] >= 0);
+}
+
+function validateMemoryInventory(memory: MemoryInventorySnapshot, workload: string): void {
+  requireValue(
+    memory && typeof memory === "object" &&
+      exactInventory(memory, [...memoryNumberMetrics, ...memoryBooleanMetrics, "gc_generation", "budget"]),
+    `memory inventory drift for ${workload}`,
+  );
+  requireValue(
+    nonnegativeSafeIntegers(memory, memoryNumberMetrics) &&
+      memoryBooleanMetrics.every((name) => typeof memory[name] === "boolean") && memory.schema === 3,
+    `memory inventory contains invalid values for ${workload}`,
+  );
+  requireValue(
+    memory.accounted_owned_bytes_complete && !memory.collector_auxiliary_owned_but_untracked &&
+      memory.context_backing_peak_bytes >= memory.context_backing_current_bytes &&
+      memory.collector_auxiliary_peak_bytes >= memory.collector_auxiliary_current_bytes &&
+      memory.external_control_current_bytes ===
+        memory.profiler_control_bytes + memory.budget_control_bytes +
+          memory.serialized_allocator_control_bytes + memory.recovery_reserve_current_bytes &&
+      memory.accounted_owned_current_bytes ===
+        memory.context_backing_current_bytes + memory.collector_auxiliary_current_bytes +
+          memory.external_control_current_bytes + memory.owned_native_live_bytes +
+          memory.owned_native_retired_bytes &&
+      (memory.owns_native_code
+        ? memory.observed_shared_native_live_bytes === 0 && memory.observed_shared_native_retired_bytes === 0
+        : memory.owned_native_live_bytes === 0 && memory.owned_native_retired_bytes === 0),
+    `memory inventory does not reconcile for ${workload}`,
+  );
+  if (memory.gc_generation === null) {
+    requireValue(!memory.owns_precise_heap, `owned precise heap lacks a generation inventory for ${workload}`);
+  } else {
+    const generation = memory.gc_generation;
+    requireValue(
+      typeof generation === "object" && exactInventory(generation, generationMemoryMetrics) &&
+        nonnegativeSafeIntegers(generation, generationMemoryMetrics),
+      `generation memory inventory drift for ${workload}`,
+    );
+    requireValue(
+      generation.live_cells === generation.young_cells + generation.old_cells &&
+        generation.live_bytes === generation.young_bytes + generation.old_bytes &&
+        generation.live_bytes === memory.heap_logical_live_bytes,
+      `generation memory inventory does not reconcile for ${workload}`,
+    );
+  }
+  if (memory.budget === null) {
+    requireValue(
+      memory.budget_control_bytes === 0 && memory.recovery_reserve_current_bytes === 0,
+      `absent memory budget has owned state for ${workload}`,
+    );
+  } else {
+    const budget = memory.budget;
+    requireValue(
+      typeof budget === "object" && exactInventory(budget, budgetMemoryMetrics) &&
+        nonnegativeSafeIntegers(budget, budgetMemoryMetrics),
+      `memory budget inventory drift for ${workload}`,
+    );
+    requireValue(
+      memory.budget_control_bytes > 0 && budget.used_bytes + budget.remaining_bytes === budget.limit_bytes &&
+        budget.peak_bytes >= budget.used_bytes &&
+        budget.recovery_reserve_released_bytes <= budget.recovery_reserve_bytes &&
+        memory.recovery_reserve_current_bytes ===
+          budget.recovery_reserve_bytes - budget.recovery_reserve_released_bytes &&
+        budget.used_bytes === memory.context_backing_current_bytes + memory.recovery_reserve_current_bytes,
+      `memory budget inventory does not reconcile for ${workload}`,
+    );
+  }
 }
 
 function workloadEntries(manifest: any): any[] {
@@ -638,6 +779,7 @@ function validateRows(
           Object.values(row.process).every(Number.isInteger),
         `non-integral attribution for ${workload}`,
       );
+      validateMemoryInventory(row.memory, workload);
       requireValue(
         JSON.stringify(Object.keys(row.execution).sort()) ===
           JSON.stringify([...tierMetrics, ...runtimeMetrics, "environment_allocations"].sort()),
@@ -1188,7 +1330,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 13,
+    schema_version: 14,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -1216,7 +1358,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 13, "checkpoint schema is not version 13");
+  requireValue(raw?.schema_version === 14, "checkpoint schema is not version 14");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
@@ -1264,6 +1406,65 @@ function atomicWrite(path: string, contents: string): void {
   writeText(temporary, contents);
   const moved = run(["mv", "-f", temporary, path]);
   requireValue(moved.exitCode === 0, moved.stderr || `cannot replace ${path}`);
+}
+
+function syntheticMemory(index: number): MemoryInventorySnapshot {
+  const heapBytes = 8192 + index,
+    nativeBytes = index > 0 ? 4096 : 0,
+    backingBytes = 1000 + index,
+    profilerBytes = 128;
+  return {
+    schema: 3,
+    accounted_owned_bytes_complete: true,
+    owns_precise_heap: true,
+    owns_native_code: true,
+    context_backing_current_bytes: backingBytes,
+    context_backing_peak_bytes: backingBytes,
+    collector_auxiliary_current_bytes: 0,
+    collector_auxiliary_peak_bytes: 0,
+    external_control_current_bytes: profilerBytes,
+    profiler_control_bytes: profilerBytes,
+    budget_control_bytes: 0,
+    serialized_allocator_control_bytes: 0,
+    recovery_reserve_current_bytes: 0,
+    owned_native_live_bytes: nativeBytes,
+    owned_native_retired_bytes: 0,
+    observed_shared_native_live_bytes: 0,
+    observed_shared_native_retired_bytes: 0,
+    accounted_owned_current_bytes: backingBytes + profilerBytes + nativeBytes,
+    collector_auxiliary_owned_but_untracked: false,
+    heap_logical_live_bytes: heapBytes,
+    heap_last_full_collection_bytes: 0,
+    gc_cell_net_issued_bytes: heapBytes,
+    gc_string_bytes_live: index,
+    gc_array_buffer_bytes_live: index,
+    gc_environment_name_bytes_live: index,
+    gc_object_backing_store_bytes_live: index,
+    gc_generator_backing_store_bytes_live: index,
+    gc_promise_reaction_entries_live: index,
+    gc_generation: {
+      live_cells: 10 + index,
+      live_bytes: heapBytes,
+      young_cells: index,
+      young_bytes: index,
+      old_cells: 10,
+      old_bytes: heapBytes - index,
+      promoted_cells_total: index,
+      promoted_bytes_total: index,
+      tenuring_age: 2,
+      minor_collections: index,
+      last_minor_young_bytes: index,
+      last_minor_reclaimed_bytes: 0,
+      last_minor_survived_cells: index,
+      last_minor_survived_bytes: index,
+      last_minor_promoted_bytes: index,
+      total_minor_young_bytes: index,
+      total_minor_reclaimed_bytes: 0,
+      total_minor_survived_bytes: index,
+      total_minor_promoted_bytes: index,
+    },
+    budget: null,
+  };
 }
 
 function syntheticRows(manifest: any): TierSnapshot[] {
@@ -1357,6 +1558,7 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           heapMetrics.map((name) => [name,
             name === "live_bytes" ? 8192 + index : name === "collections" ? index : 0]),
         ),
+        memory: syntheticMemory(index),
         process: {
           cpu_user_ns: (index + 1) * 100,
           cpu_system_ns: (index + 1) * 10,
@@ -1410,6 +1612,15 @@ export function selfTest(): void {
   const heap = JSON.parse(JSON.stringify(rows));
   delete heap[0].heap.collections;
   expectFailure(() => validate(heap, manifest, true), "heap attribution inventory drift");
+  const memory = JSON.parse(JSON.stringify(rows));
+  delete memory[0].memory.context_backing_current_bytes;
+  expectFailure(() => validate(memory, manifest, true), "memory inventory drift");
+  const incoherentMemory = JSON.parse(JSON.stringify(rows));
+  incoherentMemory[0].memory.accounted_owned_current_bytes += 1;
+  expectFailure(() => validate(incoherentMemory, manifest, true), "memory inventory does not reconcile");
+  const generationMemory = JSON.parse(JSON.stringify(rows));
+  generationMemory[0].memory.gc_generation.old_bytes += 1;
+  expectFailure(() => validate(generationMemory, manifest, true), "generation memory inventory does not reconcile");
   const processResource = JSON.parse(JSON.stringify(rows));
   delete processResource[0].process.retained_rss_bytes;
   expectFailure(() => validate(processResource, manifest, true), "process resource inventory drift");
@@ -1548,7 +1759,7 @@ export function selfTest(): void {
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/Shape/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, generated Shape report, and exact checkpoint/resume identity verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/Shape/allocation/memory/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, generated Shape report, and exact checkpoint/resume identity verified");
 }
 
 function main(): void {

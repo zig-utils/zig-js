@@ -440,6 +440,59 @@ fn printPromiseProfileRow(
     });
 }
 
+fn printFlatJsonStruct(writer: *std.Io.Writer, value: anytype) !void {
+    try writer.writeByte('{');
+    inline for (
+        comptime std.meta.fieldNames(@TypeOf(value)),
+        comptime std.meta.fieldTypes(@TypeOf(value)),
+        0..,
+    ) |name, Field, index| {
+        if (index != 0) try writer.writeByte(',');
+        const item = @field(value, name);
+        switch (@typeInfo(Field)) {
+            .int, .comptime_int => try writer.print("\"{s}\":{d}", .{ name, item }),
+            .bool => try writer.print("\"{s}\":{s}", .{ name, if (item) "true" else "false" }),
+            else => @compileError("flat JSON attribution struct contains unsupported field " ++ name),
+        }
+    }
+    try writer.writeByte('}');
+}
+
+fn printMemoryInventory(writer: *std.Io.Writer, memory: ?js.Context.MemoryInventorySnapshot) !void {
+    const snapshot = memory orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.writeByte('{');
+    var wrote_field = false;
+    inline for (
+        comptime std.meta.fieldNames(js.Context.MemoryInventorySnapshot),
+        comptime std.meta.fieldTypes(js.Context.MemoryInventorySnapshot),
+    ) |name, Field| {
+        if (comptime std.mem.eql(u8, name, "gc_generation") or std.mem.eql(u8, name, "budget"))
+            continue;
+        if (wrote_field) try writer.writeByte(',');
+        wrote_field = true;
+        const item = @field(snapshot, name);
+        switch (@typeInfo(Field)) {
+            .int, .comptime_int => try writer.print("\"{s}\":{d}", .{ name, item }),
+            .bool => try writer.print("\"{s}\":{s}", .{ name, if (item) "true" else "false" }),
+            else => @compileError("memory inventory contains unsupported field " ++ name),
+        }
+    }
+    try writer.writeAll(",\"gc_generation\":");
+    if (snapshot.gc_generation) |generation|
+        try printFlatJsonStruct(writer, generation)
+    else
+        try writer.writeAll("null");
+    try writer.writeAll(",\"budget\":");
+    if (snapshot.budget) |budget|
+        try printFlatJsonStruct(writer, budget)
+    else
+        try writer.writeAll("null");
+    try writer.writeByte('}');
+}
+
 fn printTierAttributionRow(
     writer: *std.Io.Writer,
     mode: []const u8,
@@ -538,8 +591,9 @@ fn printTierAttributionRow(
         if (index != 0) try writer.writeByte(',');
         try writer.print("{d}", .{pause_ns});
     }
-    try writer.print("],\"full_overflow\":{d}}},\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes\":{d},\"retained_rss_bytes\":{d}}}}}\n", .{
-        snapshot.runtime.full_pauses.overflow,
+    try writer.print("],\"full_overflow\":{d}}},\"memory\":", .{snapshot.runtime.full_pauses.overflow});
+    try printMemoryInventory(writer, snapshot.memory);
+    try writer.print(",\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes\":{d},\"retained_rss_bytes\":{d}}}}}\n", .{
         process.cpu_user_ns,
         process.cpu_system_ns,
         process.peak_rss_bytes,
