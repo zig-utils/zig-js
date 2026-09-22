@@ -100,13 +100,35 @@ const frontend_cases = [_]Case{
         \\  ["function f(a = 1) { \"use strict\"; }", "'use strict' directive not allowed inside a function with a non-simple parameter list."],
         \\  ["\"use strict\"; function eval() {}", "'eval' is not a valid function name in strict mode."],
         \\  ["function arguments() { \"use strict\"; }", "'arguments' is not a valid function name in strict mode."],
+        \\  ["function f(1) {}", "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list."],
+        \\  ["function f(break) {}", "Cannot use the keyword 'break' as a parameter name."],
+        \\  ["(break) => 1", "Unexpected keyword 'break'"],
+        \\  ["async (await) => 1", "Cannot use 'await' as a parameter name in an async function."],
+        \\  ["x\n=> x", "Unexpected token '=>'"],
+        \\  ["(a,a) => 0", "Duplicate parameter 'a' not allowed in an arrow function."],
+        \\  ["([a],{a}) => 0", "Duplicate parameter 'a' not allowed in function with destructuring parameters."],
+        \\  ["({m(a,a){}})", "Duplicate parameter 'a' not allowed in a method."],
+        \\  ["function f(a,a=0){}", "Duplicate parameter 'a' not allowed in function with default parameter values."],
+        \\  ["\"use strict\"; function f(a,a){}", "Cannot declare a parameter named 'a' in strict mode as it has already been declared."],
+        \\  ["(function* yield(){})", "Cannot declare generator function named 'yield'."],
+        \\  ["Function(\"a) trailing\", \"\")", "Unexpected identifier 'trailing'. Expected an opening '{' at the start of a function body."],
         \\];
         \\rows.reduce(function(bits, row, i) {
         \\  try { eval(row[0]); return bits; }
         \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
         \\}, 0)
         ,
-        .expected = 262143,
+        .expected = 1073741823,
+    },
+    .{
+        .name = "sloppy generator and async functions allow duplicate simple parameters",
+        .source =
+        \\function* generator(value, value) { yield value; }
+        \\async function asynchronous(value, value) { return value; }
+        \\async function* asyncGenerator(value, value) { yield value; }
+        \\generator(1, 2).next().value === 2 && typeof asynchronous === "function" && typeof asyncGenerator === "function" ? 1 : 0
+        ,
+        .expected = 1,
     },
     .{
         .name = "object and destructuring SyntaxErrors retain JSC prose",

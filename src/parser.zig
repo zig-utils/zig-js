@@ -46,8 +46,27 @@ pub const DiagnosticReason = enum {
     duplicate_catch_destructuring,
     catch_function_shadow,
     invalid_strict_parameters,
+    strict_duplicate_parameter,
+    strict_parameter_name,
+    strict_reserved_parameter,
+    strict_arrow_reserved_parameter,
+    function_parameter_keyword,
+    arrow_parameter_keyword,
+    async_parameter_await,
+    generator_parameter_yield,
+    duplicate_parameter_arrow,
+    duplicate_parameter_method,
+    duplicate_parameter_default,
+    duplicate_parameter_rest,
+    duplicate_parameter_destructuring,
+    expected_function_body_opening,
     function_name_required,
     function_keyword_name,
+    generator_function_name,
+    async_function_name,
+    async_generator_function_name,
+    strict_generator_function_name,
+    strict_async_generator_function_name,
     strict_directive_non_simple_parameters,
     strict_function_name,
     array_rest_pattern_closing,
@@ -200,8 +219,14 @@ pub const DiagnosticReason = enum {
             .duplicate_let_binding, .duplicate_const_binding, .duplicate_class_binding => "",
             .duplicate_catch_binding, .duplicate_catch_destructuring, .catch_function_shadow => "",
             .invalid_strict_parameters => "Invalid parameters or function name in strict mode.",
+            .strict_duplicate_parameter, .strict_parameter_name, .strict_reserved_parameter, .strict_arrow_reserved_parameter, .function_parameter_keyword, .arrow_parameter_keyword => "",
+            .async_parameter_await => "Cannot use 'await' as a parameter name in an async function.",
+            .generator_parameter_yield => "Cannot use 'yield' as a parameter name in a generator function.",
+            .duplicate_parameter_arrow, .duplicate_parameter_method, .duplicate_parameter_default, .duplicate_parameter_rest, .duplicate_parameter_destructuring => "",
+            .expected_function_body_opening => "Expected an opening '{' at the start of a function body.",
             .function_name_required => "Function statements must have a name.",
             .function_keyword_name => "",
+            .generator_function_name, .async_function_name, .async_generator_function_name, .strict_generator_function_name, .strict_async_generator_function_name => "",
             .strict_directive_non_simple_parameters => "'use strict' directive not allowed inside a function with a non-simple parameter list.",
             .strict_function_name => "",
             .array_rest_pattern_closing => "Expected a closing ']' following a rest element destructuring pattern.",
@@ -346,6 +371,8 @@ const DiagnosticToken = struct {
     text: []const u8,
     detail: ?[]const u8 = null,
 };
+
+const DuplicateParameterContext = enum { function, arrow, method };
 
 pub const SourceLocation = struct {
     byte_offset: usize,
@@ -1136,8 +1163,40 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Unexpected token '{s}'. Cannot declare a lexical variable twice: '{s}'.", .{ token.text, token.detail.? });
         if (reason == .catch_function_shadow)
             return std.fmt.allocPrint(allocator, "Cannot declare a function that shadows a let/const/class/function variable '{s}'.", .{token.text});
+        if (reason == .strict_duplicate_parameter)
+            return std.fmt.allocPrint(allocator, "Cannot declare a parameter named '{s}' in strict mode as it has already been declared.", .{token.text});
+        if (reason == .strict_parameter_name)
+            return std.fmt.allocPrint(allocator, "Cannot destructure to a parameter name '{s}' in strict mode.", .{token.text});
+        if (reason == .strict_reserved_parameter)
+            return std.fmt.allocPrint(allocator, "Cannot use the reserved word '{s}' as a parameter name in strict mode.", .{token.text});
+        if (reason == .strict_arrow_reserved_parameter)
+            return std.fmt.allocPrint(allocator, "Unexpected use of reserved word '{s}' in strict mode", .{token.text});
+        if (reason == .function_parameter_keyword)
+            return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a parameter name.", .{token.text});
+        if (reason == .async_parameter_await or reason == .generator_parameter_yield)
+            return reason.message();
+        if (reason == .duplicate_parameter_arrow)
+            return std.fmt.allocPrint(allocator, "Duplicate parameter '{s}' not allowed in an arrow function.", .{token.text});
+        if (reason == .duplicate_parameter_method)
+            return std.fmt.allocPrint(allocator, "Duplicate parameter '{s}' not allowed in a method.", .{token.text});
+        if (reason == .duplicate_parameter_default)
+            return std.fmt.allocPrint(allocator, "Duplicate parameter '{s}' not allowed in function with default parameter values.", .{token.text});
+        if (reason == .duplicate_parameter_rest)
+            return std.fmt.allocPrint(allocator, "Duplicate parameter '{s}' not allowed in function with a rest parameter.", .{token.text});
+        if (reason == .duplicate_parameter_destructuring)
+            return std.fmt.allocPrint(allocator, "Duplicate parameter '{s}' not allowed in function with destructuring parameters.", .{token.text});
         if (reason == .function_keyword_name)
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a function name.", .{token.text});
+        if (reason == .generator_function_name)
+            return std.fmt.allocPrint(allocator, "Cannot declare generator function named '{s}'.", .{token.text});
+        if (reason == .async_function_name)
+            return std.fmt.allocPrint(allocator, "Cannot declare async function named '{s}'.", .{token.text});
+        if (reason == .async_generator_function_name)
+            return std.fmt.allocPrint(allocator, "Cannot declare async generator function named '{s}'.", .{token.text});
+        if (reason == .strict_generator_function_name)
+            return std.fmt.allocPrint(allocator, "Cannot use '{s}' as a generator function name in strict mode.", .{token.text});
+        if (reason == .strict_async_generator_function_name)
+            return std.fmt.allocPrint(allocator, "Cannot use '{s}' as a async generator function name in strict mode.", .{token.text});
         if (reason == .strict_function_name)
             return std.fmt.allocPrint(allocator, "'{s}' is not a valid function name in strict mode.", .{token.text});
         if (reason == .abbreviated_destructuring_keyword)
@@ -1161,7 +1220,7 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a shorthand property name.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
-        if (reason == .unexpected_token or reason == .expected_token)
+        if (reason == .unexpected_token or reason == .expected_token or reason == .arrow_parameter_keyword)
             return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}", .{ noun, quote, token.text, quote });
         return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. {s}", .{ noun, quote, token.text, quote, reason.message() });
     }
@@ -2852,8 +2911,18 @@ pub const Parser = struct {
         if (self.check(.lbracket)) return self.parseArrayPattern(forbidden_reason);
         const name = self.advance();
         if (name.kind != .identifier) return self.failWithToken(.expected_variable_binding, name);
-        if (self.isForbiddenBindingName(name.text)) return self.failWithToken(forbidden_reason, name);
+        if (self.isForbiddenBindingName(name.text)) return self.failWithToken(self.parameterForbiddenReason(forbidden_reason, name.text), name);
         return self.alloc(.{ .identifier = name.text });
+    }
+
+    fn parameterForbiddenReason(self: *const Parser, fallback: DiagnosticReason, name: []const u8) DiagnosticReason {
+        if (fallback != .function_parameter_keyword and fallback != .arrow_parameter_keyword) return fallback;
+        if (self.in_async and std.mem.eql(u8, name, "await")) return .async_parameter_await;
+        if (self.in_generator and std.mem.eql(u8, name, "yield")) return .generator_parameter_yield;
+        if (self.strict and isEvalOrArguments(name)) return .strict_parameter_name;
+        if (self.strict and isStrictReservedBinding(name))
+            return if (fallback == .arrow_parameter_keyword) .strict_arrow_reserved_parameter else .strict_reserved_parameter;
+        return fallback;
     }
 
     fn parseObjectPattern(self: *Parser, forbidden_reason: DiagnosticReason) ParseError!*Node {
@@ -2902,7 +2971,15 @@ pub const Parser = struct {
                 try self.parseBindingTarget(forbidden_reason)
             else blk: {
                 if (!key_is_ident) return self.failWithTokenReason(.expected_named_destructuring_colon);
-                if (self.isForbiddenBindingName(key)) return self.failWithToken(.abbreviated_destructuring_keyword, key_token.?);
+                if (self.isForbiddenBindingName(key)) {
+                    const reason = self.parameterForbiddenReason(forbidden_reason, key);
+                    if (reason != forbidden_reason and reason != .generator_parameter_yield)
+                        return self.failWithToken(reason, key_token.?);
+                    return self.failWithToken(
+                        if (forbidden_reason == .arrow_parameter_keyword) .shorthand_keyword else .abbreviated_destructuring_keyword,
+                        key_token.?,
+                    );
+                }
                 break :blk try self.alloc(.{ .identifier = key });
             };
             const default = if (self.match(.assign)) try self.parseAssignment() else null;
@@ -3589,10 +3666,10 @@ pub const Parser = struct {
 
     /// Parse `(p1, p2 = default, ...rest)` into a slice of parameters.
     fn parseParamList(self: *Parser) ParseError![]const ast.Param {
-        return self.parseParamListForAccessor(.none);
+        return self.parseParamListForAccessor(.none, .arrow_parameter_keyword);
     }
 
-    fn parseParamListForAccessor(self: *Parser, accessor: ast.AccessorKind) ParseError![]const ast.Param {
+    fn parseParamListForAccessor(self: *Parser, accessor: ast.AccessorKind, forbidden_reason: DiagnosticReason) ParseError![]const ast.Param {
         try self.expect(.lparen);
         // MethodDefinition / PropertySetParameterList: a getter has no
         // parameters and a setter has one FormalParameter, not FormalParameters.
@@ -3609,7 +3686,7 @@ pub const Parser = struct {
             // destructuring: `function f(...[a], ...{a})` (no default allowed
             // on a rest element, and it must be last).
             if (self.check(.lbrace) or self.check(.lbracket)) {
-                const pat = try self.parseBindingTarget(.unexpected_token);
+                const pat = try self.parseBindingTarget(forbidden_reason);
                 const default = if (!is_rest and self.match(.assign)) try self.parseAssignment() else null;
                 try params.append(self.arena, .{ .name = "", .pattern = pat, .default = default, .is_rest = is_rest });
                 if (is_rest) break; // a rest parameter must be last
@@ -3618,8 +3695,9 @@ pub const Parser = struct {
                 continue;
             }
             const p = self.advance();
-            if (p.kind != .identifier) return ParseError.UnexpectedToken;
-            if (self.isForbiddenBindingName(p.text)) return ParseError.UnexpectedToken;
+            if (p.kind != .identifier) return self.failWithToken(.expected_variable_binding, p);
+            if (self.isForbiddenBindingName(p.text))
+                return self.failWithToken(self.parameterForbiddenReason(forbidden_reason, p.text), p);
             var default: ?*Node = null;
             if (!is_rest and self.match(.assign)) default = try self.parseAssignment();
             try params.append(self.arena, .{ .name = p.text, .default = default, .is_rest = is_rest });
@@ -3657,7 +3735,7 @@ pub const Parser = struct {
             self.in_generator = saved_gen;
             self.new_target_depth -= 1;
         }
-        const params = try self.parseParamListForAccessor(accessor);
+        const params = try self.parseParamListForAccessor(accessor, .function_parameter_keyword);
         if (is_gen or is_async) {
             try self.forbidYieldAwaitInParams(params, is_gen, is_async);
         }
@@ -3670,7 +3748,7 @@ pub const Parser = struct {
     /// consuming the constructor-inserted boundary before the body parse.
     pub fn parseDynamicFunctionParams(self: *Parser, is_gen: bool, is_async: bool) ParseError!void {
         _ = try self.parseFunctionParamList(is_gen, is_async);
-        if (!self.check(.eof)) return ParseError.UnexpectedToken;
+        if (!self.check(.eof)) return self.failWithTokenReason(.expected_function_body_opening);
     }
 
     /// CreateDynamicFunction requires the supplied body text to remain inside
@@ -3691,6 +3769,16 @@ pub const Parser = struct {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
     }
 
+    fn functionBindingReason(self: *const Parser, is_gen: bool, is_async: bool, name: []const u8) DiagnosticReason {
+        if (is_async and is_gen)
+            return if (self.strict and std.mem.eql(u8, name, "yield")) .strict_async_generator_function_name else .async_generator_function_name;
+        if (is_gen)
+            return if (self.strict and std.mem.eql(u8, name, "yield")) .strict_generator_function_name else .generator_function_name;
+        if (is_async and std.mem.eql(u8, name, "await")) return .async_function_name;
+        if (self.strict and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return .strict_function_name;
+        return .function_keyword_name;
+    }
+
     fn recordArgumentsUse(self: *Parser, name: []const u8) void {
         if (self.current_arguments_use) |uses_arguments| {
             if (std.mem.eql(u8, name, "arguments")) uses_arguments.* = true;
@@ -3708,7 +3796,7 @@ pub const Parser = struct {
 
     /// Strict-mode early errors on a formal parameter list: a parameter named
     /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
-    fn validateStrictParams(self: *Parser, params: []const ast.Param) ParseError!void {
+    fn validateStrictParams(self: *Parser, params: []const ast.Param, own_use_strict: bool) ParseError!void {
         var simple_count: u32 = 0;
         for (params) |p| if (p.pattern == null) {
             if (simple_count == std.math.maxInt(u32)) return error.OutOfMemory;
@@ -3730,18 +3818,21 @@ pub const Parser = struct {
                 return self.failWithReasonAt(.invalid_strict_parameters, self.sourceOffsetForSlice(p.name, self.cur().pos));
             if (simple_count == 1) continue;
             const entry = try seen.getOrPut(self.scratch_allocator, p.name);
-            if (entry.found_existing)
-                return self.failWithReasonAt(.invalid_strict_parameters, self.sourceOffsetForSlice(p.name, self.cur().pos));
+            if (entry.found_existing) {
+                const offset = self.sourceOffsetForSlice(p.name, self.cur().pos);
+                if (own_use_strict) return self.failWithReasonAt(.invalid_strict_parameters, offset);
+                return self.failWithNameAt(.strict_duplicate_parameter, p.name, offset);
+            }
         }
     }
 
     /// UniqueFormalParameters: duplicate simple parameter names are an early
     /// error for arrow functions and method definitions in EVERY mode (unlike
     /// ordinary functions, which permit them in sloppy mode with a simple param
-    /// list). Mirrors the duplicate-name scan in validateStrictParams; pattern
-    /// params are not simple names and are skipped (their own binding-dup rule is
-    /// separate), so no valid parameter list is rejected.
-    fn checkDuplicateParams(self: *Parser, params: []const ast.Param) ParseError!void {
+    /// list). Unlike validateStrictParams, this collects every BoundName from
+    /// destructuring patterns because UniqueFormalParameters covers the complete
+    /// list.
+    fn checkDuplicateParams(self: *Parser, params: []const ast.Param, context: DuplicateParameterContext) ParseError!void {
         // BoundNames of the parameter list must contain no duplicates — including
         // names bound inside destructuring patterns, so `([a], {a}) => {}` and
         // `({a, a}) => {}` are early errors.
@@ -3750,7 +3841,37 @@ pub const Parser = struct {
             var names: std.ArrayListUnmanaged([]const u8) = .empty;
             if (p.pattern) |pat| try self.addPatternNames(&names, pat) else if (p.name.len > 0) try names.append(self.arena, p.name);
             for (names.items) |n| {
-                if (seen.contains(n)) return ParseError.UnexpectedToken;
+                if (seen.contains(n)) {
+                    if (context == .arrow and p.is_rest) {
+                        const name_offset = self.sourceOffsetForSlice(n, self.cur().pos);
+                        if (name_offset >= 3 and std.mem.eql(u8, self.source[name_offset - 3 .. name_offset], "..."))
+                            return self.failWithDiagnosticAt(.unexpected_token, .token, "...", null, name_offset - 3);
+                    }
+                    // JavaScriptCore describes the grammar production that made
+                    // this list unique. Defaults take precedence over patterns;
+                    // patterns over rest; otherwise arrows and methods name their
+                    // own UniqueFormalParameters production.
+                    var has_default = false;
+                    var has_pattern = false;
+                    var has_rest = false;
+                    for (params) |candidate| {
+                        has_default = has_default or candidate.default != null;
+                        has_pattern = has_pattern or candidate.pattern != null;
+                        has_rest = has_rest or candidate.is_rest;
+                    }
+                    const reason: DiagnosticReason = if (has_default)
+                        .duplicate_parameter_default
+                    else if (has_pattern)
+                        .duplicate_parameter_destructuring
+                    else if (has_rest)
+                        .duplicate_parameter_rest
+                    else switch (context) {
+                        .arrow => .duplicate_parameter_arrow,
+                        .method => .duplicate_parameter_method,
+                        .function => .strict_duplicate_parameter,
+                    };
+                    return self.failWithNameAt(reason, n, self.cur().pos);
+                }
                 try seen.put(self.arena, n, {});
             }
         }
@@ -3793,9 +3914,8 @@ pub const Parser = struct {
         const is_gen = self.match(.star); // `function*` / `async function*`
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return self.failWithReasonAt(.function_name_required, name_tok.pos);
-        if (self.strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text)))
-            return self.failWithToken(.strict_function_name, name_tok);
-        if (self.isForbiddenBindingName(name_tok.text)) return self.failWithToken(.function_keyword_name, name_tok);
+        if (self.isForbiddenBindingName(name_tok.text))
+            return self.failWithToken(self.functionBindingReason(is_gen, is_async, name_tok.text), name_tok);
         var uses_arguments = false;
         var uses_direct_eval = false;
         var uses_direct_eval_in_parameters = false;
@@ -3821,14 +3941,13 @@ pub const Parser = struct {
             return self.failWithReasonAt(.strict_directive_non_simple_parameters, own_use_strict_token.?.pos);
         if (fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text)))
             return self.failWithToken(.strict_function_name, name_tok);
-        if (fn_strict) try self.validateStrictParams(params);
+        if (fn_strict) try self.validateStrictParams(params, own_use_strict);
         try self.forbidSuperInFunction(body, params);
-        // A generator/async function, or ANY function with a non-simple parameter
-        // list (a default/rest/destructuring), has UniqueFormalParameters:
-        // duplicate names are an error in every mode. Only a plain function with a
-        // simple list permits sloppy duplicates (handled by validateStrictParams
-        // in strict mode).
-        if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
+        // Every non-simple FormalParameters list (default/rest/destructuring)
+        // requires unique BoundNames. A sloppy simple list permits duplicates in
+        // ordinary, generator, async, and async-generator functions alike;
+        // methods and arrows use UniqueFormalParameters and check separately.
+        if (hasNonSimpleParams(params)) try self.checkDuplicateParams(params, .function);
         try self.checkParamBodyConflict(params, body);
         uses_direct_eval = uses_direct_eval_in_parameters or uses_direct_eval_in_body;
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -3843,6 +3962,7 @@ pub const Parser = struct {
         _ = self.advance(); // function
         const is_gen = self.match(.star); // `function*` / `async function*`
         var name: []const u8 = "";
+        var name_token: ?Token = null;
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "")) {
             // Optional name (anything that isn't the opening paren).
             if (!self.check(.lparen)) {
@@ -3857,7 +3977,9 @@ pub const Parser = struct {
                 const forbidden = self.isForbiddenBindingName(self.cur().text);
                 self.in_generator = saved_gen;
                 self.in_async = saved_async;
-                if (forbidden) return ParseError.UnexpectedToken;
+                if (forbidden)
+                    return self.failWithToken(self.functionBindingReason(is_gen, is_async, self.cur().text), self.cur());
+                name_token = self.cur();
                 name = self.advance().text;
             }
         }
@@ -3875,19 +3997,21 @@ pub const Parser = struct {
         }
         const params = try self.parseFunctionParamList(is_gen, is_async);
         self.current_direct_eval_use = &uses_direct_eval_in_body;
-        const own_use_strict = self.peekUseStrict();
+        const own_use_strict_token = self.peekUseStrictToken();
+        const own_use_strict = own_use_strict_token != null;
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
         const body = try self.parseFnBody(is_gen, is_async);
-        if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
-        if (fn_strict) try self.validateStrictParams(params);
+        if (own_use_strict and hasNonSimpleParams(params))
+            return self.failWithReasonAt(.strict_directive_non_simple_parameters, own_use_strict_token.?.pos);
+        if (fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name)))
+            return self.failWithToken(.strict_function_name, name_token.?);
+        if (fn_strict) try self.validateStrictParams(params, own_use_strict);
         try self.forbidSuperInFunction(body, params);
-        // A generator/async function, or ANY function with a non-simple parameter
-        // list (a default/rest/destructuring), has UniqueFormalParameters:
-        // duplicate names are an error in every mode. Only a plain function with a
-        // simple list permits sloppy duplicates (handled by validateStrictParams
-        // in strict mode).
-        if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
+        // Every non-simple FormalParameters list (default/rest/destructuring)
+        // requires unique BoundNames. A sloppy simple list permits duplicates in
+        // ordinary, generator, async, and async-generator functions alike;
+        // methods and arrows use UniqueFormalParameters and check separately.
+        if (hasNonSimpleParams(params)) try self.checkDuplicateParams(params, .function);
         try self.checkParamBodyConflict(params, body);
         uses_direct_eval = uses_direct_eval_in_parameters or uses_direct_eval_in_body;
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -4038,9 +4162,10 @@ pub const Parser = struct {
                 !(self.strict and isStrictReservedBinding(self.tokens.items[self.pos + 1].text)))
             {
                 _ = self.advance(); // async
-                const param = self.advance().text;
+                const param_token = self.advance();
+                const param = param_token.text;
                 // An async arrow's parameter is [+Await]: `await` is reserved.
-                if (std.mem.eql(u8, param, "await")) return ParseError.UnexpectedToken;
+                if (std.mem.eql(u8, param, "await")) return self.failWithToken(.async_parameter_await, param_token);
                 const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
                 return self.parseArrowBody(params, true, start, false);
             }
@@ -4065,9 +4190,11 @@ pub const Parser = struct {
             // SyntaxError. The single binding must also be a legal name (not
             // `eval`/`arguments`/a reserved word in the current strict/[Yield,
             // Await] context).
-            if (!self.noNewlineBefore(1)) return ParseError.UnexpectedToken;
-            const param = self.advance().text;
-            if (self.isForbiddenBindingName(param)) return ParseError.UnexpectedToken;
+            if (!self.noNewlineBefore(1)) return self.failWithToken(.unexpected_token, self.tokenAt(self.pos + 1));
+            const param_token = self.advance();
+            const param = param_token.text;
+            if (self.isForbiddenBindingName(param))
+                return self.failWithToken(self.parameterForbiddenReason(.arrow_parameter_keyword, param), param_token);
             const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
             return self.parseArrowBody(params, false, start, false);
         }
@@ -4514,9 +4641,9 @@ pub const Parser = struct {
     fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool, start: usize, uses_direct_eval_in_parameters: bool) ParseError!*Node {
         // No LineTerminator is allowed between the parameter list and `=>`
         // (`() \n => {}` is a SyntaxError).
-        if (!self.noNewlineBefore(0)) return ParseError.UnexpectedToken;
+        if (!self.noNewlineBefore(0)) return self.failWithTokenReason(.unexpected_token);
         try self.expect(.arrow);
-        try self.checkDuplicateParams(params); // arrows forbid duplicate params in all modes
+        try self.checkDuplicateParams(params, .arrow); // arrows forbid duplicate params in all modes
 
         const fnode = try self.arena.create(ast.FunctionNode);
         var uses_direct_eval_in_body = false;
@@ -4551,10 +4678,12 @@ pub const Parser = struct {
             // A block-bodied arrow is a FunctionBody, not an AssignmentExpression,
             // so `in` is available again even inside a classic for initializer.
             self.no_in = false;
-            const own_use_strict = self.peekUseStrict();
-            if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
+            const own_use_strict_token = self.peekUseStrictToken();
+            const own_use_strict = own_use_strict_token != null;
+            if (own_use_strict and hasNonSimpleParams(params))
+                return self.failWithReasonAt(.strict_directive_non_simple_parameters, own_use_strict_token.?.pos);
             self.strict = saved_strict or own_use_strict;
-            if (own_use_strict) try self.validateStrictParams(params);
+            if (own_use_strict) try self.validateStrictParams(params, true);
             // Its own var scope, like any function body (#933 item 8).
             const saved_for_body_vars = self.for_body_vars;
             self.for_body_vars = null;
@@ -6473,12 +6602,14 @@ pub const Parser = struct {
         }
         const params = try self.parseFunctionParamListForAccessor(is_gen, is_async, accessor);
         self.current_direct_eval_use = &uses_direct_eval_in_body;
-        try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
-        const own_use_strict = self.peekUseStrict();
+        try self.checkDuplicateParams(params, .method); // method definitions forbid duplicate params in all modes
+        const own_use_strict_token = self.peekUseStrictToken();
+        const own_use_strict = own_use_strict_token != null;
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
         const body = try self.parseFnBody(is_gen, is_async);
-        if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (fn_strict) try self.validateStrictParams(params);
+        if (own_use_strict and hasNonSimpleParams(params))
+            return self.failWithReasonAt(.strict_directive_non_simple_parameters, own_use_strict_token.?.pos);
+        if (fn_strict) try self.validateStrictParams(params, own_use_strict);
         try self.checkParamBodyConflict(params, body);
         uses_direct_eval = uses_direct_eval_in_parameters or uses_direct_eval_in_body;
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -6800,6 +6931,78 @@ test "parser retains binding and parameter conflict diagnostics" {
         try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
     }
+}
+
+test "parser retains function method and arrow parameter diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "function f(1) {}", .reason = .expected_variable_binding, .marker = "1", .message = "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list." },
+        .{ .source = "function f(break) {}", .reason = .function_parameter_keyword, .marker = "break", .message = "Cannot use the keyword 'break' as a parameter name." },
+        .{ .source = "(break) => 1", .reason = .arrow_parameter_keyword, .marker = "break", .message = "Unexpected keyword 'break'" },
+        .{ .source = "async (await) => 1", .reason = .async_parameter_await, .marker = "await", .message = "Cannot use 'await' as a parameter name in an async function." },
+        .{ .source = "function* f(yield) {}", .reason = .generator_parameter_yield, .marker = "yield", .message = "Cannot use 'yield' as a parameter name in a generator function." },
+        .{ .source = "function* f({yield}) {}", .reason = .abbreviated_destructuring_keyword, .marker = "yield", .message = "Cannot use abbreviated destructuring syntax for keyword 'yield'." },
+        .{ .source = "x\n=> x", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
+        .{ .source = "(x)\n=> x", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
+        .{ .source = "(a,a)=>0", .reason = .duplicate_parameter_arrow, .marker = "a", .message = "Duplicate parameter 'a' not allowed in an arrow function." },
+        .{ .source = "({m(a,a){}})", .reason = .duplicate_parameter_method, .marker = "a", .message = "Duplicate parameter 'a' not allowed in a method." },
+        .{ .source = "function f(a,a=0){}", .reason = .duplicate_parameter_default, .marker = "a", .message = "Duplicate parameter 'a' not allowed in function with default parameter values." },
+        .{ .source = "function f(a,...a){}", .reason = .duplicate_parameter_rest, .marker = "a", .message = "Duplicate parameter 'a' not allowed in function with a rest parameter." },
+        .{ .source = "function f([a],{a}){}", .reason = .duplicate_parameter_destructuring, .marker = "a", .message = "Duplicate parameter 'a' not allowed in function with destructuring parameters." },
+        .{ .source = "(a,...a)=>0", .reason = .unexpected_token, .marker = "...", .message = "Unexpected token '...'" },
+        .{ .source = "\"use strict\"; function f(a,a){}", .reason = .strict_duplicate_parameter, .marker = "a", .message = "Cannot declare a parameter named 'a' in strict mode as it has already been declared." },
+        .{ .source = "\"use strict\"; (eval)=>0", .reason = .strict_parameter_name, .marker = "eval", .message = "Cannot destructure to a parameter name 'eval' in strict mode." },
+        .{ .source = "\"use strict\"; (interface)=>0", .reason = .strict_arrow_reserved_parameter, .marker = "interface", .message = "Unexpected use of reserved word 'interface' in strict mode" },
+        .{ .source = "\"use strict\"; function f(interface){}", .reason = .strict_reserved_parameter, .marker = "interface", .message = "Cannot use the reserved word 'interface' as a parameter name in strict mode." },
+        .{ .source = "(function* yield(){})", .reason = .generator_function_name, .marker = "yield", .message = "Cannot declare generator function named 'yield'." },
+        .{ .source = "(async function await(){})", .reason = .async_function_name, .marker = "await", .message = "Cannot declare async function named 'await'." },
+        .{ .source = "(async function* await(){})", .reason = .async_generator_function_name, .marker = "await", .message = "Cannot declare async generator function named 'await'." },
+        .{ .source = "\"use strict\"; (function* yield(){})", .reason = .strict_generator_function_name, .marker = "yield", .message = "Cannot use 'yield' as a generator function name in strict mode." },
+        .{ .source = "\"use strict\"; (async function* yield(){})", .reason = .strict_async_generator_function_name, .marker = "yield", .message = "Cannot use 'yield' as a async generator function name in strict mode." },
+        .{ .source = "(function(a=1){\"use strict\";})", .reason = .strict_directive_non_simple_parameters, .marker = "\"use strict\"", .message = "'use strict' directive not allowed inside a function with a non-simple parameter list." },
+        .{ .source = "(a=1)=>{\"use strict\";}", .reason = .strict_directive_non_simple_parameters, .marker = "\"use strict\"", .message = "'use strict' directive not allowed inside a function with a non-simple parameter list." },
+        .{ .source = "({m(a=1){\"use strict\";}})", .reason = .strict_directive_non_simple_parameters, .marker = "\"use strict\"", .message = "'use strict' directive not allowed inside a function with a non-simple parameter list." },
+        .{ .source = "\"use strict\"; (function eval(){})", .reason = .strict_function_name, .marker = "eval", .message = "'eval' is not a valid function name in strict mode." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+
+    const accepted = [_][]const u8{
+        "function* f(a,a){}",
+        "async function f(a,a){}",
+        "async function* f(a,a){}",
+        "(function* f(a,a){})",
+        "(async function f(a,a){})",
+    };
+    for (accepted) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var dynamic = try Parser.init(arena.allocator(), "(a) trailing\n)");
+    try std.testing.expectError(ParseError.UnexpectedToken, dynamic.parseDynamicFunctionParams(false, false));
+    try std.testing.expectEqual(DiagnosticReason.expected_function_body_opening, dynamic.last_error_reason.?);
+    try std.testing.expectEqualStrings(
+        "Unexpected identifier 'trailing'. Expected an opening '{' at the start of a function body.",
+        try dynamic.diagnosticMessage(arena.allocator(), dynamic.last_error_reason.?),
+    );
 }
 
 test "parser retains object and destructuring pattern diagnostics" {
@@ -7248,7 +7451,7 @@ test "parser reserves strict parameter uniqueness storage once" {
     parser.last_error_offset = null;
     parser.last_error_reason = null;
     parser.last_error_token = null;
-    try parser.validateStrictParams(&params);
+    try parser.validateStrictParams(&params, false);
     try std.testing.expectEqual(@as(usize, 1), measured.allocations);
     try std.testing.expectEqual(@as(usize, 1), measured.deallocations);
     try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
@@ -7256,14 +7459,14 @@ test "parser reserves strict parameter uniqueness storage once" {
     var no_memory: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
     parser.scratch_allocator = fixed.allocator();
-    try parser.validateStrictParams(&.{});
-    try parser.validateStrictParams(&.{.{ .name = "only" }});
+    try parser.validateStrictParams(&.{}, false);
+    try parser.validateStrictParams(&.{.{ .name = "only" }}, false);
 
     var allocation_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     parser.scratch_allocator = allocation_failure.allocator();
-    try std.testing.expectError(error.OutOfMemory, parser.validateStrictParams(params[0..2]));
+    try std.testing.expectError(error.OutOfMemory, parser.validateStrictParams(params[0..2], false));
     parser.scratch_allocator = std.testing.allocator;
-    try parser.validateStrictParams(params[0..2]);
+    try parser.validateStrictParams(params[0..2], false);
 
     const invalid = [_][]const ast.Param{
         &.{ .{ .name = "first" }, .{ .name = "first" } },
@@ -7271,7 +7474,7 @@ test "parser reserves strict parameter uniqueness storage once" {
         &.{ .{ .name = "first" }, .{ .name = "arguments" } },
         &.{ .{ .name = "first" }, .{ .name = "implements" } },
     };
-    for (invalid) |case| try std.testing.expectError(ParseError.UnexpectedToken, parser.validateStrictParams(case));
+    for (invalid) |case| try std.testing.expectError(ParseError.UnexpectedToken, parser.validateStrictParams(case, false));
 }
 
 test "dynamic function validation pins the synthesized function boundary" {
