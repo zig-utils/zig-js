@@ -1406,6 +1406,48 @@ const runtime_cases = [_]Case{
         .expected = 262143,
     },
     .{
+        // #459: the RegExp receiver checks, the two String argument checks and
+        // SpeciesConstructor each had invented wording. JavaScriptCore names the
+        // accessor or method in every one of them, spells the well-known-symbol
+        // methods `@@name`, and words a non-constructor species THREE ways by
+        // caller -- `|this|.constructor[Symbol.species]` for RegExp @@split and
+        // Promise, a bare `species` for typed arrays, and "Species construction
+        // did not get a valid constructor" for Array and ArrayBuffer. Every
+        // expected string below was taken from the JavaScriptCore oracle
+        // (home-tool), which scores all twenty-two checks.
+        .name = "RegExp receivers and species report JavaScriptCore's wording",
+        .source =
+        \\function msg(fn) { try { fn(); return "OK"; } catch (e) { return e.message; } }
+        \\function getter(name) { return Object.getOwnPropertyDescriptor(RegExp.prototype, name).get; }
+        \\function bad(o) { o.constructor = { [Symbol.species]: 1 }; return o; }
+        \\var checks = [];
+        \\checks.push(msg(function () { RegExp.prototype.exec.call({}, "a"); }) === "Builtin RegExp exec can only be called on a RegExp object");
+        \\checks.push(msg(function () { RegExp.prototype.exec.call(null, "a"); }) === "Builtin RegExp exec can only be called on a RegExp object");
+        \\checks.push(msg(function () { RegExp.prototype.test.call("x", "a"); }) === "RegExp.prototype.test requires that |this| be an Object");
+        \\checks.push(msg(function () { RegExp.prototype[Symbol.match].call(1, "a"); }) === "RegExp.prototype.@@match requires that |this| be an Object");
+        \\checks.push(msg(function () { RegExp.prototype[Symbol.search].call(1, "a"); }) === "RegExp.prototype.@@search requires that |this| be an Object");
+        \\checks.push(msg(function () { RegExp.prototype[Symbol.replace].call(1, "a", "b"); }) === "RegExp.prototype.@@replace requires that |this| be an Object");
+        \\checks.push(msg(function () { RegExp.prototype[Symbol.split].call(1, "a"); }) === "RegExp.prototype.@@split requires that |this| be an Object");
+        \\checks.push(msg(function () { RegExp.prototype[Symbol.matchAll].call(1, "a"); }) === "RegExp.prototype.@@matchAll requires |this| to be an Object");
+        \\checks.push(msg(function () { "a".matchAll(/a/); }) === "String.prototype.matchAll argument must not be a non-global regular expression");
+        \\checks.push(msg(function () { "aaa".replaceAll(/a/, "b"); }) === "String.prototype.replaceAll argument must not be a non-global regular expression");
+        \\checks.push(msg(function () { "a".match({ [Symbol.match]: 1 }); }) === "1 is not a function");
+        \\checks.push(msg(function () { "a".replace({ [Symbol.replace]: null }, "b"); }) === "OK");
+        \\checks.push(msg(function () { getter("flags").call(1); }) === "The RegExp.prototype.flags getter can only be called on an object");
+        \\checks.push(msg(function () { getter("global").call(1); }) === "The RegExp.prototype.global getter can only be called on a RegExp object");
+        \\checks.push(msg(function () { getter("sticky").call({}); }) === "The RegExp.prototype.sticky getter can only be called on a RegExp object");
+        \\checks.push(msg(function () { getter("source").call({}); }) === "The RegExp.prototype.source getter can only be called on a RegExp object");
+        \\checks.push(msg(function () { var r = /a/g; Object.freeze(r); r.exec("aaa"); r.exec("aaa"); }) === "Attempted to assign to readonly property.");
+        \\checks.push(msg(function () { "aa".split(bad(/a/g)); }) === "|this|.constructor[Symbol.species] is not a constructor");
+        \\checks.push(msg(function () { bad(Promise.resolve(1)).then(function () {}); }) === "|this|.constructor[Symbol.species] is not a constructor");
+        \\checks.push(msg(function () { bad(new Uint8Array(2)).subarray(0); }) === "species is not a constructor");
+        \\checks.push(msg(function () { bad([1]).slice(0); }) === "Species construction did not get a valid constructor");
+        \\checks.push(msg(function () { bad(new ArrayBuffer(4)).slice(0); }) === "Species construction did not get a valid constructor");
+        \\checks.reduce(function (bits, y, i) { return y ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 4194303,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty

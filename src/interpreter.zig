@@ -12482,7 +12482,7 @@ pub const Interpreter = struct {
 
     fn setRegExpLastIndexValue(self: *Interpreter, o: *value.Object, v: Value) EvalError!void {
         if (o.getOwn("lastIndex") != null and !o.getAttr("lastIndex").writable)
-            return self.throwError("TypeError", "Cannot assign to read only property 'lastIndex'");
+            return self.throwError("TypeError", "Attempted to assign to readonly property.");
         try self.setProp(o, "lastIndex", v);
     }
 
@@ -13597,9 +13597,9 @@ pub const Interpreter = struct {
     /// RegExp.prototype[@@matchAll]: build a lazy %RegExpStringIterator% over a
     /// species-constructed matcher (so a subclass's exec/lastIndex drive iteration).
     fn regexpMatchAll(self: *Interpreter, this: Value, s: []const u8) EvalError!Value {
-        if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype[Symbol.matchAll] called on a non-object");
+        if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype.@@matchAll requires |this| to be an Object");
         const default_ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
-        const c = try self.speciesConstructor(this, default_ctor);
+        const c = try self.speciesConstructor(this, default_ctor, Interpreter.bad_species_this);
         const flags = try self.toStringWtf8(try self.getProperty(this, "flags"));
         const matcher = try self.construct(c, &.{ this, try Value.strAlloc(self.arena, flags) });
         const last_index = toLen(try self.toNumberV(try self.getProperty(this, "lastIndex")));
@@ -13624,7 +13624,7 @@ pub const Interpreter = struct {
     }
 
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
-        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.match] called on a non-object");
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@match requires that |this| be an Object");
         const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         if (!global) return try self.regexpExecGeneric(rx, s);
@@ -13665,7 +13665,7 @@ pub const Interpreter = struct {
     }
 
     fn regexpSearch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
-        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.search] called on a non-object");
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@search requires that |this| be an Object");
         const previous_last_index = try self.getProperty(rx, "lastIndex");
         if (!regexpSameValue(previous_last_index, Value.num(0))) try self.setRegExpLikeLastIndex(rx, 0);
         const result = try self.regexpExecGeneric(rx, s);
@@ -13677,7 +13677,7 @@ pub const Interpreter = struct {
     }
 
     fn regexpReplace(self: *Interpreter, rx: Value, s: []const u8, replace_value: Value) EvalError!Value {
-        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.replace] called on a non-object");
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@replace requires that |this| be an Object");
         const functional_replace = replace_value.isCallable();
         const replace_string = if (functional_replace) "" else try self.toStringWtf8(replace_value);
         const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
@@ -13779,12 +13779,12 @@ pub const Interpreter = struct {
     }
 
     fn regexpSplit(self: *Interpreter, rx: Value, s: []const u8, limit_value: Value) EvalError!Value {
-        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.split] called on a non-object");
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@split requires that |this| be an Object");
         const result = try self.newArray();
         const out = try result.asObj().ensureElementsList(self.arena);
 
         const default_ctor = self.env.get("RegExp") orelse Value.undef();
-        const ctor = try self.speciesConstructor(rx, default_ctor);
+        const ctor = try self.speciesConstructor(rx, default_ctor, Interpreter.bad_species_this);
         const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
@@ -17406,7 +17406,10 @@ pub const Interpreter = struct {
     /// SpeciesConstructor(O, defaultConstructor): `O.constructor[Symbol.species]`,
     /// falling back to the default when `constructor` or its species slot is
     /// undefined/null; a non-constructor species throws a TypeError.
-    pub fn speciesConstructor(self: *Interpreter, o: Value, default_ctor: Value) EvalError!Value {
+    /// `bad_species` is the TypeError text for a species slot that is not a
+    /// constructor. JavaScriptCore words it three ways by caller -- see the
+    /// constants below -- so the caller passes its own.
+    pub fn speciesConstructor(self: *Interpreter, o: Value, default_ctor: Value, comptime bad_species: []const u8) EvalError!Value {
         const ctor = try self.getProperty(o, "constructor");
         if (ctor.isUndefined()) return default_ctor;
         // Type(C) must be Object: Symbol/BigInt primitives are wrapped as objects
@@ -17416,9 +17419,18 @@ pub const Interpreter = struct {
         const skey = self.wellKnownSymbolKey("species") orelse return default_ctor;
         const s = try self.getProperty(ctor, skey);
         if (s.isUndefined() or s.isNull()) return default_ctor;
-        if (!isConstructorValue(s)) return self.throwError("TypeError", "Symbol.species is not a constructor");
+        if (!isConstructorValue(s)) return self.throwError("TypeError", bad_species);
         return s;
     }
+
+    /// JavaScriptCore's three spellings for a species slot holding a
+    /// non-constructor, kept next to each other so a new caller picks one
+    /// deliberately: `@@species` reached through `|this|.constructor`
+    /// (RegExp's `@@matchAll`/`@@split`, `Promise.prototype.then`/`finally`),
+    /// a typed array's, and the generic one (Array methods, `ArrayBuffer.slice`).
+    pub const bad_species_this = "|this|.constructor[Symbol.species] is not a constructor";
+    pub const bad_species_typed_array = "species is not a constructor";
+    pub const bad_species_generic = "Species construction did not get a valid constructor";
 
     /// ArraySpeciesCreate(originalArray, length): the result array a method like
     /// `map`/`filter`/`slice` produces. The default is a plain Array, but
@@ -17437,7 +17449,7 @@ pub const Interpreter = struct {
         const c = try self.getProperty(original, "constructor");
         default_realm = self.tempEnvRoot(realm_root, default_realm);
         if (c.isObject() and (c.asObj().is_symbol or c.asObj().is_bigint))
-            return self.throwError("TypeError", "Array species is not a constructor");
+            return self.throwError("TypeError", bad_species_generic);
         // GetFunctionRealm cross-realm check: a `constructor` that is another
         // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
         // consulting its @@species (so a cross-realm species getter is untouched).
@@ -17459,7 +17471,7 @@ pub const Interpreter = struct {
         if (default_realm.arrayIntrinsic(false)) |arr| {
             if (ctor.isObject() and ctor.asObj() == arr) return self.newArrayWithLengthInRealm(default_realm, len);
         }
-        if (!isConstructorValue(ctor)) return self.throwError("TypeError", "Array species is not a constructor");
+        if (!isConstructorValue(ctor)) return self.throwError("TypeError", bad_species_generic);
         return self.construct(ctor, &.{Value.num(@floatFromInt(len))});
     }
 
@@ -17471,7 +17483,7 @@ pub const Interpreter = struct {
     fn typedArraySpeciesCreate(self: *Interpreter, exemplar: *value.Object, len: usize, immutable_same_buffer_ok: ?*value.Object) EvalError!*value.Object {
         const kind = exemplar.typedArray().?.kind;
         const default_ctor = self.env.get(kind.ctorName()) orelse return newTypedArray(self, kind, len);
-        const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor);
+        const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor, Interpreter.bad_species_typed_array);
         // Fast path: the intrinsic constructor for this view kind.
         if (ctor.isObject() and default_ctor.isObject() and ctor.asObj() == default_ctor.asObj())
             return newTypedArray(self, kind, len);
@@ -17504,7 +17516,7 @@ pub const Interpreter = struct {
     fn typedArraySubarrayCreate(self: *Interpreter, exemplar: *value.Object, buffer: *value.Object, byte_offset: usize, len: ?usize) EvalError!Value {
         const kind = exemplar.typedArray().?.kind;
         const default_ctor = self.env.get(kind.ctorName()) orelse return self.throwError("TypeError", "missing TypedArray constructor");
-        const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor);
+        const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor, Interpreter.bad_species_typed_array);
         const res = if (len) |length| try self.construct(ctor, &.{
             Value.obj(buffer),
             Value.num(@floatFromInt(byte_offset)),
@@ -19967,7 +19979,7 @@ pub const Interpreter = struct {
         const key = self.wellKnownSymbolKey(sym) orelse return null;
         const method = try self.getProperty(target, key);
         if (method.isUndefined() or method.isNull()) return null;
-        if (!method.isCallable()) return self.throwError("TypeError", "String.prototype protocol method is not callable");
+        if (!method.isCallable()) return self.throwErrorFmt("TypeError", "{s} is not a function", .{try notAConstructorSubject(self, method)});
         var argv: std.ArrayListUnmanaged(Value) = .empty;
         try argv.append(self.arena, receiver);
         if (args.len > 1) try argv.appendSlice(self.arena, args[1..]);
@@ -19983,7 +19995,7 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "String.prototype.replaceAll called with a RegExp whose flags is undefined or null");
             const flags_s = try self.toStringWtf8(flags_v);
             if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
-                return self.throwError("TypeError", "String.prototype.replaceAll must be called with a global RegExp");
+                return self.throwError("TypeError", "String.prototype.replaceAll argument must not be a non-global regular expression");
         }
         if (!builtins.isRealObject(search)) return null;
         const key = self.wellKnownSymbolKey("replace") orelse return null;
@@ -20837,7 +20849,7 @@ pub const Interpreter = struct {
                         return self.throwError("TypeError", "String.prototype.matchAll called with a RegExp whose flags is undefined or null");
                     const flags_s = try self.toStringWtf8(flags_v);
                     if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
-                        return self.throwError("TypeError", "String.prototype.matchAll called with a non-global RegExp argument");
+                        return self.throwError("TypeError", "String.prototype.matchAll argument must not be a non-global regular expression");
                 }
                 // GetMethod(regexp, @@matchAll) — only an object can carry one; a
                 // primitive argument (string/number, and the object-boxed
@@ -22509,7 +22521,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn promiseThenImpl(self: *Interpreter, this: Value, on_f: Value, on_r: Value) value.HostError!Value {
     const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "|this| is not a Promise");
     const default_ctor = self.env.get("Promise") orelse Value.undef();
-    const c = try self.speciesConstructor(this, default_ctor);
+    const c = try self.speciesConstructor(this, default_ctor, Interpreter.bad_species_this);
     // Intrinsic Promise → cheap native capability; a subclass/custom → its own.
     if (c.isObject() and default_ctor.isObject() and c.asObj() == default_ctor.asObj())
         return promise.then(self, p, on_f, on_r);
@@ -22582,7 +22594,7 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     // `Invoke(this, "then", …)`, so it composes over any thenable.
     if (!this.isObject()) return self.throwError("TypeError", "|this| is not an object");
     const default_ctor = self.env.get("Promise") orelse Value.undef();
-    const c = try self.speciesConstructor(this, default_ctor);
+    const c = try self.speciesConstructor(this, default_ctor, Interpreter.bad_species_this);
     const cb = if (args.len > 0) args[0] else Value.undef();
     // A non-callable `onFinally` is used directly for both reactions (spec).
     if (!cb.isCallable()) return self.callMethod(this, "then", &.{ cb, cb });
@@ -27802,7 +27814,7 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     const safe_count = if (start >= src_len) 0 else @min(if (end > start) end - start else 0, src_len - start);
     // ArrayBufferSpeciesCreate(O, newLen).
     const default_ctor = self.env.get(kind_name) orelse Value.undef();
-    const ctor = try self.speciesConstructor(this, default_ctor);
+    const ctor = try self.speciesConstructor(this, default_ctor, Interpreter.bad_species_generic);
     const new_v = try self.construct(ctor, &.{Value.num(@floatFromInt(safe_count))});
     if (!new_v.isObject() or new_v.asObj().arrayBuffer() == null)
         return self.throwError("TypeError", "ArrayBuffer species constructor did not return an ArrayBuffer");
@@ -39654,14 +39666,28 @@ fn throwRegExpAccessorTypeError(self: *Interpreter, message: []const u8) EvalErr
 /// %RegExp.prototype% returns undefined; any other non-RegExp throws.
 fn regexFlagGetter(comptime flag: u8) value.NativeFn {
     return struct {
+        // JavaScriptCore names the accessor and makes no distinction between a
+        // primitive receiver and an object that is not a RegExp.
+        const bad_receiver = "The RegExp.prototype." ++ switch (flag) {
+            'd' => "hasIndices",
+            'g' => "global",
+            'i' => "ignoreCase",
+            'm' => "multiline",
+            's' => "dotAll",
+            'u' => "unicode",
+            'v' => "unicodeSets",
+            'y' => "sticky",
+            else => @compileError("unknown RegExp flag"),
+        } ++ " getter can only be called on a RegExp object";
+
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject()) return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-object");
+            if (!this.isObject()) return throwRegExpAccessorTypeError(self, bad_receiver);
             const o = this.asObj();
             if (!o.behavior.is_regex) {
                 if (isHomeRegExpProto(self, o)) return Value.undef();
-                return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-RegExp");
+                return throwRegExpAccessorTypeError(self, bad_receiver);
             }
             return Value.boolVal(std.mem.indexOfScalar(u8, o.regexFlags(), flag) != null);
         }
@@ -39671,11 +39697,11 @@ fn regexFlagGetter(comptime flag: u8) value.NativeFn {
 fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-object");
+    if (!this.isObject()) return throwRegExpAccessorTypeError(self, "The RegExp.prototype.source getter can only be called on a RegExp object");
     const o = this.asObj();
     if (!o.behavior.is_regex) {
         if (isHomeRegExpProto(self, o)) return Value.str("(?:)");
-        return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-RegExp");
+        return throwRegExpAccessorTypeError(self, "The RegExp.prototype.source getter can only be called on a RegExp object");
     }
     return try Value.strAlloc(self.arena, try escapeRegexSource(self.arena, o.regexSource()));
 }
@@ -39683,7 +39709,7 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "The RegExp.prototype.flags getter can only be called on an object");
     const o = this.asObj();
     if (self.isRegExpProto(o)) return Value.str("");
 
@@ -39718,6 +39744,8 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
                 return try self.regexpToString(this);
             }
             if (comptime std.mem.eql(u8, name, "test")) {
+                if (!this.isObject())
+                    return self.throwError("TypeError", "RegExp.prototype.test requires that |this| be an Object");
                 const str_src = if (args.len > 0) args[0] else Value.undef();
                 // Fast path when `exec` is the built-in (not subclass-overridden):
                 // regexpTestBuiltin avoids regexpExecGeneric's per-call O(n) input
@@ -39729,6 +39757,10 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
                 return Value.boolVal(!r.isNull());
             }
             if (!this.isObject() or !this.asObj().behavior.is_regex) {
+                // JavaScriptCore's wording for `exec`; for the others it throws a
+                // bare "Type error", which names less than we can.
+                if (comptime std.mem.eql(u8, name, "exec"))
+                    return self.throwError("TypeError", "Builtin RegExp exec can only be called on a RegExp object");
                 return self.throwError("TypeError", "RegExp.prototype." ++ name ++ " called on a non-RegExp");
             }
             return (try self.regexMethod(this.asObj(), name, args)) orelse Value.undef();
@@ -39746,7 +39778,12 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype[Symbol." ++ op ++ "] called on a non-object");
+            // JavaScriptCore writes these with the `@@name` spelling, and makes
+            // `@@matchAll` read differently from the other four.
+            if (!this.isObject()) return self.throwError("TypeError", if (comptime std.mem.eql(u8, op, "matchAll"))
+                "RegExp.prototype.@@matchAll requires |this| to be an Object"
+            else
+                "RegExp.prototype.@@" ++ op ++ " requires that |this| be an Object");
             const str_src = if (args.len > 0) args[0] else Value.undef();
             const string = try self.toStringValue(str_src);
             const str = try string.asWtf8(self.arena);
