@@ -249,7 +249,7 @@ pub const Node = union(enum) {
     /// `yield [expr]` / `yield* expr` — only valid inside a generator body.
     /// `delegate` marks `yield*`. Evaluates to the value passed to the next
     /// `.next(v)` resume.
-    yield_expr: struct { argument: ?*Node = null, delegate: bool = false },
+    yield_expr: struct { argument: ?*Node = null, delegate: bool = false, offset: usize },
     /// `await expr` — only valid inside an async function body.
     await_expr: struct { argument: *Node, offset: usize },
     class_expr: struct { name: []const u8, inferred_name: []const u8 = "", superclass: ?*Node, members: []ClassMember, source: []const u8 = "" },

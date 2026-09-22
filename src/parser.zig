@@ -59,6 +59,8 @@ pub const DiagnosticReason = enum {
     arrow_parameter_keyword,
     async_parameter_await,
     generator_parameter_yield,
+    async_parameter_await_expression,
+    generator_parameter_yield_expression,
     duplicate_parameter_arrow,
     duplicate_parameter_method,
     duplicate_parameter_default,
@@ -231,6 +233,8 @@ pub const DiagnosticReason = enum {
             .strict_duplicate_parameter, .strict_parameter_name, .strict_reserved_parameter, .strict_arrow_reserved_parameter, .function_parameter_keyword, .arrow_parameter_keyword => "",
             .async_parameter_await => "Cannot use 'await' as a parameter name in an async function.",
             .generator_parameter_yield => "Cannot use 'yield' as a parameter name in a generator function.",
+            .async_parameter_await_expression => "Cannot use 'await' within a parameter default expression.",
+            .generator_parameter_yield_expression => "Unexpected keyword 'yield'. Cannot use yield expression within parameters.",
             .duplicate_parameter_arrow, .duplicate_parameter_method, .duplicate_parameter_default, .duplicate_parameter_rest, .duplicate_parameter_destructuring => "",
             .expected_function_body_opening => "Expected an opening '{' at the start of a function body.",
             .function_name_required => "Function statements must have a name.",
@@ -679,6 +683,8 @@ pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
 
 /// Recursive-descent + precedence-climbing parser producing an arena-allocated
 /// AST for the v1 subset (expressions, var/let/const, if/else, while, blocks).
+const ParameterSuspensionDiagnostic = enum { function_parameters, arrow_cover };
+
 pub const Parser = struct {
     tokens: std.ArrayListUnmanaged(Token),
     pos: usize = 0,
@@ -797,6 +803,9 @@ pub const Parser = struct {
     /// the early error "FormalParameters of an async function/arrow must not
     /// contain an AwaitExpression" (e.g. `async function f(a = await x) {}`).
     scan_forbid_await: bool = false,
+    /// Selects the diagnostic family for the existing suspension expression
+    /// scan. Arrow cover grammar reports its own offending token.
+    scan_parameter_suspension_diagnostic: ParameterSuspensionDiagnostic = .arrow_cover,
     /// The active ContainsAwait query belongs to a class static block, which
     /// has position-specific diagnostics distinct from parameter queries.
     scan_static_block_await: bool = false,
@@ -3835,7 +3844,7 @@ pub const Parser = struct {
         }
         const params = try self.parseParamListForAccessor(accessor, .function_parameter_keyword);
         if (is_gen or is_async) {
-            try self.forbidYieldAwaitInParams(params, is_gen, is_async);
+            try self.forbidYieldAwaitInParams(params, is_gen, is_async, .function_parameters);
         }
         return params;
     }
@@ -4195,7 +4204,7 @@ pub const Parser = struct {
 
     /// `yield [expr]` / `yield* expr`. Only reached inside a generator body.
     fn parseYield(self: *Parser) ParseError!*Node {
-        _ = self.advance(); // yield
+        const yield_token = self.advance();
         // `yield [no LineTerminator here] * AssignmentExpression`: a `*` on the
         // next line is not part of the yield, so `yield \n * x` is a SyntaxError
         // (the orphaned `*` fails to parse as the yield's operand below).
@@ -4208,7 +4217,7 @@ pub const Parser = struct {
         if (delegate or (self.noNewlineBefore(0) and self.startsExpression())) {
             arg = try self.parseAssignment();
         }
-        return self.alloc(.{ .yield_expr = .{ .argument = arg, .delegate = delegate } });
+        return self.alloc(.{ .yield_expr = .{ .argument = arg, .delegate = delegate, .offset = yield_token.pos } });
     }
 
     fn parseRegexLiteralFromSlash(self: *Parser) ParseError!*Node {
@@ -4311,7 +4320,7 @@ pub const Parser = struct {
             // its parameter defaults is an early error: `function* g(){ (x =
             // yield) => {}; }`.
             if (self.in_generator or self.in_async or self.module) {
-                try self.forbidYieldAwaitInParams(params, self.in_generator, self.in_async or self.module);
+                try self.forbidYieldAwaitInParams(params, self.in_generator, self.in_async or self.module, .arrow_cover);
             }
             return self.parseArrowBody(params, false, start, uses_direct_eval_in_parameters);
         }
@@ -4732,7 +4741,7 @@ pub const Parser = struct {
         self.in_async = true;
         defer self.in_async = saved_async;
         const params = try self.parseParamList();
-        try self.forbidYieldAwaitInParams(params, self.in_generator, true);
+        try self.forbidYieldAwaitInParams(params, self.in_generator, true, .arrow_cover);
         return params;
     }
 
@@ -6120,20 +6129,29 @@ pub const Parser = struct {
         return self.scanEvalContext(stmts, false, false);
     }
 
-    fn forbidYieldAwaitInParams(self: *Parser, params: []const ast.Param, forbid_yield: bool, forbid_await: bool) ParseError!void {
+    fn forbidYieldAwaitInParams(
+        self: *Parser,
+        params: []const ast.Param,
+        forbid_yield: bool,
+        forbid_await: bool,
+        diagnostic: ParameterSuspensionDiagnostic,
+    ) ParseError!void {
         const saved_args = self.scan_allow_arguments;
         const saved_call = self.scan_forbid_super_call;
         const saved_yield = self.scan_forbid_yield;
         const saved_await = self.scan_forbid_await;
+        const saved_diagnostic = self.scan_parameter_suspension_diagnostic;
         self.scan_allow_arguments = true;
         self.scan_forbid_super_call = false;
         self.scan_forbid_yield = forbid_yield;
         self.scan_forbid_await = forbid_await;
+        self.scan_parameter_suspension_diagnostic = diagnostic;
         defer {
             self.scan_allow_arguments = saved_args;
             self.scan_forbid_super_call = saved_call;
             self.scan_forbid_yield = saved_yield;
             self.scan_forbid_await = saved_await;
+            self.scan_parameter_suspension_diagnostic = saved_diagnostic;
         }
         try self.scanSuperAndArgsInParams(params);
     }
@@ -6218,12 +6236,17 @@ pub const Parser = struct {
             .await_expr => |a| {
                 if (self.scan_forbid_await) return if (self.scan_static_block_await)
                     self.failWithReasonAt(.static_block_await_reference, a.offset)
+                else if (self.scan_parameter_suspension_diagnostic == .function_parameters)
+                    self.failWithReasonAt(.async_parameter_await_expression, a.offset)
                 else
                     ParseError.UnexpectedToken;
                 try self.scanSuperAndArgs(a.argument);
             },
             .yield_expr => |y| {
-                if (self.scan_forbid_yield) return ParseError.UnexpectedToken;
+                if (self.scan_forbid_yield) return if (self.scan_parameter_suspension_diagnostic == .function_parameters)
+                    self.failWithReasonAt(.generator_parameter_yield_expression, y.offset)
+                else
+                    ParseError.UnexpectedToken;
                 if (y.argument) |arg| try self.scanSuperAndArgs(arg);
             },
             .spread => |v| try self.scanSuperAndArgs(v),
@@ -7087,6 +7110,17 @@ test "parser retains function method and arrow parameter diagnostics" {
         .{ .source = "async (await) => 1", .reason = .async_parameter_await, .marker = "await", .message = "Cannot use 'await' as a parameter name in an async function." },
         .{ .source = "function* f(yield) {}", .reason = .generator_parameter_yield, .marker = "yield", .message = "Cannot use 'yield' as a parameter name in a generator function." },
         .{ .source = "function* f({yield}) {}", .reason = .abbreviated_destructuring_keyword, .marker = "yield", .message = "Cannot use abbreviated destructuring syntax for keyword 'yield'." },
+        .{ .source = "function* f(a = yield 1) {}", .reason = .generator_parameter_yield_expression, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression within parameters." },
+        .{ .source = "function* f([a = yield 1]) {}", .reason = .generator_parameter_yield_expression, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression within parameters." },
+        .{ .source = "function* f({a = yield 1}) {}", .reason = .generator_parameter_yield_expression, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression within parameters." },
+        .{ .source = "(function* (a = yield 1) {})", .reason = .generator_parameter_yield_expression, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression within parameters." },
+        .{ .source = "({ *f(a = yield 1) {} })", .reason = .generator_parameter_yield_expression, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression within parameters." },
+        .{ .source = "async function f(a = await 1) {}", .reason = .async_parameter_await_expression, .marker = "await", .message = "Cannot use 'await' within a parameter default expression." },
+        .{ .source = "async function f([a = await 1]) {}", .reason = .async_parameter_await_expression, .marker = "await", .message = "Cannot use 'await' within a parameter default expression." },
+        .{ .source = "(async function (a = await 1) {})", .reason = .async_parameter_await_expression, .marker = "await", .message = "Cannot use 'await' within a parameter default expression." },
+        .{ .source = "({ async f(a = await 1) {} })", .reason = .async_parameter_await_expression, .marker = "await", .message = "Cannot use 'await' within a parameter default expression." },
+        .{ .source = "async function* f(a = yield 1) {}", .reason = .generator_parameter_yield_expression, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression within parameters." },
+        .{ .source = "async function* f(a = await 1) {}", .reason = .async_parameter_await_expression, .marker = "await", .message = "Cannot use 'await' within a parameter default expression." },
         .{ .source = "x\n=> x", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
         .{ .source = "(x)\n=> x", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
         .{ .source = "(a,a)=>0", .reason = .duplicate_parameter_arrow, .marker = "a", .message = "Duplicate parameter 'a' not allowed in an arrow function." },
@@ -7126,6 +7160,8 @@ test "parser retains function method and arrow parameter diagnostics" {
         "async function* f(a,a){}",
         "(function* f(a,a){})",
         "(async function f(a,a){})",
+        "function* outer(a = function(x = yield) {}) {}",
+        "async function outer(a = function(x = await) {}) {}",
     };
     for (accepted) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

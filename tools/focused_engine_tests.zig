@@ -131,6 +131,29 @@ const frontend_cases = [_]Case{
         .expected = 1,
     },
     .{
+        .name = "function parameter suspension SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["function* f(a = yield 1) {}", "Unexpected keyword 'yield'. Cannot use yield expression within parameters."],
+        \\  ["function* f([a = yield 1]) {}", "Unexpected keyword 'yield'. Cannot use yield expression within parameters."],
+        \\  ["function* f({a = yield 1}) {}", "Unexpected keyword 'yield'. Cannot use yield expression within parameters."],
+        \\  ["(function* (a = yield 1) {})", "Unexpected keyword 'yield'. Cannot use yield expression within parameters."],
+        \\  ["({ *f(a = yield 1) {} })", "Unexpected keyword 'yield'. Cannot use yield expression within parameters."],
+        \\  ["async function f(a = await 1) {}", "Cannot use 'await' within a parameter default expression."],
+        \\  ["async function f([a = await 1]) {}", "Cannot use 'await' within a parameter default expression."],
+        \\  ["(async function (a = await 1) {})", "Cannot use 'await' within a parameter default expression."],
+        \\  ["({ async f(a = await 1) {} })", "Cannot use 'await' within a parameter default expression."],
+        \\  ["async function* f(a = yield 1) {}", "Unexpected keyword 'yield'. Cannot use yield expression within parameters."],
+        \\  ["async function* f(a = await 1) {}", "Cannot use 'await' within a parameter default expression."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 2047,
+    },
+    .{
         .name = "object and destructuring SyntaxErrors retain JSC prose",
         .source =
         \\var rows = [

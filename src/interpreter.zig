@@ -8519,7 +8519,7 @@ pub const Interpreter = struct {
             .logical_assign => |a| .{ .logical_assign = .{ .target = try self.deepCopyNode(a.target), .op = a.op, .value = try self.deepCopyNode(a.value) } },
             .conditional => |c| .{ .conditional = .{ .cond = try self.deepCopyNode(c.cond), .consequent = try self.deepCopyNode(c.consequent), .alternate = try self.deepCopyNode(c.alternate) } },
             .function => |f| .{ .function = try self.deepCopyFunction(f) },
-            .yield_expr => |y| .{ .yield_expr = .{ .argument = try self.deepCopyOpt(y.argument), .delegate = y.delegate } },
+            .yield_expr => |y| .{ .yield_expr = .{ .argument = try self.deepCopyOpt(y.argument), .delegate = y.delegate, .offset = y.offset } },
             .await_expr => |a| .{ .await_expr = .{ .argument = try self.deepCopyNode(a.argument), .offset = a.offset } },
             // A nested class owns a later ClassDefinitionEvaluation. Its parent
             // copy never rewrites across this boundary, so sharing the immutable
