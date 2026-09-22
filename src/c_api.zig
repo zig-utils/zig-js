@@ -1366,6 +1366,14 @@ const CContextGroup = struct {
     /// JavaScriptCore stores the active exception on the VM, not the realm.
     /// Preserve a distinct cell so sibling globals observe the same identity.
     pending_exception: ?*Boxed = null,
+    /// A private call must be able to publish an arbitrary JavaScript throw
+    /// after the call itself has exhausted the Context arena. Reserve the
+    /// value projection and exception cell before entering user code; once a
+    /// cell is published it remains VM-stable and the next private boundary
+    /// admits a fresh replacement instead of reusing an externally visible
+    /// address.
+    exception_value_reserve: ?*Boxed = null,
+    exception_cell_reserve: ?*Boxed = null,
     /// Stable, immutable OOM exception cell admitted during VM construction.
     /// A failed checkpoint must not allocate in order to stop later VM drains.
     oom_exception: ?*Boxed = null,
@@ -3412,6 +3420,31 @@ fn initializePrivateOomException(group: *CContextGroup) !void {
         Value.staticStr("OutOfMemory"),
         privateEncodedFromRef(cApiOomHandle(group.primary)),
     ) orelse return error.OutOfMemory;
+    try preparePrivateExceptionAdmission(group);
+}
+
+fn preparePrivateExceptionAdmission(group: *CContextGroup) !void {
+    const owner = group.primary;
+    if (group.exception_value_reserve == null) {
+        group.exception_value_reserve = try owner.arena().create(Boxed);
+    }
+    if (group.exception_cell_reserve == null) {
+        group.exception_cell_reserve = try owner.arena().create(Boxed);
+    }
+    // A newly thrown object also needs a canonical private value entry. Make
+    // that insertion allocation-free after arbitrary JavaScript has run.
+    try group.private_object_boxes.ensureUnusedCapacitySecure(gpa, 1);
+}
+
+fn privatePrepareExceptionAdmission(context: *Context) bool {
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return true;
+    preparePrivateExceptionAdmission(group) catch {
+        privateSetPendingOutOfMemory(context);
+        return false;
+    };
+    return true;
 }
 
 fn privateBoxInOwner(storage_owner: *Context, realm: *Context, v: Value) JSValueRef {
@@ -3539,6 +3572,62 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
     };
 }
 
+/// Encode a thrown value from storage admitted before user code. Primitive
+/// values need no projection; strings and previously unseen objects consume
+/// the reserved stable value cell. Object insertion is exact and cannot fail
+/// because the identity map capacity was reserved with the cells.
+fn privateEncodedFromThrownValue(context: *Context, group: *CContextGroup, internal: Value) EncodedValue {
+    return switch (internal.kind()) {
+        .undefined, .null, .boolean, .number => privateEncodedFromValue(context, internal),
+        .string => string: {
+            const boxed = group.exception_value_reserve orelse break :string .empty;
+            group.exception_value_reserve = null;
+            boxed.* = .{ .value = internal, .owner = context, .storage_owner = group.primary };
+            break :string privateEncodedFromRef(@ptrCast(boxed));
+        },
+        .object => object: {
+            const object_key = @intFromPtr(internal.asObj());
+            if (group.private_object_boxes.get(object_key)) |existing|
+                break :object privateEncodedFromRef(@ptrCast(existing));
+            const boxed = group.exception_value_reserve orelse break :object .empty;
+            group.exception_value_reserve = null;
+            boxed.* = .{ .value = internal, .owner = context, .storage_owner = group.primary };
+            group.private_object_boxes.putAssumeCapacity(object_key, boxed);
+            break :object privateEncodedFromRef(@ptrCast(boxed));
+        },
+    };
+}
+
+fn privateExceptionBoxFromAdmission(
+    context: *Context,
+    group: *CContextGroup,
+    thrown: Value,
+    encoded: EncodedValue,
+) ?*Boxed {
+    const boxed = group.exception_cell_reserve orelse return null;
+    var exception_realm = context;
+    if (encoded.asCellAddress()) |_| {
+        const projection = privateBoxedFrom(encoded) orelse return null;
+        if (projection.private_kind != .value or
+            projection.storage_owner.c_api_group != context.c_api_group) return null;
+        exception_realm = projection.exception_realm orelse projection.owner;
+        projection.owner = group.primary;
+        projection.exception_realm = exception_realm;
+    } else |_| {
+        if (encoded == .empty) return null;
+    }
+    group.exception_cell_reserve = null;
+    boxed.* = .{
+        .value = thrown,
+        .owner = group.primary,
+        .storage_owner = group.primary,
+        .private_kind = .exception,
+        .exception_encoded = encoded,
+        .exception_realm = exception_realm,
+    };
+    return boxed;
+}
+
 fn privateRefFromEncoded(global: JSContextRef, encoded: EncodedValue) JSValueRef {
     const context = ctxForHandleInspection(global) orelse return null;
     const internal = privateValueFrom(global, encoded) orelse return null;
@@ -3581,9 +3670,17 @@ fn privateSetPendingValue(context: *Context, thrown: Value) void {
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    const encoded = privateEncodedFromValue(context, thrown);
-    if (encoded == .empty) return;
-    group.setPendingException(privateExceptionBox(context, thrown, encoded));
+    if (!privatePrepareExceptionAdmission(context)) return;
+    const encoded = privateEncodedFromThrownValue(context, group, thrown);
+    if (encoded == .empty) {
+        privateSetPendingOutOfMemory(context);
+        return;
+    }
+    const exception = privateExceptionBoxFromAdmission(context, group, thrown, encoded) orelse {
+        privateSetPendingOutOfMemory(context);
+        return;
+    };
+    group.setPendingException(exception);
 }
 
 /// Publish the VM's construction-time OOM exception without encoding or
@@ -7891,7 +7988,9 @@ export fn JSC__JSValue__getErrorsProperty(encoded: EncodedValue, global: JSConte
 
 fn privatePropertyBoundaryGroup(context: *Context) ?*CContextGroup {
     const erased_group = context.c_api_group orelse return null;
-    return @ptrCast(@alignCast(erased_group));
+    const group: *CContextGroup = @ptrCast(@alignCast(erased_group));
+    if (group.pending_exception == null) _ = privatePrepareExceptionAdmission(context);
+    return group;
 }
 
 fn privateZigStringPropertyKey(context: *Context, key: *const PrivateZigString) ?[]const u8 {
@@ -36187,6 +36286,100 @@ test "private OOM fallbacks publish the admitted exception without allocation" {
     );
     try std.testing.expect(module_allocator.has_induced_failure);
     try std.testing.expectEqual(group.oom_exception, group.pending_exception);
+}
+
+test "private arbitrary throws consume pre-admitted stable exception cells" {
+    const Fault = struct {
+        context: *Context,
+        owner: *Context,
+        thrown: Value = Value.undef(),
+        exhausted: ContextMod.LockedArena,
+        allocator: std.testing.FailingAllocator,
+
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            machine.exception = fault.thrown;
+            fault.exhausted.inner = fault.allocator.allocator();
+            fault.context.locked_arena = &fault.exhausted;
+            fault.owner.locked_arena = &fault.exhausted;
+            _ = fault.owner.arena().alloc(u8, 1) catch {};
+            return error.Throw;
+        }
+    };
+
+    const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global).?;
+    const group = privatePropertyBoundaryGroup(context).?;
+    const original_context_lock = context.locked_arena;
+    const original_owner_lock = group.primary.locked_arena;
+    defer {
+        context.locked_arena = original_context_lock;
+        group.primary.locked_arena = original_owner_lock;
+    }
+
+    const saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(saved);
+    try interp.setNative(context.arena(), context.root_shape, context.global_object, "throwAfterExhaustion", 0, Fault.fail);
+    const callable = context.global_object.getOwn("throwAfterExhaustion").?;
+    var fault = Fault{
+        .context = context,
+        .owner = group.primary,
+        .exhausted = .{ .inner = context.arena() },
+        .allocator = .init(context.arena(), .{ .fail_index = 0, .resize_fail_index = 0 }),
+    };
+    callable.asObj().private_data = &fault;
+    const callable_encoded = privateEncodedFromValue(context, callable);
+    try std.testing.expect(callable_encoded != .empty);
+    const empty_arguments = [_]EncodedValue{};
+
+    var first_exception: ?*Boxed = null;
+    var first_projection = EncodedValue.empty;
+    for (0..2) |round| {
+        fault.thrown = try context.evaluate(if (round == 0)
+            "({ marker: 896, round: 1 })"
+        else
+            "({ marker: 896, round: 2 })");
+        try std.testing.expect(group.private_object_boxes.get(@intFromPtr(fault.thrown.asObj())) == null);
+
+        try std.testing.expectEqual(EncodedValue.empty, Bun__JSValue__call(
+            global,
+            callable_encoded,
+            .empty,
+            0,
+            &empty_arguments,
+        ));
+        try std.testing.expect(fault.allocator.has_induced_failure);
+        const exception = group.pending_exception orelse return error.MissingException;
+        try std.testing.expect(exception != group.oom_exception);
+        try std.testing.expectEqual(fault.thrown.asObj(), exception.value.asObj());
+        try std.testing.expectEqual(
+            fault.thrown.asObj(),
+            (privateValueFrom(global, exception.exception_encoded) orelse return error.ValueCreateFailed).asObj(),
+        );
+        try std.testing.expectEqual(
+            exception.exception_encoded,
+            privateEncodedFromValue(context, fault.thrown),
+        );
+
+        if (round == 0) {
+            first_exception = exception;
+            first_projection = exception.exception_encoded;
+        } else {
+            try std.testing.expect(exception != first_exception.?);
+            try std.testing.expect(exception.exception_encoded != first_projection);
+            try std.testing.expectEqual(
+                @as(f64, 1),
+                (privateValueFrom(global, first_projection) orelse return error.ValueCreateFailed).asObj().getOwn("round").?.asNum(),
+            );
+        }
+
+        context.locked_arena = original_context_lock;
+        group.primary.locked_arena = original_owner_lock;
+        JSGlobalObject__clearException(global);
+        fault.allocator = .init(context.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    }
 }
 
 test "private exception roots rewrite pending handles across nursery and compaction" {
