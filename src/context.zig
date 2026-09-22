@@ -783,6 +783,11 @@ pub const RuntimeAttributionProfiler = struct {
         full_pauses: PauseSamples = .{},
     };
 
+    pub const TeardownCurrentBytes = struct {
+        context_backing: u64,
+        collector_auxiliary: u64,
+    };
+
     inner: std.mem.Allocator,
     collector_auxiliary_inner: ?std.mem.Allocator = null,
     debug_registry: interp.DebugRegistryStats = .{},
@@ -1161,6 +1166,17 @@ pub const RuntimeAttributionProfiler = struct {
         out.full_pauses.overflow = self.full_pause_overflow;
         @memcpy(out.full_pauses.values[0..self.full_pause_len], self.full_pause_ns[0..self.full_pause_len]);
         return out;
+    }
+
+    /// Teardown runs after all workers and collector activity have stopped.
+    /// Read only the two live gauges needed for the zero-balance proof instead
+    /// of copying the profiler's bounded pause-sample arrays onto that path.
+    pub fn teardownCurrentBytes(self: *RuntimeAttributionProfiler) TeardownCurrentBytes {
+        std.debug.assert(self.counter_mutations_active.load(.acquire) == 0);
+        return .{
+            .context_backing = self.backing_current_bytes.load(.acquire),
+            .collector_auxiliary = self.collector_auxiliary_current_bytes.load(.acquire),
+        };
     }
 
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
@@ -6012,6 +6028,26 @@ pub const Context = struct {
         budget: ?HeapBudgetStats,
     };
 
+    /// Post-destruction proof returned in caller-owned storage after every
+    /// Context allocation domain and fixed profiling control has been released.
+    /// Null from `destroyWithMemoryInventory` means profiling was disabled.
+    pub const MemoryTeardownSnapshot = struct {
+        pub const schema_version = 1;
+
+        schema: u32 = schema_version,
+        accounted_owned_bytes_complete: bool,
+        fully_released: bool,
+        context_backing_current_bytes: u64,
+        collector_auxiliary_current_bytes: u64,
+        recovery_reserve_current_bytes: u64,
+        owned_native_live_bytes: u64,
+        owned_native_retired_bytes: u64,
+        profiler_control_current_bytes: u64,
+        budget_control_current_bytes: u64,
+        serialized_allocator_control_current_bytes: u64,
+        accounted_owned_current_bytes: u64,
+    };
+
     pub const NativeCodeAttributionSnapshot = struct {
         live_artifacts: usize,
         live_bytes: usize,
@@ -6333,6 +6369,20 @@ pub const Context = struct {
     }
 
     pub fn destroy(self: *Context) void {
+        self.destroyInternal(null);
+    }
+
+    /// Destroy the Context and return a machine-readable zero-balance proof
+    /// when execution attribution was enabled. The returned value is copied to
+    /// caller storage only after the profiler, budget, and allocator controls
+    /// themselves have been destroyed.
+    pub fn destroyWithMemoryInventory(self: *Context) ?MemoryTeardownSnapshot {
+        var output: ?MemoryTeardownSnapshot = null;
+        self.destroyInternal(&output);
+        return output;
+    }
+
+    fn destroyInternal(self: *Context, teardown_output: ?*?MemoryTeardownSnapshot) void {
         if (self.gc_state) |state| {
             if (state.realms.owner == self and !state.realms.ownerCanDestroy())
                 @panic("precise heap owner destroyed before every sibling realm");
@@ -6469,15 +6519,60 @@ pub const Context = struct {
         self.wasm_registry.deinit(self.gpa);
         self.sab_retains.deinit();
         self.jit_owner.deinit();
+        const collect_teardown_inventory = teardown_output != null and runtime_attribution_profiler != null;
+        const native_after_teardown = if (collect_teardown_inventory) self.jit_owner.stats() else null;
         self.arena_state.deinit();
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
-        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
         if (budget_allocator) |ba| {
             ba.deinit();
-            host_gpa.destroy(ba);
         }
+        const profiler_after_teardown = if (collect_teardown_inventory)
+            runtime_attribution_profiler.?.teardownCurrentBytes()
+        else
+            null;
+        const recovery_reserve_after_teardown: u64 = if (collect_teardown_inventory and budget_allocator != null) blk: {
+            const ba = budget_allocator.?;
+            const stats = ba.stats();
+            break :blk @intCast(std.math.sub(
+                usize,
+                stats.recovery_reserve_bytes,
+                stats.recovery_reserve_released_bytes,
+            ) catch @panic("memory teardown recovery reserve accounting underflow"));
+        } else 0;
+        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
+        if (budget_allocator) |ba| host_gpa.destroy(ba);
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
+
+        if (teardown_output) |output| {
+            output.* = if (profiler_after_teardown) |profile| blk: {
+                const context_current = profile.context_backing;
+                const auxiliary_current = profile.collector_auxiliary;
+                const native_live: u64 = @intCast(native_after_teardown.?.live_bytes);
+                const native_retired: u64 = @intCast(native_after_teardown.?.retired_bytes);
+                var accounted = std.math.add(u64, context_current, auxiliary_current) catch
+                    @panic("memory teardown byte total overflow");
+                accounted = std.math.add(u64, accounted, recovery_reserve_after_teardown) catch
+                    @panic("memory teardown byte total overflow");
+                accounted = std.math.add(u64, accounted, native_live) catch
+                    @panic("memory teardown byte total overflow");
+                accounted = std.math.add(u64, accounted, native_retired) catch
+                    @panic("memory teardown byte total overflow");
+                break :blk .{
+                    .accounted_owned_bytes_complete = true,
+                    .fully_released = accounted == 0,
+                    .context_backing_current_bytes = context_current,
+                    .collector_auxiliary_current_bytes = auxiliary_current,
+                    .recovery_reserve_current_bytes = recovery_reserve_after_teardown,
+                    .owned_native_live_bytes = native_live,
+                    .owned_native_retired_bytes = native_retired,
+                    .profiler_control_current_bytes = 0,
+                    .budget_control_current_bytes = 0,
+                    .serialized_allocator_control_current_bytes = 0,
+                    .accounted_owned_current_bytes = accounted,
+                };
+            } else null;
+        }
     }
 
     fn deinitSharedRealmState(self: *Context) void {
@@ -37474,15 +37569,16 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
 
 test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     const ordinary = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
-    defer ordinary.destroy();
     try std.testing.expect(ordinary.memoryInventorySnapshot() == null);
     try std.testing.expect(ordinary.tierAttributionSnapshot().memory == null);
+    try std.testing.expect(ordinary.destroyWithMemoryInventory() == null);
 
     const arena = try Context.createWith(std.testing.allocator, .{
         .enable_jit = false,
         .profile_execution_tiers = true,
     });
-    defer arena.destroy();
+    var arena_destroyed = false;
+    defer if (!arena_destroyed) arena.destroy();
     _ = try arena.evaluate("({ inventory: 42 })");
     const arena_memory = arena.memoryInventorySnapshot().?;
     try std.testing.expectEqual(@as(u32, Context.MemoryInventorySnapshot.schema_version), arena_memory.schema);
@@ -37500,6 +37596,10 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
             arena_memory.external_control_current_bytes,
         arena_memory.accounted_owned_current_bytes,
     );
+    const arena_teardown = arena.destroyWithMemoryInventory().?;
+    arena_destroyed = true;
+    try std.testing.expect(arena_teardown.fully_released);
+    try std.testing.expectEqual(@as(u64, 0), arena_teardown.accounted_owned_current_bytes);
 
     const precise = try Context.createWith(std.testing.allocator, .{
         .enable_jit = false,
@@ -37507,7 +37607,8 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
         .heap_limit_bytes = 64 * 1024 * 1024,
         .profile_execution_tiers = true,
     });
-    defer precise.destroy();
+    var precise_destroyed = false;
+    defer if (!precise_destroyed) precise.destroy();
     _ = try precise.evaluate(
         \\globalThis.inventoryBuffer = new ArrayBuffer(257);
         \\globalThis.inventoryText = "inventory-owned-string-" + String(42);
@@ -37544,6 +37645,21 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expectEqual(@as(u64, 0), sibling_memory.owned_native_retired_bytes);
     try sibling.destroySharedPreciseRealm();
     sibling_destroyed = true;
+
+    const precise_teardown = precise.destroyWithMemoryInventory().?;
+    precise_destroyed = true;
+    try std.testing.expectEqual(
+        @as(u32, Context.MemoryTeardownSnapshot.schema_version),
+        precise_teardown.schema,
+    );
+    try std.testing.expect(precise_teardown.accounted_owned_bytes_complete);
+    try std.testing.expect(precise_teardown.fully_released);
+    try std.testing.expectEqual(@as(u64, 0), precise_teardown.context_backing_current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), precise_teardown.collector_auxiliary_current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), precise_teardown.recovery_reserve_current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), precise_teardown.owned_native_live_bytes);
+    try std.testing.expectEqual(@as(u64, 0), precise_teardown.owned_native_retired_bytes);
+    try std.testing.expectEqual(@as(u64, 0), precise_teardown.accounted_owned_current_bytes);
 }
 
 test "vm admission: strict named-property loops reach the optimizer" {
