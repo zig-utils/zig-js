@@ -716,6 +716,20 @@ pub const RuntimeAttributionProfiler = struct {
         gc_cell_freed_bytes: u64 = 0,
     };
 
+    /// Collector pointer/index worklists use an allocator outside the public
+    /// Context heap budget. Keep that requested-byte domain separate so causal
+    /// allocation replays retain their existing Context-boundary meaning.
+    pub const AuxiliaryAllocationSnapshot = struct {
+        allocations: u64 = 0,
+        allocation_bytes: u64 = 0,
+        growths: u64 = 0,
+        growth_bytes: u64 = 0,
+        releases: u64 = 0,
+        released_bytes: u64 = 0,
+        current_bytes: u64 = 0,
+        peak_bytes: u64 = 0,
+    };
+
     pub const CellSlabLockSnapshot = struct {
         acquires: u64 = 0,
         contentions: u64 = 0,
@@ -763,12 +777,14 @@ pub const RuntimeAttributionProfiler = struct {
 
     pub const Snapshot = struct {
         allocation: AllocationSnapshot = .{},
+        collector_auxiliary: AuxiliaryAllocationSnapshot = .{},
         cell_slab_lock: CellSlabLockSnapshot = .{},
         minor_pauses: PauseSamples = .{},
         full_pauses: PauseSamples = .{},
     };
 
     inner: std.mem.Allocator,
+    collector_auxiliary_inner: ?std.mem.Allocator = null,
     debug_registry: interp.DebugRegistryStats = .{},
     // One profiler event updates several independent counters. Readers must
     // not publish a mixture of the old and new values while allocator or GC
@@ -785,6 +801,14 @@ pub const RuntimeAttributionProfiler = struct {
     backing_released_bytes: std.atomic.Value(u64) = .init(0),
     backing_current_bytes: std.atomic.Value(u64) = .init(0),
     backing_peak_bytes: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_allocations: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_allocation_bytes: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_growths: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_growth_bytes: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_releases: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_released_bytes: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_current_bytes: std.atomic.Value(u64) = .init(0),
+    collector_auxiliary_peak_bytes: std.atomic.Value(u64) = .init(0),
     gc_cell_allocations: std.atomic.Value(u64) = .init(0),
     gc_cell_bytes: std.atomic.Value(u64) = .init(0),
     gc_cell_fresh_allocations: std.atomic.Value(u64) = .init(0),
@@ -866,6 +890,49 @@ pub const RuntimeAttributionProfiler = struct {
         _ = self.backing_releases.fetchAdd(1, .monotonic);
         _ = self.backing_released_bytes.fetchAdd(@intCast(bytes), .monotonic);
         _ = self.backing_current_bytes.fetchSub(@intCast(bytes), .monotonic);
+    }
+
+    fn recordCollectorAuxiliaryPeak(self: *RuntimeAttributionProfiler, current: u64) void {
+        var peak = self.collector_auxiliary_peak_bytes.load(.monotonic);
+        while (current > peak) {
+            if (self.collector_auxiliary_peak_bytes.cmpxchgWeak(peak, current, .monotonic, .monotonic)) |observed| {
+                peak = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn recordCollectorAuxiliaryAllocation(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
+        _ = self.collector_auxiliary_allocations.fetchAdd(1, .monotonic);
+        _ = self.collector_auxiliary_allocation_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const previous = self.collector_auxiliary_current_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const current = std.math.add(u64, previous, @intCast(bytes)) catch
+            @panic("collector auxiliary attribution byte overflow");
+        self.recordCollectorAuxiliaryPeak(current);
+    }
+
+    fn recordCollectorAuxiliaryGrowth(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
+        _ = self.collector_auxiliary_growths.fetchAdd(1, .monotonic);
+        _ = self.collector_auxiliary_growth_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const previous = self.collector_auxiliary_current_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const current = std.math.add(u64, previous, @intCast(bytes)) catch
+            @panic("collector auxiliary attribution byte overflow");
+        self.recordCollectorAuxiliaryPeak(current);
+    }
+
+    fn recordCollectorAuxiliaryRelease(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
+        _ = self.collector_auxiliary_releases.fetchAdd(1, .monotonic);
+        _ = self.collector_auxiliary_released_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const previous = self.collector_auxiliary_current_bytes.fetchSub(@intCast(bytes), .monotonic);
+        if (previous < @as(u64, @intCast(bytes)))
+            @panic("collector auxiliary attribution byte underflow");
     }
 
     pub fn recordCellAllocation(self: *RuntimeAttributionProfiler, bytes: usize, kind: CellAllocationKind) void {
@@ -1052,6 +1119,16 @@ pub const RuntimeAttributionProfiler = struct {
                 .gc_cell_frees = self.gc_cell_frees.load(.acquire),
                 .gc_cell_freed_bytes = self.gc_cell_freed_bytes.load(.acquire),
             },
+            .collector_auxiliary = .{
+                .allocations = self.collector_auxiliary_allocations.load(.acquire),
+                .allocation_bytes = self.collector_auxiliary_allocation_bytes.load(.acquire),
+                .growths = self.collector_auxiliary_growths.load(.acquire),
+                .growth_bytes = self.collector_auxiliary_growth_bytes.load(.acquire),
+                .releases = self.collector_auxiliary_releases.load(.acquire),
+                .released_bytes = self.collector_auxiliary_released_bytes.load(.acquire),
+                .current_bytes = self.collector_auxiliary_current_bytes.load(.acquire),
+                .peak_bytes = self.collector_auxiliary_peak_bytes.load(.acquire),
+            },
             .cell_slab_lock = self.cellSlabLockSnapshot(),
         };
 
@@ -1129,6 +1206,62 @@ pub const RuntimeAttributionProfiler = struct {
     pub fn allocator(self: *RuntimeAttributionProfiler) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &vtable };
     }
+
+    fn collectorAuxiliaryAllocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        const inner = self.collector_auxiliary_inner orelse unreachable;
+        const ptr = inner.vtable.alloc(inner.ptr, len, alignment, ret_addr) orelse return null;
+        self.recordCollectorAuxiliaryAllocation(len);
+        return ptr;
+    }
+
+    fn collectorAuxiliaryResizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        const inner = self.collector_auxiliary_inner orelse unreachable;
+        if (!inner.vtable.resize(inner.ptr, mem, alignment, new_len, ret_addr)) return false;
+        if (new_len > mem.len)
+            self.recordCollectorAuxiliaryGrowth(new_len - mem.len)
+        else if (new_len < mem.len)
+            self.recordCollectorAuxiliaryRelease(mem.len - new_len);
+        return true;
+    }
+
+    fn collectorAuxiliaryRemapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        const inner = self.collector_auxiliary_inner orelse unreachable;
+        const ptr = inner.vtable.remap(inner.ptr, mem, alignment, new_len, ret_addr) orelse return null;
+        if (new_len > mem.len)
+            self.recordCollectorAuxiliaryGrowth(new_len - mem.len)
+        else if (new_len < mem.len)
+            self.recordCollectorAuxiliaryRelease(mem.len - new_len);
+        return ptr;
+    }
+
+    fn collectorAuxiliaryFreeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        const inner = self.collector_auxiliary_inner orelse unreachable;
+        inner.vtable.free(inner.ptr, mem, alignment, ret_addr);
+        self.recordCollectorAuxiliaryRelease(mem.len);
+    }
+
+    const collector_auxiliary_vtable: std.mem.Allocator.VTable = .{
+        .alloc = collectorAuxiliaryAllocFn,
+        .resize = collectorAuxiliaryResizeFn,
+        .remap = collectorAuxiliaryRemapFn,
+        .free = collectorAuxiliaryFreeFn,
+    };
+
+    /// Wrap zig-gc's scratch allocator without placing that storage inside the
+    /// Context heap budget or the existing Context-backing replay counters.
+    /// Construction calls this once before the heap can publish worker access.
+    pub fn collectorAuxiliaryAllocator(
+        self: *RuntimeAttributionProfiler,
+        inner: std.mem.Allocator,
+    ) std.mem.Allocator {
+        std.debug.assert(self.collector_auxiliary_inner == null);
+        self.collector_auxiliary_inner = inner;
+        return .{ .ptr = self, .vtable = &collector_auxiliary_vtable };
+    }
 };
 
 test "RuntimeAttributionProfiler records exact backing, cell, and pause samples" {
@@ -1181,6 +1314,26 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     try std.testing.expectEqual(@as(u64, 48), after_free.allocation.backing_released_bytes);
     try std.testing.expectEqual(@as(u64, 0), after_free.allocation.backing_current_bytes);
     try std.testing.expectEqual(@as(u64, 12), profile.counter_mutation_epoch.load(.acquire));
+}
+
+test "RuntimeAttributionProfiler separates collector auxiliary storage" {
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
+    const auxiliary = profile.collectorAuxiliaryAllocator(std.testing.allocator);
+    const memory = try auxiliary.alloc(u8, 73);
+
+    const live = profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 0), live.allocation.backing_allocations);
+    try std.testing.expectEqual(@as(u64, 1), live.collector_auxiliary.allocations);
+    try std.testing.expectEqual(@as(u64, 73), live.collector_auxiliary.allocation_bytes);
+    try std.testing.expectEqual(@as(u64, 73), live.collector_auxiliary.current_bytes);
+    try std.testing.expectEqual(@as(u64, 73), live.collector_auxiliary.peak_bytes);
+
+    auxiliary.free(memory);
+    const released = profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), released.collector_auxiliary.releases);
+    try std.testing.expectEqual(@as(u64, 73), released.collector_auxiliary.released_bytes);
+    try std.testing.expectEqual(@as(u64, 0), released.collector_auxiliary.current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), released.allocation.backing_current_bytes);
 }
 
 test "RuntimeAttributionProfiler rejects snapshots across concurrent partial mutations" {
@@ -5524,7 +5677,11 @@ pub const Context = struct {
             // allocator. See zig-gc `Heap.setAuxAllocator`.
             const private_gc_scratch = !options.enable_threads and
                 !options.concurrent_gc and !options.parallel_gc;
-            h.setAuxAllocator(if (private_gc_scratch) gpa else std.heap.page_allocator);
+            const collector_auxiliary_inner = if (private_gc_scratch) gpa else std.heap.page_allocator;
+            h.setAuxAllocator(if (runtime_attribution_profiler) |profile|
+                profile.collectorAuxiliaryAllocator(collector_auxiliary_inner)
+            else
+                collector_auxiliary_inner);
             h.setNurseryTenuringAge(runtime_gc_tenuring_age);
             h.setNurseryEnabled(true);
             h.setMovingNurseryEnabled(true);
@@ -5818,11 +5975,11 @@ pub const Context = struct {
     /// byte domains are disjoint requested/mapped bytes and reconcile to
     /// `accounted_owned_current_bytes`. Logical heap/cell/side-storage fields
     /// overlap allocator backing (or observe the owner's shared heap) and must
-    /// not be added again.
-    /// A precise heap owner currently leaves collector auxiliary scratch outside
-    /// the Context allocator, so `complete` makes that coverage gap explicit.
+    /// not be added again. Collector auxiliary scratch remains outside the
+    /// public heap budget and causal backing counters, but its distinct wrapper
+    /// makes it part of the reconciled owned subtotal.
     pub const MemoryInventorySnapshot = struct {
-        pub const schema_version = 1;
+        pub const schema_version = 2;
 
         schema: u32 = schema_version,
         accounted_owned_bytes_complete: bool,
@@ -5830,6 +5987,8 @@ pub const Context = struct {
         owns_native_code: bool,
         context_backing_current_bytes: u64,
         context_backing_peak_bytes: u64,
+        collector_auxiliary_current_bytes: u64,
+        collector_auxiliary_peak_bytes: u64,
         external_control_current_bytes: u64,
         profiler_control_bytes: u64,
         budget_control_bytes: u64,
@@ -5970,17 +6129,20 @@ pub const Context = struct {
         const observed_shared_native_live: u64 = if (owns_native_code) 0 else @intCast(code.live_bytes);
         const observed_shared_native_retired: u64 = if (owns_native_code) 0 else @intCast(code.retired_bytes);
         var accounted_owned = add(allocation.backing_current_bytes, external_control);
+        accounted_owned = add(accounted_owned, runtime.collector_auxiliary.current_bytes);
         accounted_owned = add(accounted_owned, owned_native_live);
         accounted_owned = add(accounted_owned, owned_native_retired);
 
         const owns_precise_heap = if (self.gc_state) |state| state.realms.owner == self else false;
         const heap = self.runtimeHeapAccounting();
         return .{
-            .accounted_owned_bytes_complete = !owns_precise_heap,
+            .accounted_owned_bytes_complete = true,
             .owns_precise_heap = owns_precise_heap,
             .owns_native_code = owns_native_code,
             .context_backing_current_bytes = allocation.backing_current_bytes,
             .context_backing_peak_bytes = allocation.backing_peak_bytes,
+            .collector_auxiliary_current_bytes = runtime.collector_auxiliary.current_bytes,
+            .collector_auxiliary_peak_bytes = runtime.collector_auxiliary.peak_bytes,
             .external_control_current_bytes = external_control,
             .profiler_control_bytes = profiler_control,
             .budget_control_bytes = budget_control,
@@ -5991,7 +6153,7 @@ pub const Context = struct {
             .observed_shared_native_live_bytes = observed_shared_native_live,
             .observed_shared_native_retired_bytes = observed_shared_native_retired,
             .accounted_owned_current_bytes = accounted_owned,
-            .collector_auxiliary_owned_but_untracked = owns_precise_heap,
+            .collector_auxiliary_owned_but_untracked = false,
             .heap_logical_live_bytes = @intCast(heap.live_bytes),
             .heap_last_full_collection_bytes = @intCast(heap.last_full_collection_bytes),
             .gc_cell_net_issued_bytes = cell_net,
@@ -37263,7 +37425,8 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     const vm_memory = snapshot.memory.?;
     try std.testing.expectEqual(@as(u64, @intCast(snapshot.native_code.live_bytes)), vm_memory.owned_native_live_bytes);
     try std.testing.expectEqual(
-        vm_memory.context_backing_current_bytes + vm_memory.external_control_current_bytes +
+        vm_memory.context_backing_current_bytes + vm_memory.collector_auxiliary_current_bytes +
+            vm_memory.external_control_current_bytes +
             vm_memory.owned_native_live_bytes + vm_memory.owned_native_retired_bytes,
         vm_memory.accounted_owned_current_bytes,
     );
@@ -37333,7 +37496,8 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
         arena_memory.external_control_current_bytes,
     );
     try std.testing.expectEqual(
-        arena_memory.context_backing_current_bytes + arena_memory.external_control_current_bytes,
+        arena_memory.context_backing_current_bytes + arena_memory.collector_auxiliary_current_bytes +
+            arena_memory.external_control_current_bytes,
         arena_memory.accounted_owned_current_bytes,
     );
 
@@ -37348,10 +37512,12 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
         \\globalThis.inventoryBuffer = new ArrayBuffer(257);
         \\globalThis.inventoryText = "inventory-owned-string-" + String(42);
     );
+    precise.collectGarbage();
     const precise_memory = precise.tierAttributionSnapshot().memory.?;
-    try std.testing.expect(!precise_memory.accounted_owned_bytes_complete);
+    try std.testing.expect(precise_memory.accounted_owned_bytes_complete);
     try std.testing.expect(precise_memory.owns_precise_heap);
-    try std.testing.expect(precise_memory.collector_auxiliary_owned_but_untracked);
+    try std.testing.expect(!precise_memory.collector_auxiliary_owned_but_untracked);
+    try std.testing.expect(precise_memory.collector_auxiliary_peak_bytes > 0);
     try std.testing.expect(precise_memory.gc_cell_net_issued_bytes > 0);
     try std.testing.expect(precise_memory.gc_array_buffer_bytes_live >= 257);
     try std.testing.expect(precise_memory.gc_string_bytes_live > 0);
@@ -37362,7 +37528,8 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
         precise_memory.budget.?.used_bytes,
     );
     try std.testing.expectEqual(
-        precise_memory.context_backing_current_bytes + precise_memory.external_control_current_bytes,
+        precise_memory.context_backing_current_bytes + precise_memory.collector_auxiliary_current_bytes +
+            precise_memory.external_control_current_bytes,
         precise_memory.accounted_owned_current_bytes,
     );
 
