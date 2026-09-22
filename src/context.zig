@@ -6368,6 +6368,61 @@ pub const Context = struct {
         self.protected_values.deinit(self.gpa);
     }
 
+    fn finishAllocatorTeardown(
+        host_gpa: std.mem.Allocator,
+        budget_allocator: ?*BudgetAllocator,
+        runtime_attribution_profiler: ?*RuntimeAttributionProfiler,
+        host_allocator_lock: ?*SerializedAllocator,
+        native_after_teardown: ?jit.OwnerStats,
+    ) ?MemoryTeardownSnapshot {
+        if (budget_allocator) |ba| ba.deinit();
+        const collect = native_after_teardown != null and runtime_attribution_profiler != null;
+        const profiler_after_teardown = if (collect)
+            runtime_attribution_profiler.?.teardownCurrentBytes()
+        else
+            null;
+        const recovery_reserve_after_teardown: u64 = if (collect and budget_allocator != null) blk: {
+            const stats = budget_allocator.?.stats();
+            break :blk @intCast(std.math.sub(
+                usize,
+                stats.recovery_reserve_bytes,
+                stats.recovery_reserve_released_bytes,
+            ) catch @panic("memory teardown recovery reserve accounting underflow"));
+        } else 0;
+
+        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
+        if (budget_allocator) |ba| host_gpa.destroy(ba);
+        if (host_allocator_lock) |lock| host_gpa.destroy(lock);
+
+        const profile = profiler_after_teardown orelse return null;
+        const native = native_after_teardown.?;
+        const context_current = profile.context_backing;
+        const auxiliary_current = profile.collector_auxiliary;
+        const native_live: u64 = @intCast(native.live_bytes);
+        const native_retired: u64 = @intCast(native.retired_bytes);
+        var accounted = std.math.add(u64, context_current, auxiliary_current) catch
+            @panic("memory teardown byte total overflow");
+        accounted = std.math.add(u64, accounted, recovery_reserve_after_teardown) catch
+            @panic("memory teardown byte total overflow");
+        accounted = std.math.add(u64, accounted, native_live) catch
+            @panic("memory teardown byte total overflow");
+        accounted = std.math.add(u64, accounted, native_retired) catch
+            @panic("memory teardown byte total overflow");
+        return .{
+            .accounted_owned_bytes_complete = true,
+            .fully_released = accounted == 0,
+            .context_backing_current_bytes = context_current,
+            .collector_auxiliary_current_bytes = auxiliary_current,
+            .recovery_reserve_current_bytes = recovery_reserve_after_teardown,
+            .owned_native_live_bytes = native_live,
+            .owned_native_retired_bytes = native_retired,
+            .profiler_control_current_bytes = 0,
+            .budget_control_current_bytes = 0,
+            .serialized_allocator_control_current_bytes = 0,
+            .accounted_owned_current_bytes = accounted,
+        };
+    }
+
     pub fn destroy(self: *Context) void {
         self.destroyInternal(null);
     }
@@ -6524,55 +6579,14 @@ pub const Context = struct {
         self.arena_state.deinit();
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
-        if (budget_allocator) |ba| {
-            ba.deinit();
-        }
-        const profiler_after_teardown = if (collect_teardown_inventory)
-            runtime_attribution_profiler.?.teardownCurrentBytes()
-        else
-            null;
-        const recovery_reserve_after_teardown: u64 = if (collect_teardown_inventory and budget_allocator != null) blk: {
-            const ba = budget_allocator.?;
-            const stats = ba.stats();
-            break :blk @intCast(std.math.sub(
-                usize,
-                stats.recovery_reserve_bytes,
-                stats.recovery_reserve_released_bytes,
-            ) catch @panic("memory teardown recovery reserve accounting underflow"));
-        } else 0;
-        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
-        if (budget_allocator) |ba| host_gpa.destroy(ba);
-        if (host_allocator_lock) |lock| host_gpa.destroy(lock);
-
-        if (teardown_output) |output| {
-            output.* = if (profiler_after_teardown) |profile| blk: {
-                const context_current = profile.context_backing;
-                const auxiliary_current = profile.collector_auxiliary;
-                const native_live: u64 = @intCast(native_after_teardown.?.live_bytes);
-                const native_retired: u64 = @intCast(native_after_teardown.?.retired_bytes);
-                var accounted = std.math.add(u64, context_current, auxiliary_current) catch
-                    @panic("memory teardown byte total overflow");
-                accounted = std.math.add(u64, accounted, recovery_reserve_after_teardown) catch
-                    @panic("memory teardown byte total overflow");
-                accounted = std.math.add(u64, accounted, native_live) catch
-                    @panic("memory teardown byte total overflow");
-                accounted = std.math.add(u64, accounted, native_retired) catch
-                    @panic("memory teardown byte total overflow");
-                break :blk .{
-                    .accounted_owned_bytes_complete = true,
-                    .fully_released = accounted == 0,
-                    .context_backing_current_bytes = context_current,
-                    .collector_auxiliary_current_bytes = auxiliary_current,
-                    .recovery_reserve_current_bytes = recovery_reserve_after_teardown,
-                    .owned_native_live_bytes = native_live,
-                    .owned_native_retired_bytes = native_retired,
-                    .profiler_control_current_bytes = 0,
-                    .budget_control_current_bytes = 0,
-                    .serialized_allocator_control_current_bytes = 0,
-                    .accounted_owned_current_bytes = accounted,
-                };
-            } else null;
-        }
+        const teardown = finishAllocatorTeardown(
+            host_gpa,
+            budget_allocator,
+            runtime_attribution_profiler,
+            host_allocator_lock,
+            native_after_teardown,
+        );
+        if (teardown_output) |output| output.* = teardown;
     }
 
     fn deinitSharedRealmState(self: *Context) void {
@@ -6649,6 +6663,20 @@ pub const Context = struct {
     /// intact and callback-addressable so the caller can drop that edge and
     /// retry without use-after-free.
     pub fn destroySharedPreciseRealm(self: *Context) !void {
+        _ = try self.destroySharedPreciseRealmInternal(false);
+    }
+
+    /// Retire an independently allocated precise sibling and return its owned
+    /// zero-balance proof. Shared heap and executable mappings remain owned by
+    /// the primary and never enter the sibling's teardown subtotal.
+    pub fn destroySharedPreciseRealmWithMemoryInventory(self: *Context) !?MemoryTeardownSnapshot {
+        return self.destroySharedPreciseRealmInternal(true);
+    }
+
+    fn destroySharedPreciseRealmInternal(
+        self: *Context,
+        report_memory: bool,
+    ) !?MemoryTeardownSnapshot {
         self.assertOwnerThread();
         std.debug.assert(self.gc != null and self.gc_state != null and self.gil == null);
         std.debug.assert(self.shared_jit_owner != null);
@@ -6700,6 +6728,8 @@ pub const Context = struct {
         const runtime_attribution_profiler = self.runtime_attribution_profiler;
         const host_allocator_lock = self.host_allocator_lock;
         self.deinitSharedRealmState();
+        const collect_teardown_inventory = report_memory and runtime_attribution_profiler != null;
+        const native_after_teardown = if (collect_teardown_inventory) self.jit_owner.stats() else null;
         if (self.locked_arena) |la| {
             la.resetLocalFor();
             context_gpa.destroy(la);
@@ -6708,12 +6738,13 @@ pub const Context = struct {
         self.arena_state.deinit();
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
-        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
-        if (budget_allocator) |ba| {
-            ba.deinit();
-            host_gpa.destroy(ba);
-        }
-        if (host_allocator_lock) |lock| host_gpa.destroy(lock);
+        return finishAllocatorTeardown(
+            host_gpa,
+            budget_allocator,
+            runtime_attribution_profiler,
+            host_allocator_lock,
+            native_after_teardown,
+        );
     }
 
     pub fn initCApiRef(self: *Context) void {
@@ -37643,8 +37674,10 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expect(!sibling_memory.owns_native_code);
     try std.testing.expectEqual(@as(u64, 0), sibling_memory.owned_native_live_bytes);
     try std.testing.expectEqual(@as(u64, 0), sibling_memory.owned_native_retired_bytes);
-    try sibling.destroySharedPreciseRealm();
+    const sibling_teardown = (try sibling.destroySharedPreciseRealmWithMemoryInventory()).?;
     sibling_destroyed = true;
+    try std.testing.expect(sibling_teardown.fully_released);
+    try std.testing.expectEqual(@as(u64, 0), sibling_teardown.accounted_owned_current_bytes);
 
     const precise_teardown = precise.destroyWithMemoryInventory().?;
     precise_destroyed = true;
