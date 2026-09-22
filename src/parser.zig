@@ -3640,7 +3640,17 @@ pub const Parser = struct {
                 break;
             }
         }
-        if (self.lex_error == null and !saw_slash) return classic;
+        if (self.lex_error == null and !saw_slash) {
+            // Parser initialization may already have filled the unambiguous
+            // token run through this head and stopped on a later lexical error.
+            // The lookahead temporarily clears that error so it can consume the
+            // retained head tokens; keep the cached frontier, but restore the
+            // pending failure before committed parsing resumes. The forked
+            // lexer has the same post-error cursor as `saved_lexer`.
+            self.lex_error = saved_lex_error;
+            self.lex_error_offset = saved_lex_error_offset;
+            return classic;
+        }
 
         self.tokens.items.len = saved_token_len;
         self.lexer = saved_lexer;
@@ -7855,6 +7865,24 @@ test "parser stream reports lexer failure source location" {
     const loc = parser.errorLocation();
     try std.testing.expectEqual(@as(usize, 2), loc.line);
     try std.testing.expectEqual(@as(usize, 2), loc.column);
+}
+
+test "classic for lookahead preserves a pending lexer failure" {
+    const cases = [_]struct {
+        source: []const u8,
+        err: ParseError,
+    }{
+        .{ .source = "for (;;) break;\nvar C = class { # x; };", .err = lex.LexError.UnexpectedCharacter },
+        .{ .source = "for (var k in {}) ;\nvar q = 1; \\u00; q", .err = lex.LexError.UnexpectedCharacter },
+        .{ .source = "function f(a){ for (var i = 0; i < a.length; i++) {} }\n$DONOTEVALUATE(); /*/", .err = lex.LexError.UnterminatedComment },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.err, parser.parseProgram());
+    }
 }
 
 test "parser retains generic unexpected token diagnostics and locations" {
