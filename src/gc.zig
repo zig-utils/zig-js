@@ -573,7 +573,7 @@ test "Object rare strong relocation mutates every active managed payload" {
     try rare_objects[2].setGenerator(allocator, @ptrCast(&old_generator));
     try rare_objects[3].setIteratorHelper(allocator, &old_helper);
     try rare_objects[4].setBoundFunction(allocator, @ptrCast(&old_bound));
-    try rare_objects[5].setProxyState(allocator, &old_objects[1], &old_objects[2]);
+    try rare_objects[5].setProxyState(allocator, &old_objects[1], &old_objects[2], false);
     var array_buffer: value.ArrayBufferData = undefined;
     var typed_array = value.TypedArrayData{
         .buffer = &old_objects[3],

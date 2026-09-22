@@ -2584,6 +2584,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     // undefined; the result is normalized (CompletePropertyDescriptor). An
     // absent trap forwards to the target.
     if (o.proxyHandler() != null or o.proxy_revoked) {
+        // Forwarding to the target, with or without a trap, recurses here
+        // without a JS call frame; bound it like the other proxy traps (#940),
+        // so a deep chain throws RangeError rather than overflowing (#968).
+        try self.proxyDepth();
         if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
         const handler = o.proxyHandler().?;
         const tgt = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");

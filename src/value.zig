@@ -2371,6 +2371,10 @@ pub const ObjectRareState = union(ObjectRareTag) {
     proxy: struct {
         target: ?*Object = null,
         handler: ?*Object = null,
+        /// ProxyCreate (10.5.14) gives the proxy a [[Construct]] exactly when
+        /// its target is a constructor. Fixed at creation and kept after
+        /// revocation, like `ObjectBehaviorFlags.proxy_callable`.
+        constructor: bool = false,
     },
     buffer_view: struct {
         array_buffer: ?*ArrayBufferData = null,
@@ -3741,10 +3745,19 @@ pub const Object = struct {
         fallback: std.mem.Allocator,
         target: *Object,
         handler: *Object,
+        constructor: bool,
     ) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .proxy, .{});
         state.target = target;
         state.handler = handler;
+        state.constructor = constructor;
+    }
+
+    /// Whether this proxy has a [[Construct]] internal method.
+    pub inline fn proxyIsConstructor(self: *const Object) bool {
+        const cold = self.coldState() orelse return false;
+        if (!cold.hasRare(.proxy)) return false;
+        return cold.rare.proxy.constructor;
     }
 
     pub fn clearProxyState(self: *Object) void {
@@ -5679,16 +5692,12 @@ pub const Object = struct {
     }
 
     pub fn isCallableObject(self: *const Object) bool {
-        // A proxy is callable iff its target is; walk iteratively (bounded) so a
-        // pathological proxy→target cycle can't blow the stack.
-        var o = self;
-        var guard: u32 = 0;
-        while (o.proxyTarget()) |t| {
-            guard += 1;
-            if (guard > 10000) return false;
-            o = t;
-        }
-        if (o.proxy_revoked) return o.behavior.proxy_callable;
+        // ProxyCreate fixes a proxy's [[Call]] from IsCallable(target) when the
+        // proxy is made, and `proxy_callable` records it, so a chain of any
+        // depth answers in O(1). Walking the chain instead gave up after
+        // 10,000 links and made every `new Proxy` cost its target's depth (#968).
+        if (self.proxyHandler() != null or self.proxy_revoked) return self.behavior.proxy_callable;
+        const o = self;
         return o.hostCallback() != null or o.native != null or
             (if (o.hostClassHooks()) |hooks| if (hooks.is_callable) |is_callable| is_callable(o) else false else false) or
             o.jsFunction() != null or o.errorCtor() != null or o.boundFunction() != null;

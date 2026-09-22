@@ -9534,20 +9534,27 @@ pub const Interpreter = struct {
     /// `callValueWithThis` for a `[[Call]]` a CallExpression owns. `site` is read
     /// only when the callee turns out not to be callable, so it costs dispatch
     /// nothing and every tier can name the callee identically.
-    pub fn callValueWithThisAtSite(self: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: CallSite) EvalError!Value {
+    pub fn callValueWithThisAtSite(self: *Interpreter, callee_value: Value, args: []const Value, this_val: Value, site: CallSite) EvalError!Value {
+        var callee = callee_value;
         if (!callee.isObject()) return self.throwNotAFunction(callee, site);
-        const obj = callee.asObj();
-        if (obj.proxyHandler() != null or obj.proxy_revoked) {
+        var obj = callee.asObj();
+        // A Proxy without an `apply` trap calls its target (10.5.12 step 7).
+        // Forward a chain of such links in a loop: each step makes the same
+        // revocation check and trap lookup, in the same order, as recursing
+        // would, but a 100,000-link chain must not cost 100,000 native frames
+        // (#968).
+        while (obj.proxyHandler() != null or obj.proxy_revoked) {
             const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
             // A Proxy has a [[Call]] method only if its target is callable; if not,
-            // calling it is a TypeError BEFORE the apply trap runs (9.5.12).
+            // calling it is a TypeError BEFORE the apply trap runs (10.5.12).
             if (!obj.behavior.proxy_callable) return self.throwNotAFunction(callee, site);
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().appendElement(self.arena, a);
                 return self.callValueWithThis(trap, &.{ Value.obj(target), this_val, arr }, Value.obj(obj.proxyHandler().?));
             }
-            return self.callValueWithThisAtSite(Value.obj(target), args, this_val, site);
+            obj = target;
+            callee = Value.obj(target);
         }
         if (obj.boundFunction()) |erased| {
             // Walk the chain instead of recursing per link: [[Call]] on a bound
@@ -10593,25 +10600,30 @@ pub const Interpreter = struct {
         return self.constructNTAtSite(callee, args, new_target, .none);
     }
 
-    fn constructNTAtSite(self: *Interpreter, callee: Value, args: []const Value, new_target: Value, site: EvaluationSite) EvalError!Value {
+    fn constructNTAtSite(self: *Interpreter, callee_value: Value, args: []const Value, new_target: Value, site: EvaluationSite) EvalError!Value {
+        var callee = callee_value;
         if (!callee.isObject()) return throwNotAConstructor(self, callee, site);
-        const obj = callee.asObj();
-        if (obj.proxyHandler() != null or obj.proxy_revoked) {
+        var obj = callee.asObj();
+        // A Proxy without a `construct` trap constructs its target with the
+        // same newTarget (10.5.13 step 7); forwarded in a loop, as for [[Call]]
+        // (#968).
+        while (obj.proxyHandler() != null or obj.proxy_revoked) {
             const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
             // A Proxy has a [[Construct]] method only if its target is a
             // constructor; if not, `new proxy()` is a TypeError before the
-            // construct trap runs (9.5.13).
-            if (!isConstructorValue(Value.obj(target))) return throwNotAConstructor(self, callee, site);
+            // construct trap runs (10.5.13).
+            if (!obj.proxyIsConstructor()) return throwNotAConstructor(self, callee, site);
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().appendElement(self.arena, a);
                 const res = try self.callValueWithThis(trap, &.{ Value.obj(target), arr, new_target }, Value.obj(obj.proxyHandler().?));
-                // The [[Construct]] trap must return an Object (9.5.14 step 9).
+                // The [[Construct]] trap must return an Object (10.5.13 step 11).
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint)
                     return self.throwError("TypeError", "Result from Proxy handler's 'construct' method should be an object");
                 return res;
             }
-            return self.constructNTAtSite(Value.obj(target), args, new_target, site);
+            obj = target;
+            callee = Value.obj(target);
         }
         if (obj.boundFunction()) |erased| {
             // `new (fn.bind(...))(...)`: construct the target with bound args
@@ -15017,7 +15029,7 @@ pub const Interpreter = struct {
 
     /// Guard against unbounded proxy→target→proxy forwarding (which recurses
     /// without a JS call frame, so the normal call-depth limit wouldn't catch it).
-    fn proxyDepth(self: *Interpreter) EvalError!void {
+    pub fn proxyDepth(self: *Interpreter) EvalError!void {
         try self.stackGuard();
         // A trap-less link forwards to its target without crossing a JS call
         // boundary, so `depth` never moves and `stackGuard` cannot see a chain
@@ -24092,7 +24104,7 @@ fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         return self.throwError("TypeError", "A Proxy's 'handler' should be an Object");
     const o = try gc_mod.allocObj(self.arena);
     o.* = .{ .behavior = .{ .proxy_callable = target.asObj().isCallableObject() } };
-    try o.setProxyState(self.arena, target.asObj(), handler.asObj());
+    try o.setProxyState(self.arena, target.asObj(), handler.asObj(), isConstructorValue(target));
     return Value.obj(o);
 }
 
@@ -24111,7 +24123,7 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         return self.throwError("TypeError", "A Proxy's 'handler' should be an Object");
     const p = try gc_mod.allocObj(self.arena);
     p.* = .{ .behavior = .{ .proxy_callable = target.asObj().isCallableObject() } };
-    try p.setProxyState(self.arena, target.asObj(), handler.asObj());
+    try p.setProxyState(self.arena, target.asObj(), handler.asObj(), isConstructorValue(target));
     const revoke = try gc_mod.allocObj(self.arena);
     revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
     try installNativeProps(self.arena, self.root_shape, revoke, "", 0);
@@ -24293,13 +24305,19 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// error constructor, a non-arrow/non-generator/non-async JS function, a bound
 /// function over a constructor, or a proxy whose target is a constructor.
 pub fn isConstructorValue(v: Value) bool {
-    if (!v.isObject()) return false;
-    const o = v.asObj();
-    if (o.proxyHandler() != null) return if (o.proxyTarget()) |t| isConstructorValue(Value.obj(t)) else false;
-    if (o.boundFunction()) |erased| {
+    var current = v;
+    // A bound function is a constructor exactly when its target is (10.4.1.3);
+    // walk a chain of them instead of recursing per link.
+    while (current.isObject()) {
+        const erased = current.asObj().boundFunction() orelse break;
         const bf: *Interpreter.BoundFn = @ptrCast(@alignCast(erased));
-        return isConstructorValue(bf.target);
+        current = bf.target;
     }
+    if (!current.isObject()) return false;
+    const o = current.asObj();
+    // A proxy's [[Construct]] was fixed when it was made (10.5.14), revoked or
+    // not, so a chain of any depth answers from its outermost link (#968).
+    if (o.proxyHandler() != null or o.proxy_revoked) return o.proxyIsConstructor();
     if (o.errorCtor() != null) return true;
     if (o.hostClassHooks()) |hooks| if (hooks.is_constructor) |is_constructor|
         if (is_constructor(o)) return true;

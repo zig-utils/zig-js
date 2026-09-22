@@ -1084,6 +1084,51 @@ const runtime_cases = [_]Case{
         .expected = 32767,
     },
     .{
+        // #968: a trap-less proxy link's [[Call]] and [[Construct]] forward to
+        // the target in a loop, and IsCallable/IsConstructor read what
+        // ProxyCreate recorded instead of walking the chain (which gave up at
+        // 10,000 links and made building a chain quadratic). Every check was
+        // run against node v24.4.1, which passes all twelve.
+        .name = "deep trap-less proxy chains call, construct and report their type",
+        .source =
+        \\function outcome(run) {
+        \\  try { return run(); }
+        \\  catch (e) { return e instanceof RangeError ? "range" : e instanceof TypeError ? "type" : "other: " + e; }
+        \\}
+        \\function chainProxy(base, n) { var p = base; for (var i = 0; i < n; i++) p = new Proxy(p, {}); return p; }
+        \\var checks = [];
+        \\// [[Call]] forwards through any number of trap-less links.
+        \\var deep_fn = chainProxy(function () { return 42; }, 100000);
+        \\checks.push(outcome(function () { return deep_fn(); }) === 42);
+        \\// IsCallable is what ProxyCreate recorded, at any depth.
+        \\checks.push(typeof deep_fn === "function");
+        \\checks.push(typeof chainProxy(function () {}, 10001) === "function");
+        \\checks.push(typeof chainProxy({}, 100000) === "object");
+        \\checks.push(outcome(function () { return chainProxy({}, 100000)(); }) === "type");
+        \\// A trap part-way down still runs, and stops the forwarding.
+        \\var trapped = new Proxy(function () { return 1; }, { apply: function () { return 2; } });
+        \\checks.push(chainProxy(trapped, 1000)() === 2);
+        \\// [[Construct]] forwards with the original newTarget.
+        \\function F(v) { this.v = v; }
+        \\var made = new (chainProxy(F, 5))(7);
+        \\checks.push(made.v === 7 && made instanceof F);
+        \\var seen_nt;
+        \\var ctor_trapped = new Proxy(F, { construct: function (t, args, nt) { seen_nt = nt; return { v: "trap" }; } });
+        \\var outer = chainProxy(ctor_trapped, 1000);
+        \\checks.push(new outer(1).v === "trap" && seen_nt === outer);
+        \\checks.push(outcome(function () { return new (chainProxy(function () {}.bind(null), 3))() instanceof Object; }) === true);
+        \\checks.push(outcome(function () { return new (chainProxy(() => 1, 1000))(); }) === "type");
+        \\// Deep enough, reading newTarget.prototype or a descriptor through the chain
+        \\// may run out of stack; that must be a RangeError, never a crash.
+        \\var deep_new = outcome(function () { return new (chainProxy(F, 100000))(7).v; });
+        \\checks.push(deep_new === 7 || deep_new === "range");
+        \\var deep_desc = outcome(function () { return Object.getOwnPropertyDescriptor(deep_fn, "length").value; });
+        \\checks.push(deep_desc === 0 || deep_desc === "range");
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 4095,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
