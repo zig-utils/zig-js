@@ -16702,8 +16702,19 @@ pub const Interpreter = struct {
             if (o.moduleNs() == null) {
                 // `hasOwnPropertyResult` rather than `getOwn`: a frozen array's
                 // dense elements are own properties that the shape map does not hold.
-                if (!o.isExtensible() and !try self.hasOwnPropertyResult(o, key))
+                // An ARRAY INDEX key (canonical, < 2**32-1) reports the readonly
+                // wording even when the cause is non-extensibility. Every other
+                // key keeps "not extensible", including numeric-looking ones that
+                // are not array indices ("1.5", "-1", "NaN", "4294967296"), as
+                // does an explicit [[DefineOwnProperty]]. Measured against
+                // JavaScriptCore, which draws the line in exactly that place.
+                if (!o.isExtensible() and !try self.hasOwnPropertyResult(o, key) and
+                    arrayElementIndex(key) == null)
                     return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
+                // A writable `length` that still refused the store was blocked by a
+                // non-configurable element the truncation could not delete.
+                if (o.is_array and std.mem.eql(u8, key, "length"))
+                    return self.throwError("TypeError", "Unable to delete property.");
             }
         }
         return self.throwError("TypeError", "Attempted to assign to readonly property.");
@@ -18426,7 +18437,7 @@ pub const Interpreter = struct {
         var key_storage: [32]u8 = undefined;
         const ks = borrowedIndexKey(&key_storage, i);
         if (!try self.setMemberResult(Value.obj(o), ks, v, Value.obj(o)))
-            return self.throwError("TypeError", "Cannot set array index");
+            return self.throwError("TypeError", "Attempted to assign to readonly property.");
     }
 
     /// DeletePropertyOrThrow(O, ToString(i)).
@@ -18434,7 +18445,7 @@ pub const Interpreter = struct {
         var key_storage: [32]u8 = undefined;
         const ks = borrowedIndexKey(&key_storage, i);
         if (!try self.deleteOwn(o, ks))
-            return self.throwError("TypeError", "Cannot delete array index");
+            return self.throwError("TypeError", "Unable to delete property.");
     }
 
     /// Spread one concat-spreadable source into `dst`, preserving holes: a real
@@ -18566,7 +18577,7 @@ pub const Interpreter = struct {
             if (new_len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
             if (!arrayLenWritable(o)) return self.throwError("TypeError", "Array length is not writable");
             if (!try self.setArrayLength(o, new_len))
-                return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                return self.throwError("TypeError", "Unable to delete property.");
             return;
         }
         if (o.boxedPrimitive()) |p| if (p.isString())
@@ -18789,7 +18800,7 @@ pub const Interpreter = struct {
             defer self.restoreTempRoots(element_root);
             const live_receiver = self.tempRoot(roots, receiver).asObj();
             if (live_receiver.is_array) {
-                if (arrayElemNonConfigurable(live_receiver, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                if (arrayElemNonConfigurable(live_receiver, last)) return self.throwError("TypeError", "Unable to delete property.");
                 if (!arrayLenWritable(live_receiver)) return self.throwError("TypeError", "Array length is not writable");
                 try live_receiver.truncateDenseElementsAndSetLength(self.arena, last);
                 return self.tempRoot(element_root, element);
@@ -18807,11 +18818,10 @@ pub const Interpreter = struct {
             const first = try self.getProperty(self.tempRoot(roots, receiver), "0"); // fires accessor on a hole
             const first_root = try self.pushTempRoot(first);
             defer self.restoreTempRoots(first_root);
-            const live_receiver = self.tempRoot(roots, receiver).asObj();
-            if (live_receiver.is_array) {
-                if (arrayElemNonConfigurable(live_receiver, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-                if (!arrayLenWritable(live_receiver)) return self.throwError("TypeError", "Array length is not writable");
-            }
+            // No pre-check on element 0 or on `length`: 23.1.3.25 moves every
+            // element down before it deletes the tail or touches `length`, so a
+            // frozen array must fail on that first store (JavaScriptCore reports
+            // the readonly assignment), and a one-element one on the delete.
             // Move each element down, delete the tail, set length.
             var k: usize = 1;
             while (k < ilen) : (k += 1) {
@@ -18826,8 +18836,13 @@ pub const Interpreter = struct {
             }
             try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), ilen - 1);
             if (self.tempRoot(roots, receiver).asObj().is_array) {
+                // Set(O, "length", len - 1, true) is the last step, and it is the
+                // one that throws when the array was frozen while the elements
+                // were being read (test262 pins that through a prototype getter).
+                if (!arrayLenWritable(self.tempRoot(roots, receiver).asObj()))
+                    return self.throwError("TypeError", "Array length is not writable");
                 if (!try self.setArrayLength(self.tempRoot(roots, receiver).asObj(), ilen - 1))
-                    return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                    return self.throwError("TypeError", "Unable to delete property.");
             } else {
                 try self.arraySetLengthThrowing(self.tempRoot(roots, receiver).asObj(), ilen - 1);
             }

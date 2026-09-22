@@ -1477,6 +1477,56 @@ const runtime_cases = [_]Case{
         .expected = 4194303,
     },
     .{
+        // #459: the Array mutators carried four bespoke failure strings of their
+        // own. JavaScriptCore reports every refused store in these paths as
+        // "Attempted to assign to readonly property." and every refused delete
+        // as "Unable to delete property." -- including a `[[Set]]` blocked by
+        // non-extensibility when the key is an INDEX, where a named key keeps
+        // "not extensible". `shift` throws from the first element store, not
+        // from a delete, so the pre-checks that reported otherwise are gone and
+        // the `length` store stayed where 23.1.3.25 puts it: last. Every
+        // expected string is JavaScriptCore's (home-tool), which scores all
+        // twenty-six.
+        .name = "frozen array mutators report JavaScriptCore's store and delete failures",
+        .source =
+        \\"use strict";
+        \\function msg(fn) { try { fn(); return "OK"; } catch (e) { return e.message; } }
+        \\function nonconf() { var a = [1, 2, 3]; Object.defineProperty(a, "2", { configurable: false }); return a; }
+        \\var RO = "Attempted to assign to readonly property.";
+        \\var DEL = "Unable to delete property.";
+        \\var NOEXT = "Attempting to define property on object that is not extensible.";
+        \\var checks = [];
+        \\checks.push(msg(function () { Object.freeze([1, 2]).push(3); }) === RO);
+        \\checks.push(msg(function () { Object.seal([1, 2]).push(3); }) === RO);
+        \\checks.push(msg(function () { Object.preventExtensions([1, 2]).push(3); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).unshift(0); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).splice(0, 1); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).sort(); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).reverse(); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).fill(0); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).copyWithin(0, 1); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).shift(); }) === RO);
+        \\checks.push(msg(function () { Object.freeze([1]).shift(); }) === DEL);
+        \\checks.push(msg(function () { Object.freeze([1, 2]).pop(); }) === DEL);
+        \\checks.push(msg(function () { Object.freeze([1]).pop(); }) === DEL);
+        \\checks.push(msg(function () { nonconf().pop(); }) === DEL);
+        \\checks.push(msg(function () { nonconf().shift(); }) === DEL);
+        \\checks.push(msg(function () { var a = nonconf(); a.length = 1; }) === DEL);
+        \\checks.push(msg(function () { var a = Object.preventExtensions([1]); a[5] = 1; }) === RO);
+        \\checks.push(msg(function () { var o = Object.preventExtensions({}); o[0] = 1; }) === RO);
+        \\checks.push(msg(function () { var o = Object.preventExtensions({}); o.x = 1; }) === NOEXT);
+        \\checks.push(msg(function () { var o = Object.preventExtensions({}); Object.defineProperty(o, "y", { value: 1 }); }) === NOEXT);
+        \\checks.push(msg(function () { Array.prototype.push.call(Object.freeze({ length: 0 }), 1); }) === RO);
+        \\checks.push(msg(function () { Array.prototype.sort.call(Object.freeze({ length: 2, 0: 2, 1: 1 })); }) === RO);
+        \\checks.push(msg(function () { var a = Object.freeze([1]); delete a[0]; }) === DEL);
+        \\checks.push(msg(function () { var a = Object.freeze([1]); a.length = 3; }) === "Array length is not writable");
+        \\checks.push(msg(function () { Object.freeze([]).fill(0); }) === "OK");
+        \\checks.push(msg(function () { Object.freeze([1]).reverse(); }) === "OK");
+        \\checks.reduce(function (bits, y, i) { return y ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 67108863,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
