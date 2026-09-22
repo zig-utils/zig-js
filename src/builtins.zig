@@ -165,10 +165,15 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     parser.useRealmHashKeys(self.root_shape);
-    const prog = parser.parseProgram() catch |err|
+    const synthetic_suffix_start = source.len - 3;
+    const prog = parser.parseProgram() catch |err| {
+        parser.classifySyntheticSuffixAsEndOfScript(synthetic_suffix_start, err);
         return self.throwParserSyntaxError("Function body", source, &parser, err);
-    parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err|
+    };
+    parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err| {
+        parser.classifySyntheticSuffixAsEndOfScript(synthetic_suffix_start, err);
         return self.throwParserSyntaxError("Function body", source, &parser, err);
+    };
     try self.registerParsedDynamicDebugScript(source, "Function", 1, &parser);
     // Create the function in the Function constructor's own realm (so its
     // closure — and thus [[Realm]] — is that realm).

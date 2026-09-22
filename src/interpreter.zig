@@ -27093,10 +27093,15 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
             parser.useRealmHashKeys(self.root_shape);
-            const prog = parser.parseProgram() catch |err|
+            const synthetic_suffix_start = source.len - 3;
+            const prog = parser.parseProgram() catch |err| {
+                parser.classifySyntheticSuffixAsEndOfScript(synthetic_suffix_start, err);
                 return self.throwParserSyntaxError("Function body", source, &parser, err);
-            parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err|
+            };
+            parser.validateDynamicFunctionProgram(prog, source[1 .. source.len - 1]) catch |err| {
+                parser.classifySyntheticSuffixAsEndOfScript(synthetic_suffix_start, err);
                 return self.throwParserSyntaxError("Function body", source, &parser, err);
+            };
             const fallback_url = switch (kind) {
                 .generator => "GeneratorFunction",
                 .async_fn => "AsyncFunction",

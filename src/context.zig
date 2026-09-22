@@ -14343,6 +14343,52 @@ test "assignment diagnostic reasons preserve early errors and Annex B calls" {
     );
 }
 
+test "generic parser diagnostics retain JavaScriptCore token kinds and structured locations" {
+    const Case = struct {
+        source: []const u8,
+        message: []const u8,
+        byte_offset: usize,
+        function_line: usize,
+        function_column: usize,
+        function_byte_offset: usize,
+    };
+    const cases = [_]Case{
+        .{ .source = "var q = ;", .message = "Unexpected token ';'", .byte_offset = 8, .function_line = 3, .function_column = 9, .function_byte_offset = 23 },
+        .{ .source = "if (true) {", .message = "Unexpected end of script", .byte_offset = 11, .function_line = 4, .function_column = 2, .function_byte_offset = 28 },
+        .{ .source = "var a b", .message = "Unexpected identifier 'b'. Expected ';' after variable declaration.", .byte_offset = 6, .function_line = 3, .function_column = 7, .function_byte_offset = 21 },
+        .{ .source = "1 2", .message = "Unexpected number '2'", .byte_offset = 2, .function_line = 3, .function_column = 3, .function_byte_offset = 17 },
+        .{ .source = "'a' 'b'", .message = "Unexpected string literal 'b'", .byte_offset = 4, .function_line = 3, .function_column = 5, .function_byte_offset = 19 },
+        .{ .source = "2n 3n", .message = "Unexpected token '3n'", .byte_offset = 3, .function_line = 3, .function_column = 4, .function_byte_offset = 18 },
+        .{ .source = "if if", .message = "Unexpected keyword 'if'. Expected '(' to start an 'if' condition.", .byte_offset = 3, .function_line = 3, .function_column = 4, .function_byte_offset = 18 },
+    };
+
+    for (cases) |case| {
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, case.source, .{});
+        defer std.testing.allocator.free(encoded);
+        const eval_expected = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}|1|{d}|{d}|false",
+            .{ case.message, case.byte_offset + 1, case.byte_offset },
+        );
+        defer std.testing.allocator.free(eval_expected);
+        const function_expected = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}|{d}|{d}|{d}|false",
+            .{ case.message, case.function_line, case.function_column, case.function_byte_offset },
+        );
+        defer std.testing.allocator.free(function_expected);
+        for ([_][]const u8{ "eval", "Function" }) |operation| {
+            const probe = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "var result = ''; try {{ {s}({s}); }} catch (e) {{ if (!(e instanceof SyntaxError)) throw e; result = e.message + '|' + e.line + '|' + e.column + '|' + e.byteOffset + '|' + Object.keys(e).includes('line'); }} result",
+                .{ operation, encoded },
+            );
+            defer std.testing.allocator.free(probe);
+            try expectEvalStr(if (std.mem.eql(u8, operation, "eval")) eval_expected else function_expected, probe);
+        }
+    }
+}
+
 test "accessor parameter grammar reports JavaScriptCore tokens before body faults" {
     const Case = struct { source: []const u8, message: []const u8 };
     const cases = [_]Case{
@@ -16728,7 +16774,7 @@ test "Function constructor builds callable functions from source" {
     // A syntactically invalid body throws SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
-        \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError" && e.message.includes("Function body:") && e.message.includes(" at "); }
+        \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError" && e.message === "Unexpected token ')'" && e.line === 3 && e.column === 8 && e.byteOffset === 22; }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(

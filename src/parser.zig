@@ -20,6 +20,11 @@ pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, In
 /// compact ParseError ABI while letting JS boundaries render an actual message
 /// instead of guessing from the token at which parsing happened to stop.
 pub const DiagnosticReason = enum {
+    unexpected_token,
+    expected_token,
+    unexpected_end_of_expression,
+    expected_semicolon_after_variable_declaration,
+    expected_if_condition,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -85,7 +90,7 @@ pub const DiagnosticReason = enum {
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
-            .unexpected_end_of_script => ParseError.ExpectedToken,
+            .expected_token, .expected_if_condition, .unexpected_end_of_script => ParseError.ExpectedToken,
             .invalid_assignment,
             .invalid_destructuring_assignment,
             .invalid_prefix_increment,
@@ -99,6 +104,11 @@ pub const DiagnosticReason = enum {
 
     pub fn message(reason: DiagnosticReason) []const u8 {
         return switch (reason) {
+            .unexpected_token => "",
+            .expected_token => "",
+            .unexpected_end_of_expression => "Unexpected end of script",
+            .expected_semicolon_after_variable_declaration => "Expected ';' after variable declaration.",
+            .expected_if_condition => "Expected '(' to start an 'if' condition.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -878,14 +888,19 @@ pub const Parser = struct {
         return reason.parseError();
     }
 
-    fn failWithTokenReason(self: *Parser, reason: DiagnosticReason) ParseError {
-        const token = self.cur();
-        if (token.kind == .eof) return self.failWithReasonAt(.unexpected_end_of_script, token.pos);
+    fn failWithToken(self: *Parser, reason: DiagnosticReason, token: Token) ParseError {
+        if (token.kind == .eof) {
+            const eof_reason: DiagnosticReason = if (reason.parseError() == ParseError.ExpectedToken)
+                .unexpected_end_of_script
+            else
+                .unexpected_end_of_expression;
+            return self.failWithReasonAt(eof_reason, token.pos);
+        }
         const err = self.failWithReasonAt(reason, token.pos);
         self.last_error_token = .{
             .kind = switch (token.kind) {
                 .identifier => if (isReservedWord(token.text)) .keyword else .identifier,
-                .number => .number,
+                .number => if (token.is_bigint) .token else .number,
                 .string => .string,
                 else => .token,
             },
@@ -896,6 +911,10 @@ pub const Parser = struct {
         return err;
     }
 
+    fn failWithTokenReason(self: *Parser, reason: DiagnosticReason) ParseError {
+        return self.failWithToken(reason, self.cur());
+    }
+
     pub fn diagnosticMessage(self: *const Parser, allocator: std.mem.Allocator, reason: DiagnosticReason) std.mem.Allocator.Error![]const u8 {
         const token = self.last_error_token orelse return reason.message();
         if (reason == .private_field_delete)
@@ -904,12 +923,28 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot reference undeclared private names: \"{s}\"", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
+        if (reason == .unexpected_token or reason == .expected_token)
+            return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}", .{ noun, quote, token.text, quote });
         return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. {s}", .{ noun, quote, token.text, quote, reason.message() });
     }
 
     pub fn errorLocation(self: *const Parser) SourceLocation {
         const offset = self.last_error_offset orelse if (self.pos < self.tokens.items.len) self.tokens.items[self.pos].pos else self.source.len;
         return sourceLocationAt(self.source, offset);
+    }
+
+    /// CreateDynamicFunction appends a newline, `}`, and `)` after the caller's
+    /// body. If those synthetic tokens are where an incomplete caller body is
+    /// finally rejected, classify the failure as end-of-script while retaining
+    /// the exact assembled-source location for debugger metadata.
+    pub fn classifySyntheticSuffixAsEndOfScript(self: *Parser, suffix_start: usize, err: ParseError) void {
+        if (self.errorLocation().byte_offset < suffix_start) return;
+        self.last_error_reason = switch (err) {
+            ParseError.ExpectedToken => .unexpected_end_of_script,
+            ParseError.UnexpectedToken => .unexpected_end_of_expression,
+            else => return,
+        };
+        self.last_error_token = null;
     }
 
     fn statementLocationAt(self: *Parser, raw_offset: usize) ParseError!SourceLocation {
@@ -961,10 +996,14 @@ pub const Parser = struct {
     }
 
     fn consumeStatementTerminator(self: *Parser) ParseError!void {
+        return self.consumeStatementTerminatorWithReason(.unexpected_token);
+    }
+
+    inline fn consumeStatementTerminatorWithReason(self: *Parser, reason: DiagnosticReason) ParseError!void {
         if (self.match(.semicolon)) return;
         if (self.check(.eof) or self.check(.rbrace)) return;
         if (self.hasLineTerminatorBefore(0)) return;
-        return self.fail(ParseError.UnexpectedToken);
+        return self.failWithTokenReason(reason);
     }
 
     fn advance(self: *Parser) Token {
@@ -989,7 +1028,11 @@ pub const Parser = struct {
     }
 
     fn expect(self: *Parser, kind: TokenKind) ParseError!void {
-        if (!self.match(kind)) return self.fail(ParseError.ExpectedToken);
+        if (!self.match(kind)) return self.failWithTokenReason(.expected_token);
+    }
+
+    fn expectWithTokenReason(self: *Parser, kind: TokenKind, reason: DiagnosticReason) ParseError!void {
+        if (!self.match(kind)) return self.failWithTokenReason(reason);
     }
 
     fn isKeyword(t: Token, word: []const u8) bool {
@@ -2623,7 +2666,7 @@ pub const Parser = struct {
             }
             if (!self.match(.comma)) break;
         }
-        try self.consumeStatementTerminator();
+        try self.consumeStatementTerminatorWithReason(.expected_semicolon_after_variable_declaration);
         // A single declarator stays a bare declaration; multiples become a
         // transparent declaration group (NOT a block — no new scope).
         if (decls.items.len == 1) return decls.items[0];
@@ -2646,7 +2689,7 @@ pub const Parser = struct {
 
     fn parseIf(self: *Parser) ParseError!*Node {
         _ = self.advance(); // if
-        try self.expect(.lparen);
+        try self.expectWithTokenReason(.lparen, .expected_if_condition);
         const cond = try self.parseExpression();
         try self.expect(.rparen);
         const cons = try self.parseSubStatement(.if_clause);
@@ -6110,18 +6153,18 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, t.text, "false")) return self.alloc(.{ .boolean = false });
                 if (std.mem.eql(u8, t.text, "null")) return self.alloc(.null_lit);
                 if (std.mem.eql(u8, t.text, "this")) return self.alloc(.this_expr);
-                if (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text))) return ParseError.UnexpectedToken;
+                if (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text))) return self.failWithToken(.unexpected_token, t);
                 // `yield`/`await` are reserved words in their contexts, so neither
                 // may appear here as an IdentifierReference — `void yield` inside a
                 // generator, `void await` inside an async function/module — even
                 // though a YieldExpression/AwaitExpression (handled higher up) is
                 // fine. (Outside those contexts they are ordinary identifiers.)
-                if (self.in_generator and std.mem.eql(u8, t.text, "yield")) return ParseError.UnexpectedToken;
-                if ((self.in_async or self.module) and std.mem.eql(u8, t.text, "await")) return ParseError.UnexpectedToken;
+                if (self.in_generator and std.mem.eql(u8, t.text, "yield")) return self.failWithToken(.unexpected_token, t);
+                if ((self.in_async or self.module) and std.mem.eql(u8, t.text, "await")) return self.failWithToken(.unexpected_token, t);
                 self.recordArgumentsUse(t.text);
                 return self.alloc(.{ .identifier = t.text });
             },
-            else => return ParseError.UnexpectedToken,
+            else => return self.failWithToken(.unexpected_token, t),
         }
     }
 };
@@ -6462,7 +6505,7 @@ test "parser records current token source location for expected-token failures" 
     try std.testing.expectError(ParseError.UnexpectedToken, p.parseProgram());
     const loc = p.errorLocation();
     try std.testing.expectEqual(@as(usize, 2), loc.line);
-    try std.testing.expectEqual(@as(usize, 12), loc.column);
+    try std.testing.expectEqual(@as(usize, 11), loc.column);
 }
 
 test "parser stream reports lexer failure source location" {
@@ -6474,6 +6517,39 @@ test "parser stream reports lexer failure source location" {
     const loc = parser.errorLocation();
     try std.testing.expectEqual(@as(usize, 2), loc.line);
     try std.testing.expectEqual(@as(usize, 2), loc.column);
+}
+
+test "parser retains generic unexpected token diagnostics and locations" {
+    const Case = struct {
+        source: []const u8,
+        err: ParseError,
+        reason: DiagnosticReason,
+        marker: ?[]const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "var q = ;", .err = ParseError.UnexpectedToken, .reason = .unexpected_token, .marker = ";", .message = "Unexpected token ';'" },
+        .{ .source = "if (true) {", .err = ParseError.ExpectedToken, .reason = .unexpected_end_of_script, .marker = null, .message = "Unexpected end of script" },
+        .{ .source = "var a b", .err = ParseError.UnexpectedToken, .reason = .expected_semicolon_after_variable_declaration, .marker = "b", .message = "Unexpected identifier 'b'. Expected ';' after variable declaration." },
+        .{ .source = "1 2", .err = ParseError.UnexpectedToken, .reason = .unexpected_token, .marker = "2", .message = "Unexpected number '2'" },
+        .{ .source = "'a' 'b'", .err = ParseError.UnexpectedToken, .reason = .unexpected_token, .marker = "'b'", .message = "Unexpected string literal 'b'" },
+        .{ .source = "2n 3n", .err = ParseError.UnexpectedToken, .reason = .unexpected_token, .marker = "3n", .message = "Unexpected token '3n'" },
+        .{ .source = "if if", .err = ParseError.ExpectedToken, .reason = .expected_if_condition, .marker = "if", .message = "Unexpected keyword 'if'. Expected '(' to start an 'if' condition." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.err, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        const expected_offset = if (case.marker) |marker|
+            std.mem.lastIndexOf(u8, case.source, marker).?
+        else
+            case.source.len;
+        try std.testing.expectEqual(expected_offset, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
 }
 
 test "parser validates wide strict parameter lists without changing duplicate semantics" {
@@ -8507,7 +8583,9 @@ test "undeclared private diagnostics retain decoded names and exact offsets" {
     defer arena.deinit();
     var bare = try Parser.init(arena.allocator(), "#missing;");
     try std.testing.expectError(ParseError.UnexpectedToken, bare.parseProgram());
-    try std.testing.expectEqual(@as(?DiagnosticReason, null), bare.last_error_reason);
+    try std.testing.expectEqual(DiagnosticReason.unexpected_token, bare.last_error_reason.?);
+    try std.testing.expectEqualStrings("#missing", bare.last_error_token.?.text);
+    try std.testing.expectEqualStrings("Unexpected token '#missing'", try bare.diagnosticMessage(arena.allocator(), bare.last_error_reason.?));
 }
 
 test "invalid super diagnostics retain context and exact token offsets" {
