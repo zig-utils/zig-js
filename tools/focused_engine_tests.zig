@@ -262,6 +262,31 @@ const frontend_cases = [_]Case{
         .expected = 63,
     },
     .{
+        .name = "binding declaration SyntaxErrors retain engine-oracle prose",
+        .source =
+        \\var rows = [
+        \\  ["var 1;", "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list."],
+        \\  ["var break;", "Cannot use the keyword 'break' as a variable name."],
+        \\  ["let let;", "Unexpected keyword 'let'. Cannot use 'let' as an identifier name for a LexicalDeclaration."],
+        \\  ["const value;", "Unexpected token ';'. const declared variable 'value' must have an initializer."],
+        \\  ["var [1] = [];", "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list."],
+        \\  ["let [1] = [];", "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list."],
+        \\  ["var [break] = [];", "Cannot use the keyword 'break' as a variable name."],
+        \\  ["let [break] = [];", "Cannot use the keyword 'break' as a lexical variable name."],
+        \\  ["let {x};", "Unexpected token ';'. Expected an initializer in destructuring variable declaration."],
+        \\  ["const {x};", "Unexpected token ';'. Expected an initializer in destructuring variable declaration."],
+        \\  ["var {...break} = {};", "Cannot use the keyword 'break' as a variable name."],
+        \\  ["{ using {x} = value; }", "Unexpected token '{'"],
+        \\  ["{ using resource; }", "Missing initializer in using declaration"],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 8191,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.

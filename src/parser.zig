@@ -91,6 +91,12 @@ pub const DiagnosticReason = enum {
     expected_property_after_dot,
     strict_class_name,
     class_field_semicolon,
+    expected_variable_binding,
+    variable_keyword_binding,
+    lexical_let_binding,
+    const_initializer,
+    destructuring_declaration_initializer,
+    using_initializer,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -156,7 +162,7 @@ pub const DiagnosticReason = enum {
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
-            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name, .expected_import_call_parenthesis, .do_while_while => ParseError.ExpectedToken,
+            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name, .expected_import_call_parenthesis, .do_while_while, .destructuring_declaration_initializer => ParseError.ExpectedToken,
             .invalid_assignment,
             .invalid_destructuring_assignment,
             .array_rest_pattern_closing,
@@ -237,6 +243,12 @@ pub const DiagnosticReason = enum {
             .expected_property_after_dot => "Expected a property name after '.'.",
             .strict_class_name => "",
             .class_field_semicolon => "Expected a ';' following a class field.",
+            .expected_variable_binding => "Expected a parameter pattern or a ')' in parameter list.",
+            .variable_keyword_binding => "",
+            .lexical_let_binding => "Cannot use 'let' as an identifier name for a LexicalDeclaration.",
+            .const_initializer => "",
+            .destructuring_declaration_initializer => "Expected an initializer in destructuring variable declaration.",
+            .using_initializer => "Missing initializer in using declaration",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -1138,6 +1150,13 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot delete unqualified property '{s}' in strict mode.", .{token.text});
         if (reason == .strict_class_name)
             return std.fmt.allocPrint(allocator, "Cannot use '{s}' as a class name in strict mode.", .{token.text});
+        if (reason == .variable_keyword_binding)
+            return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a variable name.", .{token.text});
+        if (reason == .const_initializer) {
+            const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
+            const quote = if (token.kind == .string) "" else "'";
+            return std.fmt.allocPrint(allocator, "Unexpected {s} {s}{s}{s}. const declared variable '{s}' must have an initializer.", .{ noun, quote, token.text, quote, token.detail.? });
+        }
         if (reason == .shorthand_keyword)
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a shorthand property name.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
@@ -2827,17 +2846,17 @@ pub const Parser = struct {
     // ----- destructuring binding patterns ---------------------------------
 
     /// A binding target: an identifier or a nested object/array pattern.
-    fn parseBindingTarget(self: *Parser) ParseError!*Node {
+    fn parseBindingTarget(self: *Parser, forbidden_reason: DiagnosticReason) ParseError!*Node {
         try self.checkNesting();
-        if (self.check(.lbrace)) return self.parseObjectPattern();
-        if (self.check(.lbracket)) return self.parseArrayPattern();
+        if (self.check(.lbrace)) return self.parseObjectPattern(forbidden_reason);
+        if (self.check(.lbracket)) return self.parseArrayPattern(forbidden_reason);
         const name = self.advance();
-        if (name.kind != .identifier) return ParseError.UnexpectedToken;
-        if (self.isForbiddenBindingName(name.text)) return ParseError.UnexpectedToken;
+        if (name.kind != .identifier) return self.failWithToken(.expected_variable_binding, name);
+        if (self.isForbiddenBindingName(name.text)) return self.failWithToken(forbidden_reason, name);
         return self.alloc(.{ .identifier = name.text });
     }
 
-    fn parseObjectPattern(self: *Parser) ParseError!*Node {
+    fn parseObjectPattern(self: *Parser, forbidden_reason: DiagnosticReason) ParseError!*Node {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
         var rest: ?*Node = null;
@@ -2850,7 +2869,7 @@ pub const Parser = struct {
                     const reason: DiagnosticReason = if (self.strict and isEvalOrArguments(r.text))
                         .strict_destructure_binding
                     else
-                        .lexical_keyword_binding;
+                        forbidden_reason;
                     return self.failWithToken(reason, r);
                 }
                 rest = try self.alloc(.{ .identifier = r.text });
@@ -2880,7 +2899,7 @@ pub const Parser = struct {
             // including one spelled with a Unicode escape (`key` holds the decoded
             // text). A literal/computed key REQUIRES a `: target`.
             const target = if (self.match(.colon))
-                try self.parseBindingTarget()
+                try self.parseBindingTarget(forbidden_reason)
             else blk: {
                 if (!key_is_ident) return self.failWithTokenReason(.expected_named_destructuring_colon);
                 if (self.isForbiddenBindingName(key)) return self.failWithToken(.abbreviated_destructuring_keyword, key_token.?);
@@ -2894,7 +2913,7 @@ pub const Parser = struct {
         return self.alloc(.{ .obj_pattern = .{ .props = props.items, .rest = rest } });
     }
 
-    fn parseArrayPattern(self: *Parser) ParseError!*Node {
+    fn parseArrayPattern(self: *Parser, forbidden_reason: DiagnosticReason) ParseError!*Node {
         try self.expect(.lbracket);
         var elems: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
         var rest: ?*Node = null;
@@ -2905,10 +2924,10 @@ pub const Parser = struct {
                 continue;
             }
             if (self.match(.ellipsis)) {
-                rest = try self.parseBindingTarget();
+                rest = try self.parseBindingTarget(forbidden_reason);
                 break;
             }
-            const target = try self.parseBindingTarget();
+            const target = try self.parseBindingTarget(forbidden_reason);
             const default = if (self.match(.assign)) try self.parseAssignment() else null;
             try elems.append(self.arena, .{ .target = target, .default = default });
             if (!self.match(.comma)) break;
@@ -2936,32 +2955,35 @@ pub const Parser = struct {
     fn parseVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
         const await_offset = if (dispose == 2 and self.pos > 0) self.tokens.items[self.pos - 1].pos else 0;
         _ = self.advance(); // var/let/const/using
+        const forbidden_reason: DiagnosticReason = if (kind == .@"var") .variable_keyword_binding else .lexical_keyword_binding;
         // One or more comma-separated declarators: `let a, {b} = obj, c = 1`.
         var decls: std.ArrayListUnmanaged(*Node) = .empty;
         while (true) {
             if (self.check(.lbrace) or self.check(.lbracket)) {
-                if (dispose != 0) return ParseError.UnexpectedToken;
-                const pattern = try self.parseBindingTarget();
-                try self.expect(.assign);
+                if (dispose != 0) return self.failWithTokenReason(.unexpected_token);
+                const pattern = try self.parseBindingTarget(forbidden_reason);
+                try self.expectWithTokenReason(.assign, .destructuring_declaration_initializer);
                 const init_expr = try self.parseAssignment();
                 if (kind == .@"var") try self.noteVarPattern(pattern);
                 try decls.append(self.arena, try self.alloc(.{ .destructure_decl = .{ .kind = kind, .pattern = pattern, .init = init_expr } }));
             } else {
                 const name_tok = self.advance();
-                if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
+                if (name_tok.kind != .identifier) return self.failWithToken(.expected_variable_binding, name_tok);
                 // A reserved word may not be a binding name — including when spelled
                 // with `\u` escapes (the lexer hands us the decoded text).
-                if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
+                if (self.isForbiddenBindingName(name_tok.text)) return self.failWithToken(forbidden_reason, name_tok);
                 // A lexical declaration's (let/const/using) BoundNames may not contain
                 // `let`, in every mode — `let let`, `const x, let`.
-                if (kind != .@"var" and std.mem.eql(u8, name_tok.text, "let")) return ParseError.UnexpectedToken;
+                if (kind != .@"var" and std.mem.eql(u8, name_tok.text, "let")) return self.failWithToken(.lexical_let_binding, name_tok);
                 var init_expr: ?*Node = null;
                 if (self.match(.assign)) {
                     init_expr = try self.parseAssignment();
                     nameAnon(init_expr.?, name_tok.text);
-                } else if (kind == .@"const" or dispose != 0) {
-                    // `const` and `using` declarations require an initializer.
-                    return ParseError.UnexpectedToken;
+                } else if (dispose != 0) {
+                    return self.failWithReasonAt(.using_initializer, self.cur().pos);
+                } else if (kind == .@"const") {
+                    // A `const` declaration requires an initializer.
+                    return self.failWithTokenDetail(.const_initializer, self.cur(), name_tok.text);
                 }
                 if (kind == .@"var") try self.noteVarName(name_tok.text);
                 try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose, .await_offset = await_offset } }));
@@ -3380,7 +3402,8 @@ pub const Parser = struct {
     /// (so the caller falls back to a classic `for(;;)`).
     fn tryForTarget(self: *Parser, decl_kind: ?ast.DeclKind) ParseError!?*Node {
         if (self.check(.lbrace) or self.check(.lbracket)) {
-            if (decl_kind != null) return try self.parseBindingTarget();
+            if (decl_kind) |kind|
+                return try self.parseBindingTarget(if (kind == .@"var") .variable_keyword_binding else .lexical_keyword_binding);
             const start = self.pos;
             // Assignment form: an array/object literal cover is a destructuring
             // target only when the head is immediately an in/of form. Otherwise
@@ -3395,8 +3418,10 @@ pub const Parser = struct {
         if (decl_kind != null) {
             // A declaration binds a single BindingIdentifier.
             if (self.check(.identifier)) {
-                const name = self.cur().text;
-                if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
+                const name_token = self.cur();
+                const name = name_token.text;
+                if (self.isForbiddenBindingName(name))
+                    return self.failWithToken(if (decl_kind.? == .@"var") .variable_keyword_binding else .lexical_keyword_binding, name_token);
                 return try self.alloc(.{ .identifier = self.advance().text });
             }
             return null;
@@ -3546,7 +3571,7 @@ pub const Parser = struct {
         if (isKeyword(self.cur(), "catch")) {
             _ = self.advance();
             if (self.match(.lparen)) {
-                catch_param = try self.parseBindingTarget(); // identifier or destructuring pattern
+                catch_param = try self.parseBindingTarget(.unexpected_token); // identifier or destructuring pattern
                 try self.expect(.rparen);
             }
             catch_block = try self.parseBlock();
@@ -3584,7 +3609,7 @@ pub const Parser = struct {
             // destructuring: `function f(...[a], ...{a})` (no default allowed
             // on a rest element, and it must be last).
             if (self.check(.lbrace) or self.check(.lbracket)) {
-                const pat = try self.parseBindingTarget();
+                const pat = try self.parseBindingTarget(.unexpected_token);
                 const default = if (!is_rest and self.match(.assign)) try self.parseAssignment() else null;
                 try params.append(self.arena, .{ .name = "", .pattern = pat, .default = default, .is_rest = is_rest });
                 if (is_rest) break; // a rest parameter must be last
@@ -8686,6 +8711,42 @@ test "parser retains class field name and super diagnostics" {
         .{ .source = "class C { x y }", .reason = .class_field_semicolon, .marker = "y", .message = "Unexpected identifier 'y'. Expected a ';' following a class field." },
         .{ .source = "class C { + }", .reason = .unexpected_token, .marker = "+", .message = "Unexpected token '+'" },
         .{ .source = "class C { get +() {} }", .reason = .class_field_semicolon, .marker = "+", .message = "Unexpected token '+'. Expected a ';' following a class field." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains binding and variable declaration diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "var 1;", .reason = .expected_variable_binding, .marker = "1", .message = "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list." },
+        .{ .source = "var break;", .reason = .variable_keyword_binding, .marker = "break", .message = "Cannot use the keyword 'break' as a variable name." },
+        .{ .source = "let let;", .reason = .lexical_let_binding, .marker = "let;", .message = "Unexpected keyword 'let'. Cannot use 'let' as an identifier name for a LexicalDeclaration." },
+        .{ .source = "const value;", .reason = .const_initializer, .marker = ";", .message = "Unexpected token ';'. const declared variable 'value' must have an initializer." },
+        .{ .source = "var [1] = [];", .reason = .expected_variable_binding, .marker = "1", .message = "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list." },
+        .{ .source = "let [1] = [];", .reason = .expected_variable_binding, .marker = "1", .message = "Unexpected number '1'. Expected a parameter pattern or a ')' in parameter list." },
+        .{ .source = "var [break] = [];", .reason = .variable_keyword_binding, .marker = "break", .message = "Cannot use the keyword 'break' as a variable name." },
+        .{ .source = "let [break] = [];", .reason = .lexical_keyword_binding, .marker = "break", .message = "Cannot use the keyword 'break' as a lexical variable name." },
+        .{ .source = "let {x};", .reason = .destructuring_declaration_initializer, .marker = ";", .message = "Unexpected token ';'. Expected an initializer in destructuring variable declaration." },
+        .{ .source = "const {x};", .reason = .destructuring_declaration_initializer, .marker = ";", .message = "Unexpected token ';'. Expected an initializer in destructuring variable declaration." },
+        .{ .source = "var {...break} = {};", .reason = .variable_keyword_binding, .marker = "break", .message = "Cannot use the keyword 'break' as a variable name." },
+        // Node 24.18 supplies the grammar oracle for explicit resource
+        // management; JavaScriptCore 625.1.22 does not implement this syntax.
+        .{ .source = "{ using {x} = value; }", .reason = .unexpected_token, .marker = "{x}", .message = "Unexpected token '{'" },
+        .{ .source = "{ using resource; }", .reason = .using_initializer, .marker = ";", .message = "Missing initializer in using declaration" },
     };
 
     for (cases) |case| {
