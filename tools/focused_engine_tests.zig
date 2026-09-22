@@ -244,6 +244,26 @@ const frontend_cases = [_]Case{
         .expected = 511,
     },
     .{
+        .name = "unterminated RegExp literal SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["/a", "Unterminated regular expression literal '/a'"],
+        \\  ["/[a", "Unterminated regular expression literal '/[a'"],
+        \\  ["/[a/", "Unterminated regular expression literal '/[a/'"],
+        \\  ["/a\\", "Unterminated regular expression literal '/a\\'"],
+        \\  ["/a\n/", "Unterminated regular expression literal '/a'"],
+        \\  ["/[a\n]/", "Unterminated regular expression literal '/[a'"],
+        \\  ["if (true) /a", "Unterminated regular expression literal '/a'"],
+        \\  ["var x = /a", "Unterminated regular expression literal '/a'"],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 255,
+    },
+    .{
         .name = "lexical declaration conflict SyntaxErrors retain JSC prose",
         .source =
         \\var rows = [

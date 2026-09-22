@@ -102,6 +102,7 @@ pub const DiagnosticReason = enum {
     template_numeric_escape,
     strict_legacy_decimal,
     invalid_regexp_flags,
+    unterminated_regexp_literal,
     for_await_in,
     using_for_in,
     for_of_initializer,
@@ -266,6 +267,7 @@ pub const DiagnosticReason = enum {
             .template_numeric_escape => "The only valid numeric escape in strict mode is '\\0'",
             .strict_legacy_decimal => "Decimal integer literals with a leading zero are forbidden in strict mode",
             .invalid_regexp_flags => "Invalid regular expression: invalid flags",
+            .unterminated_regexp_literal => "",
             .for_await_in => "Expected 'of' in for-await syntax.",
             .using_for_in => "Expected either 'in' or 'of' in enumeration syntax.",
             .for_of_initializer => "Cannot assign to the loop variable inside a for-of loop header.",
@@ -1171,6 +1173,8 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot reference undeclared private names: \"{s}\"", .{token.text});
         if (reason == .escaped_keyword)
             return std.fmt.allocPrint(allocator, "Unexpected escaped characters in keyword token: '{s}'", .{token.text});
+        if (reason == .unterminated_regexp_literal)
+            return std.fmt.allocPrint(allocator, "Unterminated regular expression literal '{s}'", .{token.text});
         if (reason == .undeclared_label)
             return std.fmt.allocPrint(allocator, "Cannot use the undeclared label '{s}'.", .{token.text});
         if (reason == .continue_non_loop_label)
@@ -4222,7 +4226,17 @@ pub const Parser = struct {
 
     fn parseRegexLiteralFromSlash(self: *Parser) ParseError!*Node {
         const token = self.curRegExp();
-        if (token.kind != .regex) return ParseError.UnexpectedToken;
+        if (token.kind != .regex) {
+            if (self.lex_error) |err| {
+                if (err == error.UnterminatedString) {
+                    const end = @min(self.lex_error_offset, self.source.len);
+                    const literal = if (token.pos <= end) self.source[token.pos..end] else token.text;
+                    self.lex_error = null;
+                    return self.failWithDiagnosticAt(.unterminated_regexp_literal, .token, literal, null, token.pos);
+                }
+            }
+            return ParseError.UnexpectedToken;
+        }
         _ = self.advance();
         try self.validateRegexLiteral(token.text, token.flags, token.pos);
         return self.alloc(.{ .regex_literal = .{ .pattern = token.text, .flags = token.flags } });
@@ -10100,6 +10114,33 @@ test "regex literal validation preserves exact compile diagnostics" {
         try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains unterminated regexp literal diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "/a", .message = "Unterminated regular expression literal '/a'" },
+        .{ .source = "/[a", .message = "Unterminated regular expression literal '/[a'" },
+        .{ .source = "/[a/", .message = "Unterminated regular expression literal '/[a/'" },
+        .{ .source = "/a\\", .message = "Unterminated regular expression literal '/a\\'" },
+        .{ .source = "/a\n/", .message = "Unterminated regular expression literal '/a'" },
+        .{ .source = "/[a\n]/", .message = "Unterminated regular expression literal '/[a'" },
+        .{ .source = "if (true) /a", .message = "Unterminated regular expression literal '/a'" },
+        .{ .source = "var x = /a", .message = "Unterminated regular expression literal '/a'" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(DiagnosticReason.unterminated_regexp_literal, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOfScalar(u8, case.source, '/').?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), parser.last_error_reason.?));
     }
 }
 
