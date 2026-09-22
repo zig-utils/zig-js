@@ -109,6 +109,41 @@ const frontend_cases = [_]Case{
         .expected = 262143,
     },
     .{
+        .name = "object and destructuring SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["([a]) = [];", "Left side of assignment is not a reference."],
+        \\  ["[...a,] = [];", "Unexpected token ','. Expected a closing ']' following a rest element destructuring pattern."],
+        \\  ["[...a, b] = [];", "Unexpected token ','. Expected a closing ']' following a rest element destructuring pattern."],
+        \\  ["[(a = 1)] = [];", "Invalid destructuring assignment target."],
+        \\  ["({...a, b} = {});", "Unexpected token ','. Cannot parse assignment pattern."],
+        \\  ["({...a,} = {});", "Unexpected token ','. Cannot parse assignment pattern."],
+        \\  ["({...(a + b)} = {});", "Invalid destructuring assignment target."],
+        \\  ["\"use strict\"; ({...eval} = {});", "Unexpected token '}'. Cannot modify 'eval' in strict mode."],
+        \\  ["({a: (b = 1)} = {});", "Invalid destructuring assignment target."],
+        \\  ["let {...1} = {};", "Unexpected number '1'. Expected a binding element."],
+        \\  ["let {+} = {};", "Unexpected token '+'. Expected a property name."],
+        \\  ["let {\"x\"} = {};", "Unexpected token '}'. Expected a ':' prior to a named destructuring property."],
+        \\  ["let {break} = {};", "Cannot use abbreviated destructuring syntax for keyword 'break'."],
+        \\  ["let {...break} = {};", "Cannot use the keyword 'break' as a lexical variable name."],
+        \\  ["\"use strict\"; let {...eval} = {};", "Cannot destructure to a variable named 'eval' in strict mode."],
+        \\  ["({ get #x() {} });", "Cannot declare a private setter or getter outside a class."],
+        \\  ["({ + });", "Unexpected token '+'. Expected a property name."],
+        \\  ["({ *foo });", "Unexpected token '}'. Expected a parenthesis for argument list."],
+        \\  ["({ async foo });", "Unexpected token '}'. Expected a parenthesis for argument list."],
+        \\  ["({ break });", "Cannot use the keyword 'break' as a shorthand property name."],
+        \\  ["function* g() { return { yield }; }", "Cannot use 'yield' as a shorthand property name in a generator function."],
+        \\  ["async function f() { return { await }; }", "Cannot use 'await' as a shorthand property name in an async function."],
+        \\  ["({ \"x\" });", "Unexpected token '}'. Expected an identifier as property name."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 8388607,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.

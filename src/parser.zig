@@ -50,6 +50,20 @@ pub const DiagnosticReason = enum {
     function_keyword_name,
     strict_directive_non_simple_parameters,
     strict_function_name,
+    array_rest_pattern_closing,
+    object_rest_pattern_comma,
+    expected_binding_element,
+    expected_property_name,
+    expected_named_destructuring_colon,
+    abbreviated_destructuring_keyword,
+    lexical_keyword_binding,
+    strict_destructure_binding,
+    private_accessor_outside_class,
+    expected_method_parenthesis,
+    shorthand_keyword,
+    yield_shorthand_generator,
+    await_shorthand_async,
+    expected_identifier_property_name,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -115,9 +129,11 @@ pub const DiagnosticReason = enum {
 
     pub fn parseError(reason: DiagnosticReason) ParseError {
         return switch (reason) {
-            .expected_token, .expected_if_condition, .unexpected_end_of_script => ParseError.ExpectedToken,
+            .expected_token, .expected_if_condition, .unexpected_end_of_script, .expected_identifier_property_name => ParseError.ExpectedToken,
             .invalid_assignment,
             .invalid_destructuring_assignment,
+            .array_rest_pattern_closing,
+            .object_rest_pattern_comma,
             .invalid_prefix_increment,
             .invalid_prefix_decrement,
             .invalid_postfix_increment,
@@ -155,6 +171,18 @@ pub const DiagnosticReason = enum {
             .function_keyword_name => "",
             .strict_directive_non_simple_parameters => "'use strict' directive not allowed inside a function with a non-simple parameter list.",
             .strict_function_name => "",
+            .array_rest_pattern_closing => "Expected a closing ']' following a rest element destructuring pattern.",
+            .object_rest_pattern_comma => "Cannot parse assignment pattern.",
+            .expected_binding_element => "Expected a binding element.",
+            .expected_property_name => "Expected a property name.",
+            .expected_named_destructuring_colon => "Expected a ':' prior to a named destructuring property.",
+            .abbreviated_destructuring_keyword, .lexical_keyword_binding, .strict_destructure_binding => "",
+            .private_accessor_outside_class => "Cannot declare a private setter or getter outside a class.",
+            .expected_method_parenthesis => "Expected a parenthesis for argument list.",
+            .shorthand_keyword => "",
+            .yield_shorthand_generator => "Cannot use 'yield' as a shorthand property name in a generator function.",
+            .await_shorthand_async => "Cannot use 'await' as a shorthand property name in an async function.",
+            .expected_identifier_property_name => "Expected an identifier as property name.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -504,6 +532,11 @@ fn SecureIdentityMapUnmanaged(comptime Value: type) type {
             return self.index.containsContext(identity, .{ .seed = root_context.seed });
         }
 
+        fn get(self: *const Self, state: *const SecureHashState, identity: usize) ?Value {
+            const root_context = state.context orelse return null;
+            return self.index.getContext(identity, .{ .seed = root_context.seed });
+        }
+
         fn remove(self: *Self, state: *const SecureHashState, identity: usize) bool {
             const root_context = state.context orelse return false;
             return self.index.removeContext(identity, .{ .seed = root_context.seed });
@@ -666,12 +699,16 @@ pub const Parser = struct {
     /// The current node is a direct StatementList item. Cleared before descent;
     /// nested blocks publish their own items while `if`/label bodies do not.
     scan_static_statement_list_item: bool = false,
-    /// Array literals (parsed as a cover for array patterns) that ended with a
-    /// trailing comma right after a rest element (`[...x,]`). Legal in a literal
-    /// but not in the destructuring refinement, so `litToPattern` rejects them.
-    /// Keyed by node pointer; only consulted during pattern conversion, so a
-    /// stale entry for an array used as a plain literal is simply never checked.
-    rest_trailing_comma_arrays: SecureIdentityMapUnmanaged(void) = .{},
+    /// Array literals (parsed as a cover for array patterns) with a comma after
+    /// a spread element. Legal in a literal but not in the destructuring
+    /// refinement, where a rest element must be last and have no trailing comma.
+    /// The value is the comma offset for an exact failure diagnostic.
+    rest_comma_arrays: SecureIdentityMapUnmanaged(usize) = .{},
+    /// Object literals with a comma after a spread property. A literal permits
+    /// this; an assignment-pattern refinement does not, even when the comma is
+    /// trailing. The value is the comma offset and the map is consulted only
+    /// during refinement.
+    rest_comma_objects: SecureIdentityMapUnmanaged(usize) = .{},
     /// Object literals carrying a CoverInitializedName (`{ a = 1 }`), which is
     /// valid ONLY when the object is later refined to an assignment pattern.
     /// `litToPattern` removes an entry on conversion; any left when the
@@ -1037,6 +1074,14 @@ pub const Parser = struct {
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a function name.", .{token.text});
         if (reason == .strict_function_name)
             return std.fmt.allocPrint(allocator, "'{s}' is not a valid function name in strict mode.", .{token.text});
+        if (reason == .abbreviated_destructuring_keyword)
+            return std.fmt.allocPrint(allocator, "Cannot use abbreviated destructuring syntax for keyword '{s}'.", .{token.text});
+        if (reason == .lexical_keyword_binding)
+            return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a lexical variable name.", .{token.text});
+        if (reason == .strict_destructure_binding)
+            return std.fmt.allocPrint(allocator, "Cannot destructure to a variable named '{s}' in strict mode.", .{token.text});
+        if (reason == .shorthand_keyword)
+            return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a shorthand property name.", .{token.text});
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
         if (reason == .unexpected_token or reason == .expected_token)
@@ -2630,24 +2675,23 @@ pub const Parser = struct {
     fn litToPattern(self: *Parser, node: *Node) ParseError!*Node {
         try self.checkNesting();
         // A parenthesized array/object literal can't be a destructuring target.
-        if (self.isParenWrapped(node)) return ParseError.InvalidAssignmentTarget;
+        if (self.isParenWrapped(node)) return self.failWithReasonAt(.invalid_assignment, self.cur().pos);
         switch (node.*) {
             .array_lit => |elems| {
-                // `[...x,]` — a trailing comma after the rest element is invalid in
-                // an array assignment pattern.
-                if (self.rest_trailing_comma_arrays.contains(self.secureHashState(), @intFromPtr(node))) return ParseError.InvalidAssignmentTarget;
+                if (self.rest_comma_arrays.get(self.secureHashState(), @intFromPtr(node))) |offset|
+                    return self.failWithDiagnosticAt(.array_rest_pattern_closing, .token, ",", null, offset);
                 var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
                 var rest: ?*Node = null;
                 for (elems) |e| {
                     // A rest element (`...x`) must be last: nothing — not another
                     // element, elision, or rest — may follow it.
-                    if (rest != null) return ParseError.InvalidAssignmentTarget;
+                    if (rest != null) return self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos);
                     if (e.* == .elision) {
                         try out.append(self.arena, .{}); // elision / hole in `[ , a ] = …`
                     } else if (e.* == .spread) {
                         rest = try self.exprToTarget(e.spread);
                     } else if (e.* == .assign) {
-                        if (self.isParenWrapped(e)) return ParseError.InvalidAssignmentTarget;
+                        if (self.isParenWrapped(e)) return self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos);
                         try out.append(self.arena, .{ .target = try self.exprToTarget(e.assign.target), .default = e.assign.value });
                     } else {
                         try out.append(self.arena, .{ .target = try self.exprToTarget(e) });
@@ -2664,19 +2708,29 @@ pub const Parser = struct {
                 var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
                 var rest_target: ?*ast.Node = null;
                 var seen_spread = false;
+                if (self.rest_comma_objects.get(self.secureHashState(), @intFromPtr(node))) |offset|
+                    return self.failWithDiagnosticAt(.object_rest_pattern_comma, .token, ",", null, offset);
                 for (props) |p| {
                     // An object rest property (`...rest`) must be the last member.
-                    if (seen_spread) return ParseError.InvalidAssignmentTarget;
+                    if (seen_spread) return self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos);
                     if (p.is_spread) {
                         seen_spread = true;
                         // An object rest target must be a simple assignment target
                         // (an identifier or member) — `({...import.meta} = x)`,
                         // `({...(a+b)} = x)`, `({...[a]} = x)` are SyntaxErrors.
-                        if (p.value.* != .identifier and p.value.* != .member and p.value.* != .super_member) return ParseError.InvalidAssignmentTarget;
-                        if (p.value.* == .identifier and self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
+                        if (p.value.* != .identifier and p.value.* != .member and p.value.* != .super_member)
+                            return self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos);
+                        if (p.value.* == .identifier and self.isForbiddenBindingName(p.value.identifier)) {
+                            const name = p.value.identifier;
+                            if (self.strict and isEvalOrArguments(name)) {
+                                const reason: DiagnosticReason = if (std.mem.eql(u8, name, "eval")) .strict_modify_eval else .strict_modify_arguments;
+                                return self.failWithDiagnosticAt(reason, .token, "}", null, self.sourceOffsetForSlice(name, self.cur().pos));
+                            }
+                            return self.failWithDiagnosticAt(.unexpected_token, .keyword, name, null, self.sourceOffsetForSlice(name, self.cur().pos));
+                        }
                         rest_target = try self.exprToTarget(p.value);
                     } else if (p.value.* == .assign) {
-                        if (self.isParenWrapped(p.value)) return ParseError.InvalidAssignmentTarget;
+                        if (self.isParenWrapped(p.value)) return self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos);
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value.assign.target), .default = p.value.assign.value });
                     } else {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value) });
@@ -2684,7 +2738,7 @@ pub const Parser = struct {
                 }
                 return self.alloc(.{ .obj_pattern = .{ .props = out.items, .rest = rest_target } });
             },
-            else => return ParseError.InvalidAssignmentTarget,
+            else => return self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos),
         }
     }
 
@@ -2692,7 +2746,8 @@ pub const Parser = struct {
         try self.checkNesting();
         return switch (node.*) {
             .identifier => {
-                if (self.isForbiddenBindingName(node.identifier)) return ParseError.UnexpectedToken;
+                if (self.isForbiddenBindingName(node.identifier))
+                    return self.failWithDiagnosticAt(.unexpected_token, .keyword, node.identifier, null, self.sourceOffsetForSlice(node.identifier, self.cur().pos));
                 return node;
             },
             .member, .super_member => node,
@@ -2700,7 +2755,7 @@ pub const Parser = struct {
             // Already a destructuring pattern — e.g. a nested assignment element
             // `[ {} = yield ]` whose inner `{} = …` was converted on the way up.
             .obj_pattern, .arr_pattern => node,
-            else => ParseError.InvalidAssignmentTarget,
+            else => self.failWithReasonAt(.invalid_destructuring_assignment, self.cur().pos),
         };
     }
 
@@ -2725,22 +2780,31 @@ pub const Parser = struct {
             if (self.match(.ellipsis)) {
                 const r = self.advance();
                 // A BindingRestProperty target is a plain BindingIdentifier.
-                if (r.kind != .identifier) return ParseError.UnexpectedToken;
+                if (r.kind != .identifier) return self.failWithToken(.expected_binding_element, r);
+                if (self.isForbiddenBindingName(r.text)) {
+                    const reason: DiagnosticReason = if (self.strict and isEvalOrArguments(r.text))
+                        .strict_destructure_binding
+                    else
+                        .lexical_keyword_binding;
+                    return self.failWithToken(reason, r);
+                }
                 rest = try self.alloc(.{ .identifier = r.text });
                 break;
             }
             var key: []const u8 = "";
             var key_expr: ?*Node = null;
             var key_is_ident = false;
+            var key_token: ?Token = null;
             if (self.match(.lbracket)) {
                 key_expr = try self.parseAssignment();
                 try self.expect(.rbracket);
             } else {
                 const kt = self.advance();
+                key_token = kt;
                 key = switch (kt.kind) {
                     .identifier, .string => kt.text,
                     .number => try std.fmt.allocPrint(self.arena, "{d}", .{kt.number}),
-                    else => return ParseError.UnexpectedToken,
+                    else => return self.failWithToken(.expected_property_name, kt),
                 };
                 key_is_ident = kt.kind == .identifier;
             }
@@ -2753,7 +2817,8 @@ pub const Parser = struct {
             const target = if (self.match(.colon))
                 try self.parseBindingTarget()
             else blk: {
-                if (!key_is_ident or self.isForbiddenBindingName(key)) return ParseError.UnexpectedToken;
+                if (!key_is_ident) return self.failWithTokenReason(.expected_named_destructuring_colon);
+                if (self.isForbiddenBindingName(key)) return self.failWithToken(.abbreviated_destructuring_keyword, key_token.?);
                 break :blk try self.alloc(.{ .identifier = key });
             };
             const default = if (self.match(.assign)) try self.parseAssignment() else null;
@@ -3913,8 +3978,9 @@ pub const Parser = struct {
                 .identifier, .member, .super_member => left,
                 .call => if (!self.strict and isAnnexBCallAssignmentTarget(left)) left else return self.failWithReasonAt(.invalid_assignment, self.cur().pos),
                 .array_lit, .object_lit => self.litToPattern(left) catch |err| {
-                    if (err == ParseError.InvalidAssignmentTarget)
-                        return self.failWithReasonAt(.invalid_destructuring_assignment, self.tokens.items[expression_start].pos);
+                    if (err == ParseError.InvalidAssignmentTarget and
+                        (self.last_error_reason == .invalid_destructuring_assignment or self.last_error_reason == .invalid_assignment))
+                        self.last_error_offset = self.tokens.items[expression_start].pos;
                     return err;
                 },
                 else => return self.failWithReasonAt(.invalid_assignment, self.cur().pos),
@@ -5076,6 +5142,7 @@ pub const Parser = struct {
         var has_cover_init = false;
         var seen_proto_colon = false;
         var duplicate_proto_offset: ?usize = null;
+        var rest_comma_offset: ?usize = null;
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             // Spread property `{ ...expr }`.
@@ -5083,6 +5150,8 @@ pub const Parser = struct {
                 const e = try self.parseAssignment();
                 try props.append(self.arena, .{ .value = e, .is_spread = true });
                 if (!self.match(.comma)) break;
+                if (rest_comma_offset == null)
+                    rest_comma_offset = self.tokens.items[self.pos - 1].pos;
                 continue;
             }
             // The first token of this member, so a method/accessor can capture its
@@ -5112,10 +5181,11 @@ pub const Parser = struct {
             if (!async_method and !gen_method and !self.cur().escaped_identifier and (isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
+                const property_token = self.cur();
                 const pn = try self.parsePropertyName();
                 // A private name (`#x`) is only a valid member name in a class
                 // body, never in an object literal accessor (`({ get #x(){} })`).
-                if (pn.key.len > 0 and pn.key[0] == '#') return ParseError.UnexpectedToken;
+                if (pn.key.len > 0 and pn.key[0] == '#') return self.failWithReasonAt(.private_accessor_outside_class, property_token.pos);
                 const func = try self.parseMethodTail(pn.key, false, false, member_start, kind);
                 try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
                 if (!self.match(.comma)) break;
@@ -5132,7 +5202,7 @@ pub const Parser = struct {
                     // A numeric LiteralPropertyName is ToString'd via Number::toString
                     // (so `0.0000001` keys as "1e-7", `1.0` as "1"), not Zig's `{d}`.
                     try value_mod.numberToString(self.arena, key_tok.number),
-                else => return ParseError.UnexpectedToken,
+                else => return self.failWithToken(.expected_property_name, key_tok),
             };
             var val: *Node = undefined;
             var is_proto_colon = false;
@@ -5143,7 +5213,7 @@ pub const Parser = struct {
                 // A `*`/`async` modifier must introduce a method (a `(params){…}`
                 // must follow the name): `({ *foo })`, `({ async async })` are
                 // SyntaxErrors, not a property/shorthand named `foo`/`async`.
-                return ParseError.UnexpectedToken;
+                return self.failWithTokenReason(.expected_method_parenthesis);
             } else if (self.match(.colon)) {
                 // `__proto__: value` (identifier or string key, not computed) is a
                 // prototype setter; two of them in one literal is an early error.
@@ -5158,12 +5228,12 @@ pub const Parser = struct {
                 if (!is_proto_colon) nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
             } else if (key_tok.kind == .identifier) {
                 if (isAlwaysReservedBinding(key) or (self.strict and isStrictReservedBinding(key)))
-                    return ParseError.UnexpectedToken;
+                    return self.failWithToken(.shorthand_keyword, key_tok);
                 // A `{ yield }`/`{ await }` shorthand is an identifier reference/
                 // binding, so `yield` is forbidden in a generator and `await` in
                 // an async function/module/static block.
-                if (self.in_generator and std.mem.eql(u8, key, "yield")) return ParseError.UnexpectedToken;
-                if ((self.in_async or self.module) and std.mem.eql(u8, key, "await")) return ParseError.UnexpectedToken;
+                if (self.in_generator and std.mem.eql(u8, key, "yield")) return self.failWithReasonAt(.yield_shorthand_generator, key_tok.pos);
+                if ((self.in_async or self.module) and std.mem.eql(u8, key, "await")) return self.failWithReasonAt(.await_shorthand_async, key_tok.pos);
                 self.recordArgumentsUse(key);
                 const ident = try self.alloc(.{ .identifier = key });
                 // Shorthand `{ a }`, or `{ a = default }` (a destructuring
@@ -5176,7 +5246,7 @@ pub const Parser = struct {
                 } else {
                     val = ident;
                 }
-            } else return ParseError.ExpectedToken;
+            } else return self.failWithTokenReason(.expected_identifier_property_name);
             try props.append(self.arena, .{ .key = key, .value = val, .proto_setter = is_proto_colon });
             if (!self.match(.comma)) break;
         }
@@ -5185,6 +5255,7 @@ pub const Parser = struct {
         const node = try self.alloc(.{ .object_lit = props.items });
         if (has_cover_init) try self.pending_cover_inits.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
         if (duplicate_proto_offset) |offset| try self.pending_proto_dup.put(self.arena, self.secureHashState(), @intFromPtr(node), offset);
+        if (rest_comma_offset) |offset| try self.rest_comma_objects.put(self.arena, self.secureHashState(), @intFromPtr(node), offset);
         return node;
     }
 
@@ -6276,7 +6347,7 @@ pub const Parser = struct {
         self.no_in = false;
         defer self.no_in = saved_no_in;
         var elems: std.ArrayListUnmanaged(*Node) = .empty;
-        var rest_trailing_comma = false;
+        var rest_comma_offset: ?usize = null;
         while (!self.check(.rbracket) and !self.check(.eof)) {
             // Elision / hole: a bare `,` yields an empty slot (v1: undefined, as
             // arrays are dense). `[ , x ]`, `[1, , 3]`, `[,]`.
@@ -6288,13 +6359,15 @@ pub const Parser = struct {
             const el = try self.parseSpreadable();
             try elems.append(self.arena, el);
             if (!self.match(.comma)) break;
-            // A trailing comma right after a rest element (`[...x,]`) is fine in a
-            // literal but invalid in the pattern refinement — flag it.
-            if (el.* == .spread and self.check(.rbracket)) rest_trailing_comma = true;
+            // A comma after a spread is fine in a literal but invalid when the
+            // cover grammar is refined to a rest element in a pattern.
+            if (el.* == .spread and rest_comma_offset == null)
+                rest_comma_offset = self.tokens.items[self.pos - 1].pos;
         }
         try self.expect(.rbracket);
         const node = try self.alloc(.{ .array_lit = elems.items });
-        if (rest_trailing_comma) try self.rest_trailing_comma_arrays.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
+        if (rest_comma_offset) |offset|
+            try self.rest_comma_arrays.put(self.arena, self.secureHashState(), @intFromPtr(node), offset);
         return node;
     }
 
@@ -6580,6 +6653,50 @@ test "parser retains binding and parameter conflict diagnostics" {
         try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains object and destructuring pattern diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "([a]) = [];", .reason = .invalid_assignment, .marker = "(", .message = "Left side of assignment is not a reference." },
+        .{ .source = "[...a,] = [];", .reason = .array_rest_pattern_closing, .marker = ",", .message = "Unexpected token ','. Expected a closing ']' following a rest element destructuring pattern." },
+        .{ .source = "[...a, b] = [];", .reason = .array_rest_pattern_closing, .marker = ",", .message = "Unexpected token ','. Expected a closing ']' following a rest element destructuring pattern." },
+        .{ .source = "[(a = 1)] = [];", .reason = .invalid_destructuring_assignment, .marker = "[", .message = "Invalid destructuring assignment target." },
+        .{ .source = "({...a, b} = {});", .reason = .object_rest_pattern_comma, .marker = ",", .message = "Unexpected token ','. Cannot parse assignment pattern." },
+        .{ .source = "({...a,} = {});", .reason = .object_rest_pattern_comma, .marker = ",", .message = "Unexpected token ','. Cannot parse assignment pattern." },
+        .{ .source = "({...(a + b)} = {});", .reason = .invalid_destructuring_assignment, .marker = "{", .message = "Invalid destructuring assignment target." },
+        .{ .source = "\"use strict\"; ({...eval} = {});", .reason = .strict_modify_eval, .marker = "eval", .message = "Unexpected token '}'. Cannot modify 'eval' in strict mode." },
+        .{ .source = "({a: (b = 1)} = {});", .reason = .invalid_destructuring_assignment, .marker = "{", .message = "Invalid destructuring assignment target." },
+        .{ .source = "let {...1} = {};", .reason = .expected_binding_element, .marker = "1", .message = "Unexpected number '1'. Expected a binding element." },
+        .{ .source = "let {+} = {};", .reason = .expected_property_name, .marker = "+", .message = "Unexpected token '+'. Expected a property name." },
+        .{ .source = "let {\"x\"} = {};", .reason = .expected_named_destructuring_colon, .marker = "}", .message = "Unexpected token '}'. Expected a ':' prior to a named destructuring property." },
+        .{ .source = "let {break} = {};", .reason = .abbreviated_destructuring_keyword, .marker = "break", .message = "Cannot use abbreviated destructuring syntax for keyword 'break'." },
+        .{ .source = "let {...break} = {};", .reason = .lexical_keyword_binding, .marker = "break", .message = "Cannot use the keyword 'break' as a lexical variable name." },
+        .{ .source = "\"use strict\"; let {...eval} = {};", .reason = .strict_destructure_binding, .marker = "eval", .message = "Cannot destructure to a variable named 'eval' in strict mode." },
+        .{ .source = "({ get #x() {} });", .reason = .private_accessor_outside_class, .marker = "#x", .message = "Cannot declare a private setter or getter outside a class." },
+        .{ .source = "({ + });", .reason = .expected_property_name, .marker = "+", .message = "Unexpected token '+'. Expected a property name." },
+        .{ .source = "({ *foo });", .reason = .expected_method_parenthesis, .marker = "}", .message = "Unexpected token '}'. Expected a parenthesis for argument list." },
+        .{ .source = "({ async foo });", .reason = .expected_method_parenthesis, .marker = "}", .message = "Unexpected token '}'. Expected a parenthesis for argument list." },
+        .{ .source = "({ break });", .reason = .shorthand_keyword, .marker = "break", .message = "Cannot use the keyword 'break' as a shorthand property name." },
+        .{ .source = "function* g() { return { yield }; }", .reason = .yield_shorthand_generator, .marker = "yield", .message = "Cannot use 'yield' as a shorthand property name in a generator function." },
+        .{ .source = "async function f() { return { await }; }", .reason = .await_shorthand_async, .marker = "await", .message = "Cannot use 'await' as a shorthand property name in an async function." },
+        .{ .source = "({ \"x\" });", .reason = .expected_identifier_property_name, .marker = "}", .message = "Unexpected token '}'. Expected an identifier as property name." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
     }
 }
@@ -7098,7 +7215,7 @@ test "parser preserves cover grammar facts with keyed node identity" {
     var array_rest = try Parser.init(allocator, "[...rest,] = source;");
     array_rest.useRealmHashKeys(root_shape);
     try std.testing.expectError(ParseError.InvalidAssignmentTarget, array_rest.parseProgram());
-    try std.testing.expectEqual(@as(usize, 1), array_rest.rest_trailing_comma_arrays.count());
+    try std.testing.expectEqual(@as(usize, 1), array_rest.rest_comma_arrays.count());
 
     var refined = try Parser.init(allocator, "({ value = fallback, __proto__: left, __proto__: right } = source);");
     refined.useRealmHashKeys(root_shape);
