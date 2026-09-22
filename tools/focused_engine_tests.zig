@@ -178,6 +178,26 @@ const frontend_cases = [_]Case{
         .expected = 7,
     },
     .{
+        .name = "for head SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["for (async of []) {}", "Unexpected identifier 'of'"],
+        \\  ["async function f() { for await (x in y) {} }", "Unexpected keyword 'in'. Expected 'of' in for-await syntax."],
+        \\  ["for (using x in y) {}", "Unexpected identifier 'x'. Expected either 'in' or 'of' in enumeration syntax."],
+        \\  ["async function f() { for (await using x in y) {} }", "Unexpected identifier 'x'. Expected either 'in' or 'of' in enumeration syntax."],
+        \\  ["async function f() { for await (await using x in y) {} }", "Unexpected identifier 'x'. Expected either 'in' or 'of' in enumeration syntax."],
+        \\  ["for (var x = 0 of y) {}", "Cannot assign to the loop variable inside a for-of loop header."],
+        \\  ["async function f() { for await (;;) {} }", "Unexpected token ';'. Unexpected a ';' in for-await-of header."],
+        \\  ["async function f() { for await (let x;;) {} }", "Unexpected token ';'. Unexpected a ';' in for-await-of header."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 255,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.

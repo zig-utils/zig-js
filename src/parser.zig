@@ -74,6 +74,10 @@ pub const DiagnosticReason = enum {
     malformed_template_hex_escape,
     malformed_template_unicode_escape,
     template_numeric_escape,
+    for_await_in,
+    using_for_in,
+    for_of_initializer,
+    for_await_semicolon,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -203,6 +207,10 @@ pub const DiagnosticReason = enum {
             .malformed_template_hex_escape => "\\x can only be followed by a hex character sequence",
             .malformed_template_unicode_escape => "\\u can only be followed by a Unicode character sequence",
             .template_numeric_escape => "The only valid numeric escape in strict mode is '\\0'",
+            .for_await_in => "Expected 'of' in for-await syntax.",
+            .using_for_in => "Expected either 'in' or 'of' in enumeration syntax.",
+            .for_of_initializer => "Cannot assign to the loop variable inside a for-of loop header.",
+            .for_await_semicolon => "Unexpected a ';' in for-await-of header.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -3022,6 +3030,7 @@ pub const Parser = struct {
         const error_token_save = self.last_error_token;
         var decl_kind: ?ast.DeclKind = null;
         var is_using = false;
+        var using_binding_index: ?usize = null;
         var dispose: u8 = 0; // 1 = `using`, 2 = `await using` (for a for-of head)
         if (isKeyword(self.cur(), "var")) {
             decl_kind = .@"var";
@@ -3039,6 +3048,7 @@ pub const Parser = struct {
             decl_kind = .@"const";
             is_using = true;
             dispose = 1;
+            using_binding_index = self.pos + 1;
             _ = self.advance();
         } else if (isKeyword(self.cur(), "await") and self.peekIsKeyword(1, "using") and
             self.peekKind(2) == .identifier and self.noNewlineBefore(1) and self.noNewlineBefore(2))
@@ -3048,6 +3058,7 @@ pub const Parser = struct {
             decl_kind = .@"const";
             is_using = true;
             dispose = 2;
+            using_binding_index = self.pos + 2;
             await_offset = self.advance().pos;
             _ = self.advance(); // using
         }
@@ -3068,7 +3079,7 @@ pub const Parser = struct {
         if (!is_await and self.pos == save and decl_kind == null and
             isKeyword(self.cur(), "async") and !self.cur().escaped_identifier and
             self.peekIsKeyword(1, "of") and self.peekKind(2) != .arrow)
-            return ParseError.UnexpectedToken;
+            return self.failWithToken(.unexpected_token, self.tokenAt(self.pos + 1));
         // Iteration form `for ([decl] target in/of iterable)`, where `target`
         // is an identifier, a destructuring pattern, or (assignment form) a
         // member expression. Parse a target, then require `in`/`of`; otherwise
@@ -3084,7 +3095,9 @@ pub const Parser = struct {
         };
         if (for_target) |target| {
             var var_init: ?*Node = null;
-            if (!self.strict and decl_kind != null and decl_kind.? == .@"var" and target.* == .identifier and self.match(.assign)) {
+            var var_init_offset: ?usize = null;
+            if (!self.strict and decl_kind != null and decl_kind.? == .@"var" and target.* == .identifier and self.check(.assign)) {
+                var_init_offset = self.advance().pos;
                 const saved_no_in = self.no_in;
                 self.no_in = true;
                 var_init = try self.parseExpression();
@@ -3099,12 +3112,14 @@ pub const Parser = struct {
                 // A lexical (`let`/`const`) for-in/of head binds the target's names
                 // and must have no duplicates: `for (let [x, x] of …)` is an error.
                 if (decl_kind) |k| if (k != .@"var") try self.checkNoDuplicateBindings(target);
-                const is_of = isKeyword(self.advance(), "of"); // consume in/of
-                if (is_await and !is_of) return ParseError.UnexpectedToken;
+                const iteration_token = self.advance(); // consume in/of
+                const is_of = isKeyword(iteration_token, "of");
                 // A `using`/`await using` head is valid only in a for-of/-await-of,
                 // never a for-in: `for (using x in obj)` is a SyntaxError.
-                if (is_using and !is_of) return ParseError.UnexpectedToken;
-                if (var_init != null and is_of) return ParseError.UnexpectedToken;
+                if (is_using and !is_of)
+                    return self.failWithToken(.using_for_in, self.tokenAt(using_binding_index.?));
+                if (is_await and !is_of) return self.failWithToken(.for_await_in, iteration_token);
+                if (var_init_offset) |offset| if (is_of) return self.failWithReasonAt(.for_of_initializer, offset);
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
@@ -3131,7 +3146,7 @@ pub const Parser = struct {
                 } });
             }
         }
-        if (is_await) return ParseError.UnexpectedToken;
+        if (is_await) return self.failForAwaitClassicHead();
         self.pos = save; // not an iteration form — rewind and parse a classic for
         self.current_token = &self.tokens.items[self.pos];
         // Discard locations for function bodies reached while refining the cover
@@ -3182,6 +3197,30 @@ pub const Parser = struct {
         } else try self.parseLoopBody();
         if (init_node) |ini| try self.checkNoDuplicateLexicalDeclNames(ini);
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
+    }
+
+    /// A malformed `for await` head is known to be classic because the existing
+    /// structural lookahead found its top-level semicolon. Locate that cached
+    /// token only on the rejected path so valid loops do not pay for a second
+    /// scan.
+    fn failForAwaitClassicHead(self: *Parser) ParseError {
+        var depth: usize = 0;
+        var index = self.pos;
+        while (true) : (index += 1) {
+            const token = self.tokenAt(index);
+            switch (token.kind) {
+                .lparen, .lbracket, .lbrace => depth += 1,
+                .rparen => {
+                    if (depth == 0) break;
+                    depth -= 1;
+                },
+                .rbracket, .rbrace => depth -|= 1,
+                .semicolon => if (depth == 0) return self.failWithToken(.for_await_semicolon, token),
+                .eof => break,
+                else => {},
+            }
+        }
+        return self.failWithTokenReason(.for_await_semicolon);
     }
 
     /// Whether the head starting at the cursor is a classic `for (init; cond; update)`.
@@ -8567,19 +8606,35 @@ test "parser rejects parenthesized destructuring pattern targets" {
     try std.testing.expectEqual(@as(usize, 3), prog.program.len);
 }
 
-test "parser rejects malformed for-await heads" {
+test "parser retains malformed for-in of and await head diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "for (async of []) {}", .reason = .unexpected_token, .marker = "of", .message = "Unexpected identifier 'of'" },
+        .{ .source = "async function f() { for await (x in y) {} }", .reason = .for_await_in, .marker = "in y", .message = "Unexpected keyword 'in'. Expected 'of' in for-await syntax." },
+        .{ .source = "for (using x in y) {}", .reason = .using_for_in, .marker = "x in", .message = "Unexpected identifier 'x'. Expected either 'in' or 'of' in enumeration syntax." },
+        .{ .source = "async function f() { for (await using x in y) {} }", .reason = .using_for_in, .marker = "x in", .message = "Unexpected identifier 'x'. Expected either 'in' or 'of' in enumeration syntax." },
+        .{ .source = "async function f() { for await (await using x in y) {} }", .reason = .using_for_in, .marker = "x in", .message = "Unexpected identifier 'x'. Expected either 'in' or 'of' in enumeration syntax." },
+        .{ .source = "for (var x = 0 of y) {}", .reason = .for_of_initializer, .marker = "=", .message = "Cannot assign to the loop variable inside a for-of loop header." },
+        .{ .source = "async function f() { for await (;;) {} }", .reason = .for_await_semicolon, .marker = ";", .message = "Unexpected token ';'. Unexpected a ';' in for-await-of header." },
+        .{ .source = "async function f() { for await (let x;;) {} }", .reason = .for_await_semicolon, .marker = ";", .message = "Unexpected token ';'. Unexpected a ';' in for-await-of header." },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-
-    var classic = try Parser.init(arena.allocator(), "async function* f() { for await (;;) ; }");
-    try std.testing.expectError(ParseError.UnexpectedToken, classic.parseProgram());
-
-    var classic_decl = try Parser.init(arena.allocator(), "async function* f() { for await (let a ;;) ; }");
-    try std.testing.expectError(ParseError.UnexpectedToken, classic_decl.parseProgram());
-
-    var for_in = try Parser.init(arena.allocator(), "async function* f() { for await (a in null) ; }");
-    try std.testing.expectError(ParseError.UnexpectedToken, for_in.parseProgram());
-
     var valid = try Parser.init(arena.allocator(), "async function* f() { for await (a of b) ; }");
     const prog = try valid.parseProgram();
     try std.testing.expectEqual(@as(usize, 1), prog.program.len);
