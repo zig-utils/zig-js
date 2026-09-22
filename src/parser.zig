@@ -25,6 +25,20 @@ pub const DiagnosticReason = enum {
     unexpected_end_of_expression,
     expected_semicolon_after_variable_declaration,
     expected_if_condition,
+    escaped_keyword,
+    lexical_declaration_single_statement,
+    using_declaration_invalid_context,
+    strict_with_statement,
+    break_outside_loop_or_switch,
+    undeclared_label,
+    continue_outside_loop,
+    continue_non_loop_label,
+    duplicate_label,
+    class_declaration_single_statement,
+    generator_function_single_statement,
+    async_function_single_statement,
+    strict_function_single_statement,
+    function_single_statement,
     getter_parameters,
     setter_parameters,
     setter_parameter_pattern,
@@ -109,6 +123,20 @@ pub const DiagnosticReason = enum {
             .unexpected_end_of_expression => "Unexpected end of script",
             .expected_semicolon_after_variable_declaration => "Expected ';' after variable declaration.",
             .expected_if_condition => "Expected '(' to start an 'if' condition.",
+            .escaped_keyword => "",
+            .lexical_declaration_single_statement => "Cannot use lexical declaration in single-statement context.",
+            .using_declaration_invalid_context => "'using' declarations are only valid inside blocks, functions, or modules.",
+            .strict_with_statement => "'with' statements are not valid in strict mode.",
+            .break_outside_loop_or_switch => "'break' is only valid inside a switch or loop statement.",
+            .undeclared_label => "",
+            .continue_outside_loop => "'continue' is only valid inside a loop statement.",
+            .continue_non_loop_label => "",
+            .duplicate_label => "",
+            .class_declaration_single_statement => "'class' declaration is not directly within a block statement.",
+            .generator_function_single_statement => "Cannot use generator function declaration in single-statement context.",
+            .async_function_single_statement => "Cannot use async function declaration in single-statement context.",
+            .strict_function_single_statement => "Function declarations are only allowed inside blocks or switch statements in strict mode.",
+            .function_single_statement => "Function declarations are only allowed inside block statements or at the top level of a program.",
             .getter_parameters => "getter functions must have no parameters.",
             .setter_parameters => "setter functions must have one parameter.",
             .setter_parameter_pattern => "Expected a parameter pattern or a ')' in parameter list.",
@@ -202,6 +230,7 @@ fn regexDiagnosticReason(reason: regex.CompileErrorReason) DiagnosticReason {
 const DiagnosticToken = struct {
     kind: enum { identifier, keyword, number, string, token },
     text: []const u8,
+    detail: ?[]const u8 = null,
 };
 
 pub const SourceLocation = struct {
@@ -915,12 +944,26 @@ pub const Parser = struct {
         return self.failWithToken(reason, self.cur());
     }
 
+    fn failWithTokenDetail(self: *Parser, reason: DiagnosticReason, token: Token, detail: []const u8) ParseError {
+        const err = self.failWithToken(reason, token);
+        self.last_error_token.?.detail = detail;
+        return err;
+    }
+
     pub fn diagnosticMessage(self: *const Parser, allocator: std.mem.Allocator, reason: DiagnosticReason) std.mem.Allocator.Error![]const u8 {
         const token = self.last_error_token orelse return reason.message();
         if (reason == .private_field_delete)
             return std.fmt.allocPrint(allocator, "Cannot delete private field {s}.", .{token.text});
         if (reason == .undeclared_private_name)
             return std.fmt.allocPrint(allocator, "Cannot reference undeclared private names: \"{s}\"", .{token.text});
+        if (reason == .escaped_keyword)
+            return std.fmt.allocPrint(allocator, "Unexpected escaped characters in keyword token: '{s}'", .{token.text});
+        if (reason == .undeclared_label)
+            return std.fmt.allocPrint(allocator, "Cannot use the undeclared label '{s}'.", .{token.text});
+        if (reason == .continue_non_loop_label)
+            return std.fmt.allocPrint(allocator, "Cannot continue to the label '{s}' as it is not targeting a loop.", .{token.text});
+        if (reason == .duplicate_label)
+            return std.fmt.allocPrint(allocator, "Unexpected token '{s}'. Attempted to redeclare the label '{s}'.", .{ token.text, token.detail.? });
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
         if (reason == .unexpected_token or reason == .expected_token)
@@ -2275,7 +2318,7 @@ pub const Parser = struct {
         }
         const t = self.cur();
         if (t.kind == .identifier) {
-            if (self.isEscapedReservedWord(t)) return ParseError.UnexpectedToken;
+            if (self.isEscapedReservedWord(t)) return self.failWithToken(.escaped_keyword, t);
             if (std.mem.eql(u8, t.text, "var")) return self.parseVarDecl(.@"var");
             if (std.mem.eql(u8, t.text, "let") and !t.escaped_identifier) {
                 if (suppress_let) {
@@ -2284,7 +2327,7 @@ pub const Parser = struct {
                     // identifier — EXCEPT `let [`, the restricted ExpressionStatement
                     // production, which is a SyntaxError even with an intervening
                     // LineTerminator (the restriction has no [no LineTerminator]).
-                    if (self.peekKind(1) == .lbracket) return ParseError.UnexpectedToken;
+                    if (self.peekKind(1) == .lbracket) return self.failWithToken(.lexical_declaration_single_statement, self.tokenAt(self.pos + 1));
                 } else if (self.letDeclAhead()) return self.parseVarDecl(.let);
             }
             if (std.mem.eql(u8, t.text, "const")) return self.parseVarDecl(.@"const");
@@ -2298,13 +2341,13 @@ pub const Parser = struct {
                 // A `using` declaration is only valid in a Block/function body or
                 // at Module top level — not at Script top level or in a switch
                 // CaseClause/DefaultClause.
-                if (!self.using_allowed) return ParseError.UnexpectedToken;
+                if (!self.using_allowed) return self.failWithReasonAt(.using_declaration_invalid_context, t.pos);
                 return self.parseVarDeclDispose(.@"const", 1);
             }
             if (std.mem.eql(u8, t.text, "await") and self.peekIsKeyword(1, "using") and
                 self.peekKind(2) == .identifier and self.noNewlineBefore(2))
             {
-                if (!self.using_allowed) return ParseError.UnexpectedToken;
+                if (!self.using_allowed) return self.failWithReasonAt(.using_declaration_invalid_context, t.pos);
                 _ = self.advance(); // await
                 return self.parseVarDeclDispose(.@"const", 2);
             }
@@ -2314,7 +2357,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "for")) return self.parseFor();
             if (std.mem.eql(u8, t.text, "switch")) return self.parseSwitch();
             if (std.mem.eql(u8, t.text, "with")) {
-                if (self.strict) return ParseError.UnexpectedToken; // `with` is forbidden in strict mode
+                if (self.strict) return self.failWithReasonAt(.strict_with_statement, t.pos); // `with` is forbidden in strict mode
                 _ = self.advance();
                 try self.expect(.lparen);
                 const obj = try self.parseExpression();
@@ -2349,23 +2392,27 @@ pub const Parser = struct {
             }
             if (std.mem.eql(u8, t.text, "break")) {
                 _ = self.advance();
+                const label_token = self.cur();
                 const label = self.optionalLabel();
                 _ = self.match(.semicolon);
                 // Unlabeled `break` requires an enclosing loop or switch.
-                if (label == null and self.iter_depth == 0 and self.switch_depth == 0) return ParseError.UnexpectedToken;
+                if (label == null and self.iter_depth == 0 and self.switch_depth == 0) return self.failWithReasonAt(.break_outside_loop_or_switch, t.pos);
                 if (label) |name| {
-                    if (!labelListContains(self.active_labels.items, name)) return ParseError.UnexpectedToken;
+                    if (!labelListContains(self.active_labels.items, name)) return self.failWithToken(.undeclared_label, label_token);
                 }
                 return self.alloc(.{ .break_stmt = label });
             }
             if (std.mem.eql(u8, t.text, "continue")) {
                 _ = self.advance();
+                const label_token = self.cur();
                 const label = self.optionalLabel();
                 _ = self.match(.semicolon);
                 // `continue` requires an enclosing loop (labeled or not).
-                if (self.iter_depth == 0) return ParseError.UnexpectedToken;
                 if (label) |name| {
-                    if (!labelListContains(self.continue_labels.items, name)) return ParseError.UnexpectedToken;
+                    if (!labelListContains(self.active_labels.items, name)) return self.failWithToken(.undeclared_label, label_token);
+                    if (!labelListContains(self.continue_labels.items, name)) return self.failWithToken(.continue_non_loop_label, label_token);
+                } else if (self.iter_depth == 0) {
+                    return self.failWithReasonAt(.continue_outside_loop, t.pos);
                 }
                 return self.alloc(.{ .continue_stmt = label });
             }
@@ -2373,7 +2420,7 @@ pub const Parser = struct {
             if (self.peekKind(1) == .colon and !self.isForbiddenLabelName(t.text)) {
                 _ = self.advance(); // label
                 _ = self.advance(); // ':'
-                if (labelListContains(self.active_labels.items, t.text)) return ParseError.UnexpectedToken;
+                if (labelListContains(self.active_labels.items, t.text)) return self.failWithTokenDetail(.duplicate_label, self.cur(), t.text);
                 try self.active_labels.append(self.arena, t.text);
                 defer self.active_labels.items.len -= 1;
                 const saved_pending = self.pending_labels.items.len;
@@ -2436,21 +2483,50 @@ pub const Parser = struct {
     fn parseSubStatement(self: *Parser, ctx: SubStmtCtx) ParseError!*Node {
         // A Statement position: `let` here is an identifier, not a declaration.
         self.suppress_let_decl = true;
+        const start_index = self.pos;
         const stmt = try self.parseStatement();
         switch (stmt.*) {
-            .var_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
-            .destructure_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
+            .var_decl => |d| if (d.kind != .@"var") {
+                const start_token = self.tokens.items[start_index];
+                const reason: DiagnosticReason = if (std.mem.eql(u8, start_token.text, "class"))
+                    .class_declaration_single_statement
+                else
+                    .unexpected_token;
+                return self.failWithToken(reason, start_token);
+            },
+            .destructure_decl => |d| if (d.kind != .@"var") return self.failWithToken(.unexpected_token, self.tokens.items[start_index]),
             .func_decl => |f| {
-                if (f.is_generator or f.is_async) return ParseError.UnexpectedToken;
-                if (self.strict) return ParseError.UnexpectedToken;
-                if (ctx == .loop_with) return ParseError.UnexpectedToken;
+                if (f.is_async) return self.failWithToken(.async_function_single_statement, self.functionKeywordFrom(start_index));
+                if (self.strict) return self.failWithReasonAt(.strict_function_single_statement, self.functionKeywordFrom(start_index).pos);
+                if (f.is_generator) return self.failWithToken(.generator_function_single_statement, self.functionMarkerFrom(start_index, .star));
+                if (ctx == .loop_with) return self.failWithToken(.function_single_statement, self.functionKeywordFrom(start_index));
             },
             // A labeled function is only legal as a `label:` item (B.3.2), not as
             // the body of an `if`/loop/`with` (`if (x) lbl: function f(){}`).
-            .labeled_stmt => if (ctx != .label_item and labeledEndsInFunc(stmt)) return ParseError.UnexpectedToken,
+            .labeled_stmt => if (ctx != .label_item and labeledEndsInFunc(stmt))
+                return self.failWithToken(.function_single_statement, self.functionKeywordFrom(start_index)),
             else => {},
         }
         return stmt;
+    }
+
+    /// A rejected single-statement function has already been parsed. Recover
+    /// its grammar marker from the retained token stream only on that failure
+    /// path; successful statements do no search or diagnostic formatting.
+    fn functionMarkerFrom(self: *Parser, start_index: usize, kind: TokenKind) Token {
+        const end = @min(self.pos + 1, self.tokens.items.len);
+        for (self.tokens.items[start_index..end]) |token| {
+            if (token.kind == kind) return token;
+        }
+        return self.tokens.items[start_index];
+    }
+
+    fn functionKeywordFrom(self: *Parser, start_index: usize) Token {
+        const end = @min(self.pos + 1, self.tokens.items.len);
+        for (self.tokens.items[start_index..end]) |token| {
+            if (token.kind == .identifier and std.mem.eql(u8, token.text, "function")) return token;
+        }
+        return self.tokens.items[start_index];
     }
 
     /// Convert an array/object *literal* on the LHS of `=` into a destructuring
@@ -6549,6 +6625,60 @@ test "parser retains generic unexpected token diagnostics and locations" {
             case.source.len;
         try std.testing.expectEqual(expected_offset, parser.errorLocation().byte_offset);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser retains statement placement and control flow diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "\\u0069f (true) {}", .reason = .escaped_keyword, .marker = "\\u0069f", .message = "Unexpected escaped characters in keyword token: '\\u0069f'" },
+        .{ .source = "if (true) let [a] = [];", .reason = .lexical_declaration_single_statement, .marker = "[", .message = "Unexpected token '['. Cannot use lexical declaration in single-statement context." },
+        .{ .source = "if (true) const x = 1;", .reason = .unexpected_token, .marker = "const", .message = "Unexpected keyword 'const'" },
+        .{ .source = "if (true) class C {}", .reason = .class_declaration_single_statement, .marker = "class", .message = "Unexpected keyword 'class'. 'class' declaration is not directly within a block statement." },
+        .{ .source = "\"use strict\"; with ({}) {}", .reason = .strict_with_statement, .marker = "with", .message = "'with' statements are not valid in strict mode." },
+        .{ .source = "break;", .reason = .break_outside_loop_or_switch, .marker = "break", .message = "'break' is only valid inside a switch or loop statement." },
+        .{ .source = "break missing;", .reason = .undeclared_label, .marker = "missing", .message = "Cannot use the undeclared label 'missing'." },
+        .{ .source = "continue;", .reason = .continue_outside_loop, .marker = "continue", .message = "'continue' is only valid inside a loop statement." },
+        .{ .source = "continue missing;", .reason = .undeclared_label, .marker = "missing", .message = "Cannot use the undeclared label 'missing'." },
+        .{ .source = "outer: { continue outer; }", .reason = .continue_non_loop_label, .marker = "outer;", .message = "Cannot continue to the label 'outer' as it is not targeting a loop." },
+        .{ .source = "label: label: ;", .reason = .duplicate_label, .marker = ";", .message = "Unexpected token ';'. Attempted to redeclare the label 'label'." },
+        .{ .source = "if (true) function* g() {}", .reason = .generator_function_single_statement, .marker = "*", .message = "Unexpected token '*'. Cannot use generator function declaration in single-statement context." },
+        .{ .source = "if (true) async function f() {}", .reason = .async_function_single_statement, .marker = "function", .message = "Unexpected keyword 'function'. Cannot use async function declaration in single-statement context." },
+        .{ .source = "\"use strict\"; if (true) function f() {}", .reason = .strict_function_single_statement, .marker = "function", .message = "Function declarations are only allowed inside blocks or switch statements in strict mode." },
+        .{ .source = "while (false) function f() {}", .reason = .function_single_statement, .marker = "function", .message = "Unexpected keyword 'function'. Function declarations are only allowed inside block statements or at the top level of a program." },
+        .{ .source = "if (true) label: function f() {}", .reason = .function_single_statement, .marker = "function", .message = "Unexpected keyword 'function'. Function declarations are only allowed inside block statements or at the top level of a program." },
+        .{ .source = "using resource = {};", .reason = .using_declaration_invalid_context, .marker = "using", .message = "'using' declarations are only valid inside blocks, functions, or modules." },
+        .{ .source = "await using resource = {};", .reason = .using_declaration_invalid_context, .marker = "await", .message = "'using' declarations are only valid inside blocks, functions, or modules." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+
+    const valid = [_][]const u8{
+        "while (false) { break; }",
+        "switch (0) { case 0: break; }",
+        "outer: while (false) { continue outer; }",
+        "if (true) function f() {}",
+        "label: function f() {}",
+        "{ using resource = {}; }",
+    };
+    for (valid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
     }
 }
 

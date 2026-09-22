@@ -52,6 +52,33 @@ const frontend_cases = [_]Case{
         .expected = 1,
     },
     .{
+        .name = "statement and control flow SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["if (true) let [a] = [];", "Unexpected token '['. Cannot use lexical declaration in single-statement context."],
+        \\  ["if (true) const x = 1;", "Unexpected keyword 'const'"],
+        \\  ["if (true) class C {}", "Unexpected keyword 'class'. 'class' declaration is not directly within a block statement."],
+        \\  ["\"use strict\"; with ({}) {}", "'with' statements are not valid in strict mode."],
+        \\  ["break;", "'break' is only valid inside a switch or loop statement."],
+        \\  ["break missing;", "Cannot use the undeclared label 'missing'."],
+        \\  ["continue;", "'continue' is only valid inside a loop statement."],
+        \\  ["continue missing;", "Cannot use the undeclared label 'missing'."],
+        \\  ["outer: { continue outer; }", "Cannot continue to the label 'outer' as it is not targeting a loop."],
+        \\  ["label: label: ;", "Unexpected token ';'. Attempted to redeclare the label 'label'."],
+        \\  ["if (true) function* g() {}", "Unexpected token '*'. Cannot use generator function declaration in single-statement context."],
+        \\  ["if (true) async function f() {}", "Unexpected keyword 'function'. Cannot use async function declaration in single-statement context."],
+        \\  ["\"use strict\"; if (true) function f() {}", "Function declarations are only allowed inside blocks or switch statements in strict mode."],
+        \\  ["while (false) function f() {}", "Unexpected keyword 'function'. Function declarations are only allowed inside block statements or at the top level of a program."],
+        \\  ["if (true) label: function f() {}", "Unexpected keyword 'function'. Function declarations are only allowed inside block statements or at the top level of a program."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 32767,
+    },
+    .{
         // #945/#950: arrows and other function-like boundaries own their label
         // and generator contexts, while arrow parameters still inherit [Yield].
         // A nested label must not overwrite the outer list's retained storage.
