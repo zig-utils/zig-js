@@ -1295,6 +1295,46 @@ const runtime_cases = [_]Case{
         .expected = 131071,
     },
     .{
+        // zig-regex#27: matches and captures follow the spec's backtracking
+        // priority (leftmost-first) on every path zig-js reaches -- exec from
+        // lastIndex 0 and later, match, replace and split -- including
+        // RepeatMatcher's per-iteration capture clearing and empty-iteration
+        // rule. node v24.4.1 passes all twenty-two checks.
+        .name = "RegExp matches and captures are leftmost-first",
+        .source =
+        \\function ex(re, s, last) {
+        \\  if (last !== undefined) re.lastIndex = last;
+        \\  var m = re.exec(s);
+        \\  return m === null ? "null" : JSON.stringify([m.index].concat(Array.prototype.slice.call(m)));
+        \\}
+        \\var checks = [];
+        \\checks.push(ex(/(a|ab)(c|bcd)(d*)/, "abcd") === '[0,"abcd","a","bcd",""]');
+        \\checks.push(ex(/(\d){2,4}/, "12") === '[0,"12","2"]');
+        \\checks.push(ex(/([a-z]){1,3}/, "ab1") === '[0,"ab","b"]');
+        \\checks.push(ex(/(a){1,3}/, "a") === '[0,"a","a"]');
+        \\checks.push(ex(/(a*){3}/, "aa") === '[0,"aa",""]');
+        \\checks.push(ex(/(a?){2}/, "a") === '[0,"a",""]');
+        \\checks.push(ex(/ab|abcd/i, "abcd") === '[0,"ab"]');
+        \\checks.push(ex(/ab|abcd/g, "abcd abcd", 2) === '[5,"ab"]');
+        \\checks.push(ex(/(?:ab)?(?:abcd)?/, "abcd") === '[0,"ab"]');
+        \\checks.push(ex(/(?:ab)?(?:abcd)?/g, "xabcd", 1) === '[1,"ab"]');
+        \\checks.push(ex(/(?:(a)?b){1,3}/, "abb") === '[0,"abb",null]');
+        \\checks.push(ex(/(a?)+/, "") === '[0,"",""]');
+        \\checks.push(ex(/(a?)*/, "b") === '[0,"",null]');
+        \\checks.push(ex(/(a*)?/, "b") === '[0,"",null]');
+        \\checks.push(ex(/(?:(a)*){2}/, "a") === '[0,"a",null]');
+        \\checks.push(ex(/b*((?:a?b?)*)/, "bab") === '[0,"bab","ab"]');
+        \\checks.push(ex(/(a|ab)(c|bcd)(d*)/g, "xxabcd", 1) === '[2,"abcd","a","bcd",""]');
+        \\checks.push("abcd".replace(/(a|ab)(c|bcd)(d*)/, "$1-$2-$3") === "a-bcd-");
+        \\checks.push(JSON.stringify("xabcdx".split(/(a|ab)(c|bcd)(d*)/)) === '["x","a","bcd","","x"]');
+        \\checks.push(JSON.stringify("12x3456".match(/(\d){2,4}/g)) === '["12","3456"]');
+        \\checks.push("ab abcd".replace(/ab|abcd/g, "_") === "_ _cd");
+        \\checks.push(ex(/(\w+)\s(\w+)/, "hello big world") === '[0,"hello big","hello","big"]');
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 4194303,
+    },
+    .{
         // #941: ECMA-262's Array.prototype.join defines no cycle detection, so a
         // self-referential array recursed until the stack guard threw, where
         // JavaScriptCore and V8 render a re-entered receiver as the empty
