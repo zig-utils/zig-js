@@ -154,6 +154,35 @@ const frontend_cases = [_]Case{
         .expected = 2047,
     },
     .{
+        .name = "arrow cover suspension SyntaxErrors retain JSC prose",
+        .source =
+        \\var rows = [
+        \\  ["async (a = await) => 0", "Cannot use 'await' within a parameter default expression."],
+        \\  ["async (a = await x) => 0", "Unexpected identifier 'x'. Expected ')' to end an argument list."],
+        \\  ["async ([a = await 1]) => 0", "Unexpected number '1'. Expected either a closing ']' or a ',' following an array element."],
+        \\  ["async ({a = await 1}) => 0", "Unexpected token '='. Expected a ':' following the property name 'a'."],
+        \\  ["async ({a: b = await 1}) => 0", "Unexpected number '1'. Expected '}' to end an object literal."],
+        \\  ["function* outer(){ (a = yield) => 0; }", "Unexpected keyword 'yield'. Cannot use yield expression out of generator."],
+        \\  ["function* outer(){ (a = yield 1) => 0; }", "Unexpected token '=>'"],
+        \\  ["function* outer(){ ([a = yield 1]) => 0; }", "Unexpected number '1'. Expected either a closing ']' or a ',' following an element destructuring pattern."],
+        \\  ["function* outer(){ ({a = yield 1}) => 0; }", "Unexpected token '='. Expected a ':' following the property name 'a'."],
+        \\  ["async function outer(){ (a = await 1) => 0; }", "Unexpected token '=>'"],
+        \\  ["async function outer(){ ([a = await 1]) => 0; }", "Unexpected number '1'. Expected either a closing ']' or a ',' following an element destructuring pattern."],
+        \\  ["async function outer(){ ({a: b = await 1}) => 0; }", "Unexpected number '1'. Expected either a closing '}' or an ',' after a property destructuring pattern."],
+        \\  ["async function* outer(){ async (a = yield 1) => 0; }", "Unexpected token '=>'"],
+        \\  ["async function* outer(){ async (a = await 1) => 0; }", "Unexpected token '=>'"],
+        \\  ["async (a = (await 1)) => 0", "Unexpected number '1'. Expected ')' to end a compound expression."],
+        \\  ["async ({[await 1]: a}) => 0", "Unexpected number '1'. Expected ']' to end a computed property name."],
+        \\  ["async function outer(){ ({[await 1]: a}) => 0; }", "Unexpected number '1'. Expected ']' to end end a computed property name."],
+        \\];
+        \\rows.reduce(function(bits, row, i) {
+        \\  try { eval(row[0]); return bits; }
+        \\  catch (error) { return error instanceof SyntaxError && error.message === row[1] ? bits | (1 << i) : bits; }
+        \\}, 0)
+        ,
+        .expected = 131071,
+    },
+    .{
         .name = "object and destructuring SyntaxErrors retain JSC prose",
         .source =
         \\var rows = [

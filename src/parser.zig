@@ -61,6 +61,16 @@ pub const DiagnosticReason = enum {
     generator_parameter_yield,
     async_parameter_await_expression,
     generator_parameter_yield_expression,
+    arrow_yield_outside_generator,
+    arrow_await_argument_list,
+    arrow_await_compound_expression,
+    arrow_await_array_element,
+    arrow_suspension_array_pattern,
+    arrow_suspension_object_property,
+    arrow_await_object_literal,
+    arrow_suspension_object_pattern,
+    arrow_await_computed_property,
+    arrow_suspension_computed_property,
     duplicate_parameter_arrow,
     duplicate_parameter_method,
     duplicate_parameter_default,
@@ -251,6 +261,16 @@ pub const DiagnosticReason = enum {
             .generator_parameter_yield => "Cannot use 'yield' as a parameter name in a generator function.",
             .async_parameter_await_expression => "Cannot use 'await' within a parameter default expression.",
             .generator_parameter_yield_expression => "Unexpected keyword 'yield'. Cannot use yield expression within parameters.",
+            .arrow_yield_outside_generator => "Cannot use yield expression out of generator.",
+            .arrow_await_argument_list => "Expected ')' to end an argument list.",
+            .arrow_await_compound_expression => "Expected ')' to end a compound expression.",
+            .arrow_await_array_element => "Expected either a closing ']' or a ',' following an array element.",
+            .arrow_suspension_array_pattern => "Expected either a closing ']' or a ',' following an element destructuring pattern.",
+            .arrow_suspension_object_property => "",
+            .arrow_await_object_literal => "Expected '}' to end an object literal.",
+            .arrow_suspension_object_pattern => "Expected either a closing '}' or an ',' after a property destructuring pattern.",
+            .arrow_await_computed_property => "Expected ']' to end a computed property name.",
+            .arrow_suspension_computed_property => "Expected ']' to end end a computed property name.",
             .duplicate_parameter_arrow, .duplicate_parameter_method, .duplicate_parameter_default, .duplicate_parameter_rest, .duplicate_parameter_destructuring => "",
             .expected_function_body_opening => "Expected an opening '{' at the start of a function body.",
             .function_name_required => "Function statements must have a name.",
@@ -716,7 +736,16 @@ pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
 
 /// Recursive-descent + precedence-climbing parser producing an arena-allocated
 /// AST for the v1 subset (expressions, var/let/const, if/else, while, blocks).
-const ParameterSuspensionDiagnostic = enum { function_parameters, arrow_cover };
+const ParameterSuspensionDiagnostic = enum { function_parameters, arrow_cover, async_arrow_cover };
+const ParameterPatternDiagnostic = union(enum) {
+    scalar,
+    array,
+    object: struct {
+        property_name: []const u8,
+        cover_initialized: bool,
+    },
+    computed,
+};
 
 pub const Parser = struct {
     tokens: std.ArrayListUnmanaged(Token),
@@ -839,6 +868,14 @@ pub const Parser = struct {
     /// Selects the diagnostic family for the existing suspension expression
     /// scan. Arrow cover grammar reports its own offending token.
     scan_parameter_suspension_diagnostic: ParameterSuspensionDiagnostic = .arrow_cover,
+    /// Present only while parsing a formal-parameter grammar. This lets a bare
+    /// `await` retain the parameter early error before operand parsing reaches a
+    /// delimiter; nested ordinary functions replace and restore the context.
+    parsing_parameter_suspension_diagnostic: ?ParameterSuspensionDiagnostic = null,
+    /// The parameter shape containing the default currently visited by the
+    /// suspension scan. It selects the cover-grammar token and clause without
+    /// storing diagnostic-only offsets in every pattern node.
+    scan_parameter_pattern_diagnostic: ParameterPatternDiagnostic = .scalar,
     /// The active ContainsAwait query belongs to a class static block, which
     /// has position-specific diagnostics distinct from parameter queries.
     scan_static_block_await: bool = false,
@@ -1229,6 +1266,12 @@ pub const Parser = struct {
                 .{ noun, quote, token.text, quote, token.detail.? },
             );
         }
+        if (reason == .arrow_suspension_object_property)
+            return std.fmt.allocPrint(
+                allocator,
+                "Unexpected token '='. Expected a ':' following the property name '{s}'.",
+                .{token.detail.?},
+            );
         if (reason == .undeclared_label)
             return std.fmt.allocPrint(allocator, "Cannot use the undeclared label '{s}'.", .{token.text});
         if (reason == .continue_non_loop_label)
@@ -3879,6 +3922,28 @@ pub const Parser = struct {
         return self.parseParamListForAccessor(.none, .arrow_parameter_keyword);
     }
 
+    fn parseParamListWithSuspensionDiagnostic(
+        self: *Parser,
+        diagnostic: ParameterSuspensionDiagnostic,
+    ) ParseError![]const ast.Param {
+        const saved = self.parsing_parameter_suspension_diagnostic;
+        self.parsing_parameter_suspension_diagnostic = diagnostic;
+        defer self.parsing_parameter_suspension_diagnostic = saved;
+        return self.parseParamList();
+    }
+
+    fn parseParamListForAccessorWithSuspensionDiagnostic(
+        self: *Parser,
+        accessor: ast.AccessorKind,
+        forbidden_reason: DiagnosticReason,
+        diagnostic: ParameterSuspensionDiagnostic,
+    ) ParseError![]const ast.Param {
+        const saved = self.parsing_parameter_suspension_diagnostic;
+        self.parsing_parameter_suspension_diagnostic = diagnostic;
+        defer self.parsing_parameter_suspension_diagnostic = saved;
+        return self.parseParamListForAccessor(accessor, forbidden_reason);
+    }
+
     fn parseParamListForAccessor(self: *Parser, accessor: ast.AccessorKind, forbidden_reason: DiagnosticReason) ParseError![]const ast.Param {
         try self.expect(.lparen);
         // MethodDefinition / PropertySetParameterList: a getter has no
@@ -3945,7 +4010,11 @@ pub const Parser = struct {
             self.in_generator = saved_gen;
             self.new_target_depth -= 1;
         }
-        const params = try self.parseParamListForAccessor(accessor, .function_parameter_keyword);
+        const params = try self.parseParamListForAccessorWithSuspensionDiagnostic(
+            accessor,
+            .function_parameter_keyword,
+            .function_parameters,
+        );
         if (is_gen or is_async) {
             try self.forbidYieldAwaitInParams(params, is_gen, is_async, .function_parameters);
         }
@@ -4423,7 +4492,7 @@ pub const Parser = struct {
             var uses_direct_eval_in_parameters = false;
             const saved_direct_eval_use = self.current_direct_eval_use;
             self.current_direct_eval_use = &uses_direct_eval_in_parameters;
-            const params = try self.parseParamList();
+            const params = try self.parseParamListWithSuspensionDiagnostic(.arrow_cover);
             self.current_direct_eval_use = saved_direct_eval_use;
             if (uses_direct_eval_in_parameters) {
                 if (saved_direct_eval_use) |use| use.* = true;
@@ -4853,8 +4922,9 @@ pub const Parser = struct {
         const saved_async = self.in_async;
         self.in_async = true;
         defer self.in_async = saved_async;
-        const params = try self.parseParamList();
-        try self.forbidYieldAwaitInParams(params, self.in_generator, true, .arrow_cover);
+        const diagnostic: ParameterSuspensionDiagnostic = if (saved_async) .arrow_cover else .async_arrow_cover;
+        const params = try self.parseParamListWithSuspensionDiagnostic(diagnostic);
+        try self.forbidYieldAwaitInParams(params, self.in_generator, true, diagnostic);
         return params;
     }
 
@@ -5049,6 +5119,10 @@ pub const Parser = struct {
         // identifier is then rejected as a reserved reference in its context).
         if (self.in_async and !self.cur().escaped_identifier and isKeyword(self.cur(), "await")) {
             const await_token = self.advance();
+            if (self.parsing_parameter_suspension_diagnostic != null and switch (self.cur().kind) {
+                .rparen, .rbracket, .rbrace, .comma, .eof => true,
+                else => false,
+            }) return self.failWithReasonAt(.async_parameter_await_expression, await_token.pos);
             const operand = try self.parseUnaryOperand();
             try self.rejectExponentAfterUnary();
             return self.alloc(.{ .await_expr = .{ .argument = operand, .offset = await_token.pos } });
@@ -6272,8 +6346,19 @@ pub const Parser = struct {
     fn scanSuperAndArgsInParams(self: *Parser, params: []const ast.Param) ParseError!void {
         for (params) |param| {
             if (param.pattern) |pattern| try self.scanSuperAndArgsInPattern(pattern);
-            if (param.default) |default| try self.scanSuperAndArgs(default);
+            if (param.default) |default| try self.scanParameterDefault(default, .scalar);
         }
+    }
+
+    fn scanParameterDefault(
+        self: *Parser,
+        default: *Node,
+        diagnostic: ParameterPatternDiagnostic,
+    ) ParseError!void {
+        const saved = self.scan_parameter_pattern_diagnostic;
+        self.scan_parameter_pattern_diagnostic = diagnostic;
+        defer self.scan_parameter_pattern_diagnostic = saved;
+        return self.scanSuperAndArgs(default);
     }
 
     fn scanStatementListItem(self: *Parser, node: *Node) ParseError!void {
@@ -6294,15 +6379,20 @@ pub const Parser = struct {
             .identifier => {},
             .obj_pattern => |p| {
                 for (p.props) |prop| {
-                    if (prop.key_expr) |key| try self.scanSuperAndArgs(key);
-                    if (prop.default) |default| try self.scanSuperAndArgs(default);
+                    if (prop.key_expr) |key| try self.scanParameterDefault(key, .computed);
+                    if (prop.default) |default| try self.scanParameterDefault(default, .{ .object = .{
+                        .property_name = prop.key,
+                        .cover_initialized = prop.target.* == .identifier and
+                            prop.target.identifier.ptr == prop.key.ptr and
+                            prop.target.identifier.len == prop.key.len,
+                    } });
                     try self.scanSuperAndArgsInPattern(prop.target);
                 }
                 if (p.rest) |rest| try self.scanSuperAndArgsInPattern(rest);
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| {
-                    if (elem.default) |default| try self.scanSuperAndArgs(default);
+                    if (elem.default) |default| try self.scanParameterDefault(default, .array);
                     if (elem.target) |target| try self.scanSuperAndArgsInPattern(target);
                 }
                 if (p.rest) |rest| try self.scanSuperAndArgsInPattern(rest);
@@ -6325,6 +6415,105 @@ pub const Parser = struct {
         defer spine.deinit(self.scratch_allocator);
         try self.scanSuperAndArgs(try spine.collect(self.scratch_allocator, top));
         while (spine.pop()) |link| try self.scanSuperAndArgs(ast.chainRight(link));
+    }
+
+    fn tokenAtSourceOffset(self: *Parser, offset: usize) ?Token {
+        for (self.tokens.items) |token| {
+            if (token.pos == offset) return token;
+            if (token.pos > offset) break;
+        }
+        return null;
+    }
+
+    fn tokenAfterSourceOffset(self: *Parser, offset: usize) ?Token {
+        for (self.tokens.items) |token| {
+            if (token.pos > offset) return token;
+        }
+        return null;
+    }
+
+    fn tokenOfKindBetween(self: *Parser, kind: TokenKind, start: usize, end: usize) ?Token {
+        for (self.tokens.items) |token| {
+            if (token.pos < start) continue;
+            if (token.pos >= end) break;
+            if (token.kind == kind) return token;
+        }
+        return null;
+    }
+
+    fn asyncArrowAwaitReportsOperand(token: Token) bool {
+        return switch (token.kind) {
+            .plus, .minus, .bang, .tilde, .lparen => false,
+            .identifier => !std.mem.eql(u8, token.text, "delete") and
+                !std.mem.eql(u8, token.text, "void") and
+                !std.mem.eql(u8, token.text, "typeof"),
+            else => true,
+        };
+    }
+
+    fn failArrowParameterSuspension(
+        self: *Parser,
+        node: *Node,
+        offset: usize,
+        argument: ?*Node,
+        is_await: bool,
+    ) ParseError {
+        const suspension = self.tokenAtSourceOffset(offset) orelse self.cur();
+        if (argument == null)
+            return self.failWithToken(.arrow_yield_outside_generator, suspension);
+
+        switch (self.scan_parameter_pattern_diagnostic) {
+            .object => |object| {
+                if (object.cover_initialized) {
+                    const property_offset = self.sourceOffsetForSlice(object.property_name, offset);
+                    const assign = self.tokenOfKindBetween(.assign, property_offset, offset) orelse suspension;
+                    return self.failWithTokenDetail(.arrow_suspension_object_property, assign, object.property_name);
+                }
+                const operand = self.tokenAfterSourceOffset(offset) orelse suspension;
+                if (self.isParenWrapped(node))
+                    return self.failWithToken(.arrow_await_compound_expression, operand);
+                return self.failWithToken(
+                    if (is_await and self.scan_parameter_suspension_diagnostic == .async_arrow_cover)
+                        .arrow_await_object_literal
+                    else
+                        .arrow_suspension_object_pattern,
+                    operand,
+                );
+            },
+            .array => {
+                const operand = self.tokenAfterSourceOffset(offset) orelse suspension;
+                if (self.isParenWrapped(node))
+                    return self.failWithToken(.arrow_await_compound_expression, operand);
+                const reason: DiagnosticReason = if (is_await and self.scan_parameter_suspension_diagnostic == .async_arrow_cover)
+                    .arrow_await_array_element
+                else
+                    .arrow_suspension_array_pattern;
+                return self.failWithToken(reason, operand);
+            },
+            .computed => {
+                const operand = self.tokenAfterSourceOffset(offset) orelse suspension;
+                if (self.isParenWrapped(node))
+                    return self.failWithToken(.arrow_await_compound_expression, operand);
+                return self.failWithToken(
+                    if (is_await and self.scan_parameter_suspension_diagnostic == .async_arrow_cover)
+                        .arrow_await_computed_property
+                    else
+                        .arrow_suspension_computed_property,
+                    operand,
+                );
+            },
+            .scalar => {
+                const operand = self.tokenAfterSourceOffset(offset) orelse suspension;
+                if (self.isParenWrapped(node))
+                    return self.failWithToken(.arrow_await_compound_expression, operand);
+                if (is_await and self.scan_parameter_suspension_diagnostic == .async_arrow_cover) {
+                    if (asyncArrowAwaitReportsOperand(operand))
+                        return self.failWithToken(.arrow_await_argument_list, operand);
+                    return self.failWithReasonAt(.async_parameter_await_expression, offset);
+                }
+                return self.failWithToken(.unexpected_token, self.cur());
+            },
+        }
     }
 
     fn scanSuperAndArgs(self: *Parser, node: *Node) ParseError!void {
@@ -6352,14 +6541,14 @@ pub const Parser = struct {
                 else if (self.scan_parameter_suspension_diagnostic == .function_parameters)
                     self.failWithReasonAt(.async_parameter_await_expression, a.offset)
                 else
-                    ParseError.UnexpectedToken;
+                    self.failArrowParameterSuspension(node, a.offset, a.argument, true);
                 try self.scanSuperAndArgs(a.argument);
             },
             .yield_expr => |y| {
                 if (self.scan_forbid_yield) return if (self.scan_parameter_suspension_diagnostic == .function_parameters)
                     self.failWithReasonAt(.generator_parameter_yield_expression, y.offset)
                 else
-                    ParseError.UnexpectedToken;
+                    self.failArrowParameterSuspension(node, y.offset, y.argument, false);
                 if (y.argument) |arg| try self.scanSuperAndArgs(arg);
             },
             .spread => |v| try self.scanSuperAndArgs(v),
@@ -7292,6 +7481,55 @@ test "parser retains function method and arrow parameter diagnostics" {
         "Unexpected identifier 'trailing'. Expected an opening '{' at the start of a function body.",
         try dynamic.diagnosticMessage(arena.allocator(), dynamic.last_error_reason.?),
     );
+}
+
+test "parser retains arrow cover suspension diagnostics" {
+    const Case = struct {
+        source: []const u8,
+        reason: DiagnosticReason,
+        marker: []const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "async (a = await) => 0", .reason = .async_parameter_await_expression, .marker = "await", .message = "Cannot use 'await' within a parameter default expression." },
+        .{ .source = "async (a = await x) => 0", .reason = .arrow_await_argument_list, .marker = "x", .message = "Unexpected identifier 'x'. Expected ')' to end an argument list." },
+        .{ .source = "async ([a = await 1]) => 0", .reason = .arrow_await_array_element, .marker = "1", .message = "Unexpected number '1'. Expected either a closing ']' or a ',' following an array element." },
+        .{ .source = "async ({a = await 1}) => 0", .reason = .arrow_suspension_object_property, .marker = "= await", .message = "Unexpected token '='. Expected a ':' following the property name 'a'." },
+        .{ .source = "async ({a: b = await 1}) => 0", .reason = .arrow_await_object_literal, .marker = "1", .message = "Unexpected number '1'. Expected '}' to end an object literal." },
+        .{ .source = "function* outer(){ (a = yield) => 0; }", .reason = .arrow_yield_outside_generator, .marker = "yield", .message = "Unexpected keyword 'yield'. Cannot use yield expression out of generator." },
+        .{ .source = "function* outer(){ (a = yield 1) => 0; }", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
+        .{ .source = "function* outer(){ ([a = yield 1]) => 0; }", .reason = .arrow_suspension_array_pattern, .marker = "1", .message = "Unexpected number '1'. Expected either a closing ']' or a ',' following an element destructuring pattern." },
+        .{ .source = "function* outer(){ ({a = yield 1}) => 0; }", .reason = .arrow_suspension_object_property, .marker = "= yield", .message = "Unexpected token '='. Expected a ':' following the property name 'a'." },
+        .{ .source = "async function outer(){ (a = await 1) => 0; }", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
+        .{ .source = "async function outer(){ ([a = await 1]) => 0; }", .reason = .arrow_suspension_array_pattern, .marker = "1", .message = "Unexpected number '1'. Expected either a closing ']' or a ',' following an element destructuring pattern." },
+        .{ .source = "async function outer(){ ({a: b = await 1}) => 0; }", .reason = .arrow_suspension_object_pattern, .marker = "1", .message = "Unexpected number '1'. Expected either a closing '}' or an ',' after a property destructuring pattern." },
+        .{ .source = "async function* outer(){ async (a = yield 1) => 0; }", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
+        .{ .source = "async function* outer(){ async (a = await 1) => 0; }", .reason = .unexpected_token, .marker = "=>", .message = "Unexpected token '=>'" },
+        .{ .source = "async (a = (await 1)) => 0", .reason = .arrow_await_compound_expression, .marker = "1", .message = "Unexpected number '1'. Expected ')' to end a compound expression." },
+        .{ .source = "async ({[await 1]: a}) => 0", .reason = .arrow_await_computed_property, .marker = "1", .message = "Unexpected number '1'. Expected ']' to end a computed property name." },
+        .{ .source = "async function outer(){ ({[await 1]: a}) => 0; }", .reason = .arrow_suspension_computed_property, .marker = "1", .message = "Unexpected number '1'. Expected ']' to end end a computed property name." },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.reason.parseError(), parser.parseProgram());
+        try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
+        try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+
+    const accepted = [_][]const u8{
+        "function* outer(){ (a = function(b = yield){}) => 0; }",
+        "async function outer(){ (a = function(b = await){}) => 0; }",
+    };
+    for (accepted) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
 }
 
 test "parser retains object and destructuring pattern diagnostics" {
