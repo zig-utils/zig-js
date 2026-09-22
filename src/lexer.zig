@@ -104,6 +104,11 @@ pub const Token = struct {
 /// report it as `RangeError: Maximum call stack size exceeded.`.
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory, StackExhausted };
 
+/// ECMAScript selects one of these lexical goal symbols at each parser
+/// boundary. They differ only at `/`: InputElementDiv emits division tokens,
+/// while InputElementRegExp scans a complete regular-expression literal.
+pub const LexicalGoal = enum { div, regexp, automatic };
+
 const identifier_property: u8 = 1 << 0;
 const identifier_escaped: u8 = 1 << 1;
 const identifier_for_await: u8 = 1 << 2;
@@ -178,6 +183,20 @@ pub const Lexer = struct {
 
     pub fn htmlCommentOffset(self: *const Lexer) ?usize {
         return self.first_html_comment_offset;
+    }
+
+    /// Copy the scanner state for a disposable parser lookahead. The two
+    /// variable-depth stacks need independent backing: a speculative pop/push
+    /// must not overwrite the committed lexer's retained entries.
+    pub fn fork(self: *const Lexer, allocator: std.mem.Allocator) LexError!Lexer {
+        var result = self.*;
+        result.arena = allocator;
+        result.outer_control_paren_depths = .empty;
+        result.template_brace_depths = .empty;
+        try result.outer_control_paren_depths.appendSlice(allocator, self.outer_control_paren_depths.items);
+        errdefer result.outer_control_paren_depths.deinit(allocator);
+        try result.template_brace_depths.appendSlice(allocator, self.template_brace_depths.items);
+        return result;
     }
 
     fn peek(self: *Lexer) u8 {
@@ -495,11 +514,15 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) LexError!Token {
+        return self.nextWithGoal(.automatic);
+    }
+
+    pub fn nextWithGoal(self: *Lexer, goal: LexicalGoal) LexError!Token {
         const prev = self.prev_kind;
         const prev_text = self.prev_text;
         const prev_identifier_context = self.prev_identifier_context;
         self.line_terminator_before_token = false;
-        var t = self.nextRaw() catch |err| {
+        var t = self.nextRaw(goal) catch |err| {
             self.last_error_offset = @min(self.i, self.src.len);
             return err;
         };
@@ -578,6 +601,18 @@ pub const Lexer = struct {
         return t;
     }
 
+    /// Replace the just-scanned division punctuator with the RegExp literal
+    /// selected by the parser's InputElementRegExp goal. A slash changes none
+    /// of the structural lexer stacks, so rewinding this one token preserves
+    /// the exact template/trivia state while advancing the real lexer past the
+    /// complete literal.
+    pub fn reinterpretSlashAsRegex(self: *Lexer, slash: Token) LexError!Token {
+        std.debug.assert(slash.kind == .slash or slash.kind == .slash_eq);
+        std.debug.assert(self.i == slash.end);
+        self.i = slash.pos;
+        return self.nextWithGoal(.regexp);
+    }
+
     /// True when a `/` here begins a regex literal rather than division — i.e.
     /// the previous token does not end an expression.
     fn regexAllowed(self: *Lexer) bool {
@@ -596,7 +631,7 @@ pub const Lexer = struct {
         };
     }
 
-    fn nextRaw(self: *Lexer) LexError!Token {
+    fn nextRaw(self: *Lexer, goal: LexicalGoal) LexError!Token {
         try self.skipTrivia();
         const start = self.i;
         if (self.i >= self.src.len) {
@@ -617,7 +652,7 @@ pub const Lexer = struct {
         if (c == '#' and self.peek2() == '!' and start == 0) {
             self.i += 2;
             self.skipSingleLineCommentBody();
-            return self.nextRaw();
+            return self.nextRaw(goal);
         }
         // Numbers
         if (std.ascii.isDigit(c) or (c == '.' and std.ascii.isDigit(self.peek2()))) {
@@ -690,8 +725,7 @@ pub const Lexer = struct {
                 return tok(.star, self.src[start..self.i], start);
             },
             '/' => {
-                // Regex literal where an expression is expected.
-                if (self.regexAllowed()) {
+                if (goal == .regexp or (goal == .automatic and self.regexAllowed())) {
                     self.i = start; // rewind to the opening `/`
                     return self.lexRegex();
                 }

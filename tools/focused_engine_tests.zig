@@ -207,6 +207,23 @@ const frontend_cases = [_]Case{
         .expected = 1048575,
     },
     .{
+        .name = "parser lexical goals distinguish contextual regex and division",
+        .source =
+        \\var bits = 0;
+        \\label: {} /\"/.test("\\\"") && (bits |= 1);
+        \\switch (0) { case 0: {} /\"/.test("\\\"") && (bits |= 2); }
+        \\var divided = class {} / 2; if (divided !== divided) bits |= 4;
+        \\function* generator(){ yield /\"/.source; } if (generator().next().value === "\\\"") bits |= 8;
+        \\async function task(){ return await /\"/.source; } bits |= 16;
+        \\var arrow = (first = /[)]/, second = class {} / 2) => second; if (arrow() !== arrow()) bits |= 32;
+        \\for (var first = /[;]/, value = class {} / 2; value; value--) {} bits |= 64;
+        \\if ((class {} / 2) !== (class {} / 2)) bits |= 128;
+        \\var nested = (first = `${`)`}`, second = class {} / 2) => second; if (nested() !== nested()) bits |= 256;
+        \\bits
+        ,
+        .expected = 511,
+    },
+    .{
         .name = "class private field",
         .source = "class C { #x = 7; get() { return this.#x; } } new C().get()",
         .expected = 7,

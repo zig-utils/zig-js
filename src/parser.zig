@@ -12,6 +12,7 @@ const stack_scan = @import("stack_scan.zig");
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
 const Node = ast.Node;
+const synthetic_eof_token: Token = .{ .kind = .eof, .text = "", .pos = 0 };
 
 pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, InvalidAssignmentTarget };
 
@@ -483,9 +484,14 @@ pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
 /// Recursive-descent + precedence-climbing parser producing an arena-allocated
 /// AST for the v1 subset (expressions, var/let/const, if/else, while, blocks).
 pub const Parser = struct {
-    tokens: []Token,
+    tokens: std.ArrayListUnmanaged(Token),
     pos: usize = 0,
+    current_token: *const Token = &synthetic_eof_token,
     arena: std.mem.Allocator,
+    token_allocator: std.mem.Allocator,
+    lexer: lex.Lexer,
+    lex_error: ?ParseError = null,
+    lex_error_offset: usize = 0,
     /// Freeable backing for invocation-local indexes. AST nodes, tokens, and
     /// source-derived names remain arena-owned; scratch tables never own keys.
     scratch_allocator: std.mem.Allocator,
@@ -498,9 +504,13 @@ pub const Parser = struct {
     /// pointer is stack-local to parsing and never escapes or enters the AST.
     regex_validation_arena: ?*std.heap.ArenaAllocator = null,
     /// The matching `)` of every `(` token, by token index, or
-    /// `no_matching_paren`. Built once, the first time an arrow lookahead crosses
-    /// deep nesting, and arena-owned like the tokens it indexes (#933 item 8b).
+    /// `no_matching_paren`. Arrow lookahead builds this inside its disposable
+    /// arena when nesting crosses the linear-scan threshold (#933 item 8b).
     paren_close: ?[]u32 = null,
+    /// Source-offset results retained from the disposable parenthesis index.
+    /// Unlike token indexes, these remain valid after speculative tokens are
+    /// discarded and make every nested arrow query after the first O(1).
+    arrow_lookahead: std.AutoHashMapUnmanaged(usize, bool) = .empty,
     /// Var-scoped names declared inside the body of the outermost lexical `for`
     /// being parsed in the current var scope, each with the order of its latest
     /// declaration. A lexical head asks this whether its body var-declares one
@@ -680,34 +690,44 @@ pub const Parser = struct {
     }
 
     pub fn initWithScratchDiagnostic(arena: std.mem.Allocator, scratch_allocator: std.mem.Allocator, source: []const u8, diagnostic: *?SourceLocation) ParseError!Parser {
-        var list: std.ArrayListUnmanaged(Token) = .empty;
-        return initWithTokenStorage(arena, scratch_allocator, source, arena, &list, diagnostic);
-    }
-
-    fn initWithTokenStorage(arena: std.mem.Allocator, scratch_allocator: std.mem.Allocator, source: []const u8, token_allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(Token), diagnostic: *?SourceLocation) ParseError!Parser {
         diagnostic.* = null;
-        list.clearRetainingCapacity();
-        var lx = lex.Lexer.init(arena, source);
-        while (true) {
-            const t = lx.next() catch |err| {
-                diagnostic.* = sourceLocationAt(source, lx.errorOffset());
-                return err;
-            };
-            try list.append(token_allocator, t);
-            if (t.kind == .eof) break;
-        }
-        return .{
-            .tokens = list.items,
+        const lx = lex.Lexer.init(arena, source);
+        var parser: Parser = .{
+            .tokens = .empty,
             .arena = arena,
+            .token_allocator = arena,
+            .lexer = lx,
             .scratch_allocator = scratch_allocator,
             .source = source,
             .html_comment_offset = lx.htmlCommentOffset(),
             .stack_floor = stack_scan.nestingStackFloor(),
         };
+        parser.fillTokenRun(.div);
+        if (parser.tokens.items.len != 0) parser.current_token = &parser.tokens.items[0];
+        return parser;
     }
 
     fn secureHashState(self: *Parser) *SecureHashState {
         return self.shared_secure_hash_state orelse &self.secure_hash_state;
+    }
+
+    fn streamError(self: *Parser, fallback: ?ParseError) ?ParseError {
+        const html_offset = if (self.module) self.html_comment_offset else null;
+        if (html_offset) |offset| {
+            if (self.lex_error == null or offset <= self.lex_error_offset) {
+                self.last_error_offset = offset;
+                self.last_error_reason = null;
+                self.last_error_token = null;
+                return ParseError.UnexpectedToken;
+            }
+        }
+        if (self.lex_error) |err| {
+            self.last_error_offset = @min(self.lex_error_offset, self.source.len);
+            self.last_error_reason = null;
+            self.last_error_token = null;
+            return err;
+        }
+        return fallback;
     }
 
     fn secureStringMap(self: *Parser, comptime Value: type) SecureStringMapUnmanaged(Value) {
@@ -749,14 +769,79 @@ pub const Parser = struct {
     /// capture a function's exact definition text for `Function.prototype.toString`.
     fn sourceFrom(self: *Parser, start_pos: usize) []const u8 {
         if (self.source.len == 0 or self.pos == 0) return "";
-        const lo = self.tokens[start_pos].pos;
-        const hi = self.tokens[self.pos - 1].end;
+        const lo = self.tokenAt(start_pos).pos;
+        const hi = self.tokenAt(self.pos - 1).end;
         if (lo > hi or hi > self.source.len) return "";
         return self.source[lo..hi];
     }
 
-    fn cur(self: *Parser) Token {
-        return self.tokens[self.pos];
+    fn appendNextToken(self: *Parser, goal: lex.LexicalGoal) void {
+        if (self.lex_error != null) return;
+        if (self.tokens.items.len != 0 and self.tokens.items[self.tokens.items.len - 1].kind == .eof) return;
+        const token = self.lexer.nextWithGoal(goal) catch |err| {
+            self.lex_error = err;
+            self.lex_error_offset = self.lexer.errorOffset();
+            return;
+        };
+        self.tokens.append(self.token_allocator, token) catch {
+            self.lex_error = error.OutOfMemory;
+            self.lex_error_offset = token.pos;
+            return;
+        };
+    }
+
+    /// Lex one parser-selected token and then batch the unambiguous run that
+    /// follows it. InputElementDiv makes `/` a one-token boundary, so the loop
+    /// never crosses the next place where grammar context is required. Ordinary
+    /// slash-free source keeps the eager lexer's tight linear loop instead of
+    /// paying a parser/allocator round trip per token.
+    fn fillTokenRun(self: *Parser, first_goal: lex.LexicalGoal) void {
+        self.appendNextToken(first_goal);
+        scan: while (self.lex_error == null and self.tokens.items.len != 0) {
+            switch (self.tokens.items[self.tokens.items.len - 1].kind) {
+                .eof, .slash, .slash_eq => break :scan,
+                else => self.appendNextToken(.div),
+            }
+        }
+        if (self.pos < self.tokens.items.len) self.current_token = &self.tokens.items[self.pos];
+        self.html_comment_offset = self.lexer.htmlCommentOffset();
+    }
+
+    fn ensureToken(self: *Parser, index: usize) void {
+        while (self.tokens.items.len <= index and self.lex_error == null) self.appendNextToken(.automatic);
+        if (self.pos < self.tokens.items.len) self.current_token = &self.tokens.items[self.pos];
+        self.html_comment_offset = self.lexer.htmlCommentOffset();
+    }
+
+    fn tokenAt(self: *Parser, index: usize) Token {
+        self.ensureToken(index);
+        if (index < self.tokens.items.len) return self.tokens.items[index];
+        return .{
+            .kind = .eof,
+            .text = "",
+            .pos = @min(self.lex_error_offset, self.source.len),
+            .end = @min(self.lex_error_offset, self.source.len),
+        };
+    }
+
+    inline fn cur(self: *const Parser) Token {
+        return self.current_token.*;
+    }
+
+    fn curRegExp(self: *Parser) Token {
+        if (self.tokens.items.len <= self.pos) self.fillTokenRun(.regexp);
+        if (self.pos + 1 == self.tokens.items.len and
+            (self.tokens.items[self.pos].kind == .slash or self.tokens.items[self.pos].kind == .slash_eq))
+        {
+            const token = self.lexer.reinterpretSlashAsRegex(self.tokens.items[self.pos]) catch |err| {
+                self.lex_error = err;
+                self.lex_error_offset = self.lexer.errorOffset();
+                return self.tokenAt(self.pos);
+            };
+            self.tokens.items[self.pos] = token;
+            self.current_token = &self.tokens.items[self.pos];
+        }
+        return self.current_token.*;
     }
     fn containsLineTerminator(bytes: []const u8) bool {
         if (std.mem.indexOfScalar(u8, bytes, '\n') != null) return true;
@@ -772,13 +857,15 @@ pub const Parser = struct {
 
     fn hasLineTerminatorBefore(self: *Parser, ahead: usize) bool {
         const idx = self.pos + ahead;
-        if (idx == 0 or idx >= self.tokens.len) return false;
-        const gap = self.source[self.tokens[idx - 1].end..self.tokens[idx].pos];
+        if (idx == 0) return false;
+        const current = self.tokenAt(idx);
+        if (idx >= self.tokens.items.len) return false;
+        const gap = self.source[self.tokenAt(idx - 1).end..current.pos];
         return containsLineTerminator(gap);
     }
 
     fn fail(self: *Parser, err: ParseError) ParseError {
-        self.last_error_offset = if (self.pos < self.tokens.len) self.cur().pos else self.source.len;
+        self.last_error_offset = if (self.pos < self.tokens.items.len) self.cur().pos else self.source.len;
         self.last_error_reason = null;
         self.last_error_token = null;
         return err;
@@ -821,7 +908,7 @@ pub const Parser = struct {
     }
 
     pub fn errorLocation(self: *const Parser) SourceLocation {
-        const offset = self.last_error_offset orelse if (self.pos < self.tokens.len) self.tokens[self.pos].pos else self.source.len;
+        const offset = self.last_error_offset orelse if (self.pos < self.tokens.items.len) self.tokens.items[self.pos].pos else self.source.len;
         return sourceLocationAt(self.source, offset);
     }
 
@@ -881,12 +968,15 @@ pub const Parser = struct {
     }
 
     fn advance(self: *Parser) Token {
-        const t = self.tokens[self.pos];
-        if (self.pos + 1 < self.tokens.len) self.pos += 1;
+        const t = self.cur();
+        if (t.kind == .eof) return t;
+        self.pos += 1;
+        if (self.tokens.items.len <= self.pos) self.fillTokenRun(.div);
+        self.current_token = if (self.pos < self.tokens.items.len) &self.tokens.items[self.pos] else &synthetic_eof_token;
         return t;
     }
 
-    fn check(self: *Parser, kind: TokenKind) bool {
+    inline fn check(self: *Parser, kind: TokenKind) bool {
         return self.cur().kind == kind;
     }
 
@@ -925,8 +1015,7 @@ pub const Parser = struct {
     /// The token `ahead` positions from the cursor has kind `kind`.
     fn peekIs(self: *Parser, ahead: usize, kind: TokenKind) bool {
         const idx = self.pos + ahead;
-        if (idx >= self.tokens.len) return false;
-        return self.tokens[idx].kind == kind;
+        return self.tokenAt(idx).kind == kind;
     }
 
     /// A label after `break`/`continue` on the same logical line.
@@ -1036,7 +1125,7 @@ pub const Parser = struct {
             // is a declaration — not `let` the identifier followed by an operator
             // keyword (`let in x`, `let instanceof X`), which stays an expression.
             .identifier => blk: {
-                const t1 = self.tokens[self.pos + 1].text;
+                const t1 = self.tokenAt(self.pos + 1).text;
                 break :blk !isReservedWord(t1) or std.mem.eql(u8, t1, "let") or
                     std.mem.eql(u8, t1, "yield") or std.mem.eql(u8, t1, "await");
             },
@@ -1059,14 +1148,14 @@ pub const Parser = struct {
     }
 
     fn parenWrappedIdentifierBefore(self: *Parser, pos: usize, name: []const u8) bool {
-        if (pos == 0 or self.tokens[pos - 1].kind != .rparen) return false;
+        if (pos == 0 or self.tokens.items[pos - 1].kind != .rparen) return false;
         var i = pos;
         var depth: usize = 0;
         var saw_ident = false;
         var ident_matches = false;
         while (i > 0) {
             i -= 1;
-            const t = self.tokens[i];
+            const t = self.tokens.items[i];
             switch (t.kind) {
                 .rparen => depth += 1,
                 .lparen => {
@@ -1107,25 +1196,31 @@ pub const Parser = struct {
     // ----- program / statements -------------------------------------------
 
     pub fn parseProgram(self: *Parser) ParseError!*Node {
-        if (self.regex_validation_arena != null) return self.parseProgramInner();
-        var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
-        defer validation_arena.deinit();
-        self.regex_validation_arena = &validation_arena;
-        defer self.regex_validation_arena = null;
-        return self.parseProgramInner();
+        const program = if (self.regex_validation_arena != null)
+            self.parseProgramInner()
+        else
+            parse: {
+                var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
+                defer validation_arena.deinit();
+                self.regex_validation_arena = &validation_arena;
+                defer self.regex_validation_arena = null;
+                break :parse self.parseProgramInner();
+            } catch |err| return self.streamError(err).?;
+        if (self.streamError(null)) |err| return err;
+        return program;
     }
 
     fn parseProgramInner(self: *Parser) ParseError!*Node {
         // A top-level `"use strict"` directive prologue makes the whole program
         // (and every function in it, by inheritance) strict.
         var i: usize = self.pos;
-        while (i < self.tokens.len and self.tokens[i].kind == .string) {
-            if (std.mem.eql(u8, self.tokens[i].text, "use strict")) {
+        while (self.tokenAt(i).kind == .string) {
+            if (std.mem.eql(u8, self.tokenAt(i).text, "use strict")) {
                 self.strict = true;
                 break;
             }
             i += 1;
-            if (i < self.tokens.len and self.tokens[i].kind == .semicolon) i += 1;
+            if (self.tokenAt(i).kind == .semicolon) i += 1;
         }
         var stmts: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.eof)) {
@@ -1846,12 +1941,18 @@ pub const Parser = struct {
     /// Parse the token stream as a Module: a Module is always strict, and its
     /// top level additionally permits `import`/`export` declarations.
     pub fn parseModule(self: *Parser) ParseError!*Node {
-        if (self.regex_validation_arena != null) return self.parseModuleInner();
-        var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
-        defer validation_arena.deinit();
-        self.regex_validation_arena = &validation_arena;
-        defer self.regex_validation_arena = null;
-        return self.parseModuleInner();
+        const program = if (self.regex_validation_arena != null)
+            self.parseModuleInner()
+        else
+            parse: {
+                var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
+                defer validation_arena.deinit();
+                self.regex_validation_arena = &validation_arena;
+                defer self.regex_validation_arena = null;
+                break :parse self.parseModuleInner();
+            } catch |err| return self.streamError(err).?;
+        if (self.streamError(null)) |err| return err;
+        return program;
     }
 
     fn parseModuleInner(self: *Parser) ParseError!*Node {
@@ -2149,7 +2250,7 @@ pub const Parser = struct {
             // scope exit is not yet implemented). `using` not followed (on the
             // same line) by a binding identifier is an ordinary expression.
             if (std.mem.eql(u8, t.text, "using") and self.peekKind(1) == .identifier and
-                self.noNewlineBefore(1) and !isReservedWord(self.tokens[self.pos + 1].text))
+                self.noNewlineBefore(1) and !isReservedWord(self.tokens.items[self.pos + 1].text))
             {
                 // A `using` declaration is only valid in a Block/function body or
                 // at Module top level — not at Script top level or in a switch
@@ -2488,7 +2589,7 @@ pub const Parser = struct {
 
     /// `dispose`: 0 = ordinary `var`/`let`/`const`, 1 = `using`, 2 = `await using`.
     fn parseVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
-        const await_offset = if (dispose == 2 and self.pos > 0) self.tokens[self.pos - 1].pos else 0;
+        const await_offset = if (dispose == 2 and self.pos > 0) self.tokens.items[self.pos - 1].pos else 0;
         _ = self.advance(); // var/let/const/using
         // One or more comma-separated declarators: `let a, {b} = obj, c = 1`.
         var decls: std.ArrayListUnmanaged(*Node) = .empty;
@@ -2670,7 +2771,7 @@ pub const Parser = struct {
         // failure: retrying repeats the same descent (at every enclosing head,
         // so the work doubles per level) and a `for await` head would report it
         // as a SyntaxError (#936).
-        const for_target = if (classic_using_of_decl or classic_async_of_arrow or self.classicForHeadAhead()) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
+        const for_target = if (classic_using_of_decl or classic_async_of_arrow or try self.classicForHeadAhead()) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
             error.StackExhausted, error.OutOfMemory => return err,
             else => null,
         };
@@ -2725,6 +2826,7 @@ pub const Parser = struct {
         }
         if (is_await) return ParseError.UnexpectedToken;
         self.pos = save; // not an iteration form — rewind and parse a classic for
+        self.current_token = &self.tokens.items[self.pos];
         // Discard locations for function bodies reached while refining the cover
         // grammar. The discarded AST is arena-owned but unreachable; publishing
         // its nodes would create ghost debugger locations and leave the forward
@@ -2787,11 +2889,44 @@ pub const Parser = struct {
     /// re-parsed every nested function body in the head -- and a `for` nested
     /// inside one of those bodies repeated that at its own level, so the work
     /// and the arena both doubled per level (#939).
-    fn classicForHeadAhead(self: *const Parser) bool {
+    fn classicForHeadAhead(self: *Parser) ParseError!bool {
+        const start_offset = self.cur().pos;
+        const saved_lexer = self.lexer;
+        const saved_token_len = self.tokens.items.len;
+        const saved_lex_error = self.lex_error;
+        const saved_lex_error_offset = self.lex_error_offset;
+        const saved_html_comment_offset = self.html_comment_offset;
+
+        // Keep a successful lookahead's token cache: nested for heads depend on
+        // that one-pass frontier for #939's linear growth. The fork protects the
+        // committed structural stacks. A slash-dependent scan discards the
+        // cache and restores the exact committed scanner before the bounded
+        // two-goal source scan resolves the head shape.
+        self.lexer = try saved_lexer.fork(self.arena);
+        self.lex_error = null;
+        const classic = self.classicForHeadAheadSpeculative();
+        var saw_slash = false;
+        for (self.tokens.items[self.pos..]) |token| {
+            if (isSlashToken(token.kind)) {
+                saw_slash = true;
+                break;
+            }
+        }
+        if (self.lex_error == null and !saw_slash) return classic;
+
+        self.tokens.items.len = saved_token_len;
+        self.lexer = saved_lexer;
+        self.lex_error = saved_lex_error;
+        self.lex_error_offset = saved_lex_error_offset;
+        self.html_comment_offset = saved_html_comment_offset;
+        return self.sourceClassicForHead(start_offset);
+    }
+
+    fn classicForHeadAheadSpeculative(self: *Parser) bool {
         var depth: usize = 0;
         var i = self.pos;
-        while (i < self.tokens.len) : (i += 1) {
-            switch (self.tokens[i].kind) {
+        while (true) : (i += 1) {
+            switch (self.tokenAt(i).kind) {
                 .lparen, .lbracket, .lbrace => depth += 1,
                 .rparen => {
                     // The head's own `)`: no `;` above it, so this is an
@@ -2804,6 +2939,59 @@ pub const Parser = struct {
                 .semicolon => if (depth == 0) return true,
                 .eof => return false,
                 else => {},
+            }
+        }
+        return false;
+    }
+
+    fn sourceClassicForHead(self: *Parser, start_offset: usize) ParseError!bool {
+        var pending: std.ArrayListUnmanaged(ParenScanState) = .empty;
+        defer pending.deinit(self.scratch_allocator);
+        var visited = std.AutoHashMapUnmanaged(ParenScanState, void).empty;
+        defer visited.deinit(self.scratch_allocator);
+        try pending.append(self.scratch_allocator, .{ .offset = start_offset, .depth = 0 });
+
+        while (pending.pop()) |initial| {
+            var state = initial;
+            while (state.offset < self.source.len) {
+                const entry = try visited.getOrPut(self.scratch_allocator, state);
+                if (entry.found_existing) break;
+                const c = self.source[state.offset];
+                if (c == '\'' or c == '"') {
+                    state.offset = scanQuotedSource(self.source, state.offset, c) orelse break;
+                    continue;
+                }
+                if (c == '`') {
+                    state.offset = scanTemplateSource(self.source, state.offset) orelse break;
+                    continue;
+                }
+                if (c == '/' and state.offset + 1 < self.source.len and self.source[state.offset + 1] == '/') {
+                    state.offset += 2;
+                    while (state.offset < self.source.len and lex.lineTerminatorLen(self.source, state.offset) == null) state.offset += 1;
+                    continue;
+                }
+                if (c == '/' and state.offset + 1 < self.source.len and self.source[state.offset + 1] == '*') {
+                    const end = std.mem.indexOfPos(u8, self.source, state.offset + 2, "*/") orelse break;
+                    state.offset = end + 2;
+                    continue;
+                }
+                if (c == '/') {
+                    if (scanRegexSource(self.source, state.offset)) |regex_end|
+                        try pending.append(self.scratch_allocator, .{ .offset = regex_end, .depth = state.depth });
+                    state.offset += if (state.offset + 1 < self.source.len and self.source[state.offset + 1] == '=') 2 else 1;
+                    continue;
+                }
+                switch (c) {
+                    '(', '[', '{' => state.depth += 1,
+                    ')' => {
+                        if (state.depth == 0) break;
+                        state.depth -= 1;
+                    },
+                    ']', '}' => state.depth -|= 1,
+                    ';' => if (state.depth == 0) return true,
+                    else => {},
+                }
+                state.offset += 1;
             }
         }
         return false;
@@ -2825,6 +3013,7 @@ pub const Parser = struct {
             if (node.* == .member or node.* == .super_member) return node;
             if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) return try self.litToPattern(node);
             self.pos = start;
+            self.current_token = &self.tokens.items[self.pos];
             return null;
         }
         if (decl_kind != null) {
@@ -3329,10 +3518,10 @@ pub const Parser = struct {
     /// statement-separating `;`) and stop at the first non-directive token.
     fn peekUseStrict(self: *Parser) bool {
         var i = self.pos;
-        if (i >= self.tokens.len or self.tokens[i].kind != .lbrace) return false;
+        if (self.tokenAt(i).kind != .lbrace) return false;
         i += 1;
-        while (i < self.tokens.len and self.tokens[i].kind == .string) {
-            const t = self.tokens[i];
+        while (self.tokenAt(i).kind == .string) {
+            const t = self.tokenAt(i);
             // A "use strict" directive must be the EXACT source `'use strict'` /
             // `"use strict"` — no escapes or line continuations. The decoded text
             // matching isn't enough (`'use \strict'` decodes to "use strict" but
@@ -3340,7 +3529,7 @@ pub const Parser = struct {
             // text: end - pos == text.len + 2 (the two quote characters).
             if (std.mem.eql(u8, t.text, "use strict") and t.end - t.pos == t.text.len + 2) return true;
             i += 1;
-            if (i < self.tokens.len and self.tokens[i].kind == .semicolon) i += 1;
+            if (self.tokenAt(i).kind == .semicolon) i += 1;
         }
         return false;
     }
@@ -3364,40 +3553,11 @@ pub const Parser = struct {
     }
 
     fn parseRegexLiteralFromSlash(self: *Parser) ParseError!*Node {
-        const start = self.cur().pos;
-        var i = start + 1;
-        var in_class = false;
-        while (i < self.source.len) : (i += 1) {
-            const c = self.source[i];
-            if (c == '\n' or c == '\r') return ParseError.UnexpectedToken;
-            if (c == '\\') {
-                i += 1;
-                if (i >= self.source.len) return ParseError.UnexpectedToken;
-                continue;
-            }
-            if (c == '[') {
-                in_class = true;
-                continue;
-            }
-            if (c == ']') {
-                in_class = false;
-                continue;
-            }
-            if (c == '/' and !in_class) {
-                const pattern = self.source[start + 1 .. i];
-                var end = i + 1;
-                while (end < self.source.len and isIdentifierPartByte(self.source[end])) : (end += 1) {}
-                const flags = self.source[i + 1 .. end];
-                try self.validateRegexLiteral(pattern, flags, start);
-                while (self.pos < self.tokens.len and self.tokens[self.pos].pos < end) self.pos += 1;
-                return self.alloc(.{ .regex_literal = .{ .pattern = pattern, .flags = flags } });
-            }
-        }
-        return ParseError.UnexpectedToken;
-    }
-
-    fn isIdentifierPartByte(c: u8) bool {
-        return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+        const token = self.curRegExp();
+        if (token.kind != .regex) return ParseError.UnexpectedToken;
+        _ = self.advance();
+        try self.validateRegexLiteral(token.text, token.flags, token.pos);
+        return self.alloc(.{ .regex_literal = .{ .pattern = token.text, .flags = token.flags } });
     }
 
     /// Whether the current token can begin an expression (used to decide if a
@@ -3437,8 +3597,8 @@ pub const Parser = struct {
         if (isKeyword(self.cur(), "async") and !self.cur().escaped_identifier and self.noNewlineBefore(1)) {
             const start = self.pos;
             if (self.peekKind(1) == .identifier and self.peekKind(2) == .arrow and
-                !isAlwaysReservedBinding(self.tokens[self.pos + 1].text) and
-                !(self.strict and isStrictReservedBinding(self.tokens[self.pos + 1].text)))
+                !isAlwaysReservedBinding(self.tokens.items[self.pos + 1].text) and
+                !(self.strict and isStrictReservedBinding(self.tokens.items[self.pos + 1].text)))
             {
                 _ = self.advance(); // async
                 const param = self.advance().text;
@@ -3503,14 +3663,14 @@ pub const Parser = struct {
                 .call => if (!self.strict and isAnnexBCallAssignmentTarget(left)) left else return self.failWithReasonAt(.invalid_assignment, self.cur().pos),
                 .array_lit, .object_lit => self.litToPattern(left) catch |err| {
                     if (err == ParseError.InvalidAssignmentTarget)
-                        return self.failWithReasonAt(.invalid_destructuring_assignment, self.tokens[expression_start].pos);
+                        return self.failWithReasonAt(.invalid_destructuring_assignment, self.tokens.items[expression_start].pos);
                     return err;
                 },
                 else => return self.failWithReasonAt(.invalid_assignment, self.cur().pos),
             };
             // Strict mode forbids assigning to `eval`/`arguments`.
             if (self.strict and target.* == .identifier and isEvalOrArguments(target.identifier))
-                return self.failWithReasonAt(if (std.mem.eql(u8, target.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens[expression_start].pos);
+                return self.failWithReasonAt(if (std.mem.eql(u8, target.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens.items[expression_start].pos);
             // A parenthesized LHS (`(f) = function(){}`) is not an IdentifierRef,
             // so NamedEvaluation does not apply — the function stays anonymous.
             const assign_pos = self.pos;
@@ -3545,7 +3705,7 @@ pub const Parser = struct {
                 (self.strict or !isAnnexBCallAssignmentTarget(left)))
                 return self.failWithReasonAt(.invalid_assignment, self.cur().pos);
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
-                return self.failWithReasonAt(if (std.mem.eql(u8, left.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens[expression_start].pos);
+                return self.failWithReasonAt(if (std.mem.eql(u8, left.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens.items[expression_start].pos);
             _ = self.advance();
             const rhs = try self.parseAssignment();
             return self.alloc(.{ .op_assign = .{ .target = left, .op = op, .value = rhs } });
@@ -3562,7 +3722,7 @@ pub const Parser = struct {
             if (left.* != .identifier and left.* != .member and left.* != .super_member)
                 return self.failWithReasonAt(.invalid_assignment, self.cur().pos);
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
-                return self.failWithReasonAt(if (std.mem.eql(u8, left.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens[expression_start].pos);
+                return self.failWithReasonAt(if (std.mem.eql(u8, left.identifier, "eval")) .strict_modify_eval else .strict_modify_arguments, self.tokens.items[expression_start].pos);
             // A parenthesized LHS (`(a) ||= function(){}`) is not an IdentifierRef,
             // so NamedEvaluation does not apply (mirrors the plain-`=` check above).
             const assign_pos = self.pos;
@@ -3580,16 +3740,13 @@ pub const Parser = struct {
     }
 
     fn peekKind(self: *Parser, ahead: usize) TokenKind {
-        const idx = self.pos + ahead;
-        return if (idx < self.tokens.len) self.tokens[idx].kind else .eof;
+        return self.tokenAt(self.pos + ahead).kind;
     }
 
     /// True if the token `ahead` of the cursor is an identifier with text `word`
     /// (i.e. one of the contextual keywords the lexer emits as identifiers).
     fn peekIsKeyword(self: *Parser, ahead: usize, word: []const u8) bool {
-        const idx = self.pos + ahead;
-        if (idx >= self.tokens.len) return false;
-        const t = self.tokens[idx];
+        const t = self.tokenAt(self.pos + ahead);
         return t.kind == .identifier and std.mem.eql(u8, t.text, word);
     }
 
@@ -3619,9 +3776,225 @@ pub const Parser = struct {
     /// Like `arrowAhead`, but scanning a `(` that begins at token index `start`
     /// (used to peek past an `async` modifier: `async (params) => …`).
     fn arrowAheadAt(self: *Parser, start: usize) ParseError!bool {
-        const close = (try self.matchingParen(start)) orelse return false;
-        const next = if (close + 1 < self.tokens.len) self.tokens[close + 1].kind else .eof;
-        return next == .arrow;
+        const open_offset = self.tokenAt(start).pos;
+        if (self.arrow_lookahead.get(open_offset)) |cached| return cached;
+        const saved_lexer = self.lexer;
+        const saved_token_len = self.tokens.items.len;
+        const saved_lex_error = self.lex_error;
+        const saved_lex_error_offset = self.lex_error_offset;
+        const saved_html_comment_offset = self.html_comment_offset;
+        const saved_paren_close = self.paren_close;
+
+        var lookahead_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
+        defer lookahead_arena.deinit();
+        const scan = scan: {
+            self.lexer = try saved_lexer.fork(lookahead_arena.allocator());
+            self.lex_error = null;
+            self.paren_close = null;
+            defer {
+                self.tokens.items.len = saved_token_len;
+                self.lexer = saved_lexer;
+                self.lex_error = saved_lex_error;
+                self.lex_error_offset = saved_lex_error_offset;
+                self.html_comment_offset = saved_html_comment_offset;
+                self.paren_close = saved_paren_close;
+            }
+
+            const close = try self.matchingParen(start);
+            const guessed = if (close) |index| self.tokenAt(index + 1).kind == .arrow else false;
+            const scan_end = if (close) |index| @min(index + 1, self.tokens.items.len) else self.tokens.items.len;
+            var saw_slash = false;
+            for (self.tokens.items[start..scan_end]) |token| {
+                if (isSlashToken(token.kind)) {
+                    saw_slash = true;
+                    break;
+                }
+            }
+            const ambiguous = self.lex_error != null or saw_slash;
+            if (!ambiguous) {
+                if (self.paren_close) |table| {
+                    for (self.tokens.items, 0..) |token, index| {
+                        if (token.kind != .lparen or index >= table.len) continue;
+                        const close_index = table[index];
+                        if (close_index == no_matching_paren) continue;
+                        try self.arrow_lookahead.put(
+                            self.arena,
+                            token.pos,
+                            self.tokenAt(@as(usize, close_index) + 1).kind == .arrow,
+                        );
+                    }
+                } else try self.arrow_lookahead.put(self.arena, open_offset, guessed);
+            }
+            break :scan .{
+                .guessed = guessed,
+                .ambiguous = ambiguous,
+            };
+        };
+
+        if (!scan.ambiguous) return scan.guessed;
+        return self.sourceParenFollowedByArrow(open_offset);
+    }
+
+    const ParenScanState = struct { offset: usize, depth: usize };
+
+    fn isSlashToken(kind: TokenKind) bool {
+        return kind == .slash or kind == .slash_eq or kind == .regex;
+    }
+
+    /// Resolve a slash-ambiguous arrow lookahead without committing either
+    /// lexical interpretation. Each slash contributes its division continuation
+    /// and, when a complete literal exists, its RegExp continuation. Equal
+    /// (offset, depth) states converge, so repeated ambiguity remains bounded by
+    /// the source span rather than multiplying paths.
+    fn sourceParenFollowedByArrow(self: *Parser, open_offset: usize) ParseError!bool {
+        var pending: std.ArrayListUnmanaged(ParenScanState) = .empty;
+        defer pending.deinit(self.scratch_allocator);
+        var visited = std.AutoHashMapUnmanaged(ParenScanState, void).empty;
+        defer visited.deinit(self.scratch_allocator);
+        try pending.append(self.scratch_allocator, .{ .offset = open_offset + 1, .depth = 1 });
+
+        while (pending.pop()) |initial| {
+            var state = initial;
+            while (state.offset < self.source.len) {
+                const entry = try visited.getOrPut(self.scratch_allocator, state);
+                if (entry.found_existing) break;
+
+                const c = self.source[state.offset];
+                if (c == '\'' or c == '"') {
+                    state.offset = scanQuotedSource(self.source, state.offset, c) orelse break;
+                    continue;
+                }
+                if (c == '`') {
+                    state.offset = scanTemplateSource(self.source, state.offset) orelse break;
+                    continue;
+                }
+                if (c == '/' and state.offset + 1 < self.source.len and self.source[state.offset + 1] == '/') {
+                    state.offset += 2;
+                    while (state.offset < self.source.len and lex.lineTerminatorLen(self.source, state.offset) == null) state.offset += 1;
+                    continue;
+                }
+                if (c == '/' and state.offset + 1 < self.source.len and self.source[state.offset + 1] == '*') {
+                    const end = std.mem.indexOfPos(u8, self.source, state.offset + 2, "*/") orelse break;
+                    state.offset = end + 2;
+                    continue;
+                }
+                if (c == '/') {
+                    if (scanRegexSource(self.source, state.offset)) |regex_end|
+                        try pending.append(self.scratch_allocator, .{ .offset = regex_end, .depth = state.depth });
+                    state.offset += if (state.offset + 1 < self.source.len and self.source[state.offset + 1] == '=') 2 else 1;
+                    continue;
+                }
+                if (c == '(') {
+                    state.depth += 1;
+                } else if (c == ')') {
+                    state.depth -= 1;
+                    if (state.depth == 0) {
+                        var after = state.offset + 1;
+                        while (after < self.source.len and std.ascii.isWhitespace(self.source[after])) after += 1;
+                        if (after + 1 < self.source.len and self.source[after] == '=' and self.source[after + 1] == '>') return true;
+                        break;
+                    }
+                }
+                state.offset += 1;
+            }
+        }
+        return false;
+    }
+
+    fn scanQuotedSource(source: []const u8, start: usize, quote: u8) ?usize {
+        var i = start + 1;
+        while (i < source.len) {
+            if (source[i] == '\\') {
+                i += 2;
+                continue;
+            }
+            if (source[i] == quote) return i + 1;
+            if (lex.lineTerminatorLen(source, i) != null) return null;
+            i += 1;
+        }
+        return null;
+    }
+
+    fn scanTemplateSource(source: []const u8, start: usize) ?usize {
+        var i = start + 1;
+        while (i < source.len) {
+            if (source[i] == '\\') {
+                i += 2;
+                continue;
+            }
+            if (source[i] == '`') return i + 1;
+            if (source[i] == '$' and i + 1 < source.len and source[i + 1] == '{') {
+                i = scanTemplateSubstitutionSource(source, i + 2) orelse return null;
+                continue;
+            }
+            i += 1;
+        }
+        return null;
+    }
+
+    fn scanTemplateSubstitutionSource(source: []const u8, start: usize) ?usize {
+        var i = start;
+        var brace_depth: usize = 0;
+        while (i < source.len) {
+            const c = source[i];
+            if (c == '\'' or c == '"') {
+                i = scanQuotedSource(source, i, c) orelse return null;
+                continue;
+            }
+            if (c == '`') {
+                i = scanTemplateSource(source, i) orelse return null;
+                continue;
+            }
+            if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+                i += 2;
+                while (i < source.len and lex.lineTerminatorLen(source, i) == null) i += 1;
+                continue;
+            }
+            if (c == '/' and i + 1 < source.len and source[i + 1] == '*') {
+                const end = std.mem.indexOfPos(u8, source, i + 2, "*/") orelse return null;
+                i = end + 2;
+                continue;
+            }
+            switch (c) {
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return i + 1;
+                    brace_depth -= 1;
+                },
+                else => {},
+            }
+            i += 1;
+        }
+        return null;
+    }
+
+    fn scanRegexSource(source: []const u8, start: usize) ?usize {
+        var i = start + 1;
+        var in_class = false;
+        while (i < source.len) {
+            if (lex.lineTerminatorLen(source, i) != null) return null;
+            switch (source[i]) {
+                '\\' => i += 2,
+                '[' => {
+                    in_class = true;
+                    i += 1;
+                },
+                ']' => {
+                    in_class = false;
+                    i += 1;
+                },
+                '/' => {
+                    if (!in_class) {
+                        i += 1;
+                        while (i < source.len and (std.ascii.isAlphanumeric(source[i]) or source[i] == '_' or source[i] == '$')) i += 1;
+                        return i;
+                    }
+                    i += 1;
+                },
+                else => i += 1,
+            }
+        }
+        return null;
     }
 
     const no_matching_paren = std.math.maxInt(u32);
@@ -3642,11 +4015,11 @@ pub const Parser = struct {
         }
         var depth: usize = 0;
         var i = start;
-        while (i < self.tokens.len) : (i += 1) {
-            switch (self.tokens[i].kind) {
+        while (true) : (i += 1) {
+            switch (self.tokenAt(i).kind) {
                 .lparen => {
                     depth += 1;
-                    if (depth > deep_paren_nesting and self.tokens.len < no_matching_paren) {
+                    if (depth > deep_paren_nesting and self.tokens.items.len < no_matching_paren) {
                         try self.indexParens();
                         return self.matchingParen(start);
                     }
@@ -3662,15 +4035,22 @@ pub const Parser = struct {
         return null;
     }
 
-    /// Record every `(`'s matching `)` in one pass over the tokens. The token
-    /// array never changes after lexing, so the index stays exact for the rest
-    /// of the parse.
+    /// Fill the disposable lookahead's token frontier, then record every `(`'s
+    /// matching `)` in one pass. The index is used only while that frontier is
+    /// stable; durable arrow results are translated to source offsets.
     fn indexParens(self: *Parser) ParseError!void {
-        const table = try self.arena.alloc(u32, self.tokens.len);
+        while (self.tokens.items.len == 0 or self.tokens.items[self.tokens.items.len - 1].kind != .eof) {
+            const before = self.tokens.items.len;
+            self.appendNextToken(.automatic);
+            if (self.tokens.items.len == before) break;
+        }
+        if (self.pos < self.tokens.items.len) self.current_token = &self.tokens.items[self.pos];
+        self.html_comment_offset = self.lexer.htmlCommentOffset();
+        const table = try self.arena.alloc(u32, self.tokens.items.len);
         @memset(table, no_matching_paren);
         var open: std.ArrayListUnmanaged(u32) = .empty;
         defer open.deinit(self.scratch_allocator);
-        for (self.tokens, 0..) |token, index| switch (token.kind) {
+        for (self.tokens.items, 0..) |token, index| switch (token.kind) {
             .lparen => try open.append(self.scratch_allocator, @intCast(index)),
             .rparen => if (open.pop()) |opener| {
                 table[opener] = @intCast(index);
@@ -3975,7 +4355,7 @@ pub const Parser = struct {
             // Strict mode forbids updating `eval`/`arguments`: `"use strict";
             // eval++;` is a SyntaxError.
             if (self.strict and m.* == .identifier and isEvalOrArguments(m.identifier))
-                return self.failWithReasonAt(if (std.mem.eql(u8, m.identifier, "eval")) .strict_postfix_eval else .strict_postfix_arguments, self.tokens[start_token].pos);
+                return self.failWithReasonAt(if (std.mem.eql(u8, m.identifier, "eval")) .strict_postfix_eval else .strict_postfix_arguments, self.tokens.items[start_token].pos);
             _ = self.advance();
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = false, .target = m } });
         }
@@ -4007,10 +4387,10 @@ pub const Parser = struct {
     /// token, so `a  .  b  (1)` names the callee `a  .  b  `.
     fn callSourceFrom(self: *Parser, start_token: usize, callee_end_token: usize) CallSource {
         const text = self.sourceFrom(start_token);
-        if (text.len == 0 or start_token >= self.tokens.len or callee_end_token >= self.tokens.len)
+        if (text.len == 0 or start_token >= self.tokens.items.len or callee_end_token >= self.tokens.items.len)
             return .{};
-        const lo = self.tokens[start_token].pos;
-        const hi = self.tokens[callee_end_token].pos;
+        const lo = self.tokens.items[start_token].pos;
+        const hi = self.tokens.items[callee_end_token].pos;
         if (hi < lo or hi - lo > text.len) return .{ .text = text };
         return .{ .text = text, .callee_len = @intCast(hi - lo) };
     }
@@ -4122,7 +4502,7 @@ pub const Parser = struct {
             // Keep the NewTarget early error attached to its own source token.
             // Template substitutions now share this parser and its offsets.
             if (self.new_target_depth == 0)
-                return self.failWithReasonAt(if (self.fn_depth > 0) .new_target_in_global_arrow else .new_target_outside_function, self.tokens[new_start_token].pos);
+                return self.failWithReasonAt(if (self.fn_depth > 0) .new_target_in_global_arrow else .new_target_outside_function, self.tokens.items[new_start_token].pos);
             return self.alloc(.new_target_expr);
         }
         const parenthesized_callee = self.check(.lparen);
@@ -5686,7 +6066,7 @@ pub const Parser = struct {
             try self.parseDecorators();
             return self.parseClassExpr();
         }
-        if (self.check(.slash)) return self.parseRegexLiteralFromSlash();
+        if (self.check(.regex) or self.check(.slash) or self.check(.slash_eq)) return self.parseRegexLiteralFromSlash();
         if (self.check(.lbrace)) return self.parseObjectLiteral();
         if (self.check(.lbracket)) return self.parseArrayLiteral();
         const t = self.advance();
@@ -6085,12 +6465,13 @@ test "parser records current token source location for expected-token failures" 
     try std.testing.expectEqual(@as(usize, 12), loc.column);
 }
 
-test "parser init reports lexer failure source location" {
+test "parser stream reports lexer failure source location" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diagnostic: ?SourceLocation = null;
-    try std.testing.expectError(lex.LexError.UnterminatedString, Parser.initWithDiagnostic(arena.allocator(), "let ok = 1;\n'", &diagnostic));
-    const loc = diagnostic orelse return error.TestUnexpectedResult;
+    var parser = try Parser.initWithDiagnostic(arena.allocator(), "let ok = 1;\n'", &diagnostic);
+    try std.testing.expectError(lex.LexError.UnterminatedString, parser.parseProgram());
+    const loc = parser.errorLocation();
     try std.testing.expectEqual(@as(usize, 2), loc.line);
     try std.testing.expectEqual(@as(usize, 2), loc.column);
 }
@@ -6423,6 +6804,31 @@ test "yield and await regex operands retain postfix member tails" {
         "async function f(){ return await /a/.source; }",
     };
     for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+}
+
+test "parser lexical goals distinguish regex literals from division in grammar context" {
+    const cases = [_][]const u8{
+        "label: {} /\"/.test(\"\\\"\");",
+        "switch (0) { case 0: {} /\"/.test(\"\\\"\"); }",
+        "var value = class {} / 2;",
+        "function* generator(){ yield /\"/.source; }",
+        "async function task(){ return await /\"/.source; }",
+        "(value = class {} / 2) => value;",
+        "(value = /[)]/) => value;",
+        "(first = /[)]/, second = class {} / 2) => second;",
+        "(first = `${`)`}`, second = class {} / 2) => second;",
+        "var arrow = (first = /[)]/, second = class {} / 2) => second;",
+        "(class {} / 2);",
+        "for (var value = class {} / 2; value; value--) {}",
+        "for (var first = /[;]/, value = class {} / 2; value; value--) {}",
+    };
+
+    for (cases) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var parser = try Parser.init(arena.allocator(), source);
@@ -6799,8 +7205,10 @@ test "parser enforces Unicode identifier properties in bindings and private name
         "class C { #☃; }",
         "class C { #a☃; }",
     };
-    for (invalid) |source|
-        try std.testing.expectError(lex.LexError.UnexpectedCharacter, Parser.init(arena.allocator(), source));
+    for (invalid) |source| {
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(lex.LexError.UnexpectedCharacter, parser.parseProgram());
+    }
 }
 
 test "parser accepts ASI line terminators between statements" {
@@ -8366,17 +8774,17 @@ test "parser does not propagate module await into function parameters" {
     try std.testing.expectError(ParseError.UnexpectedToken, expr_param.parseModule());
 }
 
-test "module parsing reuses one token stream and rejects Script HTML comments" {
+test "module parsing extends one goal-bounded token stream and rejects Script HTML comments" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     var module = try Parser.init(arena.allocator(), "import { value } from './dependency.js'; export { value };");
-    const token_pointer = module.tokens.ptr;
-    const token_count = module.tokens.len;
+    const initial_token_count = module.tokens.items.len;
+    try std.testing.expect(initial_token_count > 0);
     const program = try module.parseModule();
     try std.testing.expectEqual(@as(usize, 2), program.program.len);
-    try std.testing.expectEqual(token_pointer, module.tokens.ptr);
-    try std.testing.expectEqual(token_count, module.tokens.len);
+    try std.testing.expect(module.tokens.items.len >= initial_token_count);
+    try std.testing.expectEqual(TokenKind.eof, module.tokens.items[module.tokens.items.len - 1].kind);
 
     const source = "var before = 1;\n  --> hidden\nvar after = 2;";
     var script = try Parser.init(arena.allocator(), source);
