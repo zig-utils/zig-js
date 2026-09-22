@@ -104,6 +104,45 @@ pub const Token = struct {
 /// report it as `RangeError: Maximum call stack size exceeded.`.
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory, StackExhausted };
 
+pub const DiagnosticReason = enum {
+    generic,
+    invalid_character,
+    invalid_identifier_escape,
+    invalid_unicode_identifier_escape,
+    numeric_identifier,
+    numeric_escaped_identifier,
+    missing_hex_digits,
+    missing_binary_digits,
+    missing_octal_digits,
+    missing_exponent_digits,
+    invalid_hex_string_escape,
+    invalid_unicode_string_escape,
+    unterminated_string_escape,
+    unterminated_string,
+    unterminated_comment,
+};
+
+pub fn isSyntaxError(err: anyerror) bool {
+    return switch (err) {
+        error.UnexpectedCharacter,
+        error.UnterminatedString,
+        error.UnterminatedComment,
+        error.InvalidNumber,
+        => true,
+        else => false,
+    };
+}
+
+pub fn fallbackDiagnosticMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnexpectedCharacter => "Invalid character",
+        error.UnterminatedString => "Unexpected end of script",
+        error.UnterminatedComment => "Multiline comment was not closed properly",
+        error.InvalidNumber => "Invalid numeric literal",
+        else => @errorName(err),
+    };
+}
+
 /// ECMAScript selects one of these lexical goal symbols at each parser
 /// boundary. They differ only at `/`: InputElementDiv emits division tokens,
 /// while InputElementRegExp scans a complete regular-expression literal.
@@ -139,7 +178,9 @@ pub const Lexer = struct {
     outer_control_paren_depths: std.ArrayListUnmanaged(usize) = .empty,
     last_rparen_control: bool = false,
     last_identifier_escaped: bool = false,
-    last_error_offset: ?usize = null,
+    last_error_reason: DiagnosticReason = .generic,
+    last_error_offset: usize = std.math.maxInt(usize),
+    last_error_start: usize = 0,
     /// Brace depth for each active TemplateSubstitution. A zero top entry means
     /// the next `}` selects TemplateMiddle or TemplateTail instead of the
     /// ordinary punctuator. Substitution contents otherwise use this lexer's
@@ -178,7 +219,58 @@ pub const Lexer = struct {
     }
 
     pub fn errorOffset(self: *const Lexer) usize {
-        return self.last_error_offset orelse @min(self.i, self.src.len);
+        return if (self.last_error_offset == std.math.maxInt(usize))
+            @min(self.i, self.src.len)
+        else
+            self.last_error_offset;
+    }
+
+    pub fn diagnosticMessage(self: *const Lexer, allocator: std.mem.Allocator, err: anyerror) std.mem.Allocator.Error![]const u8 {
+        const start = @min(self.last_error_start, self.src.len);
+        const raw_end = switch (self.last_error_reason) {
+            .invalid_character, .invalid_identifier_escape, .invalid_unicode_identifier_escape => self.i,
+            .numeric_escaped_identifier => self.rawEscapedIdentifierEnd(start),
+            else => self.errorOffset(),
+        };
+        const end = @max(start, @min(raw_end, self.src.len));
+        const spelling = self.src[start..end];
+        return switch (self.last_error_reason) {
+            .invalid_character => std.fmt.allocPrint(allocator, "Invalid character: '{s}'", .{spelling}),
+            .invalid_identifier_escape => std.fmt.allocPrint(allocator, "Invalid escape in identifier: '{s}'", .{spelling}),
+            .invalid_unicode_identifier_escape => std.fmt.allocPrint(allocator, "Invalid unicode escape in identifier: '{s}'", .{spelling}),
+            .numeric_identifier => "No identifiers allowed directly after numeric literal",
+            .numeric_escaped_identifier => std.fmt.allocPrint(allocator, "Unexpected identifier '{s}'", .{spelling}),
+            .missing_hex_digits => "No hexadecimal digits after '0x'",
+            .missing_binary_digits => "No binary digits after '0b'",
+            .missing_octal_digits => "No octal digits after '0o'",
+            .missing_exponent_digits => "Non-number found after exponent indicator",
+            .invalid_hex_string_escape => "\\x can only be followed by a hex character sequence",
+            .invalid_unicode_string_escape => "\\u can only be followed by a Unicode character sequence",
+            .unterminated_string_escape => "Unterminated string constant",
+            .unterminated_string => "Unexpected end of script",
+            .unterminated_comment => "Multiline comment was not closed properly",
+            .generic => fallbackDiagnosticMessage(err),
+        };
+    }
+
+    pub fn restoreErrorDiagnostic(self: *Lexer, saved: *const Lexer) void {
+        self.last_error_offset = saved.last_error_offset;
+        self.last_error_start = saved.last_error_start;
+        self.last_error_reason = saved.last_error_reason;
+    }
+
+    fn fail(self: *Lexer, err: LexError, reason: DiagnosticReason, start: usize) LexError {
+        self.last_error_start = @min(start, self.src.len);
+        self.last_error_reason = reason;
+        self.last_error_offset = @min(self.i, self.src.len);
+        return err;
+    }
+
+    fn failAt(self: *Lexer, err: LexError, reason: DiagnosticReason, start: usize, offset: usize) LexError {
+        self.last_error_start = @min(start, self.src.len);
+        self.last_error_reason = reason;
+        self.last_error_offset = @min(offset, self.src.len);
+        return err;
     }
 
     pub fn htmlCommentOffset(self: *const Lexer) ?usize {
@@ -221,7 +313,8 @@ pub const Lexer = struct {
                 self.i += 2;
                 self.skipSingleLineCommentBody();
             } else if (c == '/' and self.peek2() == '*') {
-                const had_nl = self.skipBlockComment() catch return LexError.UnterminatedComment;
+                const comment_start = self.i;
+                const had_nl = self.skipBlockComment() catch return self.failAt(LexError.UnterminatedComment, .unterminated_comment, comment_start, comment_start);
                 // A block comment containing a line terminator counts as a
                 // LineTerminatorSequence for the purpose of a following `-->`.
                 if (had_nl) {
@@ -371,6 +464,40 @@ pub const Lexer = struct {
         return self.lexIdentNameWithOwnedPrefix("", validated_start_len);
     }
 
+    /// Find the raw end of an escaped IdentifierName without decoding or
+    /// allocating. This is used only to retain the offending spelling after a
+    /// numeric literal; the committed lexer cursor remains at the backslash so
+    /// structured source coordinates still identify the start of the token.
+    fn rawEscapedIdentifierEnd(self: *const Lexer, start: usize) usize {
+        var cursor = start;
+        while (cursor < self.src.len) {
+            const c = self.src[cursor];
+            if (c == '\\') {
+                if (cursor + 1 >= self.src.len or self.src[cursor + 1] != 'u') break;
+                cursor += 2;
+                if (cursor < self.src.len and self.src[cursor] == '{') {
+                    cursor += 1;
+                    while (cursor < self.src.len and self.src[cursor] != '}') cursor += 1;
+                    if (cursor < self.src.len) cursor += 1;
+                } else {
+                    cursor = @min(cursor + 4, self.src.len);
+                }
+                continue;
+            }
+            if (c < 0x80) {
+                if (!isIdentPart(c)) break;
+                cursor += 1;
+                continue;
+            }
+            const len = std.unicode.utf8ByteSequenceLength(c) catch break;
+            if (cursor + len > self.src.len) break;
+            const cp = std.unicode.utf8Decode(self.src[cursor .. cursor + len]) catch break;
+            if (!isIdContinueCp(cp)) break;
+            cursor += len;
+        }
+        return cursor;
+    }
+
     /// Advance across complete ASCII IdentifierPart blocks only when every lane
     /// is valid. A mixed block stays untouched so the caller can distinguish an
     /// escape, non-ASCII scalar, malformed byte, or exact token delimiter at the
@@ -415,7 +542,7 @@ pub const Lexer = struct {
             // identStartLen uses zero only for a leading `\u` escape. Entering
             // the owned decoder directly removes first-vs-part work from every
             // raw continuation byte while preserving its failure path.
-            if (self.src[self.i] != '\\') return LexError.UnexpectedCharacter;
+            if (self.src[self.i] != '\\') return self.failAt(LexError.UnexpectedCharacter, .invalid_character, self.i, self.i);
             return self.lexEscapedIdentName(start, true, owned_prefix);
         }
         self.i += validated_start_len;
@@ -451,12 +578,15 @@ pub const Lexer = struct {
             if (c == '\\') {
                 const escape_start = self.i;
                 self.i += 1;
-                if (self.peek() != 'u') return LexError.UnexpectedCharacter;
+                if (self.peek() != 'u') return self.failAt(LexError.UnexpectedCharacter, .invalid_identifier_escape, start, escape_start);
                 self.i += 1; // 'u'
-                const cp = try self.scanUnicodeEscapeCp();
-                if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp))) return LexError.UnexpectedCharacter;
+                const cp = self.scanUnicodeEscapeCp() catch |err|
+                    return self.failAt(err, .invalid_unicode_identifier_escape, start, escape_start);
+                if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp)))
+                    return self.failAt(LexError.UnexpectedCharacter, .invalid_unicode_identifier_escape, start, escape_start);
                 var encoded: [4]u8 = undefined;
-                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return LexError.UnexpectedCharacter;
+                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch
+                    return self.failAt(LexError.UnexpectedCharacter, .invalid_unicode_identifier_escape, start, escape_start);
                 // Decode during the validating scan. Ordinary source bytes stay
                 // borrowed until an escape requires owned storage, then move in
                 // contiguous spans rather than one append per byte.
@@ -523,7 +653,8 @@ pub const Lexer = struct {
         const prev_identifier_context = self.prev_identifier_context;
         self.line_terminator_before_token = false;
         var t = self.nextRaw(goal) catch |err| {
-            self.last_error_offset = @min(self.i, self.src.len);
+            if (self.last_error_offset == std.math.maxInt(usize))
+                self.last_error_offset = @min(self.i, self.src.len);
             return err;
         };
         // A real token has been scanned: a subsequent `-->` is only an HTML close
@@ -635,7 +766,8 @@ pub const Lexer = struct {
         try self.skipTrivia();
         const start = self.i;
         if (self.i >= self.src.len) {
-            if (self.template_brace_depths.items.len != 0) return LexError.UnterminatedString;
+            if (self.template_brace_depths.items.len != 0)
+                return self.fail(LexError.UnterminatedString, .unterminated_string, start);
             return .{ .kind = .eof, .text = "", .pos = start };
         }
 
@@ -660,7 +792,13 @@ pub const Lexer = struct {
             // A numeric literal may not be immediately followed by an
             // IdentifierStart (a digit is already consumed): `3in`, `3abc`,
             // `3.toString()` are SyntaxErrors.
-            if (self.i < self.src.len and self.identStartLen() != null) return LexError.UnexpectedCharacter;
+            if (self.i < self.src.len) if (self.identStartLen()) |identifier_start_len| {
+                if (identifier_start_len == 0) {
+                    const identifier_start = self.i;
+                    return self.fail(LexError.UnexpectedCharacter, .numeric_escaped_identifier, identifier_start);
+                }
+                return self.fail(LexError.UnexpectedCharacter, .numeric_identifier, start);
+            };
             return num;
         }
         // Identifiers / keywords — ASCII, Unicode letters, or `\u` escapes.
@@ -672,7 +810,8 @@ pub const Lexer = struct {
         // `#` may itself use Unicode letters or `\u` escapes.
         if (c == '#') {
             self.i += 1; // '#'
-            const start_len = self.identStartLen() orelse return LexError.UnexpectedCharacter;
+            const start_len = self.identStartLen() orelse
+                return self.failAt(LexError.UnexpectedCharacter, .invalid_character, start, start);
             const name = try self.lexIdentNameWithOwnedPrefix("#", start_len);
             // The token's complete unescaped spelling is already stable source.
             // Escapes seed their one owned decoded buffer with `#` directly.
@@ -877,7 +1016,12 @@ pub const Lexer = struct {
             },
             '~' => return tok(.tilde, self.src[start..self.i], start),
             '@' => return tok(.at, self.src[start..self.i], start),
-            else => return LexError.UnexpectedCharacter,
+            else => return self.failAt(
+                LexError.UnexpectedCharacter,
+                if (c == '\\') .invalid_identifier_escape else .invalid_character,
+                start,
+                start,
+            ),
         }
     }
 
@@ -895,7 +1039,15 @@ pub const Lexer = struct {
                 self.i += 2;
                 const ds = self.i;
                 while (self.i < self.src.len and (isRadixDigit(self.src[self.i], r) or self.src[self.i] == '_')) self.i += 1;
-                if (!separatorsValid(self.src[ds..self.i], r)) return LexError.InvalidNumber;
+                if (self.i == ds or !separatorsValid(self.src[ds..self.i], r)) {
+                    const reason: DiagnosticReason = if (self.i == ds or self.src[ds] == '_') switch (r) {
+                        2 => .missing_binary_digits,
+                        8 => .missing_octal_digits,
+                        16 => .missing_hex_digits,
+                        else => unreachable,
+                    } else .numeric_identifier;
+                    return self.failAt(LexError.InvalidNumber, reason, start, start);
+                }
                 const cleaned = try stripSeparators(self.arena, self.src[ds..self.i]);
                 if (self.peek() == 'n') {
                     self.i += 1; // `0xFFn` — a BigInt literal.
@@ -905,8 +1057,11 @@ pub const Lexer = struct {
                     } else |_| {}
                     return .{ .kind = .number, .text = self.src[start..self.i], .pos = start, .is_bigint = true, .bigint_text = try radixDigitsToDecimal(self.arena, cleaned, r) };
                 }
-                const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
-                return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start };
+                const n: f64 = if (std.fmt.parseInt(u128, cleaned, r)) |integer|
+                    @floatFromInt(integer)
+                else |_|
+                    try radixIntegerToF64(cleaned, r);
+                return .{ .kind = .number, .text = self.src[start..self.i], .number = n, .pos = start };
             }
         }
         while (self.i < self.src.len and (std.ascii.isDigit(self.src[self.i]) or self.src[self.i] == '_')) self.i += 1;
@@ -922,17 +1077,30 @@ pub const Lexer = struct {
         // Decimal separators must sit between two decimal digits — `.`, `e`,
         // signs, and the `n` suffix are not digits, so e.g. `1_.5`, `1_e3`, `1_n`
         // are rejected. A `0`-prefixed legacy literal admits no separators at all.
-        if (!separatorsValid(self.src[start..self.i], 10)) return LexError.InvalidNumber;
+        if (!separatorsValid(self.src[start..self.i], 10)) {
+            const literal = self.src[start..self.i];
+            const exponent = std.mem.indexOfAny(u8, literal, "eE");
+            const reason: DiagnosticReason = if (exponent) |index| reason: {
+                if (index != 0 and literal[index - 1] == '_') break :reason .numeric_identifier;
+                var digit_index = index + 1;
+                if (digit_index < literal.len and (literal[digit_index] == '+' or literal[digit_index] == '-')) digit_index += 1;
+                break :reason if (digit_index >= literal.len or literal[digit_index] == '_') .missing_exponent_digits else .numeric_identifier;
+            } else .numeric_identifier;
+            return self.failAt(LexError.InvalidNumber, reason, start, start);
+        }
         if (self.src[start] == '0' and self.i - start > 1 and
             (std.ascii.isDigit(self.src[start + 1]) or self.src[start + 1] == '_') and
-            std.mem.indexOfScalar(u8, self.src[start..self.i], '_') != null) return LexError.InvalidNumber;
+            std.mem.indexOfScalar(u8, self.src[start..self.i], '_') != null)
+            return self.failAt(LexError.InvalidNumber, .numeric_identifier, start, start);
         if (self.peek() == 'n') {
             // `123n` — a decimal BigInt literal (no fraction/exponent allowed).
-            if (std.mem.indexOfAny(u8, self.src[start..self.i], ".eE") != null) return LexError.InvalidNumber;
+            if (std.mem.indexOfAny(u8, self.src[start..self.i], ".eE") != null)
+                return self.failAt(LexError.InvalidNumber, .numeric_identifier, start, start);
             // The integer part may not have a leading zero: only `0n` is legal,
             // `00n`/`01n`/`08n`/`0123n` (legacy-octal-like or non-octal-decimal)
             // are SyntaxErrors in every mode.
-            if (self.src[start] == '0' and self.i - start > 1) return LexError.InvalidNumber;
+            if (self.src[start] == '0' and self.i - start > 1)
+                return self.failAt(LexError.InvalidNumber, .numeric_identifier, start, start);
             const digits = try stripSeparators(self.arena, self.src[start..self.i]);
             self.i += 1;
             if (std.fmt.parseInt(i128, digits, 10)) |bi| {
@@ -942,7 +1110,8 @@ pub const Lexer = struct {
             }
         }
         const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
-        var n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
+        var n = std.fmt.parseFloat(f64, cleaned) catch
+            return self.failAt(LexError.InvalidNumber, if (std.mem.indexOfAny(u8, cleaned, "eE") != null) .missing_exponent_digits else .numeric_identifier, start, start);
         // A leading `0` immediately followed by another digit is a legacy octal
         // (`0123`) or non-octal-decimal (`08`) literal — flagged for strict mode.
         const num_tok = self.src[start..self.i];
@@ -1035,7 +1204,7 @@ pub const Lexer = struct {
             if (ch == '\\') {
                 if (cursor + 1 >= self.src.len) {
                     self.i = cursor;
-                    return LexError.UnterminatedString;
+                    return self.fail(LexError.UnterminatedString, .unterminated_string_escape, start);
                 }
                 decoded_len += cursor - raw_start;
                 const e = self.src[cursor + 1];
@@ -1046,7 +1215,11 @@ pub const Lexer = struct {
                 }
                 validateStringEscape(self.src, cursor + 1) catch |err| {
                     self.i = cursor;
-                    return err;
+                    const reason: DiagnosticReason = if (self.src[cursor + 1] == 'x')
+                        .invalid_hex_string_escape
+                    else
+                        .invalid_unicode_string_escape;
+                    return self.fail(err, reason, start);
                 };
                 const escape = decodeEscape(self.src, cursor + 1);
                 if (!decoded) {
@@ -1061,13 +1234,13 @@ pub const Lexer = struct {
                 raw_start = cursor;
             } else if (ch == '\n' or ch == '\r') {
                 self.i = cursor;
-                return LexError.UnterminatedString;
+                return self.fail(LexError.UnterminatedString, .unterminated_string, start);
             } else {
                 cursor += 1;
             }
         }
         self.i = cursor;
-        return LexError.UnterminatedString;
+        return self.fail(LexError.UnterminatedString, .unterminated_string, start);
     }
 
     /// Scan the first quasi of a template. Template substitutions remain in
@@ -1114,7 +1287,7 @@ pub const Lexer = struct {
             }
             self.i += 1;
         }
-        return LexError.UnterminatedString;
+        return self.fail(LexError.UnterminatedString, .unterminated_string, start);
     }
 
     fn lexTemplateContinuation(self: *Lexer) LexError!Token {
@@ -1132,9 +1305,11 @@ pub const Lexer = struct {
         var in_class = false;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
-            if (self.lineTerminatorLenAt(self.i) != null) return LexError.UnterminatedString;
+            if (self.lineTerminatorLenAt(self.i) != null)
+                return self.fail(LexError.UnterminatedString, .unterminated_string, start);
             if (c == '\\') {
-                if (lineTerminatorLen(self.src, self.i + 1) != null) return LexError.UnterminatedString;
+                if (lineTerminatorLen(self.src, self.i + 1) != null)
+                    return self.fail(LexError.UnterminatedString, .unterminated_string, start);
                 self.i += 2;
                 continue;
             }
@@ -1147,7 +1322,8 @@ pub const Lexer = struct {
             }
             self.i += 1;
         }
-        if (self.i >= self.src.len) return LexError.UnterminatedString;
+        if (self.i >= self.src.len)
+            return self.fail(LexError.UnterminatedString, .unterminated_string, start);
         const pattern = self.src[pat_start..self.i];
         self.i += 1; // closing /
         const flags_start = self.i;
@@ -1392,6 +1568,71 @@ fn canonicalDecimalDigits(digits: []const u8) []const u8 {
     // into immutable source and separated digits point into the parser arena's
     // exact normalized allocation. Canonicalization needs only a subslice.
     return digits[i..];
+}
+
+/// Convert an arbitrarily wide binary/octal/hex integer literal directly to
+/// binary64. These radices are powers of two, so retaining the leading 53 bits
+/// plus guard/sticky state gives exact round-to-nearest, ties-to-even without a
+/// temporary bigint or decimal string.
+fn radixIntegerToF64(digits: []const u8, radix: u8) LexError!f64 {
+    const bits_per_digit: usize = switch (radix) {
+        2 => 1,
+        8 => 3,
+        16 => 4,
+        else => return LexError.InvalidNumber,
+    };
+    var first: usize = 0;
+    while (first < digits.len and digits[first] == '0') first += 1;
+    if (first == digits.len) return 0;
+
+    const first_value = std.fmt.charToDigit(digits[first], radix) catch return LexError.InvalidNumber;
+    const first_bits: usize = if (first_value >= 8)
+        4
+    else if (first_value >= 4)
+        3
+    else if (first_value >= 2)
+        2
+    else
+        1;
+    const trailing_bits = std.math.mul(usize, digits.len - first - 1, bits_per_digit) catch return LexError.OutOfMemory;
+    const bit_length = std.math.add(usize, first_bits, trailing_bits) catch return LexError.OutOfMemory;
+    if (bit_length > 1024) return std.math.inf(f64);
+
+    var leading: u64 = 0;
+    var consumed: usize = 0;
+    var guard = false;
+    var sticky = false;
+    for (digits[first..], 0..) |digit, digit_index| {
+        const value = std.fmt.charToDigit(digit, radix) catch return LexError.InvalidNumber;
+        const width = if (digit_index == 0) first_bits else bits_per_digit;
+        var remaining = width;
+        while (remaining != 0) {
+            remaining -= 1;
+            const bit = (value >> @intCast(remaining)) & 1;
+            if (consumed < 53) {
+                leading = (leading << 1) | bit;
+            } else if (consumed == 53) {
+                guard = bit != 0;
+            } else {
+                sticky = sticky or bit != 0;
+            }
+            consumed += 1;
+        }
+    }
+    std.debug.assert(consumed == bit_length);
+    if (bit_length <= 53) return @floatFromInt(leading);
+
+    if (guard and (sticky or (leading & 1) != 0)) leading += 1;
+    var exponent = bit_length - 1;
+    if (leading == (@as(u64, 1) << 53)) {
+        leading >>= 1;
+        exponent += 1;
+    }
+    if (exponent > 1023) return std.math.inf(f64);
+
+    const fraction_mask = (@as(u64, 1) << 52) - 1;
+    const bits = (@as(u64, @intCast(exponent + 1023)) << 52) | (leading & fraction_mask);
+    return @bitCast(bits);
 }
 
 fn radixDigitsToDecimal(arena: std.mem.Allocator, digits: []const u8, radix: u8) LexError![]const u8 {
@@ -1781,6 +2022,22 @@ test "lexer preserves numeric separator values forms and source offsets" {
         var lexer = Lexer.init(arena.allocator(), source);
         try std.testing.expectError(LexError.InvalidNumber, lexer.next());
     }
+
+    const wide_radix = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    var wide_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer wide_arena.deinit();
+    var wide_lexer = Lexer.init(wide_arena.allocator(), wide_radix);
+    const wide = try wide_lexer.next();
+    try std.testing.expectEqual(TokenKind.number, wide.kind);
+    try std.testing.expect(std.math.isFinite(wide.number));
+    try std.testing.expect(wide.number > @as(f64, @floatFromInt(std.math.maxInt(u128))));
+    try std.testing.expectEqual(@as(u64, 0x51f0000000000000), @as(u64, @bitCast(wide.number)));
+    try std.testing.expectEqualStrings(wide_radix, wide.text);
+
+    const rounded_source = "0b100011100010011101010100100111101101001011100001110101001101110101110111101011110011111101111100011110000000010111100000110010100";
+    var rounded_lexer = Lexer.init(wide_arena.allocator(), rounded_source);
+    const rounded = try rounded_lexer.next();
+    try std.testing.expectEqual(@as(u64, 0x47f1c4ea93da5c3b), @as(u64, @bitCast(rounded.number)));
 }
 
 test "lexer borrows canonical oversized decimal BigInt digits" {

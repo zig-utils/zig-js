@@ -17,11 +17,8 @@ const synthetic_eof_token: Token = .{ .kind = .eof, .text = "", .pos = 0 };
 pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, InvalidAssignmentTarget };
 
 pub fn isSyntaxError(err: anyerror) bool {
+    if (lex.isSyntaxError(err)) return true;
     return switch (err) {
-        error.UnexpectedCharacter,
-        error.UnterminatedString,
-        error.UnterminatedComment,
-        error.InvalidNumber,
         error.UnexpectedToken,
         error.ExpectedToken,
         error.InvalidAssignmentTarget,
@@ -35,11 +32,8 @@ pub fn isSyntaxError(err: anyerror) bool {
 /// JavaScriptCore keeps source coordinates on the Error object and reserves
 /// `.message` for the diagnostic itself.
 pub fn fallbackSyntaxErrorMessage(err: anyerror) []const u8 {
+    if (lex.isSyntaxError(err)) return lex.fallbackDiagnosticMessage(err);
     return switch (err) {
-        error.UnexpectedCharacter => "Invalid character",
-        error.UnterminatedString => "Unexpected end of script",
-        error.UnterminatedComment => "Multiline comment was not closed properly",
-        error.InvalidNumber => "Invalid numeric literal",
         error.UnexpectedToken => "Unexpected token",
         error.ExpectedToken => "Unexpected end of script",
         error.InvalidAssignmentTarget => "Left side of assignment is not a reference.",
@@ -1386,6 +1380,8 @@ pub const Parser = struct {
         }
         if (reason == .shorthand_keyword)
             return std.fmt.allocPrint(allocator, "Cannot use the keyword '{s}' as a shorthand property name.", .{token.text});
+        if (reason == .unexpected_token and token.kind == .token and std.mem.eql(u8, token.text, "@"))
+            return "Invalid character: '@'";
         const noun = if (token.kind == .string) "string literal" else @tagName(token.kind);
         const quote = if (token.kind == .string) "" else "'";
         if (reason == .unexpected_token or reason == .expected_token or reason == .arrow_parameter_keyword)
@@ -1397,6 +1393,7 @@ pub const Parser = struct {
         if (self.last_error_reason) |reason| {
             if (err == reason.parseError()) return self.diagnosticMessage(allocator, reason);
         }
+        if (lex.isSyntaxError(err)) return self.lexer.diagnosticMessage(allocator, err);
         return fallbackSyntaxErrorMessage(err);
     }
 
@@ -3687,6 +3684,7 @@ pub const Parser = struct {
             // lexer has the same post-error cursor as `saved_lexer`.
             self.lex_error = saved_lex_error;
             self.lex_error_offset = saved_lex_error_offset;
+            self.lexer.restoreErrorDiagnostic(&saved_lexer);
             return classic;
         }
 
@@ -5982,12 +5980,13 @@ pub const Parser = struct {
     /// it (the syntax is accepted; decorator application is not implemented).
     fn parseDecorators(self: *Parser) ParseError!void {
         while (self.check(.at)) {
-            _ = self.advance(); // @
+            const at_token = self.advance();
             if (self.match(.lparen)) {
                 _ = try self.parseExpression();
                 try self.expect(.rparen);
             } else {
-                if (!self.check(.identifier) and !self.check(.private_name)) return ParseError.UnexpectedToken;
+                if (!self.check(.identifier) and !self.check(.private_name))
+                    return self.failWithToken(.unexpected_token, at_token);
                 _ = self.advance(); // IdentifierReference
                 while (self.check(.dot)) {
                     _ = self.advance();
@@ -7903,6 +7902,43 @@ test "parser stream reports lexer failure source location" {
     const loc = parser.errorLocation();
     try std.testing.expectEqual(@as(usize, 2), loc.line);
     try std.testing.expectEqual(@as(usize, 2), loc.column);
+    try std.testing.expectEqualStrings("Unexpected end of script", try parser.diagnosticMessageForError(arena.allocator(), lex.LexError.UnterminatedString));
+}
+
+test "parser retains lexer diagnostics and offending source locations" {
+    const Case = struct {
+        source: []const u8,
+        err: ParseError,
+        marker: ?[]const u8,
+        message: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "@", .err = ParseError.UnexpectedToken, .marker = "@", .message = "Invalid character: '@'" },
+        .{ .source = "# x", .err = lex.LexError.UnexpectedCharacter, .marker = "#", .message = "Invalid character: '#'" },
+        .{ .source = "var \\x = 1", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Invalid escape in identifier: '\\'" },
+        .{ .source = "var \\u00 = 1", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Invalid unicode escape in identifier: '\\u00'" },
+        .{ .source = "var a\\u002D = 1", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Invalid unicode escape in identifier: 'a\\u002D'" },
+        .{ .source = "'\\x0'", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "\\x can only be followed by a hex character sequence" },
+        .{ .source = "'\\u000'", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "\\u can only be followed by a Unicode character sequence" },
+        .{ .source = "1a", .err = lex.LexError.UnexpectedCharacter, .marker = "a", .message = "No identifiers allowed directly after numeric literal" },
+        .{ .source = "1\\u0061", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Unexpected identifier '\\u0061'" },
+        .{ .source = "0x", .err = lex.LexError.InvalidNumber, .marker = "0", .message = "No hexadecimal digits after '0x'" },
+        .{ .source = "1__0", .err = lex.LexError.InvalidNumber, .marker = "1", .message = "No identifiers allowed directly after numeric literal" },
+        .{ .source = "1e+", .err = lex.LexError.InvalidNumber, .marker = "1", .message = "Non-number found after exponent indicator" },
+        .{ .source = "/*", .err = lex.LexError.UnterminatedComment, .marker = "/", .message = "Multiline comment was not closed properly" },
+        .{ .source = "'a\\", .err = lex.LexError.UnterminatedString, .marker = "\\", .message = "Unterminated string constant" },
+        .{ .source = "'", .err = lex.LexError.UnterminatedString, .marker = null, .message = "Unexpected end of script" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), case.source);
+        try std.testing.expectError(case.err, parser.parseProgram());
+        const expected_offset = if (case.marker) |marker| std.mem.lastIndexOf(u8, case.source, marker).? else case.source.len;
+        try std.testing.expectEqual(expected_offset, parser.errorLocation().byte_offset);
+        try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessageForError(arena.allocator(), case.err));
+    }
 }
 
 test "classic for lookahead preserves a pending lexer failure" {
