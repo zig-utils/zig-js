@@ -195,10 +195,10 @@
       "../zig-gc"
     ],
     "owned_sibling_checkouts": [
-      { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "87e9ca28fa14194dd1e8b4cae7461e179331efca", "occurrences": 8, "edge": "zig-regex" },
+      { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "6e805ad9135f1375bd55a8a783d26edc999d065c", "occurrences": 8, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "0285ef801dd221a4ae8e88b31a09ae31627657a3", "occurrences": 8, "edge": "zig-gc" },
       { "repository": "home-lang/home", "path": "Home/lang", "revision": "d01469e9dd90e84cf9434b056390dcb4667b18bc", "occurrences": 4, "edge": "home-tool-runtime" },
-      { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "87e9ca28fa14194dd1e8b4cae7461e179331efca", "occurrences": 1, "edge": "zig-regex" },
+      { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "6e805ad9135f1375bd55a8a783d26edc999d065c", "occurrences": 1, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "Libraries/zig-gc", "revision": "0285ef801dd221a4ae8e88b31a09ae31627657a3", "occurrences": 1, "edge": "zig-gc" },
       { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "226414abe51a3c539aa27db79c3c7c3bb23fa34f", "occurrences": 1, "edge": "bunpress-docs-toolchain" }
     ],
