@@ -278,12 +278,18 @@ function revision(path: string): string {
   return output(["git", "-C", path, "rev-parse", "HEAD"]);
 }
 
-function assertClean(): void {
+function assertCleanPath(path: string, name: string): void {
   const dirty = output(
-    ["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"],
+    ["git", "-C", path, "status", "--porcelain", "--untracked-files=no"],
     "status unavailable",
   );
-  requireValue(!dirty, `refusing publication from a dirty tracked worktree:\n${dirty}`);
+  requireValue(!dirty, `refusing publication from dirty tracked ${name} inputs:\n${dirty}`);
+}
+
+function assertClean(): void {
+  assertCleanPath(ROOT, "zig-js");
+  assertCleanPath(`${ROOT}/../zig-gc`, "zig-gc");
+  assertCleanPath(`${ROOT}/../zig-regex`, "zig-regex");
 }
 
 function environment(runner: string, zig: string, samples: number, warmups: number): Record<string, string> {
