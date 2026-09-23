@@ -1364,6 +1364,38 @@ const runtime_cases = [_]Case{
         .expected = 4194303,
     },
     .{
+        // zig-regex#30: a failed additional bounded RepeatMatcher iteration
+        // must restore the previous matchState's captures. Keep empty, lazy,
+        // reverse, and successful capture-clearing controls beside the repro.
+        .name = "bounded backtracking repeats retain accepted captures",
+        .source =
+        \\function ex(re, s) {
+        \\  var m = re.exec(s);
+        \\  return m === null ? "null" : JSON.stringify([m.index].concat(Array.prototype.slice.call(m)));
+        \\}
+        \\var checks = [];
+        \\checks.push(ex(/(?=a)(a){1,3}/, "a") === '[0,"a","a"]');
+        \\checks.push(ex(/(?=a)(a|b){1,3}/, "ab") === '[0,"ab","b"]');
+        \\checks.push(ex(/(?:((a+){2,3}|(.){3})){0,3}/, "aABBb") === '[0,"aAB","aAB",null,"B"]');
+        \\checks.push(ex(/((a?){1,2}|b)/, "") === '[0,"","",""]');
+        \\checks.push(ex(/(?=a)(?:(a)|b){1,3}/, "ab") === '[0,"ab",null]');
+        \\checks.push(ex(/(?=a)(a){1,3}/, "aaa") === '[0,"aaa","a"]');
+        \\checks.push(ex(/(?<=(a){1,3})b/, "aab") === '[2,"b","a"]');
+        \\checks.push(ex(/(?=a)(a){1,3}?/, "aaa") === '[0,"a","a"]');
+        \\var re = /(?:((a+){2,3}|(.){3})){0,3}/y;
+        \\re.lastIndex = 1;
+        \\checks.push(ex(re, "zaABBb") === '[1,"aAB","aAB",null,"B"]' && re.lastIndex === 4);
+        \\var captures = false;
+        \\var replaced = "aABBb".replace(/(?:((a+){2,3}|(.){3})){0,3}/, function (m, a, b, c, offset) {
+        \\  captures = m === "aAB" && a === "aAB" && b === undefined && c === "B" && offset === 0;
+        \\  return "X";
+        \\});
+        \\checks.push(captures && replaced === "XBb");
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 1023,
+    },
+    .{
         // zig-regex#31: the regex engine's ReDoS analyzer ran on every compile
         // and refused "critical" patterns outright, so nested quantifiers --
         // ordinary JavaScript -- threw a SyntaxError before they could match.
