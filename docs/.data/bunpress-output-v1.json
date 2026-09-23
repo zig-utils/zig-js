@@ -35,8 +35,8 @@
     },
     {
       "path": "advanced/memory-and-gc/index.html",
-      "bytes": 231843,
-      "sha256": "091bb454cdb07e2a6f091c5c01a6cbd551317eeb7221c5f0f4d17c2c4a3898e8"
+      "bytes": 232092,
+      "sha256": "77b0aff191db9e626f3939260cff5d37747b027e11e7bda1f672deec7d889e24"
     },
     {
       "path": "advanced/verification/index.html",
@@ -65,8 +65,8 @@
     },
     {
       "path": "benchmarks/index.html",
-      "bytes": 433110,
-      "sha256": "d2abccc4613ac8eb9d2ac0a6c6e1047a250fa8ead9a54163fcc62e6df4d16499"
+      "bytes": 433218,
+      "sha256": "0c1279670bb507da14dc82017818db403d77a195f7b1c90b4b527060f6d02bec"
     },
     {
       "path": "c-api/README/index.html",
@@ -181,7 +181,7 @@
     {
       "path": "search-index.json",
       "bytes": 267642,
-      "sha256": "5143f5c7df1243f8289a6808d61c45d16601c34bdb4e271f5e058e702c8e1db4"
+      "sha256": "432bdb164d5ea145def0e87c4894e787c66a17da2bfa1f19a18a09932aa0fedd"
     },
     {
       "path": "sitemap.xml",
@@ -274,5 +274,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "8373a99ae1ff4aa39be0d3bcdf117bf007ae460a1b76ede8f5a9254e85a3d3f6"
+  "tree_sha256": "ca6b029f1f3622bd5d89a7c54a7e5de4c427a991220e927bd0a5833997ccc64e"
 }

@@ -493,6 +493,29 @@ fn printMemoryInventory(writer: *std.Io.Writer, memory: ?js.Context.MemoryInvent
     try writer.writeByte('}');
 }
 
+fn printMemoryPressure(writer: *std.Io.Writer, pressure: ?js.Context.MemoryPressureResult) !void {
+    const result = pressure orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.writeByte('{');
+    inline for (
+        comptime std.meta.fieldNames(js.Context.MemoryPressureResult),
+        comptime std.meta.fieldTypes(js.Context.MemoryPressureResult),
+        0..,
+    ) |name, Field, index| {
+        if (index != 0) try writer.writeByte(',');
+        const item = @field(result, name);
+        switch (@typeInfo(Field)) {
+            .int, .comptime_int => try writer.print("\"{s}\":{d}", .{ name, item }),
+            .bool => try writer.print("\"{s}\":{s}", .{ name, if (item) "true" else "false" }),
+            .@"enum" => try writer.print("\"{s}\":\"{s}\"", .{ name, @tagName(item) }),
+            else => @compileError("memory pressure result contains unsupported field " ++ name),
+        }
+    }
+    try writer.writeByte('}');
+}
+
 fn printTierAttributionRow(
     writer: *std.Io.Writer,
     mode: []const u8,
@@ -503,6 +526,7 @@ fn printTierAttributionRow(
     checksum: f64,
     snapshot: js.Context.TierAttributionSnapshot,
     process: ProcessResourceSnapshot,
+    pressure: ?js.Context.MemoryPressureResult,
 ) !void {
     try writer.print("{{\"kind\":\"zig-js-tier-attribution\",\"mode\":\"{s}\",\"workload\":\"{s}\",\"lanes\":{d},\"jobs\":{d},\"phase\":\"{s}\",\"checksum\":{d:.0},\"execution\":{{", .{
         mode, workload, lanes, jobs, phase, checksum,
@@ -593,6 +617,8 @@ fn printTierAttributionRow(
     }
     try writer.print("],\"full_overflow\":{d}}},\"memory\":", .{snapshot.runtime.full_pauses.overflow});
     try printMemoryInventory(writer, snapshot.memory);
+    try writer.writeAll(",\"memory_pressure\":");
+    try printMemoryPressure(writer, pressure);
     try writer.print(",\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes\":{d},\"retained_rss_bytes\":{d}}}}}\n", .{
         process.cpu_user_ns,
         process.cpu_system_ns,
@@ -837,15 +863,16 @@ fn runAttribution(
     const checkpoint = try configure(ctx, workload, jobs, 0, false);
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "configuration", 0, configuration, configuration_process);
+    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "configuration", 0, configuration, configuration_process, null);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "warmup", 0, warmed, warmed_process);
+    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "warmup", 0, warmed, warmed_process, null);
     const result = try invoke(ctx, checkpoint);
     const invoked = ctx.tierAttributionSnapshot();
     const invoked_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "invocation", result.toNumber(), invoked, invoked_process);
+    const pressure = ctx.relieveMemoryPressure();
+    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "invocation", result.toNumber(), invoked, invoked_process, pressure);
     _ = io;
 }
 
@@ -1302,16 +1329,17 @@ fn runModuleAttribution(
     defer ctx.destroy();
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "configuration", 0, configuration, configuration_process);
+    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "configuration", 0, configuration, configuration_process, null);
     try configureModuleGlobals(ctx, jobs, 0);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "warmup", 0, warmed, warmed_process);
+    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "warmup", 0, warmed, warmed_process, null);
     _ = try ctx.evaluateModule(profile.entry_path, profile.entry_source, profile.host());
     const checksum = (try ctx.evaluate("globalThis.__representativeModuleChecksum")).toNumber();
     const invoked = ctx.tierAttributionSnapshot();
     const invoked_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "invocation", checksum, invoked, invoked_process);
+    const pressure = ctx.relieveMemoryPressure();
+    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "invocation", checksum, invoked, invoked_process, pressure);
     _ = io;
 }
 
@@ -1347,7 +1375,7 @@ fn runSharedAttribution(
     });
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "configuration", 0, configuration, configuration_process);
+    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "configuration", 0, configuration, configuration_process, null);
 
     if (!std.mem.eql(u8, workload, "wasm_threads_wait_notify")) {
         try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
@@ -1364,12 +1392,13 @@ fn runSharedAttribution(
     try prepareShared(ctx, shared_prepare);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "warmup", 0, warmed, warmed_process);
+    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "warmup", 0, warmed, warmed_process, null);
 
     const result = try evaluateShared(ctx, shared_invocation);
     const invoked = ctx.tierAttributionSnapshot();
     const invoked_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "invocation", result.toNumber(), invoked, invoked_process);
+    const pressure = ctx.relieveMemoryPressure();
+    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "invocation", result.toNumber(), invoked, invoked_process, pressure);
     _ = io;
 }
 

@@ -24,6 +24,10 @@ export type MemoryInventorySnapshot = Record<string, any> & {
   gc_generation: CounterMap | null;
   budget: CounterMap | null;
 };
+export type MemoryPressureSnapshot = Record<string, any> & {
+  heap_status: string;
+  native_code_status: string;
+};
 export type TierSnapshot = {
   kind: "zig-js-tier-attribution";
   mode: "single" | "shared" | "module_cold";
@@ -47,6 +51,7 @@ export type TierSnapshot = {
   native_code: CounterMap;
   heap: CounterMap;
   memory: MemoryInventorySnapshot;
+  memory_pressure: MemoryPressureSnapshot | null;
   process: ProcessResourceSnapshot;
 };
 export type TierDelta = {
@@ -362,6 +367,31 @@ const budgetMemoryMetrics = [
   "recovery_reserve_bytes",
   "recovery_reserve_released_bytes",
 ];
+const memoryPressureNumberMetrics = [
+  "schema",
+  "heap_live_bytes_before",
+  "heap_live_bytes_after",
+  "cell_backing_capacity_bytes_before",
+  "cell_backing_capacity_bytes_after",
+  "native_live_bytes_before",
+  "native_live_bytes_after",
+  "native_retired_bytes_before",
+  "native_retired_bytes_after",
+  "native_reclaimed_bytes_total_before",
+  "native_reclaimed_bytes_total_after",
+  "moved_cells",
+  "moved_bytes",
+];
+const memoryPressureBooleanMetrics = ["owns_precise_heap", "owns_native_code"];
+const memoryPressureStatuses = [
+  "unavailable",
+  "observed_shared",
+  "unsafe",
+  "unchanged",
+  "reclaimed",
+  "retired_pending",
+  "out_of_memory",
+];
 
 function requireValue(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -438,6 +468,57 @@ function validateMemoryInventory(memory: MemoryInventorySnapshot, workload: stri
           budget.recovery_reserve_bytes - budget.recovery_reserve_released_bytes &&
         budget.used_bytes === memory.context_backing_current_bytes + memory.recovery_reserve_current_bytes,
       `memory budget inventory does not reconcile for ${workload}`,
+    );
+  }
+}
+
+function validateMemoryPressure(row: TierSnapshot): void {
+  const pressure = row.memory_pressure;
+  if (row.phase !== "invocation") {
+    requireValue(pressure === null, `memory pressure ran before the invocation boundary for ${row.workload}`);
+    return;
+  }
+  requireValue(
+    pressure && typeof pressure === "object" && exactInventory(
+      pressure,
+      [...memoryPressureNumberMetrics, ...memoryPressureBooleanMetrics, "heap_status", "native_code_status"],
+    ),
+    `memory pressure inventory drift for ${row.workload}`,
+  );
+  requireValue(
+    nonnegativeSafeIntegers(pressure, memoryPressureNumberMetrics) && pressure.schema === 1 &&
+      memoryPressureBooleanMetrics.every((name) => typeof pressure[name] === "boolean") &&
+      memoryPressureStatuses.includes(pressure.heap_status) &&
+      memoryPressureStatuses.includes(pressure.native_code_status),
+    `memory pressure result contains invalid values for ${row.workload}`,
+  );
+  requireValue(
+    pressure.owns_precise_heap && pressure.owns_native_code &&
+      ["unchanged", "reclaimed"].includes(pressure.heap_status) &&
+      ["unavailable", "unchanged", "reclaimed"].includes(pressure.native_code_status) &&
+      pressure.heap_live_bytes_before === row.memory.heap_logical_live_bytes &&
+      pressure.heap_live_bytes_after <= pressure.heap_live_bytes_before &&
+      pressure.cell_backing_capacity_bytes_after <= pressure.cell_backing_capacity_bytes_before &&
+      pressure.native_live_bytes_before === row.native_code.live_bytes &&
+      pressure.native_retired_bytes_before === row.native_code.retired_bytes_current &&
+      pressure.native_reclaimed_bytes_total_before === row.native_code.reclaimed_bytes_total &&
+      pressure.native_live_bytes_after === 0 && pressure.native_retired_bytes_after === 0 &&
+      pressure.native_reclaimed_bytes_total_after >= pressure.native_reclaimed_bytes_total_before,
+    `memory pressure result does not reconcile for ${row.workload}`,
+  );
+  if (pressure.native_code_status === "reclaimed") {
+    requireValue(
+      pressure.native_live_bytes_before + pressure.native_retired_bytes_before > 0 &&
+        pressure.native_reclaimed_bytes_total_after >=
+          pressure.native_reclaimed_bytes_total_before + pressure.native_live_bytes_before +
+            pressure.native_retired_bytes_before,
+      `memory pressure native reclamation does not reconcile for ${row.workload}`,
+    );
+  } else {
+    requireValue(
+      pressure.native_live_bytes_before === 0 && pressure.native_retired_bytes_before === 0 &&
+        pressure.native_reclaimed_bytes_total_after === pressure.native_reclaimed_bytes_total_before,
+      `memory pressure unchanged native domain drift for ${row.workload}`,
     );
   }
 }
@@ -780,6 +861,7 @@ function validateRows(
         `non-integral attribution for ${workload}`,
       );
       validateMemoryInventory(row.memory, workload);
+      validateMemoryPressure(row);
       requireValue(
         JSON.stringify(Object.keys(row.execution).sort()) ===
           JSON.stringify([...tierMetrics, ...runtimeMetrics, "environment_allocations"].sort()),
@@ -1330,7 +1412,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 14,
+    schema_version: 15,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -1358,7 +1440,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 14, "checkpoint schema is not version 14");
+  requireValue(raw?.schema_version === 15, "checkpoint schema is not version 15");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
@@ -1467,6 +1549,30 @@ function syntheticMemory(index: number): MemoryInventorySnapshot {
   };
 }
 
+function syntheticMemoryPressure(index: number): MemoryPressureSnapshot {
+  const heapBytes = 8192 + index,
+    nativeBytes = index > 0 ? 4096 : 0;
+  return {
+    schema: 1,
+    owns_precise_heap: true,
+    owns_native_code: true,
+    heap_status: "unchanged",
+    native_code_status: nativeBytes > 0 ? "reclaimed" : "unchanged",
+    heap_live_bytes_before: heapBytes,
+    heap_live_bytes_after: heapBytes,
+    cell_backing_capacity_bytes_before: 16384,
+    cell_backing_capacity_bytes_after: 16384,
+    native_live_bytes_before: nativeBytes,
+    native_live_bytes_after: 0,
+    native_retired_bytes_before: 0,
+    native_retired_bytes_after: 0,
+    native_reclaimed_bytes_total_before: 0,
+    native_reclaimed_bytes_total_after: nativeBytes,
+    moved_cells: 0,
+    moved_bytes: 0,
+  };
+}
+
 function syntheticRows(manifest: any): TierSnapshot[] {
   const rows: TierSnapshot[] = [];
   for (const entry of workloadEntries(manifest)) {
@@ -1559,6 +1665,7 @@ function syntheticRows(manifest: any): TierSnapshot[] {
             name === "live_bytes" ? 8192 + index : name === "collections" ? index : 0]),
         ),
         memory: syntheticMemory(index),
+        memory_pressure: phase === "invocation" ? syntheticMemoryPressure(index) : null,
         process: {
           cpu_user_ns: (index + 1) * 100,
           cpu_system_ns: (index + 1) * 10,
@@ -1621,6 +1728,18 @@ export function selfTest(): void {
   const generationMemory = JSON.parse(JSON.stringify(rows));
   generationMemory[0].memory.gc_generation.old_bytes += 1;
   expectFailure(() => validate(generationMemory, manifest, true), "generation memory inventory does not reconcile");
+  const earlyPressure = JSON.parse(JSON.stringify(rows));
+  earlyPressure[0].memory_pressure = syntheticMemoryPressure(0);
+  expectFailure(() => validate(earlyPressure, manifest, true), "memory pressure ran before the invocation boundary");
+  const missingPressure = JSON.parse(JSON.stringify(rows));
+  missingPressure[2].memory_pressure = null;
+  expectFailure(() => validate(missingPressure, manifest, true), "memory pressure inventory drift");
+  const pressureInventory = JSON.parse(JSON.stringify(rows));
+  delete pressureInventory[2].memory_pressure.moved_bytes;
+  expectFailure(() => validate(pressureInventory, manifest, true), "memory pressure inventory drift");
+  const pressureReconciliation = JSON.parse(JSON.stringify(rows));
+  pressureReconciliation[2].memory_pressure.native_live_bytes_before += 1;
+  expectFailure(() => validate(pressureReconciliation, manifest, true), "memory pressure result does not reconcile");
   const processResource = JSON.parse(JSON.stringify(rows));
   delete processResource[0].process.retained_rss_bytes;
   expectFailure(() => validate(processResource, manifest, true), "process resource inventory drift");
@@ -1759,7 +1878,7 @@ export function selfTest(): void {
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/Shape/allocation/memory/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, generated Shape report, and exact checkpoint/resume identity verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/Shape/allocation/memory/pressure/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, generated Shape report, and exact checkpoint/resume identity verified");
 }
 
 function main(): void {

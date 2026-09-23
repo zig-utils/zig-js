@@ -1,0 +1,76 @@
+{
+  "schema_version": 41,
+  "matrix_id": "zig-js-representative-v41",
+  "status": "frozen",
+  "frozen_date": "2026-09-22",
+  "owner_issue": 975,
+  "history_policy": "This version hash-inherits every V40 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, and schema-v3 memory inventory. It changes no scored row or execution hot path. It versions the tier-attribution sidecar from schema 14 to 15, updates its fail-closed validator, and re-pins the zig-js comparison runner after #975 attached one post-invocation schema-v1 pressure result. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v40",
+    "path": "docs/.data/representative-benchmark-matrix-v40.json",
+    "sha256": "4c1560d2f2042018736e2e08724f95bba6f3ef5abfa9aceebe5a66f4e9fd5ff7",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_inventory_diagnostics"
+    ]
+  },
+  "change": "Adds one schema-v1 Context memory-pressure result to the post-invocation attribution boundary. Configuration and warmup rows carry null; the invocation snapshot, process gauges, checksum, and every scored or replayed counter are captured before pressure runs. The diagnostic validates exact heap/slab reduction and quiescent native-code retirement without entering timing scores or publication decisions.",
+  "memory_pressure_diagnostics": {
+    "owner_issue": 975,
+    "result_schema_version": 1,
+    "row_field": "memory_pressure",
+    "phase": "invocation",
+    "scored": false,
+    "reconciliation": "before heap and native-code gauges equal the invocation memory and native-code snapshots; after heap and slab gauges cannot increase; live and retired native mappings reach zero or the validator fails",
+    "publication_boundary": "The checkpoint runs exactly once after the invocation attribution and process snapshots. Its result does not enter elapsed-time scores, phase deltas, exact allocation replay signatures, performance ratios, stability decisions, or publication acceptance."
+  },
+  "tier_attribution": {
+    "artifact_schema_version": 15
+  },
+  "exact_parent_integration": {
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "0259777d849291199f45dcf3a13c59de2129752eea479e9d5a84525d7379a498"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "9b638839aadc247d5b3381d1dc7cc1cffd47a4bee6d73dfc2bd13d4ee7bedee9"
+      }
+    ],
+    "publication_boundary": "V41 preserves every V40 timing, efficiency, cleanliness, checksum, serial-child, process-classification, provenance, mixed-tier allocation-replay, and memory-inventory gate. The tier-attribution sidecar advances to schema 15 solely for the post-invocation memory-pressure result, which remains diagnostic and outside every scored boundary."
+  },
+  "context_lifecycle_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "0259777d849291199f45dcf3a13c59de2129752eea479e9d5a84525d7379a498"
+    },
+    "publication_boundary": "V41 changes only the shared runner hash. Lifecycle scenarios, options, checksums, phase and finalizer reconciliation, plateau policy, measured-boundary occupancy, and evidence ruling are unchanged."
+  },
+  "no_jit_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "0259777d849291199f45dcf3a13c59de2129752eea479e9d5a84525d7379a498"
+    },
+    "publication_boundary": "V41 changes only the shared runner hash. Required-bytecode and no-native modes, logical work, checksums, scored attribution, quickening contracts, publication duration, and exact-parent requirements are unchanged."
+  },
+  "string_indexing_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "0259777d849291199f45dcf3a13c59de2129752eea479e9d5a84525d7379a498"
+    },
+    "publication_boundary": "V41 changes only the shared runner hash. Every string representation, width, job count, checksum, required-bytecode boundary, scored attribution value, measured-boundary occupancy rule, and exact allocation replay remains unchanged."
+  }
+}

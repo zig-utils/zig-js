@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v40.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v41.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 40, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 41, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,74 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 40),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 41),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 41) {
+    requireValue(
+      child.tier_attribution && typeof child.tier_attribution === "object" &&
+        same(Object.keys(child.tier_attribution), ["artifact_schema_version"]) &&
+        child.tier_attribution.artifact_schema_version === 15,
+      "v41 must replace only the attribution artifact schema version",
+    );
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v41 re-pins the zig-js comparison runner only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v41 must inherit completed panel inventory unchanged");
+    requireValue(child.instrumentation_overhead_integration === undefined, "v41 must inherit instrumentation_overhead_integration unchanged");
+    const diagnostics = child.memory_pressure_diagnostics;
+    requireValue(
+      diagnostics && typeof diagnostics === "object" && diagnostics.owner_issue === 975 && diagnostics.result_schema_version === 1 &&
+        diagnostics.phase === "invocation" && diagnostics.scored === false && diagnostics.row_field === "memory_pressure",
+      "v41 memory-pressure diagnostic contract drift",
+    );
+    const replacement = child.exact_parent_integration;
+    requireValue(
+      replacement && typeof replacement === "object" && same(Object.keys(replacement).sort(), ["native_runners", "publication_boundary"]),
+      "v41 replaces only the exact-parent native runners and publication boundary",
+    );
+    const inheritedRunners = inherited.exact_parent_integration.native_runners;
+    requireValue(
+      Array.isArray(replacement.native_runners) && Array.isArray(inheritedRunners) &&
+        same(replacement.native_runners.map((runner: any) => runner.path), inheritedRunners.map((runner: any) => runner.path)),
+      "v41 native runner inventory drift",
+    );
+    for (let index = 0; index < replacement.native_runners.length; index += 1) {
+      const runner = replacement.native_runners[index];
+      if (runner.path !== "bench/comparison_zig_js.zig")
+        requireValue(runner.sha256 === inheritedRunners[index].sha256, `v41 must inherit ${runner.path} unchanged`);
+    }
+    const exactParent = { ...inherited.exact_parent_integration, ...replacement };
+    const tierAttribution = { ...inherited.tier_attribution, ...child.tier_attribution };
+    for (const name of ["context_lifecycle_integration", "no_jit_integration", "string_indexing_integration"]) {
+      const integration = child[name];
+      requireValue(
+        integration && typeof integration === "object" && same(Object.keys(integration).sort(), ["publication_boundary", "runner"]),
+        `v41 must re-pin ${name}'s shared runner only`,
+      );
+      requireValue(
+        integration.runner.path === "bench/comparison_zig_js.zig" && integration.runner.sha256 === replacement.native_runners[0].sha256,
+        `v41 ${name} runner pin drift`,
+      );
+    }
+    const merged = {
+      ...inherited,
+      ...child,
+      tier_attribution: tierAttribution,
+      exact_parent_integration: exactParent,
+      context_lifecycle_integration: { ...inherited.context_lifecycle_integration, ...child.context_lifecycle_integration },
+      no_jit_integration: { ...inherited.no_jit_integration, ...child.no_jit_integration },
+      string_indexing_integration: { ...inherited.string_indexing_integration, ...child.string_indexing_integration },
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: { ...inherited.completed_metric_panels.efficiency_thermal, scored_integration: exactParent },
+      },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 40) {
     requireValue(
@@ -524,7 +585,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 40, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 41, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   if (manifest.schema_version >= 40) {
     const diagnostics = manifest.memory_inventory_diagnostics;
@@ -535,6 +596,16 @@ export function validate(manifest: any, root = ROOT): void {
         typeof diagnostics.reconciliation === "string" && diagnostics.reconciliation.length > 0 &&
         typeof diagnostics.publication_boundary === "string" && diagnostics.publication_boundary.length > 0,
       "v40 memory-inventory diagnostic contract drift",
+    );
+  }
+  if (manifest.schema_version >= 41) {
+    const diagnostics = manifest.memory_pressure_diagnostics;
+    requireValue(
+      diagnostics && typeof diagnostics === "object" && diagnostics.owner_issue === 975 && diagnostics.result_schema_version === 1 &&
+        diagnostics.phase === "invocation" && diagnostics.scored === false && diagnostics.row_field === "memory_pressure" &&
+        typeof diagnostics.reconciliation === "string" && diagnostics.reconciliation.length > 0 &&
+        typeof diagnostics.publication_boundary === "string" && diagnostics.publication_boundary.length > 0,
+      "v41 memory-pressure diagnostic contract drift",
     );
   }
   const lanes = manifest.lanes;
@@ -974,8 +1045,8 @@ export function validate(manifest: any, root = ROOT): void {
     requireValue(same(attribution.metrics || [], expectedMetrics), "representative tier metric inventory changed");
     if (manifest.schema_version >= 33) {
       requireValue(
-        attribution.artifact_schema_version === (manifest.schema_version >= 40 ? 14 : 13),
-        `${manifest.schema_version >= 40 ? "V40" : "V33"} attribution artifact schema drift`,
+        attribution.artifact_schema_version === (manifest.schema_version >= 41 ? 15 : manifest.schema_version >= 40 ? 14 : 13),
+        `${manifest.schema_version >= 41 ? "V41" : manifest.schema_version >= 40 ? "V40" : "V33"} attribution artifact schema drift`,
       );
       requireValue(
         same(attribution.shape_counters || [], ["transition_requests", "transition_hits", "transition_misses", "transition_lock_yields"]),

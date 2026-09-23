@@ -85,8 +85,10 @@ export function selfTest(): void {
   rejects("workload source identity drift", value => { value.exact_parent_integration.workload_source_identity = "unchecked"; value.completed_metric_panels.efficiency_thermal.scored_integration.workload_source_identity = "unchecked"; }, "V34 workload source identity drift");
   rejects("memory diagnostic schema drift", value => { value.memory_inventory_diagnostics.snapshot_schema_version = 2; }, "memory-inventory diagnostic contract drift");
   rejects("memory diagnostic scoring drift", value => { value.memory_inventory_diagnostics.scored = true; }, "memory-inventory diagnostic contract drift");
-  rejects("unsupported future matrix", value => { value.schema_version = 41; }, "unsupported representative matrix schema");
-  console.log("representative matrix structural tests: 77/77 passed");
+  rejects("pressure diagnostic schema drift", value => { value.memory_pressure_diagnostics.result_schema_version = 2; }, "memory-pressure diagnostic contract drift");
+  rejects("pressure diagnostic scoring drift", value => { value.memory_pressure_diagnostics.scored = true; }, "memory-pressure diagnostic contract drift");
+  rejects("unsupported future matrix", value => { value.schema_version = 42; }, "unsupported representative matrix schema");
+  console.log("representative matrix structural tests: 79/79 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();

@@ -8292,6 +8292,10 @@ pub const Context = struct {
         const native_after = owner.stats();
         result.heap_live_bytes_after = @intCast(heap_after.live_bytes);
         result.cell_backing_capacity_bytes_after = @intCast(backing_after.capacity_bytes);
+        if (result.heap_status == .unchanged and
+            (result.heap_live_bytes_after < result.heap_live_bytes_before or
+                result.cell_backing_capacity_bytes_after < result.cell_backing_capacity_bytes_before))
+            result.heap_status = .reclaimed;
         result.native_live_bytes_after = @intCast(native_after.live_bytes);
         result.native_retired_bytes_after = @intCast(native_after.retired_bytes);
         result.native_reclaimed_bytes_total_after = @intCast(native_after.reclaimed_bytes);
@@ -37859,7 +37863,7 @@ test "memory pressure checkpoint compacts precise heap and retires owned code" {
 
     try std.testing.expect(pressure.owns_precise_heap);
     try std.testing.expect(pressure.owns_native_code);
-    try std.testing.expect(pressure.heap_status == .reclaimed or pressure.heap_status == .unchanged);
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.reclaimed, pressure.heap_status);
     try std.testing.expect(pressure.heap_live_bytes_after <= pressure.heap_live_bytes_before);
     try std.testing.expect(pressure.cell_backing_capacity_bytes_after <= pressure.cell_backing_capacity_bytes_before);
     try std.testing.expectEqual(budget_before.limit_bytes, budget_after.limit_bytes);

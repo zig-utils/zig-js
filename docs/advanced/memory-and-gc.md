@@ -156,7 +156,10 @@ storage. Moving collection reports `unsafe` while an evaluation or another
 unrewritable boundary is active. Native mappings protected by an active reader
 move to `retired_pending` and are unmapped after the last reader releases its
 epoch. A compaction planning allocation failure reports `out_of_memory` without
-mutating roots, cells, or slab backing.
+mutating roots, cells, or slab backing. Heap `reclaimed` covers exact live-byte
+or slab-capacity reduction from the full collection and tail trimming even when
+no cells needed relocation; `moved_cells` and `moved_bytes` continue to report
+relocation only.
 
 ## Heap budgets
 
