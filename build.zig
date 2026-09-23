@@ -2301,8 +2301,28 @@ pub fn build(b: *std.Build) void {
     compiler_pressure_benchmark_bin_step.dependOn(&install_compiler_pressure_benchmark.step);
     const run_compiler_pressure_self_test = b.addRunArtifact(compiler_pressure_benchmark);
     run_compiler_pressure_self_test.addArg("--self-test");
+    const compiler_pressure_harness_self_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/compiler-pressure-benchmark.ts", "--self-test" });
     const compiler_pressure_benchmark_test_step = b.step("compiler-pressure-benchmark-test", "Validate compiler pressure checksums and JIT controls");
     compiler_pressure_benchmark_test_step.dependOn(&run_compiler_pressure_self_test.step);
+    compiler_pressure_benchmark_test_step.dependOn(&compiler_pressure_harness_self_test.step);
+    const compiler_pressure_benchmark_step = b.step("compiler-pressure-benchmark", "Publish synchronous compiler pressure evidence");
+    if (b.option([]const u8, "compiler-pressure-raw-out", "Write raw compiler pressure samples to this JSON path")) |raw_out| {
+        if (b.option([]const u8, "compiler-pressure-markdown-out", "Write the compiler pressure report to this Markdown path")) |markdown_out| {
+            const collect_compiler_pressure = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/compiler-pressure-benchmark.ts", "--runner" });
+            collect_compiler_pressure.addArtifactArg(compiler_pressure_benchmark);
+            collect_compiler_pressure.addArgs(&.{ "--zig", b.graph.zig_exe, "--raw-out", raw_out, "--markdown-out", markdown_out });
+            if (b.option(usize, "compiler-pressure-samples", "Fresh-process samples per compiler pressure row")) |samples|
+                collect_compiler_pressure.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+            if (b.option(usize, "compiler-pressure-warmups", "Discarded fresh-process warmups per compiler pressure row")) |warmups|
+                collect_compiler_pressure.addArgs(&.{ "--warmups", b.fmt("{d}", .{warmups}) });
+            collect_compiler_pressure.has_side_effects = true;
+            compiler_pressure_benchmark_step.dependOn(&collect_compiler_pressure.step);
+        } else {
+            compiler_pressure_benchmark_step.dependOn(&b.addFail("compiler-pressure-benchmark requires -Dcompiler-pressure-markdown-out=<path>").step);
+        }
+    } else {
+        compiler_pressure_benchmark_step.dependOn(&b.addFail("compiler-pressure-benchmark requires -Dcompiler-pressure-raw-out=<path>").step);
+    }
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
             .name = "bench-comparison-zig-js",
