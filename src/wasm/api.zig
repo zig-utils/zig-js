@@ -13,6 +13,7 @@ const context = @import("../context.zig");
 const promise = @import("../promise.zig");
 const stack_scan = @import("../stack_scan.zig");
 const agent = @import("../agent.zig");
+const runtime_threads = @import("../runtime_threads.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate_mod = @import("validate.zig");
@@ -811,6 +812,8 @@ fn compileModuleObject(
     descriptor: *ModuleDescriptor,
     prototype: *Object,
 ) value.HostError!Value {
+    var work = runtime_threads.beginInternalWork(.wasm_compilation);
+    defer work.end();
     const copy = try copyBufferSource(self, input);
     defer copy.deinit();
     const owner = self.wasm_store_ctx orelse return self.throwError("TypeError", "WebAssembly store is unavailable");
@@ -3028,6 +3031,7 @@ test "wasm api corpus harness invokes float functions bit-exactly" {
         .profile_execution_tiers = true,
     });
     defer store.destroy();
+    const work_before = runtime_threads.snapshot().work(.wasm_compilation);
     const result = try store.evaluate(
         \\var bytes = new Uint8Array([
         \\  0,97,115,109,1,0,0,0,
@@ -3042,6 +3046,15 @@ test "wasm api corpus harness invokes float functions bit-exactly" {
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
     try std.testing.expectEqual(@as(u64, 2), store.tierAttributionSnapshot().execution.count(.wasm_dispatches));
+    const work_after = runtime_threads.snapshot().work(.wasm_compilation);
+    try std.testing.expectEqual(work_before.starts + 1, work_after.starts);
+    try std.testing.expectEqual(work_before.completions + 1, work_after.completions);
+    try std.testing.expectEqual(work_before.active, work_after.active);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        work_after.host_reserved_admissions - work_before.host_reserved_admissions +
+            work_after.general_slot_admissions - work_before.general_slot_admissions,
+    );
 }
 
 test "wasm api corpus harness preserves raw v128 functions and globals" {

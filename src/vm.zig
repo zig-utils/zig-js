@@ -27,6 +27,7 @@ const jit = @import("jit.zig");
 const jit_compiler = @import("jit/compiler.zig");
 const optimizer = @import("jit/optimizer.zig");
 const optimizer_compiler = @import("jit/optimizer_compiler.zig");
+const runtime_threads = @import("runtime_threads.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
@@ -7690,6 +7691,8 @@ fn loadOrCompileOptimizer(
         optimizer_tier_entry_threshold,
     )) |claim_value| {
         var claim = claim_value;
+        var work = runtime_threads.beginInternalWork(.native_compilation);
+        defer work.end();
         const tier_up_started_ns = tierTimingStarted(vm);
         var compiled = (if (owner.nativeObservabilityEnabled())
             optimizer_compiler.compileObserved(chunk)
@@ -7823,6 +7826,8 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         native_tier_entry_threshold;
     if (code == null) if (owner.claimCompilation(&chunk.tier, tier_threshold)) |claim_value| {
         var claim = claim_value;
+        var work = runtime_threads.beginInternalWork(.native_compilation);
+        defer work.end();
         const tier_up_started_ns = tierTimingStarted(vm);
         var compiled = (if (owner.nativeObservabilityEnabled())
             jit_compiler.compileObserved(chunk)

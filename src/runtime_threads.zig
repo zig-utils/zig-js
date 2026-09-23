@@ -28,6 +28,13 @@ pub const Priority = enum {
 pub const priority_count = std.meta.fieldNames(Priority).len;
 pub const priority_weights: [priority_count]u64 = .{ 4, 2, 1 };
 
+pub const InternalWorkKind = enum {
+    native_compilation,
+    wasm_compilation,
+};
+
+pub const internal_work_kind_count = std.meta.fieldNames(InternalWorkKind).len;
+
 const priority_schedule = [_]Priority{
     .safety,
     .safety,
@@ -83,6 +90,42 @@ const SlotWaiter = struct {
     granted: bool = false,
 };
 
+const WorkAdmission = enum {
+    typed_slot_reuse,
+    nested_reuse,
+    host_reserved,
+    general_slot,
+};
+
+const WorkWaiter = struct {
+    kind: InternalWorkKind,
+    ticket: u64,
+    wait_started_ns: i96,
+    cond: std.Io.Condition = .init,
+    next: ?*WorkWaiter = null,
+    granted: ?WorkAdmission = null,
+};
+
+const WorkCounters = struct {
+    requests: std.atomic.Value(u64) = .init(0),
+    starts: std.atomic.Value(u64) = .init(0),
+    completions: std.atomic.Value(u64) = .init(0),
+    active: std.atomic.Value(u64) = .init(0),
+    peak_active: std.atomic.Value(u64) = .init(0),
+    typed_slot_reuses: std.atomic.Value(u64) = .init(0),
+    nested_reuses: std.atomic.Value(u64) = .init(0),
+    host_reserved_admissions: std.atomic.Value(u64) = .init(0),
+    general_slot_admissions: std.atomic.Value(u64) = .init(0),
+    waiters: std.atomic.Value(u64) = .init(0),
+    peak_waiters: std.atomic.Value(u64) = .init(0),
+    waits: std.atomic.Value(u64) = .init(0),
+    wait_ns: std.atomic.Value(u64) = .init(0),
+    wait_ns_max: std.atomic.Value(u64) = .init(0),
+    last_grant_ticket: std.atomic.Value(u64) = .init(0),
+};
+
+var work_counters: [internal_work_kind_count]WorkCounters = @splat(.{});
+
 const PriorityCounters = struct {
     waiters: std.atomic.Value(u64) = .init(0),
     peak_waiters: std.atomic.Value(u64) = .init(0),
@@ -100,12 +143,18 @@ const Coordinator = struct {
     effective_max_runnable_threads: std.atomic.Value(u64) = .init(1),
     active_slots: std.atomic.Value(u64) = .init(0),
     peak_active_slots: std.atomic.Value(u64) = .init(0),
+    internal_work_general_active: std.atomic.Value(u64) = .init(0),
+    peak_internal_work_general_active: std.atomic.Value(u64) = .init(0),
+    host_work_reserved_active: std.atomic.Value(u64) = .init(0),
+    peak_host_work_reserved_active: std.atomic.Value(u64) = .init(0),
     slot_waiters: std.atomic.Value(u64) = .init(0),
     peak_slot_waiters: std.atomic.Value(u64) = .init(0),
     slot_waits: std.atomic.Value(u64) = .init(0),
     priority: [priority_count]PriorityCounters = @splat(.{}),
     wait_heads: [priority_count]?*SlotWaiter = @splat(null),
     wait_tails: [priority_count]?*SlotWaiter = @splat(null),
+    work_head: ?*WorkWaiter = null,
+    work_tail: ?*WorkWaiter = null,
     next_ticket: u64 = 0,
     schedule_cursor: usize = 0,
 };
@@ -156,6 +205,25 @@ pub const PrioritySnapshot = struct {
     last_grant_ticket: u64,
 };
 
+pub const InternalWorkSnapshot = struct {
+    priority: Priority,
+    requests: u64,
+    starts: u64,
+    completions: u64,
+    active: u64,
+    peak_active: u64,
+    typed_slot_reuses: u64,
+    nested_reuses: u64,
+    host_reserved_admissions: u64,
+    general_slot_admissions: u64,
+    waiters: u64,
+    peak_waiters: u64,
+    waits: u64,
+    wait_ns: u64,
+    wait_ns_max: u64,
+    last_grant_ticket: u64,
+};
+
 pub const SchedulerSnapshot = struct {
     policy: SchedulerPolicy,
     host_logical_cpus: u64,
@@ -164,6 +232,10 @@ pub const SchedulerSnapshot = struct {
     effective_max_runnable_threads: u64,
     active_slots: u64,
     peak_active_slots: u64,
+    internal_work_general_active: u64,
+    peak_internal_work_general_active: u64,
+    host_work_reserved_active: u64,
+    peak_host_work_reserved_active: u64,
     slot_waiters: u64,
     peak_slot_waiters: u64,
     slot_waits: u64,
@@ -175,10 +247,11 @@ pub const SchedulerSnapshot = struct {
 };
 
 pub const Snapshot = struct {
-    schema_version: u32 = 6,
+    schema_version: u32 = 7,
     generation: u64,
     scheduler: SchedulerSnapshot,
     resources: [kind_count]ResourceSnapshot,
+    internal_work: [internal_work_kind_count]InternalWorkSnapshot,
 
     pub fn resource(self: *const Snapshot, kind: Kind) ResourceSnapshot {
         return self.resources[@backingInt(kind)];
@@ -189,6 +262,18 @@ pub const Snapshot = struct {
         for (self.resources) |resource_state| total += resource_state.runnable;
         return total;
     }
+
+    pub fn work(self: *const Snapshot, kind: InternalWorkKind) InternalWorkSnapshot {
+        return self.internal_work[@backingInt(kind)];
+    }
+
+    pub fn scheduledGeneralTotal(self: *const Snapshot) u64 {
+        return self.runnableTotal() + self.scheduler.internal_work_general_active;
+    }
+
+    pub fn scheduledCpuTotal(self: *const Snapshot) u64 {
+        return self.scheduledGeneralTotal() + self.scheduler.host_work_reserved_active;
+    }
 };
 
 const ThreadState = struct {
@@ -197,6 +282,7 @@ const ThreadState = struct {
 };
 
 threadlocal var current_thread: ?ThreadState = null;
+threadlocal var internal_work_depth: usize = 0;
 
 fn beginMutation() void {
     _ = mutation_writers.fetchAdd(1, .acquire);
@@ -215,6 +301,52 @@ fn recordPeak(value: *std.atomic.Value(u64), candidate: u64) void {
             peak = observed;
         } else break;
     }
+}
+
+fn workState(kind: InternalWorkKind) *WorkCounters {
+    return &work_counters[@backingInt(kind)];
+}
+
+fn recordWorkRequest(kind: InternalWorkKind) void {
+    _ = workState(kind).requests.fetchAdd(1, .monotonic);
+}
+
+fn recordWorkStart(kind: InternalWorkKind, admission: WorkAdmission) void {
+    const state = workState(kind);
+    _ = state.starts.fetchAdd(1, .monotonic);
+    const active = state.active.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&state.peak_active, active);
+    switch (admission) {
+        .typed_slot_reuse => _ = state.typed_slot_reuses.fetchAdd(1, .monotonic),
+        .nested_reuse => _ = state.nested_reuses.fetchAdd(1, .monotonic),
+        .host_reserved => _ = state.host_reserved_admissions.fetchAdd(1, .monotonic),
+        .general_slot => _ = state.general_slot_admissions.fetchAdd(1, .monotonic),
+    }
+}
+
+fn recordWorkCompletion(kind: InternalWorkKind) void {
+    const state = workState(kind);
+    _ = state.completions.fetchAdd(1, .monotonic);
+    const active = state.active.fetchSub(1, .monotonic);
+    std.debug.assert(active > 0);
+}
+
+fn beginWorkWaitState(kind: InternalWorkKind) void {
+    const state = workState(kind);
+    const waiters = state.waiters.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&state.peak_waiters, waiters);
+    _ = state.waits.fetchAdd(1, .monotonic);
+}
+
+fn finishWorkWaitState(kind: InternalWorkKind, ticket: u64, elapsed_ns: u64, admission: WorkAdmission) void {
+    const state = workState(kind);
+    const waiters = state.waiters.fetchSub(1, .monotonic);
+    std.debug.assert(waiters > 0);
+    _ = state.wait_ns.fetchAdd(elapsed_ns, .monotonic);
+    recordPeak(&state.wait_ns_max, elapsed_ns);
+    const previous_ticket = state.last_grant_ticket.swap(ticket, .monotonic);
+    std.debug.assert(ticket > previous_ticket);
+    recordWorkStart(kind, admission);
 }
 
 fn lockAdmission(state: *Counters) void {
@@ -361,6 +493,10 @@ fn loadScheduler() SchedulerSnapshot {
         .effective_max_runnable_threads = coordinator.effective_max_runnable_threads.load(.acquire),
         .active_slots = coordinator.active_slots.load(.acquire),
         .peak_active_slots = coordinator.peak_active_slots.load(.acquire),
+        .internal_work_general_active = coordinator.internal_work_general_active.load(.acquire),
+        .peak_internal_work_general_active = coordinator.peak_internal_work_general_active.load(.acquire),
+        .host_work_reserved_active = coordinator.host_work_reserved_active.load(.acquire),
+        .peak_host_work_reserved_active = coordinator.peak_host_work_reserved_active.load(.acquire),
         .slot_waiters = coordinator.slot_waiters.load(.acquire),
         .peak_slot_waiters = coordinator.peak_slot_waiters.load(.acquire),
         .slot_waits = coordinator.slot_waits.load(.acquire),
@@ -392,18 +528,54 @@ fn releaseSlotState() void {
     std.debug.assert(active > 0);
 }
 
-fn beginSlotWaitState(priority: Priority) void {
+fn reserveGeneralWorkSlotState() void {
+    reserveSlotState();
+    const active = coordinator.internal_work_general_active.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&coordinator.peak_internal_work_general_active, active);
+}
+
+fn releaseGeneralWorkSlotState() void {
+    const active = coordinator.internal_work_general_active.fetchSub(1, .monotonic);
+    std.debug.assert(active > 0);
+    releaseSlotState();
+}
+
+fn hostWorkReservationAvailableLocked() bool {
+    if (!coordinator.automatic.load(.monotonic)) return false;
+    return coordinator.host_work_reserved_active.load(.monotonic) <
+        coordinator.automatic_host_reservation.load(.monotonic);
+}
+
+fn reserveHostWorkState() void {
+    const active = coordinator.host_work_reserved_active.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&coordinator.peak_host_work_reserved_active, active);
+}
+
+fn releaseHostWorkState() void {
+    const active = coordinator.host_work_reserved_active.fetchSub(1, .monotonic);
+    std.debug.assert(active > 0);
+}
+
+fn beginSchedulerWaitState() void {
     const waiters = coordinator.slot_waiters.fetchAdd(1, .monotonic) + 1;
     recordPeak(&coordinator.peak_slot_waiters, waiters);
     _ = coordinator.slot_waits.fetchAdd(1, .monotonic);
+}
+
+fn beginSlotWaitState(priority: Priority) void {
+    beginSchedulerWaitState();
     const priority_state = &coordinator.priority[@backingInt(priority)];
     const priority_waiters = priority_state.waiters.fetchAdd(1, .monotonic) + 1;
     recordPeak(&priority_state.peak_waiters, priority_waiters);
 }
 
-fn finishSlotWaitState(priority: Priority, ticket: u64) void {
+fn finishSchedulerWaitState() void {
     const waiters = coordinator.slot_waiters.fetchSub(1, .monotonic);
     std.debug.assert(waiters > 0);
+}
+
+fn finishSlotWaitState(priority: Priority, ticket: u64) void {
+    finishSchedulerWaitState();
     const priority_state = &coordinator.priority[@backingInt(priority)];
     const priority_waiters = priority_state.waiters.fetchSub(1, .monotonic);
     std.debug.assert(priority_waiters > 0);
@@ -431,31 +603,94 @@ fn enqueueWaiterLocked(waiter: *SlotWaiter) void {
     finishMutation();
 }
 
+fn enqueueWorkWaiterLocked(waiter: *WorkWaiter) void {
+    coordinator.next_ticket += 1;
+    waiter.ticket = coordinator.next_ticket;
+    waiter.wait_started_ns = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds;
+    if (coordinator.work_tail) |tail| {
+        tail.next = waiter;
+    } else {
+        coordinator.work_head = waiter;
+    }
+    coordinator.work_tail = waiter;
+    beginMutation();
+    recordWorkRequest(waiter.kind);
+    beginSchedulerWaitState();
+    beginWorkWaitState(waiter.kind);
+    finishMutation();
+}
+
+fn priorityQueuedLocked(priority: Priority) bool {
+    if (coordinator.wait_heads[@backingInt(priority)] != null) return true;
+    return priority == .background and coordinator.work_head != null;
+}
+
 fn choosePriorityLocked() ?Priority {
     for (0..priority_schedule.len) |_| {
         const priority = priority_schedule[coordinator.schedule_cursor];
         coordinator.schedule_cursor = (coordinator.schedule_cursor + 1) % priority_schedule.len;
-        if (coordinator.wait_heads[@backingInt(priority)] != null) return priority;
+        if (priorityQueuedLocked(priority)) return priority;
     }
     return null;
 }
 
+fn popWorkWaiterLocked() *WorkWaiter {
+    const waiter = coordinator.work_head orelse unreachable;
+    coordinator.work_head = waiter.next;
+    if (waiter.next == null) coordinator.work_tail = null;
+    waiter.next = null;
+    return waiter;
+}
+
+fn grantWorkWaiterLocked(waiter: *WorkWaiter, admission: WorkAdmission, io: std.Io) void {
+    const elapsed: u64 = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds - waiter.wait_started_ns, 0));
+    beginMutation();
+    finishSchedulerWaitState();
+    switch (admission) {
+        .host_reserved => reserveHostWorkState(),
+        .general_slot => reserveGeneralWorkSlotState(),
+        else => unreachable,
+    }
+    finishWorkWaitState(waiter.kind, waiter.ticket, elapsed, admission);
+    finishMutation();
+    waiter.granted = admission;
+    waiter.cond.signal(io);
+}
+
+fn dispatchReservedWorkLocked(io: std.Io) void {
+    while (hostWorkReservationAvailableLocked() and coordinator.work_head != null)
+        grantWorkWaiterLocked(popWorkWaiterLocked(), .host_reserved, io);
+}
+
+fn grantThreadWaiterLocked(priority: Priority, io: std.Io) void {
+    const index = @backingInt(priority);
+    const waiter = coordinator.wait_heads[index] orelse unreachable;
+    coordinator.wait_heads[index] = waiter.next;
+    if (waiter.next == null) coordinator.wait_tails[index] = null;
+    waiter.next = null;
+
+    beginMutation();
+    finishSlotWaitState(priority, waiter.ticket);
+    reserveSlotState();
+    recordRunnableState(waiter.kind);
+    finishMutation();
+    waiter.granted = true;
+    waiter.cond.signal(io);
+}
+
 fn dispatchSlotsLocked(io: std.Io) void {
+    dispatchReservedWorkLocked(io);
     while (slotAvailableLocked() and hasQueuedWaitersLocked()) {
         const priority = choosePriorityLocked() orelse unreachable;
         const index = @backingInt(priority);
-        const waiter = coordinator.wait_heads[index] orelse unreachable;
-        coordinator.wait_heads[index] = waiter.next;
-        if (waiter.next == null) coordinator.wait_tails[index] = null;
-        waiter.next = null;
-
-        beginMutation();
-        finishSlotWaitState(priority, waiter.ticket);
-        reserveSlotState();
-        recordRunnableState(waiter.kind);
-        finishMutation();
-        waiter.granted = true;
-        waiter.cond.signal(io);
+        const thread_waiter = coordinator.wait_heads[index];
+        if (priority == .background) if (coordinator.work_head) |work_waiter| {
+            if (thread_waiter == null or work_waiter.ticket < thread_waiter.?.ticket) {
+                grantWorkWaiterLocked(popWorkWaiterLocked(), .general_slot, io);
+                continue;
+            }
+        };
+        grantThreadWaiterLocked(priority, io);
     }
 }
 
@@ -468,6 +703,42 @@ fn waitForSlotLocked(kind: Kind, io: std.Io) void {
     enqueueWaiterLocked(&waiter);
     dispatchSlotsLocked(io);
     while (!waiter.granted) waiter.cond.waitUncancelable(io, &coordinator.mutex);
+}
+
+fn waitForWorkLocked(kind: InternalWorkKind, io: std.Io) WorkAdmission {
+    var waiter = WorkWaiter{
+        .kind = kind,
+        .ticket = 0,
+        .wait_started_ns = 0,
+    };
+    enqueueWorkWaiterLocked(&waiter);
+    dispatchSlotsLocked(io);
+    while (waiter.granted == null) waiter.cond.waitUncancelable(io, &coordinator.mutex);
+    return waiter.granted.?;
+}
+
+fn admitHostWork(kind: InternalWorkKind) WorkAdmission {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    defer coordinator.mutex.unlock(io);
+    ensureCoordinatorInitializedLocked();
+    if (hostWorkReservationAvailableLocked() and coordinator.work_head == null) {
+        beginMutation();
+        recordWorkRequest(kind);
+        reserveHostWorkState();
+        recordWorkStart(kind, .host_reserved);
+        finishMutation();
+        return .host_reserved;
+    }
+    if (slotAvailableLocked() and !hasQueuedWaitersLocked()) {
+        beginMutation();
+        recordWorkRequest(kind);
+        reserveGeneralWorkSlotState();
+        recordWorkStart(kind, .general_slot);
+        finishMutation();
+        return .general_slot;
+    }
+    return waitForWorkLocked(kind, io);
 }
 
 fn startThread(kind: Kind, stack_bytes: usize) void {
@@ -562,6 +833,27 @@ fn loadResource(state: *const Counters) ResourceSnapshot {
     };
 }
 
+fn loadInternalWork(state: *const WorkCounters) InternalWorkSnapshot {
+    return .{
+        .priority = .background,
+        .requests = state.requests.load(.acquire),
+        .starts = state.starts.load(.acquire),
+        .completions = state.completions.load(.acquire),
+        .active = state.active.load(.acquire),
+        .peak_active = state.peak_active.load(.acquire),
+        .typed_slot_reuses = state.typed_slot_reuses.load(.acquire),
+        .nested_reuses = state.nested_reuses.load(.acquire),
+        .host_reserved_admissions = state.host_reserved_admissions.load(.acquire),
+        .general_slot_admissions = state.general_slot_admissions.load(.acquire),
+        .waiters = state.waiters.load(.acquire),
+        .peak_waiters = state.peak_waiters.load(.acquire),
+        .waits = state.waits.load(.acquire),
+        .wait_ns = state.wait_ns.load(.acquire),
+        .wait_ns_max = state.wait_ns_max.load(.acquire),
+        .last_grant_ticket = state.last_grant_ticket.load(.acquire),
+    };
+}
+
 /// Coherent process-wide resource and runnable-slot state. Readers retry only
 /// across short atomic mutation sections; JavaScript execution never holds a
 /// telemetry or coordinator lock.
@@ -577,8 +869,10 @@ pub fn snapshot() Snapshot {
             .generation = generation,
             .scheduler = loadScheduler(),
             .resources = undefined,
+            .internal_work = undefined,
         };
         for (&counters, 0..) |*state, index| result.resources[index] = loadResource(state);
+        for (&work_counters, 0..) |*state, index| result.internal_work[index] = loadInternalWork(state);
         const after_generation = mutation_generation.load(.acquire);
         const after_writers = mutation_writers.load(.acquire);
         const final_generation = mutation_generation.load(.acquire);
@@ -683,6 +977,64 @@ pub fn beginBlocking() BlockingScope {
     return .{ .active = true };
 }
 
+/// Synchronous internal CPU work remains on its requesting thread. A typed
+/// engine thread reuses its runnable slot; an untyped host request uses the
+/// automatic host reservation or joins the background queue for a general
+/// slot. Nested internal work reuses the outer admission.
+pub const InternalWorkScope = struct {
+    kind: InternalWorkKind,
+    admission: WorkAdmission,
+    active: bool = true,
+
+    pub fn end(scope: *InternalWorkScope) void {
+        if (!scope.active) return;
+        std.debug.assert(internal_work_depth > 0);
+        internal_work_depth -= 1;
+        if (scope.admission == .host_reserved or scope.admission == .general_slot) {
+            std.debug.assert(internal_work_depth == 0);
+            const io = engine_io.get();
+            coordinator.mutex.lockUncancelable(io);
+            beginMutation();
+            recordWorkCompletion(scope.kind);
+            if (scope.admission == .host_reserved)
+                releaseHostWorkState()
+            else
+                releaseGeneralWorkSlotState();
+            finishMutation();
+            dispatchSlotsLocked(io);
+            coordinator.mutex.unlock(io);
+        } else {
+            beginMutation();
+            recordWorkCompletion(scope.kind);
+            finishMutation();
+        }
+        scope.active = false;
+    }
+};
+
+pub fn beginInternalWork(kind: InternalWorkKind) InternalWorkScope {
+    if (internal_work_depth != 0) {
+        internal_work_depth += 1;
+        beginMutation();
+        recordWorkRequest(kind);
+        recordWorkStart(kind, .nested_reuse);
+        finishMutation();
+        return .{ .kind = kind, .admission = .nested_reuse };
+    }
+    if (current_thread) |state| {
+        std.debug.assert(state.blocking_depth == 0);
+        internal_work_depth = 1;
+        beginMutation();
+        recordWorkRequest(kind);
+        recordWorkStart(kind, .typed_slot_reuse);
+        finishMutation();
+        return .{ .kind = kind, .admission = .typed_slot_reuse };
+    }
+    const admission = admitHostWork(kind);
+    internal_work_depth = 1;
+    return .{ .kind = kind, .admission = admission };
+}
+
 pub fn spawn(
     comptime kind: Kind,
     config: std.Thread.SpawnConfig,
@@ -749,7 +1101,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(u32, 6), snapshot().schema_version);
+    try std.testing.expectEqual(@as(u32, 7), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
     var release = std.atomic.Value(bool).init(false);
@@ -794,6 +1146,143 @@ test "runtime blocking scopes account nested and concurrent transitions once" {
     try std.testing.expectEqual(before.runnable, after.runnable);
     try std.testing.expectEqual(before.blocked, after.blocked);
     try std.testing.expectEqual(after.live, after.runnable + after.blocked);
+}
+
+test "internal work reuses typed slots and nested admission" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const before = snapshot();
+    var entered = std.atomic.Value(bool).init(false);
+    var release = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn run(entered_gate: *std.atomic.Value(bool), release_gate: *std.atomic.Value(bool)) void {
+            var native = beginInternalWork(.native_compilation);
+            defer native.end();
+            var wasm = beginInternalWork(.wasm_compilation);
+            defer wasm.end();
+            entered_gate.store(true, .release);
+            while (!release_gate.load(.acquire)) std.atomic.spinLoopHint();
+        }
+    };
+    const thread = try spawn(.script_worker, .{}, Worker.run, .{ &entered, &release });
+    while (!entered.load(.acquire)) std.Thread.yield() catch {};
+    const active = snapshot();
+    const native_before = before.work(.native_compilation);
+    const native_active = active.work(.native_compilation);
+    const wasm_before = before.work(.wasm_compilation);
+    const wasm_active = active.work(.wasm_compilation);
+    try std.testing.expectEqual(native_before.requests + 1, native_active.requests);
+    try std.testing.expectEqual(native_before.starts + 1, native_active.starts);
+    try std.testing.expectEqual(native_before.active + 1, native_active.active);
+    try std.testing.expectEqual(native_before.typed_slot_reuses + 1, native_active.typed_slot_reuses);
+    try std.testing.expectEqual(wasm_before.requests + 1, wasm_active.requests);
+    try std.testing.expectEqual(wasm_before.starts + 1, wasm_active.starts);
+    try std.testing.expectEqual(wasm_before.active + 1, wasm_active.active);
+    try std.testing.expectEqual(wasm_before.nested_reuses + 1, wasm_active.nested_reuses);
+    try std.testing.expectEqual(before.scheduler.internal_work_general_active, active.scheduler.internal_work_general_active);
+    try std.testing.expectEqual(before.scheduler.host_work_reserved_active, active.scheduler.host_work_reserved_active);
+    try std.testing.expectEqual(active.scheduler.active_slots, active.scheduledGeneralTotal());
+
+    release.store(true, .release);
+    thread.join();
+    const after = snapshot();
+    try std.testing.expectEqual(native_before.active, after.work(.native_compilation).active);
+    try std.testing.expectEqual(native_before.completions + 1, after.work(.native_compilation).completions);
+    try std.testing.expectEqual(wasm_before.active, after.work(.wasm_compilation).active);
+    try std.testing.expectEqual(wasm_before.completions + 1, after.work(.wasm_compilation).completions);
+    try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
+}
+
+test "host internal work uses one reservation and queues excess background work" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    defer _ = setSchedulerLimits(previous);
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    std.debug.assert(coordinator.active_slots.load(.monotonic) == 0 and !hasQueuedWaitersLocked());
+    beginMutation();
+    storeAutomaticPolicyState(automaticPolicy(2));
+    finishMutation();
+    coordinator.mutex.unlock(io);
+
+    const before = snapshot();
+    var entered = std.atomic.Value(u64).init(0);
+    var active = std.atomic.Value(u64).init(0);
+    var peak = std.atomic.Value(u64).init(0);
+    var phase = std.atomic.Value(u64).init(0);
+    const Worker = struct {
+        fn run(entered_count: *std.atomic.Value(u64), active_count: *std.atomic.Value(u64), peak_count: *std.atomic.Value(u64), phase_gate: *std.atomic.Value(u64)) void {
+            var work = beginInternalWork(.native_compilation);
+            defer work.end();
+            const ordinal = entered_count.fetchAdd(1, .acq_rel);
+            const now_active = active_count.fetchAdd(1, .acq_rel) + 1;
+            recordPeak(peak_count, now_active);
+            const required_phase: u64 = if (ordinal == 0) 1 else 2;
+            while (phase_gate.load(.acquire) < required_phase) std.atomic.spinLoopHint();
+            _ = active_count.fetchSub(1, .acq_rel);
+        }
+    };
+    var threads: [3]std.Thread = undefined;
+    var spawned: usize = 0;
+    defer {
+        phase.store(2, .release);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
+    for (&threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &entered, &active, &peak, &phase });
+        spawned += 1;
+    }
+
+    const deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+    var pressured = snapshot();
+    while ((entered.load(.acquire) != 2 or pressured.work(.native_compilation).waiters != before.work(.native_compilation).waiters + 1) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < deadline)
+    {
+        std.Thread.yield() catch {};
+        pressured = snapshot();
+    }
+    const work_before = before.work(.native_compilation);
+    const work_pressured = pressured.work(.native_compilation);
+    try std.testing.expectEqual(@as(u64, 2), entered.load(.acquire));
+    try std.testing.expectEqual(work_before.requests + 3, work_pressured.requests);
+    try std.testing.expectEqual(work_before.starts + 2, work_pressured.starts);
+    try std.testing.expectEqual(work_before.active + 2, work_pressured.active);
+    try std.testing.expectEqual(work_before.waiters + 1, work_pressured.waiters);
+    try std.testing.expectEqual(work_before.waits + 1, work_pressured.waits);
+    try std.testing.expectEqual(before.scheduler.internal_work_general_active + 1, pressured.scheduler.internal_work_general_active);
+    try std.testing.expectEqual(before.scheduler.host_work_reserved_active + 1, pressured.scheduler.host_work_reserved_active);
+    try std.testing.expectEqual(before.scheduledCpuTotal() + 2, pressured.scheduledCpuTotal());
+
+    phase.store(1, .release);
+    const resume_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+    while (entered.load(.acquire) != 3 and std.Io.Timestamp.now(io, .awake).nanoseconds < resume_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(u64, 3), entered.load(.acquire));
+    const resumed = snapshot().work(.native_compilation);
+    try std.testing.expectEqual(work_before.starts + 3, resumed.starts);
+    try std.testing.expectEqual(work_before.completions + 1, resumed.completions);
+    try std.testing.expectEqual(work_before.active + 2, resumed.active);
+    try std.testing.expectEqual(work_before.waiters, resumed.waiters);
+
+    phase.store(2, .release);
+    for (threads) |thread| thread.join();
+    spawned = 0;
+    const after = snapshot();
+    const work_after = after.work(.native_compilation);
+    try std.testing.expectEqual(@as(u64, 2), peak.load(.acquire));
+    try std.testing.expectEqual(work_before.requests + 3, work_after.requests);
+    try std.testing.expectEqual(work_before.starts + 3, work_after.starts);
+    try std.testing.expectEqual(work_before.completions + 3, work_after.completions);
+    try std.testing.expectEqual(work_before.active, work_after.active);
+    try std.testing.expectEqual(work_before.waiters, work_after.waiters);
+    try std.testing.expectEqual(work_before.waits + 1, work_after.waits);
+    try std.testing.expect(work_after.wait_ns > work_before.wait_ns);
+    try std.testing.expectEqual(@as(u64, 3), work_after.host_reserved_admissions - work_before.host_reserved_admissions +
+        work_after.general_slot_admissions - work_before.general_slot_admissions);
+    try std.testing.expect(work_after.host_reserved_admissions > work_before.host_reserved_admissions);
+    try std.testing.expect(work_after.general_slot_admissions > work_before.general_slot_admissions);
+    try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.internal_work_general_active, after.scheduler.internal_work_general_active);
+    try std.testing.expectEqual(before.scheduler.host_work_reserved_active, after.scheduler.host_work_reserved_active);
 }
 
 test "runtime scheduler derives automatic capacity and exposes fixed overrides" {

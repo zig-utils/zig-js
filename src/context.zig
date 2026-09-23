@@ -37770,6 +37770,7 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
         tree_snapshot.runtime.minor_pauses.len + tree_snapshot.runtime.full_pauses.len,
     );
 
+    const compiler_work_before = runtime_threads.snapshot().work(.native_compilation);
     const profiled_vm = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = true,
         .enable_gc = true,
@@ -37835,6 +37836,16 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
         );
         try std.testing.expect(snapshot.timing.baseline_tier_up_ns >= snapshot.timing.baseline_tier_up_ns_max);
         try std.testing.expect(snapshot.timing.optimizer_tier_up_ns >= snapshot.timing.optimizer_tier_up_ns_max);
+        const compiler_work_after = runtime_threads.snapshot().work(.native_compilation);
+        const work_starts = compiler_work_after.starts - compiler_work_before.starts;
+        try std.testing.expect(work_starts > 0);
+        try std.testing.expectEqual(work_starts, compiler_work_after.completions - compiler_work_before.completions);
+        try std.testing.expectEqual(compiler_work_before.active, compiler_work_after.active);
+        try std.testing.expectEqual(
+            work_starts,
+            compiler_work_after.host_reserved_admissions - compiler_work_before.host_reserved_admissions +
+                compiler_work_after.general_slot_admissions - compiler_work_before.general_slot_admissions,
+        );
     }
 
     const Host = struct {

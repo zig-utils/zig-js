@@ -91,13 +91,13 @@
   "synchronous_subsystems": [
     {
       "id": "jit_compilation",
-      "path": "src/jit.zig",
-      "status": "Compilation runs synchronously on the requesting JavaScript/host thread; there is no production compiler helper or queue"
+      "path": "src/vm.zig",
+      "status": "Compilation and publication remain synchronous on the requesting JavaScript/host thread; typed threads reuse their runnable slot, while untyped hosts use the reserved lane or the bounded background admission queue"
     },
     {
       "id": "wasm_compilation",
-      "path": "src/wasm",
-      "status": "Decode, validation, and compilation run synchronously on the requesting JavaScript/host thread; production Wasm creates no helper pool"
+      "path": "src/wasm/api.zig",
+      "status": "Decode, validation, and compilation remain synchronous on the requesting JavaScript/host thread; typed threads reuse their runnable slot, while untyped hosts use the reserved lane or the bounded background admission queue"
     }
   ],
   "test_only_direct_spawns": [
@@ -116,6 +116,7 @@
     { "path": "src/jsthread.zig", "count": 3 },
     { "path": "src/parallel_lock.zig", "count": 2 },
     { "path": "src/root_handshake.zig", "count": 1 },
+    { "path": "src/runtime_threads.zig", "count": 1 },
     { "path": "src/shape.zig", "count": 3 },
     { "path": "src/shared_buffer.zig", "count": 1 },
     { "path": "src/strcell.zig", "count": 4 },

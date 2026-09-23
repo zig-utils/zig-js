@@ -181,9 +181,15 @@ fn auditSources(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !struc
         if (direct != scopes.production + scopes.test_only)
             return fail("token-aware direct-spawn count drift in '{s}': {d} textual, {d} tokenized", .{ path, direct, scopes.production + scopes.test_only });
         if (std.mem.eql(u8, path, "src/runtime_threads.zig")) {
-            if (scopes.production != 1 or scopes.test_only != 0)
+            if (scopes.production != 1)
                 return fail("runtime thread boundary has invalid production/test direct-spawn split", .{});
-            wrapper_direct = direct;
+            wrapper_direct = scopes.production;
+            const inventory_index = listedDirect(inventory, path) orelse
+                return fail("runtime thread boundary has unclassified test spawns", .{});
+            if (scopes.test_only != inventory.test_only_direct_spawns[inventory_index].count)
+                return fail("runtime thread boundary has {d} test spawns, expected {d}", .{ scopes.test_only, inventory.test_only_direct_spawns[inventory_index].count });
+            direct_seen[inventory_index] = true;
+            direct_total += scopes.test_only;
         } else if (direct != 0) {
             if (scopes.production != 0)
                 return fail("'{s}' retains {d} direct spawns outside top-level tests", .{ path, scopes.production });
