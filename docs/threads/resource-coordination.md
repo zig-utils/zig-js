@@ -36,17 +36,22 @@ const previous = js.setRuntimeThreadLimits(.script_worker, .{
 const previous_scheduler = js.setRuntimeThreadSchedulerLimits(.{
     .max_runnable_threads = 4,
 });
+
+// Restore automatic host sizing. An explicit maxInt(u64) means unlimited.
+_ = js.setRuntimeThreadSchedulerLimits(.{});
 ```
 
 Each resource row reports attempts, successful starts, completions, spawn
 failures, policy rejections, in-flight spawn calls, admitted reservations, live
 and peak threads, current/peak runnable and blocked threads, block/resume
 transition totals, current/peak configured stack bytes, and the active limits.
-The schema-v4 invariants are `attempts = starts + spawn_failures +
+The schema-v5 invariants are `attempts = starts + spawn_failures +
 admission_rejections + in_flight_attempts`, `live = starts - completions`, and
 `live = runnable + blocked`. The scheduler row reports its runnable limit,
-active and peak slots, current and peak queued waiters, and cumulative slot
-waits. Its cross-resource invariant is `active_slots = sum(resource.runnable)`.
+policy mode, detected logical CPU count, automatic host reservation, configured
+override, active and peak slots, current and peak queued waiters, and cumulative
+slot waits. Its cross-resource invariant is
+`active_slots = sum(resource.runnable)`.
 Configured stack bytes describe the `std.Thread.SpawnConfig` reservation, not
 resident or committed process memory. Counters mutate only at OS-thread
 creation, blocking transitions, and exit; snapshot readers retry across those
@@ -77,11 +82,15 @@ queues for a slot while holding its reacquired wait mutex: it tries the slot
 first, and if capacity is unavailable it releases the mutex, parks, then
 reacquires the mutex before returning to its caller.
 
-The runnable limit defaults to unlimited. Lowering it below current use does
-not interrupt existing runnable threads; new entries and resumes wait until
-active use falls below the limit. A zero limit pauses every new entry and resume
-until an embedder raises it. Increasing capacity wakes queued threads to compete
-under the coordinator mutex.
+The runnable limit defaults to `max(1, logical CPUs - 1)`. The reserved lane
+keeps capacity available for the embedder or foreground host mutator, which
+runs outside the typed engine-thread boundary. If host detection fails, the
+coordinator fails safe to one runnable slot. Passing `null` reapplies automatic
+sizing and refreshes host detection; a numeric override is exact, including
+zero to pause every new entry and resume, or `maxInt(u64)` for intentional
+unlimited capacity. Lowering effective capacity below current use does not
+interrupt existing runnable threads. Increasing it wakes queued threads to
+compete under the coordinator mutex.
 
 Run the fail-closed audit after adding or removing any runtime or test thread:
 
@@ -96,6 +105,6 @@ JSON only after reviewing whether the new work belongs to production, test
 scaffolding, or an existing resource class.
 
 The boundary controls live-thread/configured-stack admission, records
-runnable/blocked state, and enforces neutral shared CPU slots. Issue
-[#502](https://github.com/zig-utils/zig-js/issues/502) owns automatic host sizing,
-priority policy, compilation queues, cancellation, and memory pressure.
+runnable/blocked state, and enforces automatically sized shared CPU slots.
+Issue [#502](https://github.com/zig-utils/zig-js/issues/502) owns priority policy,
+compilation queues, cancellation, and memory pressure.

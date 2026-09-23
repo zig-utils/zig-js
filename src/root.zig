@@ -46,6 +46,7 @@ pub const shape = @import("shape.zig");
 pub const promise_profile = @import("promise_profile.zig");
 pub const RuntimeThreadResourceKind = @import("runtime_threads.zig").Kind;
 pub const RuntimeThreadResourceSnapshot = @import("runtime_threads.zig").ResourceSnapshot;
+pub const RuntimeThreadSchedulerPolicy = @import("runtime_threads.zig").SchedulerPolicy;
 pub const RuntimeThreadSchedulerSnapshot = @import("runtime_threads.zig").SchedulerSnapshot;
 pub const RuntimeThreadSnapshot = @import("runtime_threads.zig").Snapshot;
 pub const RuntimeThreadLimits = @import("runtime_threads.zig").Limits;

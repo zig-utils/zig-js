@@ -50,7 +50,12 @@ var mutation_generation: std.atomic.Value(u64) = .init(0);
 const Coordinator = struct {
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
-    max_runnable_threads: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
+    initialized: std.atomic.Value(bool) = .init(false),
+    automatic: std.atomic.Value(bool) = .init(true),
+    host_logical_cpus: std.atomic.Value(u64) = .init(1),
+    automatic_host_reservation: std.atomic.Value(u64) = .init(0),
+    configured_max_runnable_threads: std.atomic.Value(u64) = .init(0),
+    effective_max_runnable_threads: std.atomic.Value(u64) = .init(1),
     active_slots: std.atomic.Value(u64) = .init(0),
     peak_active_slots: std.atomic.Value(u64) = .init(0),
     slot_waiters: std.atomic.Value(u64) = .init(0),
@@ -89,11 +94,19 @@ pub const Limits = struct {
 };
 
 pub const SchedulerLimits = struct {
-    max_runnable_threads: u64 = std.math.maxInt(u64),
+    /// `null` derives a finite limit from host capacity. Numeric values are
+    /// exact: zero pauses entry/resume and `maxInt(u64)` is explicit unlimited.
+    max_runnable_threads: ?u64 = null,
 };
 
+pub const SchedulerPolicy = enum { automatic, fixed };
+
 pub const SchedulerSnapshot = struct {
-    max_runnable_threads: u64,
+    policy: SchedulerPolicy,
+    host_logical_cpus: u64,
+    automatic_host_reservation: u64,
+    configured_max_runnable_threads: ?u64,
+    effective_max_runnable_threads: u64,
     active_slots: u64,
     peak_active_slots: u64,
     slot_waiters: u64,
@@ -102,7 +115,7 @@ pub const SchedulerSnapshot = struct {
 };
 
 pub const Snapshot = struct {
-    schema_version: u32 = 4,
+    schema_version: u32 = 5,
     generation: u64,
     scheduler: SchedulerSnapshot,
     resources: [kind_count]ResourceSnapshot,
@@ -233,9 +246,59 @@ fn recordRunnableState(kind: Kind) void {
     _ = state.runnable_transitions.fetchAdd(1, .monotonic);
 }
 
-fn loadScheduler() SchedulerSnapshot {
+const AutomaticPolicy = struct {
+    host_logical_cpus: u64,
+    host_reservation: u64,
+    effective_max_runnable_threads: u64,
+};
+
+fn automaticPolicy(host_logical_cpus: u64) AutomaticPolicy {
+    std.debug.assert(host_logical_cpus >= 1);
+    const reservation: u64 = if (host_logical_cpus > 1) 1 else 0;
     return .{
-        .max_runnable_threads = coordinator.max_runnable_threads.load(.acquire),
+        .host_logical_cpus = host_logical_cpus,
+        .host_reservation = reservation,
+        .effective_max_runnable_threads = host_logical_cpus - reservation,
+    };
+}
+
+fn detectAutomaticPolicy() AutomaticPolicy {
+    const detected: u64 = @intCast(std.Thread.getCpuCount() catch 1);
+    return automaticPolicy(detected);
+}
+
+fn storeAutomaticPolicyState(policy: AutomaticPolicy) void {
+    coordinator.automatic.store(true, .monotonic);
+    coordinator.host_logical_cpus.store(policy.host_logical_cpus, .monotonic);
+    coordinator.automatic_host_reservation.store(policy.host_reservation, .monotonic);
+    coordinator.configured_max_runnable_threads.store(0, .monotonic);
+    coordinator.effective_max_runnable_threads.store(policy.effective_max_runnable_threads, .monotonic);
+}
+
+fn ensureCoordinatorInitializedLocked() void {
+    if (coordinator.initialized.load(.monotonic)) return;
+    beginMutation();
+    storeAutomaticPolicyState(detectAutomaticPolicy());
+    finishMutation();
+    coordinator.initialized.store(true, .release);
+}
+
+fn ensureCoordinatorInitialized() void {
+    if (coordinator.initialized.load(.acquire)) return;
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    ensureCoordinatorInitializedLocked();
+    coordinator.mutex.unlock(io);
+}
+
+fn loadScheduler() SchedulerSnapshot {
+    const automatic = coordinator.automatic.load(.acquire);
+    return .{
+        .policy = if (automatic) .automatic else .fixed,
+        .host_logical_cpus = coordinator.host_logical_cpus.load(.acquire),
+        .automatic_host_reservation = coordinator.automatic_host_reservation.load(.acquire),
+        .configured_max_runnable_threads = if (automatic) null else coordinator.configured_max_runnable_threads.load(.acquire),
+        .effective_max_runnable_threads = coordinator.effective_max_runnable_threads.load(.acquire),
         .active_slots = coordinator.active_slots.load(.acquire),
         .peak_active_slots = coordinator.peak_active_slots.load(.acquire),
         .slot_waiters = coordinator.slot_waiters.load(.acquire),
@@ -245,7 +308,7 @@ fn loadScheduler() SchedulerSnapshot {
 }
 
 fn slotAvailableLocked() bool {
-    return coordinator.active_slots.load(.monotonic) < coordinator.max_runnable_threads.load(.monotonic);
+    return coordinator.active_slots.load(.monotonic) < coordinator.effective_max_runnable_threads.load(.monotonic);
 }
 
 fn reserveSlotState() void {
@@ -273,6 +336,7 @@ fn startThread(kind: Kind, stack_bytes: usize) void {
     const io = engine_io.get();
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
+    ensureCoordinatorInitializedLocked();
     if (slotAvailableLocked()) {
         beginMutation();
         reserveSlotState();
@@ -378,6 +442,7 @@ fn loadResource(state: *const Counters) ResourceSnapshot {
 /// across short atomic mutation sections; JavaScript execution never holds a
 /// telemetry or coordinator lock.
 pub fn snapshot() Snapshot {
+    ensureCoordinatorInitialized();
     while (true) {
         const generation = mutation_generation.load(.acquire);
         if (mutation_writers.load(.acquire) != 0) {
@@ -425,13 +490,23 @@ pub fn setSchedulerLimits(limits: SchedulerLimits) SchedulerLimits {
     const io = engine_io.get();
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
+    ensureCoordinatorInitializedLocked();
     beginMutation();
+    const was_automatic = coordinator.automatic.load(.monotonic);
     const previous = SchedulerLimits{
-        .max_runnable_threads = coordinator.max_runnable_threads.load(.monotonic),
+        .max_runnable_threads = if (was_automatic) null else coordinator.configured_max_runnable_threads.load(.monotonic),
     };
-    coordinator.max_runnable_threads.store(limits.max_runnable_threads, .monotonic);
+    const previous_effective = coordinator.effective_max_runnable_threads.load(.monotonic);
+    if (limits.max_runnable_threads) |fixed| {
+        coordinator.automatic.store(false, .monotonic);
+        coordinator.configured_max_runnable_threads.store(fixed, .monotonic);
+        coordinator.effective_max_runnable_threads.store(fixed, .monotonic);
+    } else {
+        storeAutomaticPolicyState(detectAutomaticPolicy());
+    }
+    const effective = coordinator.effective_max_runnable_threads.load(.monotonic);
     finishMutation();
-    if (limits.max_runnable_threads > previous.max_runnable_threads)
+    if (effective > previous_effective)
         coordinator.cond.broadcast(io);
     return previous;
 }
@@ -553,7 +628,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(u32, 4), snapshot().schema_version);
+    try std.testing.expectEqual(@as(u32, 5), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
     var release = std.atomic.Value(bool).init(false);
@@ -598,6 +673,48 @@ test "runtime blocking scopes account nested and concurrent transitions once" {
     try std.testing.expectEqual(before.runnable, after.runnable);
     try std.testing.expectEqual(before.blocked, after.blocked);
     try std.testing.expectEqual(after.live, after.runnable + after.blocked);
+}
+
+test "runtime scheduler derives automatic capacity and exposes fixed overrides" {
+    try std.testing.expectEqualDeep(AutomaticPolicy{
+        .host_logical_cpus = 1,
+        .host_reservation = 0,
+        .effective_max_runnable_threads = 1,
+    }, automaticPolicy(1));
+    try std.testing.expectEqualDeep(AutomaticPolicy{
+        .host_logical_cpus = 2,
+        .host_reservation = 1,
+        .effective_max_runnable_threads = 1,
+    }, automaticPolicy(2));
+    try std.testing.expectEqualDeep(AutomaticPolicy{
+        .host_logical_cpus = 64,
+        .host_reservation = 1,
+        .effective_max_runnable_threads = 63,
+    }, automaticPolicy(64));
+
+    const previous = setSchedulerLimits(.{});
+    defer _ = setSchedulerLimits(previous);
+    const automatic = snapshot().scheduler;
+    try std.testing.expectEqual(SchedulerPolicy.automatic, automatic.policy);
+    try std.testing.expectEqual(@as(?u64, null), automatic.configured_max_runnable_threads);
+    try std.testing.expect(automatic.host_logical_cpus >= 1);
+    const expected = automaticPolicy(automatic.host_logical_cpus);
+    try std.testing.expectEqual(expected.host_reservation, automatic.automatic_host_reservation);
+    try std.testing.expectEqual(expected.effective_max_runnable_threads, automatic.effective_max_runnable_threads);
+
+    const automatic_limits = setSchedulerLimits(.{ .max_runnable_threads = std.math.maxInt(u64) });
+    try std.testing.expectEqual(@as(?u64, null), automatic_limits.max_runnable_threads);
+    const unlimited = snapshot().scheduler;
+    try std.testing.expectEqual(SchedulerPolicy.fixed, unlimited.policy);
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), unlimited.configured_max_runnable_threads);
+    try std.testing.expectEqual(std.math.maxInt(u64), unlimited.effective_max_runnable_threads);
+
+    const unlimited_limits = setSchedulerLimits(automatic_limits);
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), unlimited_limits.max_runnable_threads);
+    const restored = snapshot().scheduler;
+    try std.testing.expectEqual(SchedulerPolicy.automatic, restored.policy);
+    try std.testing.expectEqual(@as(?u64, null), restored.configured_max_runnable_threads);
+    try std.testing.expectEqual(restored.active_slots, snapshot().runnableTotal());
 }
 
 test "runtime scheduler bounds runnable slots and wakes policy waiters" {
@@ -685,7 +802,7 @@ test "runtime scheduler bounds runnable slots and wakes policy waiters" {
     try std.testing.expect(!ran.load(.acquire));
     try std.testing.expectEqual(before.scheduler.active_slots, paused.scheduler.active_slots);
     try std.testing.expectEqual(before.scheduler.slot_waiters + 1, paused.scheduler.slot_waiters);
-    _ = setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    _ = setSchedulerLimits(.{});
     paused_thread.?.join();
     paused_thread = null;
     try std.testing.expect(ran.load(.acquire));
@@ -693,6 +810,8 @@ test "runtime scheduler bounds runnable slots and wakes policy waiters" {
     try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
     try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
     try std.testing.expectEqual(before.scheduler.slot_waits + 3, after.scheduler.slot_waits);
+    try std.testing.expectEqual(SchedulerPolicy.automatic, after.scheduler.policy);
+    try std.testing.expect(after.scheduler.effective_max_runnable_threads >= 1);
     try std.testing.expectEqual(after.scheduler.active_slots, after.runnableTotal());
 }
 
