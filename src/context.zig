@@ -37841,7 +37841,8 @@ test "memory pressure checkpoint compacts precise heap and retires owned code" {
         .heap_limit_bytes = 64 * 1024 * 1024,
         .profile_execution_tiers = true,
     });
-    defer ctx.destroy();
+    var ctx_destroyed = false;
+    defer if (!ctx_destroyed) ctx.destroy();
     _ = try ctx.evaluate(
         \\globalThis.pressureKeep = { marker: 451 };
         \\globalThis.pressureDiscard = [];
@@ -37856,7 +37857,6 @@ test "memory pressure checkpoint compacts precise heap and retires owned code" {
         \\pressureDiscard = null;
     );
     const keep = try ctx.protectValue(ctx.global_object.getOwn("pressureKeep").?);
-    defer std.debug.assert(ctx.unprotectValue(keep));
     const budget_before = ctx.heapBudgetStats().?;
     const pressure = ctx.relieveMemoryPressure();
     const budget_after = ctx.heapBudgetStats().?;
@@ -37883,6 +37883,19 @@ test "memory pressure checkpoint compacts precise heap and retires owned code" {
         try std.testing.expectEqual(Context.MemoryPressureDomainStatus.unavailable, pressure.native_code_status);
     }
     try std.testing.expectEqual(@as(f64, 2467), (try ctx.evaluate("pressureHot(64)")).asNum());
+    try std.testing.expect(ctx.unprotectValue(keep));
+
+    const teardown = ctx.destroyWithMemoryInventory().?;
+    ctx_destroyed = true;
+    try std.testing.expectEqual(@as(u32, Context.MemoryTeardownSnapshot.schema_version), teardown.schema);
+    try std.testing.expect(teardown.accounted_owned_bytes_complete);
+    try std.testing.expect(teardown.fully_released);
+    try std.testing.expectEqual(@as(u64, 0), teardown.context_backing_current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), teardown.collector_auxiliary_current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), teardown.recovery_reserve_current_bytes);
+    try std.testing.expectEqual(@as(u64, 0), teardown.owned_native_live_bytes);
+    try std.testing.expectEqual(@as(u64, 0), teardown.owned_native_retired_bytes);
+    try std.testing.expectEqual(@as(u64, 0), teardown.accounted_owned_current_bytes);
 }
 
 test "memory pressure checkpoint leaves shared ownership with the primary" {
