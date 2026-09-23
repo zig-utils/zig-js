@@ -1432,6 +1432,7 @@ pub fn build(b: *std.Build) void {
     wasm_test_options.addOption([]const u8, "threads_benchmark_source", @embedFile("bench/wasm_threads_comparison.js"));
     tests.root_module.addOptions("wasm_test_options", wasm_test_options);
     const run_tests = b.addRunArtifact(tests);
+    run_tests.setEnvironmentVariable("TZ", "UTC");
     if (test_filter) |filter| {
         run_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
     }
@@ -1452,6 +1453,7 @@ pub fn build(b: *std.Build) void {
     const parallel_driver_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/unit-test-parallel.ts", "--self-test" });
     const parallel_tests = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/unit-test-parallel.ts" });
     parallel_tests.addFileArg(tests.getEmittedBin());
+    parallel_tests.setEnvironmentVariable("TZ", "UTC");
     if (test_filter) |filter| {
         parallel_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
     }
@@ -1727,6 +1729,7 @@ pub fn build(b: *std.Build) void {
     }) |spec| {
         const run_focused_engine_tests = b.addRunArtifact(focused_engine_tests);
         run_focused_engine_tests.addArg(spec.suite);
+        run_focused_engine_tests.setEnvironmentVariable("TZ", "UTC");
         if (test_filter) |filter| run_focused_engine_tests.addArg(filter);
         const focused_step = b.step(spec.step_name, spec.description);
         focused_step.dependOn(&run_focused_engine_tests.step);

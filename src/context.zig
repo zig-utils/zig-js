@@ -12291,6 +12291,38 @@ test "Date basics" {
     try std.testing.expect((try evalIn("typeof new Date() === 'object'")).asBool());
 }
 
+test "Date local operations follow the process default IANA zone" {
+    try std.testing.expect(interp.setTimeZoneOverride(std.heap.page_allocator, "Asia/Manila"));
+    defer _ = interp.setTimeZoneOverride(std.heap.page_allocator, null);
+
+    try std.testing.expect((try evalIn(
+        \\var epoch = new Date(0);
+        \\epoch.getHours() === 8 && epoch.getUTCHours() === 0 &&
+        \\  epoch.getTimezoneOffset() === -480 &&
+        \\  new Date(1970, 0, 1).getTime() === -28800000 &&
+        \\  Date.parse("1970-01-01T00:00:00") === -28800000 &&
+        \\  Date.parse("1970-01-01") === 0 &&
+        \\  epoch.toString().includes("GMT+0800 (Asia/Manila)") &&
+        \\  new Intl.DateTimeFormat("en").resolvedOptions().timeZone === "Asia/Manila" &&
+        \\  Temporal.Now.timeZoneId() === "Asia/Manila"
+    )).asBool());
+
+    try std.testing.expect(interp.setTimeZoneOverride(std.heap.page_allocator, "America/New_York"));
+    try std.testing.expect((try evalIn(
+        \\var winter = new Date(Date.UTC(2024, 0, 1));
+        \\var summer = new Date(Date.UTC(2024, 6, 1));
+        \\var gap = new Date(2024, 2, 10, 2, 30);
+        \\var overlap = new Date(2024, 10, 3, 1, 30);
+        \\var setter = new Date(Date.UTC(2024, 2, 10, 6, 30));
+        \\setter.setHours(2, 30);
+        \\winter.getTimezoneOffset() === 300 && summer.getTimezoneOffset() === 240 &&
+        \\  gap.getTime() === Date.UTC(2024, 2, 10, 7, 30) && gap.getHours() === 3 &&
+        \\  overlap.getTime() === Date.UTC(2024, 10, 3, 5, 30) &&
+        \\  setter.getTime() === Date.UTC(2024, 2, 10, 7, 30) &&
+        \\  Date.parse("2024-03-10T02:30:00") === gap.getTime()
+    )).asBool());
+}
+
 test "Date parses W3C NOTE space-separated date-times" {
     try std.testing.expect((try evalIn(
         \\new Date("1997-03-08 1:1:1.01").getTime() === new Date("1997-03-08T01:01:01.01").getTime()

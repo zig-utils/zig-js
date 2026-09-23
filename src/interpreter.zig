@@ -13962,12 +13962,34 @@ pub const Interpreter = struct {
         return if (tr == 0) 0 else tr;
     }
 
+    /// Offset for an epoch time in the process default zone. Date values are
+    /// millisecond integers after TimeClip, so conversion through i128 keeps
+    /// the full ECMAScript range exact before the IANA transition lookup.
+    fn dateLocalOffsetNs(t: f64) i64 {
+        const tz = nowTimeZone();
+        const epoch_ns = @as(i128, @intFromFloat(t)) * 1_000_000;
+        return timeZoneOffsetAtEpoch(tz.name, epoch_ns, tz.offset_ns);
+    }
+
+    fn dateLocalTime(t: f64) f64 {
+        return t + @as(f64, @floatFromInt(dateLocalOffsetNs(t))) / 1_000_000.0;
+    }
+
+    /// LocalTime -> UTC per ECMA-262, using Temporal's compatible
+    /// disambiguation rule: the earlier instant in an overlap and the later
+    /// instant across a gap.
+    fn dateUtcFromLocal(self: *Interpreter, local_ms: f64) EvalError!f64 {
+        if (!std.math.isFinite(local_ms) or @abs(local_ms) > 8.64e15) return std.math.nan(f64);
+        const local_ns = @as(i128, @intFromFloat(@trunc(local_ms))) * 1_000_000;
+        const offset_ns = try zdtOffsetForLocalDisambiguation(self, nowTimeZone(), local_ns, .compatible);
+        return local_ms - @as(f64, @floatFromInt(offset_ns)) / 1_000_000.0;
+    }
+
     /// Recompose broken-down components into an epoch-ms time, set it on `o`, and
     /// return it — the shared back half of every `Date.prototype.set*`. Out-of-range
     /// fields roll over (e.g. `setHours(0,0,0,-1)`); a non-finite or absurd field, or
     /// a result past the ±8.64e15 ms range (TimeClip), yields NaN.
-    fn dateCommit(self: *Interpreter, o: *value.Object, y: f64, mo: f64, d: f64, h: f64, mi: f64, s: f64, ms: f64) EvalError!Value {
-        _ = self; // [[DateValue]] now lives in the `date_ms` field, no property write
+    fn dateCommit(self: *Interpreter, o: *value.Object, y: f64, mo: f64, d: f64, h: f64, mi: f64, s: f64, ms: f64, local: bool) EvalError!Value {
         const nan = std.math.nan(f64);
         var tf: f64 = nan;
         const fields = [_]f64{ y, mo, d, h, mi, s, ms };
@@ -13984,14 +14006,15 @@ pub const Interpreter = struct {
             const tod = @as(i64, @intFromFloat(@trunc(h))) * 3600000 + @as(i64, @intFromFloat(@trunc(mi))) * 60000 +
                 @as(i64, @intFromFloat(@trunc(s))) * 1000 + @as(i64, @intFromFloat(@trunc(ms)));
             tf = @as(f64, @floatFromInt(days)) * @as(f64, @floatFromInt(ms_per_day)) + @as(f64, @floatFromInt(tod));
-            if (@abs(tf) > 8.64e15) tf = nan;
+            if (local) tf = try self.dateUtcFromLocal(tf);
+            tf = dateTimeClip(tf);
         }
         o.setDateMs(tf);
         return Value.num(tf);
     }
 
-    /// `Date.prototype` methods (UTC-based; v1 ignores local timezone, so
-    /// get*/getUTC* coincide). Time is the internal-slot field `date_ms`.
+    /// `Date.prototype` methods. Local operations use the process default IANA
+    /// zone while UTC operations work directly on the [[DateValue]] epoch time.
     fn dateMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const t = o.dateMs();
         const nan = std.math.nan(f64);
@@ -14035,7 +14058,9 @@ pub const Interpreter = struct {
             // Non-fullyear setters on an invalid date stay invalid (arguments were
             // still coerced above); setFullYear revives it from a zero base.
             if (std.math.isNan(t) and !fy and !sy) return Value.num(nan);
-            const c = dateDecompose(if (std.math.isNan(t)) 0 else t);
+            const local = std.mem.indexOf(u8, name, "UTC") == null;
+            const inspected_t = if (std.math.isNan(t)) 0 else if (local) dateLocalTime(t) else t;
+            const c = dateDecompose(inspected_t);
             var y: f64 = @floatFromInt(c.y);
             var mo: f64 = @floatFromInt(c.mo);
             var d: f64 = @floatFromInt(c.d);
@@ -14047,7 +14072,7 @@ pub const Interpreter = struct {
                 y = arg0(a).toNumber();
                 if (a.len > 1) mo = a[1].toNumber();
                 if (a.len > 2) d = a[2].toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (sy) {
                 const yv = arg0(a).toNumber();
@@ -14057,38 +14082,38 @@ pub const Interpreter = struct {
                 }
                 const yi = @trunc(yv);
                 y = if (yi >= 0 and yi <= 99) 1900 + yi else yv;
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (eq(name, "setMonth") or eq(name, "setUTCMonth")) {
                 mo = arg0(a).toNumber();
                 if (a.len > 1) d = a[1].toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (eq(name, "setDate") or eq(name, "setUTCDate")) {
                 d = arg0(a).toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (eq(name, "setHours") or eq(name, "setUTCHours")) {
                 h = arg0(a).toNumber();
                 if (a.len > 1) mi = a[1].toNumber();
                 if (a.len > 2) s = a[2].toNumber();
                 if (a.len > 3) ms = a[3].toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (eq(name, "setMinutes") or eq(name, "setUTCMinutes")) {
                 mi = arg0(a).toNumber();
                 if (a.len > 1) s = a[1].toNumber();
                 if (a.len > 2) ms = a[2].toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (eq(name, "setSeconds") or eq(name, "setUTCSeconds")) {
                 s = arg0(a).toNumber();
                 if (a.len > 1) ms = a[1].toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
             if (eq(name, "setMilliseconds") or eq(name, "setUTCMilliseconds")) {
                 ms = arg0(a).toNumber();
-                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms, local);
             }
         }
 
@@ -14115,7 +14140,13 @@ pub const Interpreter = struct {
         }
         if (eq(name, "toDateString") or eq(name, "toString") or eq(name, "toTimeString")) {
             if (std.math.isNan(t)) return Value.str("Invalid Date");
-            const c = dateDecompose(t);
+            const tz = nowTimeZone();
+            const epoch_ns = @as(i128, @intFromFloat(t)) * 1_000_000;
+            const offset_ns = timeZoneOffsetAtEpoch(tz.name, epoch_ns, tz.offset_ns);
+            const c = dateDecompose(t + @as(f64, @floatFromInt(offset_ns)) / 1_000_000.0);
+            const offset_minutes: i64 = @divTrunc(offset_ns, 60_000_000_000);
+            const offset_abs: u64 = @intCast(if (offset_minutes < 0) -offset_minutes else offset_minutes);
+            const zone_label = if (std.mem.eql(u8, tz.name, "UTC")) "Coordinated Universal Time" else tz.name;
             var year_buffer: [32]u8 = undefined;
             const year = writeDateYear(c.y, &year_buffer);
             const allocator = self.dateStringResultAllocator();
@@ -14127,17 +14158,19 @@ pub const Interpreter = struct {
                     day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), year,
                 }));
             if (eq(name, "toTimeString"))
-                return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{
-                    dnz(c.h), dnz(c.mi), dnz(c.s),
+                return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2}:{d:0>2} GMT{s}{d:0>2}{d:0>2} ({s})", .{
+                    dnz(c.h), dnz(c.mi), dnz(c.s), if (offset_minutes < 0) "-" else "+", offset_abs / 60, offset_abs % 60, zone_label,
                 }));
-            return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{s} {s} {d:0>2} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{
-                day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), year, dnz(c.h), dnz(c.mi), dnz(c.s),
+            return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{s} {s} {d:0>2} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT{s}{d:0>2}{d:0>2} ({s})", .{
+                day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), year, dnz(c.h), dnz(c.mi), dnz(c.s), if (offset_minutes < 0) "-" else "+", offset_abs / 60, offset_abs % 60, zone_label,
             }));
         }
 
         // ---- getters ----------------------------------------------------------
         if (std.math.isNan(t)) return Value.num(nan);
-        const ti: i64 = @intFromFloat(t);
+        const utc = std.mem.indexOf(u8, name, "UTC") != null;
+        const inspected_t = if (utc) t else dateLocalTime(t);
+        const ti: i64 = @intFromFloat(inspected_t);
         const days = @divFloor(ti, ms_per_day);
         const tod = @mod(ti, ms_per_day);
         const c = civilFromDays(days);
@@ -14150,7 +14183,8 @@ pub const Interpreter = struct {
         if (eq(name, "getMinutes") or eq(name, "getUTCMinutes")) return Value.num(@floatFromInt(@mod(@divFloor(tod, 60000), 60)));
         if (eq(name, "getSeconds") or eq(name, "getUTCSeconds")) return Value.num(@floatFromInt(@mod(@divFloor(tod, 1000), 60)));
         if (eq(name, "getMilliseconds") or eq(name, "getUTCMilliseconds")) return Value.num(@floatFromInt(@mod(tod, 1000)));
-        if (eq(name, "getTimezoneOffset")) return Value.num(0);
+        if (eq(name, "getTimezoneOffset"))
+            return Value.num(-@as(f64, @floatFromInt(dateLocalOffsetNs(t))) / 60_000_000_000.0);
         return null;
     }
 
@@ -30823,7 +30857,7 @@ fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
 fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequired, defaults: DtfDefaults) EvalError!DtfOptions {
     // CoerceOptionsToObject: undefined -> none; null -> TypeError; primitive -> boxed.
     const raw: Value = if (raw_in.isUndefined()) Value.undef() else Value.obj(try self.toObject(raw_in));
-    var r = DtfOptions{ .time_zone = timeZoneOverride() orelse "UTC" };
+    var r = DtfOptions{ .time_zone = defaultTimeZoneName() };
     // Read options only when an options object was supplied; the required/default
     // logic below still runs for `new Intl.DateTimeFormat()` (no options).
     if (raw.isObject()) {
@@ -46992,7 +47026,7 @@ fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return Value.strAlloc(self.arena, timeZoneOverride() orelse "UTC");
+    return Value.strAlloc(self.arena, defaultTimeZoneName());
 }
 
 fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -47087,328 +47121,69 @@ fn roundOffsetToMinute(ns: i128) i128 {
     return if (neg) -rounded else rounded;
 }
 
+fn zdtPossibleOffsets(tz: TimeZone, local_ns: i128, out: *[3]i64) usize {
+    // Every civil offset is well inside seven days. Sampling on both sides of
+    // the wall time therefore finds the offsets adjacent to any gap or overlap,
+    // including date-line changes, while the exact-match check discards an
+    // offset that does not map this wall time back into itself.
+    const span = 7 * nsPerUnit(.day);
+    const probes = [_]i128{ local_ns - span, local_ns, local_ns + span };
+    var count: usize = 0;
+    for (probes) |probe| {
+        const offset = timeZoneOffsetAtEpoch(tz.name, probe, tz.offset_ns);
+        var duplicate = false;
+        for (out[0..count]) |present| {
+            if (present == offset) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate and zdtOffsetMatchesLocal(tz, local_ns, offset)) {
+            out[count] = offset;
+            count += 1;
+        }
+    }
+    return count;
+}
+
 fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
-    if (std.mem.eql(u8, tz.name, "America/Toronto")) {
-        const gap_start = (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day));
-        const gap_end = gap_start + 30 * nsPerUnit(.minute);
-        if (local_ns >= gap_start and local_ns < gap_end)
-            return -5 * 3_600_000_000_000;
+    var possible: [3]i64 = undefined;
+    const count = zdtPossibleOffsets(tz, local_ns, &possible);
+    if (count != 0) {
+        // Compatible chooses the earlier instant in an overlap, which is the
+        // candidate with the greatest offset.
+        var selected = possible[0];
+        for (possible[1..count]) |offset| selected = @max(selected, offset);
+        return selected;
     }
-    if (std.mem.eql(u8, tz.name, "America/Los_Angeles")) {
-        const spring_gap_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2000 = spring_gap_start_2000 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2000 and local_ns < spring_gap_end_2000)
-            return -8 * 3_600_000_000_000;
-        const fall_overlap_start_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2000 = fall_overlap_start_2000 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2000 and local_ns < fall_overlap_end_2000)
-            return -7 * 3_600_000_000_000;
-        const spring_gap_start = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start and local_ns < spring_gap_end)
-            return -8 * 3_600_000_000_000;
-        const fall_overlap_start = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
-            return -7 * 3_600_000_000_000;
-    }
-    if (std.mem.eql(u8, tz.name, "America/New_York")) {
-        const spring_gap_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2024 = spring_gap_start_2024 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2024 and local_ns < spring_gap_end_2024)
-            return -5 * 3_600_000_000_000;
-        const fall_overlap_start_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2024 = fall_overlap_start_2024 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2024 and local_ns < fall_overlap_end_2024)
-            return -4 * 3_600_000_000_000;
-    }
-    if (std.mem.eql(u8, tz.name, "America/Sao_Paulo")) {
-        const fall_overlap_start_2018 = (@as(i128, tDaysFromCivil(2018, 2, 17)) * nsPerUnit(.day)) + 23 * nsPerUnit(.hour);
-        const fall_overlap_end_2018 = (@as(i128, tDaysFromCivil(2018, 2, 18)) * nsPerUnit(.day));
-        if (local_ns >= fall_overlap_start_2018 and local_ns < fall_overlap_end_2018)
-            return -2 * 3_600_000_000_000;
-        const spring_gap_start_2018 = (@as(i128, tDaysFromCivil(2018, 11, 4)) * nsPerUnit(.day));
-        const spring_gap_end_2018 = spring_gap_start_2018 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2018 and local_ns < spring_gap_end_2018)
-            return -3 * 3_600_000_000_000;
-        const fall_overlap_start = (@as(i128, tDaysFromCivil(2019, 2, 16)) * nsPerUnit(.day)) + 23 * nsPerUnit(.hour);
-        const fall_overlap_end = (@as(i128, tDaysFromCivil(2019, 2, 17)) * nsPerUnit(.day));
-        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
-            return -2 * 3_600_000_000_000;
-    }
-    if (std.mem.eql(u8, tz.name, "America/St_Johns")) {
-        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 11, 7)) * nsPerUnit(.day));
-        const fall_overlap_end_2010 = fall_overlap_start_2010 + nsPerUnit(.minute);
-        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010)
-            return -(2 * 3_600_000_000_000 + 30 * 60_000_000_000);
-    }
-    if (std.mem.eql(u8, tz.name, "Antarctica/Casey")) {
-        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 3, 5)) * nsPerUnit(.day));
-        const fall_overlap_end_2010 = fall_overlap_start_2010 + 2 * nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010)
-            return 11 * 3_600_000_000_000;
-    }
-    if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
-        const spring_gap_start_1999 = (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_1999 = spring_gap_start_1999 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_1999 and local_ns < spring_gap_end_1999)
-            return -8 * 3_600_000_000_000;
-        const fall_overlap_start_1999 = (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_1999 = fall_overlap_start_1999 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_1999 and local_ns < fall_overlap_end_1999)
-            return -7 * 3_600_000_000_000;
-        const spring_gap_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2019 = spring_gap_start_2019 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2019 and local_ns < spring_gap_end_2019)
-            return -8 * 3_600_000_000_000;
-        const fall_overlap_start_2019 = (@as(i128, tDaysFromCivil(2019, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2019 = fall_overlap_start_2019 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2019 and local_ns < fall_overlap_end_2019)
-            return -7 * 3_600_000_000_000;
-        const spring_gap_start = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start and local_ns < spring_gap_end)
-            return -8 * 3_600_000_000_000;
-        const fall_overlap_start = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
-            return -7 * 3_600_000_000_000;
-        const spring_gap_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2025 = spring_gap_start_2025 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2025 and local_ns < spring_gap_end_2025)
-            return -8 * 3_600_000_000_000;
-        const fall_overlap_start_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2025 = fall_overlap_start_2025 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2025 and local_ns < fall_overlap_end_2025)
-            return -7 * 3_600_000_000_000;
-    }
-    const candidate_epoch = local_ns - @as(i128, tz.offset_ns);
-    return timeZoneOffsetAtEpoch(tz.name, candidate_epoch, tz.offset_ns);
+    // A gap maps with the offset before the transition, producing the first
+    // valid wall time after it. Seven days is also sufficient for the largest
+    // IANA date-line transition.
+    return timeZoneOffsetAtEpoch(tz.name, local_ns - 7 * nsPerUnit(.day), tz.offset_ns);
 }
 
 fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i128, disambiguation: ZdtDisambiguation) EvalError!i64 {
-    if (std.mem.eql(u8, tz.name, "America/Toronto")) {
-        const standard = -5 * 3_600_000_000_000;
-        const daylight = -4 * 3_600_000_000_000;
-        const gap_start = (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day));
-        const gap_end = gap_start + 30 * nsPerUnit(.minute);
-        if (local_ns >= gap_start and local_ns < gap_end) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
+    var possible: [3]i64 = undefined;
+    const count = zdtPossibleOffsets(tz, local_ns, &possible);
+    if (count == 1) return possible[0];
+    if (count > 1) {
+        if (disambiguation == .reject)
+            return self.throwError("RangeError", "ambiguous or nonexistent local time");
+        var earlier = possible[0];
+        var later = possible[0];
+        for (possible[1..count]) |offset| {
+            earlier = @max(earlier, offset);
+            later = @min(later, offset);
         }
+        return if (disambiguation == .later) later else earlier;
     }
-    if (std.mem.eql(u8, tz.name, "America/Los_Angeles")) {
-        const standard = -8 * 3_600_000_000_000;
-        const daylight = -7 * 3_600_000_000_000;
-        const spring_gap_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2000 = spring_gap_start_2000 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2000 and local_ns < spring_gap_end_2000) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2000 = fall_overlap_start_2000 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2000 and local_ns < fall_overlap_end_2000) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const spring_gap_start = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start and local_ns < spring_gap_end) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    if (std.mem.eql(u8, tz.name, "America/New_York")) {
-        const standard = -5 * 3_600_000_000_000;
-        const daylight = -4 * 3_600_000_000_000;
-        const spring_gap_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2024 = spring_gap_start_2024 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2024 and local_ns < spring_gap_end_2024) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2024 = fall_overlap_start_2024 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2024 and local_ns < fall_overlap_end_2024) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    if (std.mem.eql(u8, tz.name, "America/Sao_Paulo")) {
-        const daylight = -2 * 3_600_000_000_000;
-        const standard = -3 * 3_600_000_000_000;
-        const fall_overlap_start_2018 = (@as(i128, tDaysFromCivil(2018, 2, 17)) * nsPerUnit(.day)) + 23 * nsPerUnit(.hour);
-        const fall_overlap_end_2018 = (@as(i128, tDaysFromCivil(2018, 2, 18)) * nsPerUnit(.day));
-        if (local_ns >= fall_overlap_start_2018 and local_ns < fall_overlap_end_2018) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const spring_gap_start_2018 = (@as(i128, tDaysFromCivil(2018, 11, 4)) * nsPerUnit(.day));
-        const spring_gap_end_2018 = spring_gap_start_2018 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2018 and local_ns < spring_gap_end_2018) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start = (@as(i128, tDaysFromCivil(2019, 2, 16)) * nsPerUnit(.day)) + 23 * nsPerUnit(.hour);
-        const fall_overlap_end = (@as(i128, tDaysFromCivil(2019, 2, 17)) * nsPerUnit(.day));
-        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    if (std.mem.eql(u8, tz.name, "America/St_Johns")) {
-        const daylight = -(2 * 3_600_000_000_000 + 30 * 60_000_000_000);
-        const standard = -(3 * 3_600_000_000_000 + 30 * 60_000_000_000);
-        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 11, 7)) * nsPerUnit(.day));
-        const fall_overlap_end_2010 = fall_overlap_start_2010 + nsPerUnit(.minute);
-        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    if (std.mem.eql(u8, tz.name, "Antarctica/Casey")) {
-        const daylight = 11 * 3_600_000_000_000;
-        const standard = 8 * 3_600_000_000_000;
-        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 3, 5)) * nsPerUnit(.day));
-        const fall_overlap_end_2010 = fall_overlap_start_2010 + 2 * nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    if (std.mem.eql(u8, tz.name, "Pacific/Apia")) {
-        const before_skip = -10 * 3_600_000_000_000;
-        const after_skip = 14 * 3_600_000_000_000;
-        const skipped_day_start = @as(i128, tDaysFromCivil(2011, 12, 30)) * nsPerUnit(.day);
-        const skipped_day_end = skipped_day_start + nsPerUnit(.day);
-        if (local_ns >= skipped_day_start and local_ns < skipped_day_end) {
-            return switch (disambiguation) {
-                .compatible, .later => before_skip,
-                .earlier => after_skip,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
-        const standard = -8 * 3_600_000_000_000;
-        const daylight = -7 * 3_600_000_000_000;
-        const spring_gap_start_1999 = (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_1999 = spring_gap_start_1999 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_1999 and local_ns < spring_gap_end_1999) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start_1999 = (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_1999 = fall_overlap_start_1999 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_1999 and local_ns < fall_overlap_end_1999) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const spring_gap_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2019 = spring_gap_start_2019 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2019 and local_ns < spring_gap_end_2019) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start_2019 = (@as(i128, tDaysFromCivil(2019, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2019 = fall_overlap_start_2019 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2019 and local_ns < fall_overlap_end_2019) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const spring_gap_start = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start and local_ns < spring_gap_end) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const spring_gap_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
-        const spring_gap_end_2025 = spring_gap_start_2025 + nsPerUnit(.hour);
-        if (local_ns >= spring_gap_start_2025 and local_ns < spring_gap_end_2025) {
-            return switch (disambiguation) {
-                .compatible, .later => standard,
-                .earlier => daylight,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-        const fall_overlap_start_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + nsPerUnit(.hour);
-        const fall_overlap_end_2025 = fall_overlap_start_2025 + nsPerUnit(.hour);
-        if (local_ns >= fall_overlap_start_2025 and local_ns < fall_overlap_end_2025) {
-            return switch (disambiguation) {
-                .compatible, .earlier => daylight,
-                .later => standard,
-                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
-            };
-        }
-    }
-    return zdtActualOffsetForLocal(tz, local_ns);
+
+    if (disambiguation == .reject)
+        return self.throwError("RangeError", "ambiguous or nonexistent local time");
+    const span = 7 * nsPerUnit(.day);
+    const before = timeZoneOffsetAtEpoch(tz.name, local_ns - span, tz.offset_ns);
+    const after = timeZoneOffsetAtEpoch(tz.name, local_ns + span, tz.offset_ns);
+    return if (disambiguation == .earlier) after else before;
 }
 
 fn skippedMidnightStartEpoch(tz_name: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) ?i128 {
@@ -47468,6 +47243,10 @@ fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: Z
 
 var tz_override_lock: std.atomic.Mutex = .unlocked;
 var tz_override: ?[]const u8 = null;
+var tz_override_initial_offset_ns: i64 = 0;
+var tz_host_initialized = false;
+var tz_host: []const u8 = "UTC";
+var tz_host_initial_offset_ns: i64 = 0;
 
 fn tzOverrideLock() void {
     var spins: usize = 0;
@@ -47484,8 +47263,10 @@ fn tzOverrideLock() void {
 /// process-lifetime global.
 pub fn setTimeZoneOverride(allocator: std.mem.Allocator, canonical_name: ?[]const u8) bool {
     const owned: ?[]const u8 = if (canonical_name) |n| allocator.dupe(u8, n) catch return false else null;
+    const initial_offset_ns = if (canonical_name) |name| timeZoneOffsetAtEpoch(name, 0, 0) else 0;
     tzOverrideLock();
     tz_override = owned;
+    tz_override_initial_offset_ns = initial_offset_ns;
     tz_override_lock.unlock();
     return true;
 }
@@ -47497,7 +47278,73 @@ pub fn timeZoneOverride() ?[]const u8 {
 }
 
 fn nowTimeZone() TimeZone {
-    return .{ .name = timeZoneOverride() orelse "UTC", .offset_ns = 0 };
+    return defaultTimeZone();
+}
+
+fn defaultTimeZoneName() []const u8 {
+    return defaultTimeZone().name;
+}
+
+fn defaultTimeZone() TimeZone {
+    tzOverrideLock();
+    defer tz_override_lock.unlock();
+    if (tz_override) |name| return .{ .name = name, .offset_ns = tz_override_initial_offset_ns };
+    if (!tz_host_initialized) {
+        tz_host = discoverHostTimeZone();
+        tz_host_initial_offset_ns = timeZoneOffsetAtEpoch(tz_host, 0, 0);
+        tz_host_initialized = true;
+    }
+    return .{ .name = tz_host, .offset_ns = tz_host_initial_offset_ns };
+}
+
+/// Discover the process zone once. POSIX `TZ` has precedence; otherwise Unix
+/// systems conventionally expose the selected IANA file through
+/// `/etc/localtime`. Unsupported rule strings and non-IANA localtime files
+/// fall back to UTC because the engine requires a stable canonical identifier
+/// for Intl and Temporal as well as an offset.
+fn discoverHostTimeZone() []const u8 {
+    var link_buffer: [1024]u8 = undefined;
+    var candidate: ?[]const u8 = null;
+    if (builtin.link_libc) {
+        if (std.c.getenv("TZ")) |raw| {
+            const env_value = std.mem.span(raw);
+            if (env_value.len != 0) candidate = env_value;
+        }
+        if (candidate == null and builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            const len = std.c.readlink("/etc/localtime", &link_buffer, link_buffer.len);
+            if (len > 0) candidate = link_buffer[0..@intCast(len)];
+        }
+    }
+    const raw = candidate orelse return "UTC";
+    var canonical_buffer: [256]u8 = undefined;
+    const canonical = canonicalHostTimeZone(raw, &canonical_buffer) orelse return "UTC";
+    if (std.mem.eql(u8, canonical, "UTC")) return "UTC";
+    return std.heap.page_allocator.dupe(u8, canonical) catch "UTC";
+}
+
+fn canonicalHostTimeZone(raw_in: []const u8, canonical_buffer: []u8) ?[]const u8 {
+    var raw = raw_in;
+    if (raw.len != 0 and raw[0] == ':') raw = raw[1..];
+    if (std.mem.lastIndexOf(u8, raw, "/zoneinfo/")) |marker|
+        raw = raw[marker + "/zoneinfo/".len ..];
+    if (std.ascii.eqlIgnoreCase(raw, "UTC") or std.ascii.eqlIgnoreCase(raw, "Etc/UTC") or std.ascii.eqlIgnoreCase(raw, "GMT"))
+        return "UTC";
+    const exact = canonicalTimeZoneName(raw);
+    if (iana_zones.isCanonical(exact)) return exact;
+    return validCanonicalTimeZoneName(raw, canonical_buffer);
+}
+
+test "Date host time zone discovery canonicalizes process inputs" {
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Asia/Manila", canonicalHostTimeZone("Asia/Manila", &buffer).?);
+    try std.testing.expectEqualStrings("America/Los_Angeles", canonicalHostTimeZone(":US/Pacific", &buffer).?);
+    try std.testing.expectEqualStrings(
+        "America/Los_Angeles",
+        canonicalHostTimeZone("/var/db/timezone/zoneinfo/America/Los_Angeles", &buffer).?,
+    );
+    try std.testing.expectEqualStrings("America/New_York", canonicalHostTimeZone("america/new_york", &buffer).?);
+    try std.testing.expectEqualStrings("UTC", canonicalHostTimeZone("Etc/UTC", &buffer).?);
+    try std.testing.expect(canonicalHostTimeZone("PST8PDT0", &buffer) == null);
 }
 
 /// Validate a candidate named zone the way the Intl pipeline does — ASCII
@@ -55192,7 +55039,7 @@ fn symbolProto(self: *Interpreter) ?*value.Object {
 /// epoch), or NaN. Handles YYYY[-MM[-DD]][THH:mm[:ss[.sss]]][Z|±HH:mm]; a
 /// date-only or zoneless date-time is interpreted as UTC (this engine has no
 /// local time zone).
-pub fn parseDateString(s_in: []const u8) f64 {
+fn parseDateStringUTCScale(s_in: []const u8) f64 {
     const nan = std.math.nan(f64);
     const s = std.mem.trim(u8, s_in, " \t\n\r\x0c\x0b");
     if (s.len == 0) return nan;
@@ -55283,6 +55130,23 @@ pub fn parseDateString(s_in: []const u8) f64 {
     const f: f64 = @floatFromInt(total);
     if (std.math.isNan(f) or @abs(f) > 8.64e15) return nan;
     return f;
+}
+
+/// Parse an ECMAScript date string in the process default zone. Date-only
+/// strings denote UTC, while a date-time without a UTC designator or numeric
+/// offset denotes local time. The syntax parser above returns civil fields on
+/// the UTC scale so this shared boundary also serves embedding date factories.
+pub fn parseDateString(s_in: []const u8) f64 {
+    const parsed = parseDateStringUTCScale(s_in);
+    if (!std.math.isFinite(parsed)) return parsed;
+    const s = std.mem.trim(u8, s_in, " \t\n\r\x0c\x0b");
+    const separator = std.mem.indexOfAny(u8, s, "Tt ") orelse return parsed;
+    const time_suffix = s[separator + 1 ..];
+    if (std.mem.indexOfAny(u8, time_suffix, "Zz+-") != null or std.mem.indexOf(u8, time_suffix, "GMT") != null)
+        return parsed;
+    const local_ns = @as(i128, @intFromFloat(@trunc(parsed))) * 1_000_000;
+    const offset_ns = zdtActualOffsetForLocal(nowTimeZone(), local_ns);
+    return Interpreter.dateTimeClip(parsed - @as(f64, @floatFromInt(offset_ns)) / 1_000_000.0);
 }
 
 /// Browser-compatible W3C NOTE-datetime extension used by SpiderMonkey staging:
@@ -55450,6 +55314,29 @@ fn dateParseLegacyUTC(s: []const u8) f64 {
     if (!dateParseTime(time_tok, &hour, &minute, &sec)) return nan;
     if (day < 1 or day > 31) return nan;
 
+    // Date.prototype.toString uses `GMT±HHMM`; Date.parse must round-trip that
+    // implementation-produced representation. UTC/GMT without a suffix has a
+    // zero offset. Other legacy abbreviations retain the historical UTC
+    // interpretation until their grammar is implemented explicitly.
+    const zone = toks[5];
+    if (std.mem.startsWith(u8, zone, "GMT") and zone.len > 3) {
+        if (zone[3] != '+' and zone[3] != '-') return nan;
+        const sign: i64 = if (zone[3] == '-') -1 else 1;
+        var digits: [4]u8 = undefined;
+        var count: usize = 0;
+        for (zone[4..]) |c| {
+            if (c == ':') continue;
+            if (!std.ascii.isDigit(c) or count == digits.len) return nan;
+            digits[count] = c;
+            count += 1;
+        }
+        if (count != 4) return nan;
+        const offset_hour = @as(i64, digits[0] - '0') * 10 + (digits[1] - '0');
+        const offset_minute = @as(i64, digits[2] - '0') * 10 + (digits[3] - '0');
+        if (offset_hour > 23 or offset_minute > 59) return nan;
+        minute -= sign * (offset_hour * 60 + offset_minute);
+    }
+
     const days = Interpreter.daysFromCivil(year, month, day);
     const total = days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + sec * 1000;
     const f: f64 = @floatFromInt(total);
@@ -55478,7 +55365,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         for (args, 0..) |av, i| buf[i] = Value.num(try self.toNumberV(av));
         const yi = @trunc(buf[0].asNum());
         if (yi >= 0 and yi <= 99) buf[0] = Value.num(yi + 1900);
-        return self.makeDate(Interpreter.dateTimeFromArgs(buf));
+        return self.makeDate(try self.dateUtcFromLocal(Interpreter.dateTimeFromArgs(buf)));
     }
     if (args.len == 1) {
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
