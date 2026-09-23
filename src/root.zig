@@ -46,10 +46,13 @@ pub const shape = @import("shape.zig");
 pub const promise_profile = @import("promise_profile.zig");
 pub const RuntimeThreadResourceKind = @import("runtime_threads.zig").Kind;
 pub const RuntimeThreadResourceSnapshot = @import("runtime_threads.zig").ResourceSnapshot;
+pub const RuntimeThreadSchedulerSnapshot = @import("runtime_threads.zig").SchedulerSnapshot;
 pub const RuntimeThreadSnapshot = @import("runtime_threads.zig").Snapshot;
 pub const RuntimeThreadLimits = @import("runtime_threads.zig").Limits;
+pub const RuntimeThreadSchedulerLimits = @import("runtime_threads.zig").SchedulerLimits;
 pub const runtimeThreadSnapshot = @import("runtime_threads.zig").snapshot;
 pub const setRuntimeThreadLimits = @import("runtime_threads.zig").setLimits;
+pub const setRuntimeThreadSchedulerLimits = @import("runtime_threads.zig").setSchedulerLimits;
 /// Revision-pinned private consumer ABI pieces. These are deliberately
 /// separate from the stable engine `Value` representation and public C API.
 pub const private_abi = @import("private_abi.zig");

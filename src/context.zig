@@ -6533,7 +6533,7 @@ pub const Context = struct {
                     rec.join_mutex.lockUncancelable(io);
                     while (!rec.exited) {
                         var blocking = runtime_threads.beginBlocking();
-                        defer blocking.end();
+                        defer blocking.endWithMutex(&rec.join_mutex, io);
                         rec.done_cond.wait(io, &rec.join_mutex) catch {};
                     }
                     rec.join_mutex.unlock(io);
@@ -7456,9 +7456,9 @@ pub const Context = struct {
             const park_ns = @min(next - now, 5 * std.time.ns_per_ms);
             const release_gil = machine.use_thread_gil and machine.gil != null;
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
             if (release_gil) machine.gil.?.release();
             std.Io.sleep(agent.engineIo(), .fromNanoseconds(@intCast(park_ns)), .awake) catch {};
+            blocking.end();
             if (release_gil) machine.gil.?.acquire();
             _ = deadline;
         }
@@ -10096,7 +10096,7 @@ pub const Context = struct {
                         if (rec.exited) break;
                         stack_scan.beginPark();
                         var blocking = runtime_threads.beginBlocking();
-                        defer blocking.end();
+                        defer blocking.endWithMutex(&rec.join_mutex, io);
                         io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
                             .raw = .fromMilliseconds(5),
                             .clock = .awake,

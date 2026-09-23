@@ -32,15 +32,21 @@ const previous = js.setRuntimeThreadLimits(.script_worker, .{
     .max_threads = 8,
     .max_configured_stack_bytes = 128 * 1024 * 1024,
 });
+
+const previous_scheduler = js.setRuntimeThreadSchedulerLimits(.{
+    .max_runnable_threads = 4,
+});
 ```
 
 Each resource row reports attempts, successful starts, completions, spawn
 failures, policy rejections, in-flight spawn calls, admitted reservations, live
 and peak threads, current/peak runnable and blocked threads, block/resume
 transition totals, current/peak configured stack bytes, and the active limits.
-The schema-v3 invariants are `attempts = starts + spawn_failures +
+The schema-v4 invariants are `attempts = starts + spawn_failures +
 admission_rejections + in_flight_attempts`, `live = starts - completions`, and
-`live = runnable + blocked`.
+`live = runnable + blocked`. The scheduler row reports its runnable limit,
+active and peak slots, current and peak queued waiters, and cumulative slot
+waits. Its cross-resource invariant is `active_slots = sum(resource.runnable)`.
 Configured stack bytes describe the `std.Thread.SpawnConfig` reservation, not
 resident or committed process memory. Counters mutate only at OS-thread
 creation, blocking transitions, and exit; snapshot readers retry across those
@@ -62,6 +68,21 @@ host or test threads outside the typed boundary are inert. Thread completion
 requires the blocking depth to be zero, so a missing scope end fails in debug
 and test builds instead of silently corrupting the state totals.
 
+The process-wide runnable limit is shared by all six resource classes. A typed
+thread acquires one slot before its entry function, releases it at its outermost
+blocking transition, reacquires one before returning from that wait, and
+releases it at completion. Excess entries and resumes park on a condition
+variable, without a spin or sleep admission loop. A condition waiter never
+queues for a slot while holding its reacquired wait mutex: it tries the slot
+first, and if capacity is unavailable it releases the mutex, parks, then
+reacquires the mutex before returning to its caller.
+
+The runnable limit defaults to unlimited. Lowering it below current use does
+not interrupt existing runnable threads; new entries and resumes wait until
+active use falls below the limit. A zero limit pauses every new entry and resume
+until an embedder raises it. Increasing capacity wakes queued threads to compete
+under the coordinator mutex.
+
 Run the fail-closed audit after adding or removing any runtime or test thread:
 
 ```bash
@@ -74,8 +95,7 @@ missing inventory row, or direct spawn in a new source file fails. Update the
 JSON only after reviewing whether the new work belongs to production, test
 scaffolding, or an existing resource class.
 
-The boundary controls live-thread and configured-stack admission and records
-runnable/blocked state. It does not yet allocate runnable CPU slots or change
-scheduling. Issue
-[#502](https://github.com/zig-utils/zig-js/issues/502) owns shared CPU slots,
-backpressure, cancellation, memory pressure, and embedder controls.
+The boundary controls live-thread/configured-stack admission, records
+runnable/blocked state, and enforces neutral shared CPU slots. Issue
+[#502](https://github.com/zig-utils/zig-js/issues/502) owns automatic host sizing,
+priority policy, compilation queues, cancellation, and memory pressure.

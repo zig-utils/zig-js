@@ -12,6 +12,7 @@
 //!   waiter table; neither is ever held while running JS.
 
 const std = @import("std");
+const engine_io = @import("engine_io.zig");
 const runtime_threads = @import("runtime_threads.zig");
 const io_compat = @import("io_compat.zig");
 const shared_buffer = @import("shared_buffer.zig");
@@ -21,27 +22,8 @@ const alloc = std.heap.page_allocator;
 const report_queue_reserve_granularity = 64;
 const waiter_ticket_reserve_granularity = 16;
 
-// ---- engine-global blocking Io ---------------------------------------------
-// This zig std's Mutex/Condition/sleep live behind `std.Io`; `Io.Threaded` is
-// the blocking implementation (real futex waits with timeouts). One lazily-
-// initialized instance serves the whole engine; we use only the futex/clock
-// surface, never async/concurrent spawning.
-
-var io_threaded: std.Io.Threaded = undefined;
-var io_state = std.atomic.Value(u8).init(0); // 0 uninit / 1 initializing / 2 ready
-
 pub fn engineIo() std.Io {
-    while (true) {
-        switch (io_state.load(.acquire)) {
-            2 => return io_threaded.io(),
-            0 => if (io_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
-                io_threaded = std.Io.Threaded.init(alloc, .{});
-                io_state.store(2, .release);
-                return io_threaded.io();
-            },
-            else => std.atomic.spinLoopHint(),
-        }
-    }
+    return engine_io.get();
 }
 
 // ---- agent group ------------------------------------------------------------
@@ -151,7 +133,7 @@ pub fn parkUntilBroadcast() ?*SharedBufferStorage {
     defer group.mutex.unlock(io);
     while (group.bcast_gen == a.acked_gen and !group.stopping) {
         var blocking = runtime_threads.beginBlocking();
-        defer blocking.end();
+        defer blocking.endWithMutex(&group.mutex, io);
         group.cond.waitUncancelable(io, &group.mutex);
     }
     if (group.stopping) return null;
@@ -183,7 +165,7 @@ pub fn broadcast(storage: *SharedBufferStorage) void {
         if (pending == 0) break;
         {
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
+            defer blocking.endWithMutex(&group.mutex, io);
             io_compat.conditionWaitTimeout(&group.cond, io, &group.mutex, .{ .duration = .{
                 .raw = .fromSeconds(10),
                 .clock = .awake,
@@ -604,7 +586,7 @@ pub fn waitInterruptible(storage: *SharedBufferStorage, offset: usize, comptime 
         }
         {
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
+            defer blocking.endWithMutex(&waiters_mutex, io);
             io_compat.conditionWaitTimeout(&ticket.cond, io, &waiters_mutex, deadline) catch |err| switch (err) {
                 error.Timeout => {
                     if (!ticket.woken) outcome = .timed_out;
@@ -843,7 +825,7 @@ pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
         const wait_ns: u64 = if (nearest) |d| @intCast(@max(1, d - now)) else 100 * std.time.ns_per_ms;
         {
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
+            defer blocking.endWithMutex(&waiters_mutex, io);
             io_compat.conditionWaitTimeout(&waiters_cond, io, &waiters_mutex, .{ .duration = .{
                 .raw = .fromNanoseconds(wait_ns),
                 .clock = .awake,

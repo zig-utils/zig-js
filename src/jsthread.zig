@@ -2666,18 +2666,19 @@ fn timeoutMillisToNs(ms: f64) value.HostError!?u64 {
 fn waitOnLockCond(self: *Interpreter, rec: *LockRecord, timeout: std.Io.Timeout) void {
     const io = agent.engineIo();
     var blocking = runtime_threads.beginBlocking();
-    defer blocking.end();
     if (self.use_thread_gil) {
         const g = rec.gil;
         stack_scan.beginPark();
         g.release();
         io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
         rec.mutex.unlock(io);
+        blocking.end();
         g.acquire();
         stack_scan.endPark();
         rec.mutex.lockUncancelable(io);
     } else {
         io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
+        blocking.endWithMutex(&rec.mutex, io);
     }
 }
 
@@ -2912,18 +2913,19 @@ fn ackSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
 fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeout) void {
     const io = agent.engineIo();
     var blocking = runtime_threads.beginBlocking();
-    defer blocking.end();
     if (self.use_thread_gil) {
         const g = rec.gil;
         stack_scan.beginPark();
         g.release();
         io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
         rec.mutex.unlock(io);
+        blocking.end();
         g.acquire();
         stack_scan.endPark();
         rec.mutex.lockUncancelable(io);
     } else {
         io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
+        blocking.endWithMutex(&rec.mutex, io);
     }
 }
 
@@ -4203,7 +4205,6 @@ test "property waiter metadata counts against heap budget" {
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
     const io = agent.engineIo();
     var blocking = runtime_threads.beginBlocking();
-    defer blocking.end();
     if (self.use_thread_gil) {
         var timed_out = false;
         stack_scan.beginPark();
@@ -4218,15 +4219,19 @@ fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicke
         // must not hold prop_mutex while trying to reacquire the GIL, because a
         // GIL holder may be entering Atomics.notify and need prop_mutex.
         g.unlockPropWaiters();
+        blocking.end();
         g.acquire();
         stack_scan.endPark();
         g.lockPropWaiters();
         if (timed_out) return error.Timeout;
     } else {
+        var timed_out = false;
         io_compat.conditionWaitTimeout(&ticket.cond, io, &g.prop_mutex, timeout) catch |err| switch (err) {
-            error.Timeout => return error.Timeout,
+            error.Timeout => timed_out = true,
             error.Canceled => {},
         };
+        blocking.endWithMutex(&g.prop_mutex, io);
+        if (timed_out) return error.Timeout;
     }
 }
 
@@ -4784,7 +4789,6 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     recordThreadJoinPark();
     const wait_start = startLifecycleTimer();
     var blocking = runtime_threads.beginBlocking();
-    defer blocking.end();
     io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,
@@ -4792,8 +4796,11 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     finishLifecycleTimer("thread_join_wait_ns", wait_start);
     if (released_gil) {
         rec.join_mutex.unlock(io);
+        blocking.end();
         rec.gil.acquire();
         rec.join_mutex.lockUncancelable(io);
+    } else {
+        blocking.endWithMutex(&rec.join_mutex, io);
     }
 }
 
@@ -5196,6 +5203,43 @@ test "JavaScript Thread Atomics park publishes blocked runtime state" {
         after.block_transitions - before.block_transitions,
         after.runnable_transitions - before.runnable_transitions,
     );
+}
+
+test "runtime scheduler one slot hands off across JavaScript Thread waits" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    for ([_]bool{ false, true }) |serialized| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = !serialized,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\const schedulerGate = { ready: 0, go: 0 };
+            \\const schedulerWaiter = new Thread(function () {
+            \\  Atomics.store(schedulerGate, "ready", 1);
+            \\  Atomics.notify(schedulerGate, "ready", 1);
+            \\  while (Atomics.load(schedulerGate, "go") === 0)
+            \\    Atomics.wait(schedulerGate, "go", 0);
+            \\  return 1;
+            \\});
+            \\const schedulerNotifier = new Thread(function () {
+            \\  while (Atomics.load(schedulerGate, "ready") === 0)
+            \\    Atomics.wait(schedulerGate, "ready", 0);
+            \\  Atomics.store(schedulerGate, "go", 1);
+            \\  Atomics.notify(schedulerGate, "go", 1);
+            \\  return 2;
+            \\});
+            \\schedulerWaiter.join() + schedulerNotifier.join();
+        );
+        try std.testing.expectEqual(@as(f64, 3), result.asNum());
+        const resources = runtime_threads.snapshot();
+        try std.testing.expect(resources.scheduler.active_slots <= 1);
+        try std.testing.expectEqual(resources.scheduler.active_slots, resources.runnableTotal());
+    }
 }
 
 test "Thread capped admission refuses without consuming IDs and admits after completion" {

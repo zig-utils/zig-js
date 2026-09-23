@@ -266,7 +266,7 @@ pub const Gil = struct {
             g.tasks_queued.load(.acquire) == 0)
         {
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
+            defer blocking.endWithMutex(&g.task_state_mutex, io);
             g.task_state_cond.waitUncancelable(io, &g.task_state_mutex);
         }
         g.task_state_mutex.unlock(io);
@@ -413,7 +413,6 @@ pub const Gil = struct {
         if (!g.mutex.tryLock()) {
             _ = g.contenders.fetchAdd(1, .monotonic);
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
             // Publish this thread's stack range while blocked (#722). A peer
             // waiting here is not at an Atomics/Condition park, so without
             // publication `allOthersParked` never observes it and an
@@ -423,7 +422,14 @@ pub const Gil = struct {
             // stack is stable, and the conservative scan roots its temporaries.
             stack_scan.beginPark();
             defer stack_scan.endPark();
-            g.mutex.lockUncancelable(io);
+            while (true) {
+                g.mutex.lockUncancelable(io);
+                if (blocking.tryEnd()) break;
+                g.mutex.unlock(io);
+                blocking.end();
+                if (g.mutex.tryLock()) break;
+                blocking = runtime_threads.beginBlocking();
+            }
             _ = g.contenders.fetchSub(1, .monotonic);
         }
         g.holder.store(currentId(), .monotonic);
@@ -458,11 +464,11 @@ pub const Gil = struct {
         stack_scan.beginPark();
         defer stack_scan.endPark();
         var blocking = runtime_threads.beginBlocking();
-        defer blocking.end();
         g.release();
         while (g.contenders.load(.acquire) != 0) {
             std.Thread.yield() catch {};
         }
+        blocking.end();
         g.acquire();
     }
 
@@ -476,10 +482,15 @@ pub const Gil = struct {
         stack_scan.beginPark();
         defer stack_scan.endPark();
         var blocking = runtime_threads.beginBlocking();
-        defer blocking.end();
         g.holder.store(0, .monotonic);
         cond.waitUncancelable(io, &g.mutex);
-        g.holder.store(currentId(), .monotonic);
+        if (blocking.tryEnd()) {
+            g.holder.store(currentId(), .monotonic);
+        } else {
+            g.mutex.unlock(io);
+            blocking.end();
+            g.acquire();
+        }
     }
 
     /// `wait` with a deadline (property-Atomics timed waits). Reacquires the
@@ -489,13 +500,20 @@ pub const Gil = struct {
         stack_scan.beginPark();
         defer stack_scan.endPark();
         var blocking = runtime_threads.beginBlocking();
-        defer blocking.end();
         g.holder.store(0, .monotonic);
-        defer g.holder.store(currentId(), .monotonic);
+        var timed_out = false;
         io_compat.conditionWaitTimeout(cond, io, &g.mutex, timeout) catch |err| switch (err) {
-            error.Timeout => return error.Timeout,
+            error.Timeout => timed_out = true,
             error.Canceled => {},
         };
+        if (blocking.tryEnd()) {
+            g.holder.store(currentId(), .monotonic);
+        } else {
+            g.mutex.unlock(io);
+            blocking.end();
+            g.acquire();
+        }
+        if (timed_out) return error.Timeout;
     }
 };
 

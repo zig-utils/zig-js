@@ -1,11 +1,12 @@
 //! Typed creation boundary for every OS thread the production engine owns.
 //!
 //! The boundary owns admission, lifecycle telemetry, and runnable/blocked
-//! state. Scheduling policy remains separate: blocking scopes establish the
-//! exact state transitions a shared CPU-slot coordinator needs without yet
-//! changing which thread may run.
+//! state. A process-wide slot budget bounds how many typed threads may be
+//! runnable at once; blocked threads release their slot and reacquire one
+//! before resuming.
 
 const std = @import("std");
+const engine_io = @import("engine_io.zig");
 
 pub const Kind = enum {
     test262_agent,
@@ -46,6 +47,19 @@ var counters: [kind_count]Counters = @splat(.{});
 var mutation_writers: std.atomic.Value(u64) = .init(0);
 var mutation_generation: std.atomic.Value(u64) = .init(0);
 
+const Coordinator = struct {
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
+    max_runnable_threads: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
+    active_slots: std.atomic.Value(u64) = .init(0),
+    peak_active_slots: std.atomic.Value(u64) = .init(0),
+    slot_waiters: std.atomic.Value(u64) = .init(0),
+    peak_slot_waiters: std.atomic.Value(u64) = .init(0),
+    slot_waits: std.atomic.Value(u64) = .init(0),
+};
+
+var coordinator: Coordinator = .{};
+
 pub const ResourceSnapshot = struct {
     attempts: u64,
     starts: u64,
@@ -74,13 +88,33 @@ pub const Limits = struct {
     max_configured_stack_bytes: u64 = std.math.maxInt(u64),
 };
 
+pub const SchedulerLimits = struct {
+    max_runnable_threads: u64 = std.math.maxInt(u64),
+};
+
+pub const SchedulerSnapshot = struct {
+    max_runnable_threads: u64,
+    active_slots: u64,
+    peak_active_slots: u64,
+    slot_waiters: u64,
+    peak_slot_waiters: u64,
+    slot_waits: u64,
+};
+
 pub const Snapshot = struct {
-    schema_version: u32 = 3,
+    schema_version: u32 = 4,
     generation: u64,
+    scheduler: SchedulerSnapshot,
     resources: [kind_count]ResourceSnapshot,
 
     pub fn resource(self: *const Snapshot, kind: Kind) ResourceSnapshot {
         return self.resources[@backingInt(kind)];
+    }
+
+    pub fn runnableTotal(self: *const Snapshot) u64 {
+        var total: u64 = 0;
+        for (self.resources) |resource_state| total += resource_state.runnable;
+        return total;
     }
 };
 
@@ -136,17 +170,21 @@ fn tryAdmit(kind: Kind, stack_bytes: usize) bool {
     return true;
 }
 
-fn recordStart(kind: Kind, stack_bytes: usize) void {
-    beginMutation();
-    defer finishMutation();
+fn recordStartState(kind: Kind, stack_bytes: usize, runnable_state: bool) void {
     const state = &counters[@backingInt(kind)];
     const pending = state.in_flight_attempts.fetchSub(1, .monotonic);
     std.debug.assert(pending > 0);
     _ = state.starts.fetchAdd(1, .monotonic);
     const live = state.live.fetchAdd(1, .monotonic) + 1;
     recordPeak(&state.peak_live, live);
-    const runnable = state.runnable.fetchAdd(1, .monotonic) + 1;
-    recordPeak(&state.peak_runnable, runnable);
+    if (runnable_state) {
+        const runnable = state.runnable.fetchAdd(1, .monotonic) + 1;
+        recordPeak(&state.peak_runnable, runnable);
+    } else {
+        const blocked = state.blocked.fetchAdd(1, .monotonic) + 1;
+        recordPeak(&state.peak_blocked, blocked);
+        _ = state.block_transitions.fetchAdd(1, .monotonic);
+    }
     const stack = state.configured_stack_bytes.fetchAdd(stack_bytes, .monotonic) + stack_bytes;
     recordPeak(&state.peak_configured_stack_bytes, stack);
 }
@@ -167,9 +205,7 @@ fn recordFailure(kind: Kind, stack_bytes: usize) void {
     releaseAdmission(state, stack_bytes);
 }
 
-fn recordCompletion(kind: Kind, stack_bytes: usize) void {
-    beginMutation();
-    defer finishMutation();
+fn recordCompletionState(kind: Kind, stack_bytes: usize) void {
     const state = &counters[@backingInt(kind)];
     _ = state.completions.fetchAdd(1, .monotonic);
     const live = state.live.fetchSub(1, .monotonic);
@@ -179,9 +215,7 @@ fn recordCompletion(kind: Kind, stack_bytes: usize) void {
     releaseAdmission(state, stack_bytes);
 }
 
-fn recordBlocked(kind: Kind) void {
-    beginMutation();
-    defer finishMutation();
+fn recordBlockedState(kind: Kind) void {
     const state = &counters[@backingInt(kind)];
     const runnable = state.runnable.fetchSub(1, .monotonic);
     std.debug.assert(runnable > 0);
@@ -190,15 +224,129 @@ fn recordBlocked(kind: Kind) void {
     _ = state.block_transitions.fetchAdd(1, .monotonic);
 }
 
-fn recordRunnable(kind: Kind) void {
-    beginMutation();
-    defer finishMutation();
+fn recordRunnableState(kind: Kind) void {
     const state = &counters[@backingInt(kind)];
     const blocked = state.blocked.fetchSub(1, .monotonic);
     std.debug.assert(blocked > 0);
     const runnable = state.runnable.fetchAdd(1, .monotonic) + 1;
     recordPeak(&state.peak_runnable, runnable);
     _ = state.runnable_transitions.fetchAdd(1, .monotonic);
+}
+
+fn loadScheduler() SchedulerSnapshot {
+    return .{
+        .max_runnable_threads = coordinator.max_runnable_threads.load(.acquire),
+        .active_slots = coordinator.active_slots.load(.acquire),
+        .peak_active_slots = coordinator.peak_active_slots.load(.acquire),
+        .slot_waiters = coordinator.slot_waiters.load(.acquire),
+        .peak_slot_waiters = coordinator.peak_slot_waiters.load(.acquire),
+        .slot_waits = coordinator.slot_waits.load(.acquire),
+    };
+}
+
+fn slotAvailableLocked() bool {
+    return coordinator.active_slots.load(.monotonic) < coordinator.max_runnable_threads.load(.monotonic);
+}
+
+fn reserveSlotState() void {
+    const active = coordinator.active_slots.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&coordinator.peak_active_slots, active);
+}
+
+fn releaseSlotState() void {
+    const active = coordinator.active_slots.fetchSub(1, .monotonic);
+    std.debug.assert(active > 0);
+}
+
+fn beginSlotWaitState() void {
+    const waiters = coordinator.slot_waiters.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&coordinator.peak_slot_waiters, waiters);
+    _ = coordinator.slot_waits.fetchAdd(1, .monotonic);
+}
+
+fn finishSlotWaitState() void {
+    const waiters = coordinator.slot_waiters.fetchSub(1, .monotonic);
+    std.debug.assert(waiters > 0);
+}
+
+fn startThread(kind: Kind, stack_bytes: usize) void {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    defer coordinator.mutex.unlock(io);
+    if (slotAvailableLocked()) {
+        beginMutation();
+        reserveSlotState();
+        recordStartState(kind, stack_bytes, true);
+        finishMutation();
+        return;
+    }
+
+    beginMutation();
+    recordStartState(kind, stack_bytes, false);
+    beginSlotWaitState();
+    finishMutation();
+    while (!slotAvailableLocked()) coordinator.cond.waitUncancelable(io, &coordinator.mutex);
+    beginMutation();
+    finishSlotWaitState();
+    reserveSlotState();
+    recordRunnableState(kind);
+    finishMutation();
+}
+
+fn blockThread(kind: Kind) void {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    beginMutation();
+    recordBlockedState(kind);
+    releaseSlotState();
+    finishMutation();
+    coordinator.cond.signal(io);
+    coordinator.mutex.unlock(io);
+}
+
+fn resumeThread(kind: Kind) void {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    defer coordinator.mutex.unlock(io);
+    if (!slotAvailableLocked()) {
+        beginMutation();
+        beginSlotWaitState();
+        finishMutation();
+        while (!slotAvailableLocked()) coordinator.cond.waitUncancelable(io, &coordinator.mutex);
+        beginMutation();
+        finishSlotWaitState();
+        reserveSlotState();
+        recordRunnableState(kind);
+        finishMutation();
+        return;
+    }
+    beginMutation();
+    reserveSlotState();
+    recordRunnableState(kind);
+    finishMutation();
+}
+
+fn tryResumeThread(kind: Kind) bool {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    defer coordinator.mutex.unlock(io);
+    if (!slotAvailableLocked()) return false;
+    beginMutation();
+    reserveSlotState();
+    recordRunnableState(kind);
+    finishMutation();
+    return true;
+}
+
+fn completeThread(kind: Kind, stack_bytes: usize) void {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    beginMutation();
+    recordCompletionState(kind, stack_bytes);
+    releaseSlotState();
+    finishMutation();
+    coordinator.cond.signal(io);
+    coordinator.mutex.unlock(io);
 }
 
 fn loadResource(state: *const Counters) ResourceSnapshot {
@@ -226,9 +374,9 @@ fn loadResource(state: *const Counters) ResourceSnapshot {
     };
 }
 
-/// Coherent process-wide resource state. Readers retry only across the short
-/// atomic mutation sections at thread creation and exit; JavaScript execution,
-/// blocking waits, and joins never hold a telemetry lock.
+/// Coherent process-wide resource and runnable-slot state. Readers retry only
+/// across short atomic mutation sections; JavaScript execution never holds a
+/// telemetry or coordinator lock.
 pub fn snapshot() Snapshot {
     while (true) {
         const generation = mutation_generation.load(.acquire);
@@ -236,7 +384,11 @@ pub fn snapshot() Snapshot {
             std.atomic.spinLoopHint();
             continue;
         }
-        var result = Snapshot{ .generation = generation, .resources = undefined };
+        var result = Snapshot{
+            .generation = generation,
+            .scheduler = loadScheduler(),
+            .resources = undefined,
+        };
         for (&counters, 0..) |*state, index| result.resources[index] = loadResource(state);
         const after_generation = mutation_generation.load(.acquire);
         const after_writers = mutation_writers.load(.acquire);
@@ -265,25 +417,72 @@ pub fn setLimits(kind: Kind, limits: Limits) Limits {
     return previous;
 }
 
+/// Atomically replace the process-wide runnable-slot policy. Lowering the
+/// limit never interrupts a running thread; entries and resumes wait until
+/// active use falls below the new limit. Raising the limit wakes every waiter
+/// to compete for the newly available slots under the coordinator mutex.
+pub fn setSchedulerLimits(limits: SchedulerLimits) SchedulerLimits {
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    defer coordinator.mutex.unlock(io);
+    beginMutation();
+    const previous = SchedulerLimits{
+        .max_runnable_threads = coordinator.max_runnable_threads.load(.monotonic),
+    };
+    coordinator.max_runnable_threads.store(limits.max_runnable_threads, .monotonic);
+    finishMutation();
+    if (limits.max_runnable_threads > previous.max_runnable_threads)
+        coordinator.cond.broadcast(io);
+    return previous;
+}
+
 /// Marks the current engine-owned thread blocked until `end` runs. Nested
 /// scopes count as one outer transition. Calls from host and test threads that
 /// did not enter through `spawn` are inert.
 pub const BlockingScope = struct {
     active: bool,
 
-    pub fn end(scope: *BlockingScope) void {
-        if (!scope.active) return;
-        scope.active = false;
+    /// Resume without waiting for a slot. On failure the outer scope remains
+    /// active, letting a condition waiter release its reacquired mutex before
+    /// calling `end` and parking on the scheduler queue.
+    pub fn tryEnd(scope: *BlockingScope) bool {
+        if (!scope.active) return true;
         const state = if (current_thread) |*value| value else unreachable;
         std.debug.assert(state.blocking_depth > 0);
-        state.blocking_depth -= 1;
-        if (state.blocking_depth == 0) recordRunnable(state.kind);
+        if (state.blocking_depth > 1) {
+            state.blocking_depth -= 1;
+            scope.active = false;
+            return true;
+        }
+        if (!tryResumeThread(state.kind)) return false;
+        state.blocking_depth = 0;
+        scope.active = false;
+        return true;
+    }
+
+    pub fn end(scope: *BlockingScope) void {
+        if (scope.tryEnd()) return;
+        const state = if (current_thread) |*value| value else unreachable;
+        std.debug.assert(state.blocking_depth == 1);
+        resumeThread(state.kind);
+        state.blocking_depth = 0;
+        scope.active = false;
+    }
+
+    /// End a condition-wait scope while preserving the caller's mutex-held
+    /// postcondition. If no slot is immediately available, release the mutex,
+    /// park for a slot, then reacquire it. This prevents slot/mutex inversion.
+    pub fn endWithMutex(scope: *BlockingScope, mutex: *std.Io.Mutex, io: std.Io) void {
+        if (scope.tryEnd()) return;
+        mutex.unlock(io);
+        scope.end();
+        mutex.lockUncancelable(io);
     }
 };
 
 pub fn beginBlocking() BlockingScope {
     const state = if (current_thread) |*value| value else return .{ .active = false };
-    if (state.blocking_depth == 0) recordBlocked(state.kind);
+    if (state.blocking_depth == 0) blockThread(state.kind);
     state.blocking_depth += 1;
     return .{ .active = true };
 }
@@ -299,11 +498,11 @@ pub fn spawn(
         fn run(call_args: @TypeOf(args), stack_bytes: usize) void {
             std.debug.assert(current_thread == null);
             current_thread = .{ .kind = kind };
-            recordStart(kind, stack_bytes);
+            startThread(kind, stack_bytes);
             defer {
                 const state = current_thread orelse unreachable;
                 std.debug.assert(state.kind == kind and state.blocking_depth == 0);
-                recordCompletion(kind, stack_bytes);
+                completeThread(kind, stack_bytes);
                 current_thread = null;
             }
             @call(.auto, function, call_args);
@@ -354,7 +553,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(u32, 3), snapshot().schema_version);
+    try std.testing.expectEqual(@as(u32, 4), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
     var release = std.atomic.Value(bool).init(false);
@@ -399,6 +598,102 @@ test "runtime blocking scopes account nested and concurrent transitions once" {
     try std.testing.expectEqual(before.runnable, after.runnable);
     try std.testing.expectEqual(before.blocked, after.blocked);
     try std.testing.expectEqual(after.live, after.runnable + after.blocked);
+}
+
+test "runtime scheduler bounds runnable slots and wakes policy waiters" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const before = snapshot();
+    try std.testing.expectEqual(before.scheduler.active_slots, before.runnableTotal());
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = 2 });
+    var phase = std.atomic.Value(u64).init(0);
+    var entered = std.atomic.Value(u64).init(0);
+    var active = std.atomic.Value(u64).init(0);
+    var max_active = std.atomic.Value(u64).init(0);
+    const Worker = struct {
+        fn run(phase_gate: *std.atomic.Value(u64), entered_count: *std.atomic.Value(u64), active_count: *std.atomic.Value(u64), peak: *std.atomic.Value(u64)) void {
+            const ordinal = entered_count.fetchAdd(1, .acq_rel);
+            const now_active = active_count.fetchAdd(1, .acq_rel) + 1;
+            recordPeak(peak, now_active);
+            const required_phase: u64 = if (ordinal < 2) 1 else 2;
+            while (phase_gate.load(.acquire) < required_phase) std.atomic.spinLoopHint();
+            _ = active_count.fetchSub(1, .acq_rel);
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    var spawned: usize = 0;
+    var paused_thread: ?std.Thread = null;
+    defer {
+        phase.store(2, .release);
+        _ = setSchedulerLimits(.{});
+        for (threads[0..spawned]) |thread| thread.join();
+        if (paused_thread) |thread| thread.join();
+        _ = setSchedulerLimits(previous);
+    }
+    for (&threads) |*thread| {
+        thread.* = try spawn(.script_worker, .{}, Worker.run, .{ &phase, &entered, &active, &max_active });
+        spawned += 1;
+    }
+    const first_deadline = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    while (entered.load(.acquire) != 2 and std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < first_deadline)
+        std.Thread.yield() catch {};
+    var pressured = snapshot();
+    while (pressured.scheduler.slot_waiters != before.scheduler.slot_waiters + 2 and
+        std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < first_deadline)
+    {
+        std.Thread.yield() catch {};
+        pressured = snapshot();
+    }
+    try std.testing.expectEqual(@as(u64, 2), entered.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.active_slots + 2, pressured.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 2, pressured.scheduler.slot_waiters);
+    try std.testing.expectEqual(pressured.scheduler.active_slots, pressured.runnableTotal());
+    const pressured_workers = pressured.resource(.script_worker);
+    const before_workers = before.resource(.script_worker);
+    try std.testing.expectEqual(before_workers.runnable + 2, pressured_workers.runnable);
+    try std.testing.expectEqual(before_workers.blocked + 2, pressured_workers.blocked);
+
+    phase.store(1, .release);
+    const second_deadline = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    while (entered.load(.acquire) != 4 and std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < second_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(u64, 4), entered.load(.acquire));
+    const second = snapshot();
+    try std.testing.expectEqual(before.scheduler.active_slots + 2, second.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, second.scheduler.slot_waiters);
+    try std.testing.expectEqual(second.scheduler.active_slots, second.runnableTotal());
+    try std.testing.expectEqual(@as(u64, 2), max_active.load(.acquire));
+    phase.store(2, .release);
+    for (&threads) |*thread| thread.join();
+    spawned = 0;
+
+    _ = setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    var ran = std.atomic.Value(bool).init(false);
+    const Paused = struct {
+        fn run(flag: *std.atomic.Value(bool)) void {
+            flag.store(true, .release);
+        }
+    };
+    paused_thread = try spawn(.module_worker, .{}, Paused.run, .{&ran});
+    const zero_deadline = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    var paused = snapshot();
+    while (paused.scheduler.slot_waiters == before.scheduler.slot_waiters and
+        std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < zero_deadline)
+    {
+        std.Thread.yield() catch {};
+        paused = snapshot();
+    }
+    try std.testing.expect(!ran.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.active_slots, paused.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, paused.scheduler.slot_waiters);
+    _ = setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    paused_thread.?.join();
+    paused_thread = null;
+    try std.testing.expect(ran.load(.acquire));
+    const after = snapshot();
+    try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+    try std.testing.expectEqual(before.scheduler.slot_waits + 3, after.scheduler.slot_waits);
+    try std.testing.expectEqual(after.scheduler.active_slots, after.runnableTotal());
 }
 
 test "runtime thread telemetry distinguishes failed and in-flight attempts" {

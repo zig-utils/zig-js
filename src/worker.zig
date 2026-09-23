@@ -189,7 +189,7 @@ const Channel = struct {
             } } else .none;
             {
                 var blocking = runtime_threads.beginBlocking();
-                defer blocking.end();
+                defer blocking.endWithMutex(&ch.mutex, io);
                 io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
                     error.Timeout => if (!ch.hasQueued()) {
                         jsthread.recordWorkerChannelEmptyPop();
@@ -299,7 +299,7 @@ const InspectorEventQueue = struct {
             } } else .none;
             {
                 var blocking = runtime_threads.beginBlocking();
-                defer blocking.end();
+                defer blocking.endWithMutex(&q.mutex, io);
                 io_compat.conditionWaitTimeout(&q.cond, io, &q.mutex, tmo) catch |err| switch (err) {
                     error.Timeout => return null,
                     error.Canceled => continue,
@@ -342,7 +342,7 @@ const InspectorEventQueue = struct {
         defer q.mutex.unlock(io);
         while (!runtime_detached.load(.acquire)) {
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
+            defer blocking.endWithMutex(&q.mutex, io);
             q.cond.wait(io, &q.mutex) catch continue;
         }
     }
@@ -432,7 +432,7 @@ const InspectorCommandQueue = struct {
                 q.head = 0;
             }
             var blocking = runtime_threads.beginBlocking();
-            defer blocking.end();
+            defer blocking.endWithMutex(&q.mutex, io);
             q.cond.wait(io, &q.mutex) catch continue;
         }
         const command = q.items.items[q.head];
@@ -1256,6 +1256,45 @@ test "worker inbox park publishes blocked runtime state" {
         after.block_transitions - before.block_transitions,
         after.runnable_transitions - before.runnable_transitions,
     );
+}
+
+test "runtime scheduler one slot hands off across isolated Workers" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    var workers: [2]?*Worker = @splat(null);
+    defer {
+        _ = runtime_threads.setSchedulerLimits(.{});
+        for (&workers) |*slot| if (slot.*) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+            slot.* = null;
+        };
+    }
+    const source =
+        \\globalThis.onmessage = function (event) {
+        \\  postMessage(event.data + 1);
+        \\  close();
+        \\};
+    ;
+    for (&workers) |*slot| slot.* = try Worker.spawn(source);
+    for (&workers, 0..) |*slot, index|
+        try slot.*.?.postMessage(&machine, Value.num(@floatFromInt(index)));
+    for (&workers, 0..) |*slot, index| {
+        const w = slot.*.?;
+        const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(index + 1)), reply.asNum());
+        w.join();
+        w.destroy();
+        slot.* = null;
+    }
+    const resources = runtime_threads.snapshot();
+    try std.testing.expect(resources.scheduler.active_slots <= 1);
+    try std.testing.expectEqual(resources.scheduler.active_slots, resources.runnableTotal());
 }
 
 test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
