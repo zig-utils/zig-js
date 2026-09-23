@@ -38,6 +38,7 @@ const enc_mb = @import("encoding_multibyte.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
+const cldr_collation = @import("cldr_collation.zig");
 const cldr_plurals = @import("cldr_plurals.zig");
 const cldr_timedata = @import("cldr_timedata.zig");
 const cldr_tzalias = @import("cldr_tzalias.zig");
@@ -33575,6 +33576,51 @@ fn appendLowerAscii(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, b: u
     try buf.append(a, if (b >= 'A' and b <= 'Z') b + 32 else b);
 }
 
+fn collatorTailoredPrimaryKey(allocator: std.mem.Allocator, s: []const u8, opts: CollatorOptions) EvalError!?[]const u8 {
+    if (opts.collation != .default) return null;
+    const profile = cldr_collation.forLocale(opts.locale) orelse return null;
+    const nfd = try unicode_normalize.normalize(allocator, s, .nfd);
+    const folded = try unicode_case.toLower(allocator, nfd);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < folded.len) {
+        var weight: ?u16 = null;
+        var token_len: usize = 0;
+        for (profile.tokens) |token| {
+            if (std.mem.startsWith(u8, folded[i..], token.bytes)) {
+                weight = token.weight;
+                token_len = token.bytes.len;
+                break;
+            }
+        }
+        if (weight == null and folded[i] >= 'a' and folded[i] <= 'z') {
+            weight = profile.ascii[folded[i] - 'a'];
+            token_len = 1;
+        }
+        if (weight) |w| {
+            // Fixed-width, big-endian elements make byte comparison identical
+            // to primary-weight comparison while keeping punctuation below and
+            // untailored non-ASCII characters above the Latin range.
+            try out.appendSlice(allocator, &.{ 0x80, @intCast(w >> 8), @intCast(w & 0xff) });
+            i += token_len;
+            continue;
+        }
+        if (isCombiningMarkStart(folded, i)) |n| {
+            i += n;
+            continue;
+        }
+        if (opts.ignore_punctuation and folded[i] < 0x80 and !std.ascii.isAlphanumeric(folded[i])) {
+            i += 1;
+            continue;
+        }
+        const seq_len: usize = std.unicode.utf8ByteSequenceLength(folded[i]) catch 1;
+        const end = @min(i + seq_len, folded.len);
+        try out.appendSlice(allocator, folded[i..end]);
+        i = end;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn collatorKey(allocator: std.mem.Allocator, s: []const u8, opts: CollatorOptions, comptime keep_accents: bool, comptime keep_case: bool) EvalError![]const u8 {
     const nfd = try unicode_normalize.normalize(allocator, s, .nfd);
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -33738,8 +33784,8 @@ fn collatorCompareStringsWithAllocator(allocator: std.mem.Allocator, x: []const 
     if ((std.mem.eql(u8, x, "\xf0\xaf\xa0\xab") and std.mem.eql(u8, y, "\xe5\x8c\x97")) or
         (std.mem.eql(u8, y, "\xf0\xaf\xa0\xab") and std.mem.eql(u8, x, "\xe5\x8c\x97")))
         return 0;
-    const primary_x = try collatorKey(allocator, x, opts, false, false);
-    const primary_y = try collatorKey(allocator, y, opts, false, false);
+    const primary_x = (try collatorTailoredPrimaryKey(allocator, x, opts)) orelse try collatorKey(allocator, x, opts, false, false);
+    const primary_y = (try collatorTailoredPrimaryKey(allocator, y, opts)) orelse try collatorKey(allocator, y, opts, false, false);
     const primary = cmpBytes(primary_x, primary_y);
     if (primary != 0) return primary;
     if (opts.sensitivity == .base) return 0;
@@ -60303,6 +60349,30 @@ test "Intl.Collator preserves locale weights while ignoring punctuation" {
         \\ok &&= thaiAccent.compare("Alpha", "alpha") === 0 && thaiAccent.compare("resume", "résumé") < 0;
         \\ok &&= thaiCase.compare("Alpha", "alpha") > 0 && thaiCase.compare("resume", "résumé") === 0;
         \\ok &&= thaiVariant.compare("Alpha", "alpha") > 0 && thaiVariant.compare("resume", "résumé") < 0;
+        \\ok
+    )).asBool());
+}
+
+test "Intl.Collator applies generated CLDR Latin primary tailorings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\const sign = (value) => value < 0 ? -1 : value > 0 ? 1 : 0;
+        \\const rows = [
+        \\  ["sv", "ä", "z", 1], ["sv", "ö", "z", 1], ["da", "å", "z", 1],
+        \\  ["cs", "ch", "h", 1], ["cs", "ch", "i", -1], ["sk", "ä", "a", 1],
+        \\  ["pl", "ł", "l", 1], ["pl", "ż", "ź", 1], ["lv", "y", "i", 1],
+        \\  ["et", "z", "š", 1], ["hu", "dzs", "dz", 1], ["hr", "dž", "đ", -1],
+        \\  ["is", "á", "b", -1], ["ro", "â", "ă", 1], ["vi", "ơ", "ô", 1],
+        \\  ["cy", "ng", "g", 1], ["eo", "ĉ", "c", 1], ["sq", "dh", "d", 1]
+        \\];
+        \\let ok = rows.every(([locale, left, right, expected]) =>
+        \\  sign(new Intl.Collator(locale, { sensitivity: "base" }).compare(left, right)) === expected);
+        \\ok &&= new Intl.Collator("da", { sensitivity: "base" }).compare("aa", "å") === 0;
+        \\ok &&= new Intl.Collator("lt", { sensitivity: "base" }).compare("y", "i") === 0;
+        \\ok &&= new Intl.Collator("sv").compare("a\u0308", "ä") === 0;
+        \\ok &&= ["z", "ö", "a", "å", "ä"].sort(new Intl.Collator("sv").compare).join("|") === "a|z|å|ä|ö";
+        \\ok &&= ["i", "ch", "h", "č", "c"].sort(new Intl.Collator("cs", { sensitivity: "base" }).compare).join("|") === "c|č|h|ch|i";
         \\ok
     )).asBool());
 }
