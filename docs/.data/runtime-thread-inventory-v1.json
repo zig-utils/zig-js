@@ -14,7 +14,8 @@
       "blocking": "Broadcast, Atomics.wait, agent sleep, and teardown joins publish nested runnable/blocked transitions",
       "shutdown": "agent.reset interrupts waiters and joins every started agent",
       "scratch_memory": "Fresh realm plus process-allocator Agent source/report state",
-      "coordinator_status": "shared_cpu_slots"
+      "coordinator_status": "shared_cpu_slots",
+      "scheduler_priority": "foreground"
     },
     {
       "id": "concurrent_gc_marker",
@@ -27,7 +28,8 @@
       "blocking": "CPU tracing loop; the joining mutator publishes its blocked transition",
       "shutdown": "finishConcurrentGCIfActive signals and joins before cycle completion or Context teardown",
       "scratch_memory": "Collector mark work owned and reported by the Context heap",
-      "coordinator_status": "shared_cpu_slots"
+      "coordinator_status": "shared_cpu_slots",
+      "scheduler_priority": "safety"
     },
     {
       "id": "javascript_thread",
@@ -40,7 +42,8 @@
       "blocking": "Lock, Condition, Atomics.wait, join, GIL contention, and engine backoff publish nested runnable/blocked transitions",
       "shutdown": "Thread completion is published once; join/asyncJoin and Context teardown reclaim records",
       "scratch_memory": "Per-thread interpreter registration, microtask queue, entry arguments, and native stack",
-      "coordinator_status": "shared_cpu_slots"
+      "coordinator_status": "shared_cpu_slots",
+      "scheduler_priority": "foreground"
     },
     {
       "id": "script_worker",
@@ -53,7 +56,8 @@
       "blocking": "Inbox and inspector queues, engine waits, and teardown joins publish nested runnable/blocked transitions",
       "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
       "scratch_memory": "Isolated Context, bounded channels, structured-clone buffers, optional inspector state",
-      "coordinator_status": "shared_cpu_slots"
+      "coordinator_status": "shared_cpu_slots",
+      "scheduler_priority": "background"
     },
     {
       "id": "module_worker",
@@ -66,7 +70,8 @@
       "blocking": "Inbox and inspector queues, engine waits, and teardown joins publish nested runnable/blocked transitions",
       "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
       "scratch_memory": "Isolated Context, module registry/source copies, bounded channels, optional inspector state",
-      "coordinator_status": "shared_cpu_slots"
+      "coordinator_status": "shared_cpu_slots",
+      "scheduler_priority": "background"
     },
     {
       "id": "execution_watchdog",
@@ -79,7 +84,8 @@
       "blocking": "Every bounded deadline sleep publishes a runnable/blocked transition",
       "shutdown": "ContextGroup destruction sets watchdog_stop and joins the thread",
       "scratch_memory": "No dynamic work queue; fixed ContextGroup atomics and native stack",
-      "coordinator_status": "shared_cpu_slots"
+      "coordinator_status": "shared_cpu_slots",
+      "scheduler_priority": "safety"
     }
   ],
   "synchronous_subsystems": [

@@ -19,6 +19,33 @@ pub const Kind = enum {
 
 pub const kind_count = std.meta.fieldNames(Kind).len;
 
+pub const Priority = enum {
+    safety,
+    foreground,
+    background,
+};
+
+pub const priority_count = std.meta.fieldNames(Priority).len;
+pub const priority_weights: [priority_count]u64 = .{ 4, 2, 1 };
+
+const priority_schedule = [_]Priority{
+    .safety,
+    .safety,
+    .safety,
+    .safety,
+    .foreground,
+    .foreground,
+    .background,
+};
+
+fn priorityFor(kind: Kind) Priority {
+    return switch (kind) {
+        .concurrent_gc_marker, .execution_watchdog => .safety,
+        .javascript_thread, .test262_agent => .foreground,
+        .script_worker, .module_worker => .background,
+    };
+}
+
 const Counters = struct {
     admission_lock: std.atomic.Mutex = .unlocked,
     attempts: std.atomic.Value(u64) = .init(0),
@@ -47,9 +74,24 @@ var counters: [kind_count]Counters = @splat(.{});
 var mutation_writers: std.atomic.Value(u64) = .init(0);
 var mutation_generation: std.atomic.Value(u64) = .init(0);
 
+const SlotWaiter = struct {
+    kind: Kind,
+    priority: Priority,
+    ticket: u64,
+    cond: std.Io.Condition = .init,
+    next: ?*SlotWaiter = null,
+    granted: bool = false,
+};
+
+const PriorityCounters = struct {
+    waiters: std.atomic.Value(u64) = .init(0),
+    peak_waiters: std.atomic.Value(u64) = .init(0),
+    grants: std.atomic.Value(u64) = .init(0),
+    last_grant_ticket: std.atomic.Value(u64) = .init(0),
+};
+
 const Coordinator = struct {
     mutex: std.Io.Mutex = .init,
-    cond: std.Io.Condition = .init,
     initialized: std.atomic.Value(bool) = .init(false),
     automatic: std.atomic.Value(bool) = .init(true),
     host_logical_cpus: std.atomic.Value(u64) = .init(1),
@@ -61,6 +103,11 @@ const Coordinator = struct {
     slot_waiters: std.atomic.Value(u64) = .init(0),
     peak_slot_waiters: std.atomic.Value(u64) = .init(0),
     slot_waits: std.atomic.Value(u64) = .init(0),
+    priority: [priority_count]PriorityCounters = @splat(.{}),
+    wait_heads: [priority_count]?*SlotWaiter = @splat(null),
+    wait_tails: [priority_count]?*SlotWaiter = @splat(null),
+    next_ticket: u64 = 0,
+    schedule_cursor: usize = 0,
 };
 
 var coordinator: Coordinator = .{};
@@ -101,6 +148,14 @@ pub const SchedulerLimits = struct {
 
 pub const SchedulerPolicy = enum { automatic, fixed };
 
+pub const PrioritySnapshot = struct {
+    weight: u64,
+    waiters: u64,
+    peak_waiters: u64,
+    grants: u64,
+    last_grant_ticket: u64,
+};
+
 pub const SchedulerSnapshot = struct {
     policy: SchedulerPolicy,
     host_logical_cpus: u64,
@@ -112,10 +167,15 @@ pub const SchedulerSnapshot = struct {
     slot_waiters: u64,
     peak_slot_waiters: u64,
     slot_waits: u64,
+    priorities: [priority_count]PrioritySnapshot,
+
+    pub fn priority(self: *const SchedulerSnapshot, value: Priority) PrioritySnapshot {
+        return self.priorities[@backingInt(value)];
+    }
 };
 
 pub const Snapshot = struct {
-    schema_version: u32 = 5,
+    schema_version: u32 = 6,
     generation: u64,
     scheduler: SchedulerSnapshot,
     resources: [kind_count]ResourceSnapshot,
@@ -293,7 +353,7 @@ fn ensureCoordinatorInitialized() void {
 
 fn loadScheduler() SchedulerSnapshot {
     const automatic = coordinator.automatic.load(.acquire);
-    return .{
+    var result = SchedulerSnapshot{
         .policy = if (automatic) .automatic else .fixed,
         .host_logical_cpus = coordinator.host_logical_cpus.load(.acquire),
         .automatic_host_reservation = coordinator.automatic_host_reservation.load(.acquire),
@@ -304,7 +364,18 @@ fn loadScheduler() SchedulerSnapshot {
         .slot_waiters = coordinator.slot_waiters.load(.acquire),
         .peak_slot_waiters = coordinator.peak_slot_waiters.load(.acquire),
         .slot_waits = coordinator.slot_waits.load(.acquire),
+        .priorities = undefined,
     };
+    for (&coordinator.priority, 0..) |*state, index| {
+        result.priorities[index] = .{
+            .weight = priority_weights[index],
+            .waiters = state.waiters.load(.acquire),
+            .peak_waiters = state.peak_waiters.load(.acquire),
+            .grants = state.grants.load(.acquire),
+            .last_grant_ticket = state.last_grant_ticket.load(.acquire),
+        };
+    }
+    return result;
 }
 
 fn slotAvailableLocked() bool {
@@ -321,15 +392,82 @@ fn releaseSlotState() void {
     std.debug.assert(active > 0);
 }
 
-fn beginSlotWaitState() void {
+fn beginSlotWaitState(priority: Priority) void {
     const waiters = coordinator.slot_waiters.fetchAdd(1, .monotonic) + 1;
     recordPeak(&coordinator.peak_slot_waiters, waiters);
     _ = coordinator.slot_waits.fetchAdd(1, .monotonic);
+    const priority_state = &coordinator.priority[@backingInt(priority)];
+    const priority_waiters = priority_state.waiters.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&priority_state.peak_waiters, priority_waiters);
 }
 
-fn finishSlotWaitState() void {
+fn finishSlotWaitState(priority: Priority, ticket: u64) void {
     const waiters = coordinator.slot_waiters.fetchSub(1, .monotonic);
     std.debug.assert(waiters > 0);
+    const priority_state = &coordinator.priority[@backingInt(priority)];
+    const priority_waiters = priority_state.waiters.fetchSub(1, .monotonic);
+    std.debug.assert(priority_waiters > 0);
+    _ = priority_state.grants.fetchAdd(1, .monotonic);
+    const previous_ticket = priority_state.last_grant_ticket.swap(ticket, .monotonic);
+    std.debug.assert(ticket > previous_ticket);
+}
+
+fn hasQueuedWaitersLocked() bool {
+    return coordinator.slot_waiters.load(.monotonic) != 0;
+}
+
+fn enqueueWaiterLocked(waiter: *SlotWaiter) void {
+    coordinator.next_ticket += 1;
+    waiter.ticket = coordinator.next_ticket;
+    const index = @backingInt(waiter.priority);
+    if (coordinator.wait_tails[index]) |tail| {
+        tail.next = waiter;
+    } else {
+        coordinator.wait_heads[index] = waiter;
+    }
+    coordinator.wait_tails[index] = waiter;
+    beginMutation();
+    beginSlotWaitState(waiter.priority);
+    finishMutation();
+}
+
+fn choosePriorityLocked() ?Priority {
+    for (0..priority_schedule.len) |_| {
+        const priority = priority_schedule[coordinator.schedule_cursor];
+        coordinator.schedule_cursor = (coordinator.schedule_cursor + 1) % priority_schedule.len;
+        if (coordinator.wait_heads[@backingInt(priority)] != null) return priority;
+    }
+    return null;
+}
+
+fn dispatchSlotsLocked(io: std.Io) void {
+    while (slotAvailableLocked() and hasQueuedWaitersLocked()) {
+        const priority = choosePriorityLocked() orelse unreachable;
+        const index = @backingInt(priority);
+        const waiter = coordinator.wait_heads[index] orelse unreachable;
+        coordinator.wait_heads[index] = waiter.next;
+        if (waiter.next == null) coordinator.wait_tails[index] = null;
+        waiter.next = null;
+
+        beginMutation();
+        finishSlotWaitState(priority, waiter.ticket);
+        reserveSlotState();
+        recordRunnableState(waiter.kind);
+        finishMutation();
+        waiter.granted = true;
+        waiter.cond.signal(io);
+    }
+}
+
+fn waitForSlotLocked(kind: Kind, io: std.Io) void {
+    var waiter = SlotWaiter{
+        .kind = kind,
+        .priority = priorityFor(kind),
+        .ticket = 0,
+    };
+    enqueueWaiterLocked(&waiter);
+    dispatchSlotsLocked(io);
+    while (!waiter.granted) waiter.cond.waitUncancelable(io, &coordinator.mutex);
 }
 
 fn startThread(kind: Kind, stack_bytes: usize) void {
@@ -337,7 +475,7 @@ fn startThread(kind: Kind, stack_bytes: usize) void {
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
     ensureCoordinatorInitializedLocked();
-    if (slotAvailableLocked()) {
+    if (slotAvailableLocked() and !hasQueuedWaitersLocked()) {
         beginMutation();
         reserveSlotState();
         recordStartState(kind, stack_bytes, true);
@@ -347,14 +485,8 @@ fn startThread(kind: Kind, stack_bytes: usize) void {
 
     beginMutation();
     recordStartState(kind, stack_bytes, false);
-    beginSlotWaitState();
     finishMutation();
-    while (!slotAvailableLocked()) coordinator.cond.waitUncancelable(io, &coordinator.mutex);
-    beginMutation();
-    finishSlotWaitState();
-    reserveSlotState();
-    recordRunnableState(kind);
-    finishMutation();
+    waitForSlotLocked(kind, io);
 }
 
 fn blockThread(kind: Kind) void {
@@ -364,7 +496,7 @@ fn blockThread(kind: Kind) void {
     recordBlockedState(kind);
     releaseSlotState();
     finishMutation();
-    coordinator.cond.signal(io);
+    dispatchSlotsLocked(io);
     coordinator.mutex.unlock(io);
 }
 
@@ -372,16 +504,8 @@ fn resumeThread(kind: Kind) void {
     const io = engine_io.get();
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
-    if (!slotAvailableLocked()) {
-        beginMutation();
-        beginSlotWaitState();
-        finishMutation();
-        while (!slotAvailableLocked()) coordinator.cond.waitUncancelable(io, &coordinator.mutex);
-        beginMutation();
-        finishSlotWaitState();
-        reserveSlotState();
-        recordRunnableState(kind);
-        finishMutation();
+    if (!slotAvailableLocked() or hasQueuedWaitersLocked()) {
+        waitForSlotLocked(kind, io);
         return;
     }
     beginMutation();
@@ -394,7 +518,7 @@ fn tryResumeThread(kind: Kind) bool {
     const io = engine_io.get();
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
-    if (!slotAvailableLocked()) return false;
+    if (!slotAvailableLocked() or hasQueuedWaitersLocked()) return false;
     beginMutation();
     reserveSlotState();
     recordRunnableState(kind);
@@ -409,7 +533,7 @@ fn completeThread(kind: Kind, stack_bytes: usize) void {
     recordCompletionState(kind, stack_bytes);
     releaseSlotState();
     finishMutation();
-    coordinator.cond.signal(io);
+    dispatchSlotsLocked(io);
     coordinator.mutex.unlock(io);
 }
 
@@ -484,8 +608,8 @@ pub fn setLimits(kind: Kind, limits: Limits) Limits {
 
 /// Atomically replace the process-wide runnable-slot policy. Lowering the
 /// limit never interrupts a running thread; entries and resumes wait until
-/// active use falls below the new limit. Raising the limit wakes every waiter
-/// to compete for the newly available slots under the coordinator mutex.
+/// active use falls below the new limit. Raising the limit dispatches exactly
+/// the newly available slots through the weighted priority queues.
 pub fn setSchedulerLimits(limits: SchedulerLimits) SchedulerLimits {
     const io = engine_io.get();
     coordinator.mutex.lockUncancelable(io);
@@ -496,7 +620,6 @@ pub fn setSchedulerLimits(limits: SchedulerLimits) SchedulerLimits {
     const previous = SchedulerLimits{
         .max_runnable_threads = if (was_automatic) null else coordinator.configured_max_runnable_threads.load(.monotonic),
     };
-    const previous_effective = coordinator.effective_max_runnable_threads.load(.monotonic);
     if (limits.max_runnable_threads) |fixed| {
         coordinator.automatic.store(false, .monotonic);
         coordinator.configured_max_runnable_threads.store(fixed, .monotonic);
@@ -504,10 +627,8 @@ pub fn setSchedulerLimits(limits: SchedulerLimits) SchedulerLimits {
     } else {
         storeAutomaticPolicyState(detectAutomaticPolicy());
     }
-    const effective = coordinator.effective_max_runnable_threads.load(.monotonic);
     finishMutation();
-    if (effective > previous_effective)
-        coordinator.cond.broadcast(io);
+    dispatchSlotsLocked(io);
     return previous;
 }
 
@@ -628,7 +749,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(u32, 5), snapshot().schema_version);
+    try std.testing.expectEqual(@as(u32, 6), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
     var release = std.atomic.Value(bool).init(false);
@@ -715,6 +836,81 @@ test "runtime scheduler derives automatic capacity and exposes fixed overrides" 
     try std.testing.expectEqual(SchedulerPolicy.automatic, restored.policy);
     try std.testing.expectEqual(@as(?u64, null), restored.configured_max_runnable_threads);
     try std.testing.expectEqual(restored.active_slots, snapshot().runnableTotal());
+}
+
+test "runtime scheduler grants weighted priorities with FIFO class order" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    try std.testing.expectEqual(Priority.safety, priorityFor(.concurrent_gc_marker));
+    try std.testing.expectEqual(Priority.safety, priorityFor(.execution_watchdog));
+    try std.testing.expectEqual(Priority.foreground, priorityFor(.javascript_thread));
+    try std.testing.expectEqual(Priority.foreground, priorityFor(.test262_agent));
+    try std.testing.expectEqual(Priority.background, priorityFor(.script_worker));
+    try std.testing.expectEqual(Priority.background, priorityFor(.module_worker));
+
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    var threads: [14]std.Thread = undefined;
+    var spawned: usize = 0;
+    var output: [14]u64 = @splat(std.math.maxInt(u64));
+    var output_count = std.atomic.Value(u64).init(0);
+    defer {
+        _ = setSchedulerLimits(.{});
+        for (threads[0..spawned]) |thread| thread.join();
+        _ = setSchedulerLimits(previous);
+    }
+
+    const io = engine_io.get();
+    coordinator.mutex.lockUncancelable(io);
+    std.debug.assert(!hasQueuedWaitersLocked() and coordinator.active_slots.load(.monotonic) == 0);
+    coordinator.schedule_cursor = 0;
+    coordinator.mutex.unlock(io);
+
+    const Worker = struct {
+        fn run(id: u64, count: *std.atomic.Value(u64), values: *[14]u64) void {
+            const index: usize = @intCast(count.fetchAdd(1, .acq_rel));
+            values[index] = id;
+        }
+    };
+    const before = snapshot().scheduler;
+    const deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+    for (0..8) |index| {
+        threads[spawned] = try spawn(.execution_watchdog, .{}, Worker.run, .{ 100 + index, &output_count, &output });
+        spawned += 1;
+        while (snapshot().scheduler.slot_waiters != before.slot_waiters + spawned and
+            std.Io.Timestamp.now(io, .awake).nanoseconds < deadline)
+            std.Thread.yield() catch {};
+    }
+    for (0..4) |index| {
+        threads[spawned] = try spawn(.javascript_thread, .{}, Worker.run, .{ 200 + index, &output_count, &output });
+        spawned += 1;
+        while (snapshot().scheduler.slot_waiters != before.slot_waiters + spawned and
+            std.Io.Timestamp.now(io, .awake).nanoseconds < deadline)
+            std.Thread.yield() catch {};
+    }
+    for (0..2) |index| {
+        threads[spawned] = try spawn(.script_worker, .{}, Worker.run, .{ 300 + index, &output_count, &output });
+        spawned += 1;
+        while (snapshot().scheduler.slot_waiters != before.slot_waiters + spawned and
+            std.Io.Timestamp.now(io, .awake).nanoseconds < deadline)
+            std.Thread.yield() catch {};
+    }
+    const queued = snapshot().scheduler;
+    try std.testing.expectEqual(before.slot_waiters + threads.len, queued.slot_waiters);
+    try std.testing.expectEqual(before.priority(.safety).waiters + 8, queued.priority(.safety).waiters);
+    try std.testing.expectEqual(before.priority(.foreground).waiters + 4, queued.priority(.foreground).waiters);
+    try std.testing.expectEqual(before.priority(.background).waiters + 2, queued.priority(.background).waiters);
+
+    _ = setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    for (&threads) |*thread| thread.join();
+    spawned = 0;
+    try std.testing.expectEqual(@as(u64, output.len), output_count.load(.acquire));
+    try std.testing.expectEqualSlices(u64, &.{ 100, 101, 102, 103, 200, 201, 300, 104, 105, 106, 107, 202, 203, 301 }, &output);
+
+    const after = snapshot().scheduler;
+    try std.testing.expectEqual(before.slot_waiters, after.slot_waiters);
+    try std.testing.expectEqual(before.priority(.safety).grants + 8, after.priority(.safety).grants);
+    try std.testing.expectEqual(before.priority(.foreground).grants + 4, after.priority(.foreground).grants);
+    try std.testing.expectEqual(before.priority(.background).grants + 2, after.priority(.background).grants);
+    try std.testing.expectEqual(after.active_slots, snapshot().runnableTotal());
 }
 
 test "runtime scheduler bounds runnable slots and wakes policy waiters" {

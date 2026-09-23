@@ -20,6 +20,7 @@ const Resource = struct {
     shutdown: []const u8,
     scratch_memory: []const u8,
     coordinator_status: []const u8,
+    scheduler_priority: []const u8,
 };
 const SynchronousSubsystem = struct { id: []const u8, path: []const u8, status: []const u8 };
 const Inventory = struct {
@@ -95,13 +96,21 @@ fn nonEmpty(resource: Resource) bool {
     return resource.id.len > 0 and resource.purpose.len > 0 and resource.call_sites.len > 0 and
         resource.owner.len > 0 and resource.multiplicity.len > 0 and resource.admission.len > 0 and
         resource.stack_policy.len > 0 and resource.blocking.len > 0 and resource.shutdown.len > 0 and
-        resource.scratch_memory.len > 0 and resource.coordinator_status.len > 0;
+        resource.scratch_memory.len > 0 and resource.coordinator_status.len > 0 and
+        resource.scheduler_priority.len > 0;
 }
 
 fn listedDirect(inventory: Inventory, path: []const u8) ?usize {
     for (inventory.test_only_direct_spawns, 0..) |item, index| {
         if (std.mem.eql(u8, item.path, path)) return index;
     }
+    return null;
+}
+
+fn expectedSchedulerPriority(id: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, id, "concurrent_gc_marker") or std.mem.eql(u8, id, "execution_watchdog")) return "safety";
+    if (std.mem.eql(u8, id, "javascript_thread") or std.mem.eql(u8, id, "test262_agent")) return "foreground";
+    if (std.mem.eql(u8, id, "script_worker") or std.mem.eql(u8, id, "module_worker")) return "background";
     return null;
 }
 
@@ -113,6 +122,10 @@ fn auditInventory(inventory: Inventory) !void {
     if (inventory.resources.len == 0) return fail("resource inventory is empty", .{});
     for (inventory.resources, 0..) |resource, i| {
         if (!nonEmpty(resource)) return fail("resource {d} has an empty required field", .{i});
+        const expected_priority = expectedSchedulerPriority(resource.id) orelse
+            return fail("resource '{s}' has no scheduler priority ruling", .{resource.id});
+        if (!std.mem.eql(u8, resource.scheduler_priority, expected_priority))
+            return fail("resource '{s}' has scheduler priority '{s}', expected '{s}'", .{ resource.id, resource.scheduler_priority, expected_priority });
         for (inventory.resources[0..i]) |prior| {
             if (std.mem.eql(u8, prior.id, resource.id)) return fail("duplicate resource id '{s}'", .{resource.id});
         }

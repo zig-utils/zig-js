@@ -181,7 +181,7 @@
     {
       "path": "search-index.json",
       "bytes": 268572,
-      "sha256": "7775d9cb83668b7584b2e647354437cad14d28603c65ce1991ab52a3cf855325"
+      "sha256": "1e90a50038e11966c39d3732635991db4e6d5af1726e9be0183595a9d12b5319"
     },
     {
       "path": "sitemap.xml",
@@ -255,8 +255,8 @@
     },
     {
       "path": "threads/resource-coordination/index.html",
-      "bytes": 204390,
-      "sha256": "299593dbabde97991d27c508e148cf444e63654f55213f601d0be98fddec6529"
+      "bytes": 205354,
+      "sha256": "ccd572016685d137599c7571549456f126fab3de05f48055c384c7258f26de9d"
     },
     {
       "path": "threads/testing/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "83c22ec160046bf0897b4015110560cb77d0ed1843ea039a509bb67cb38363d6"
+  "tree_sha256": "5a39c28dce6ef07c3cda182f59cb9b8606b5a45954f5f549384041dd62375268"
 }
