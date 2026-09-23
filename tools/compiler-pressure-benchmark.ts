@@ -217,6 +217,14 @@ export function collect(
     }
   }
   requireValue(runnerMetadata !== null, "empty compiler-pressure matrix");
+  requireValue(
+    (runnerMetadata as RecordValue).jit_supported === true,
+    "native compiler pressure requires a JIT-supported host",
+  );
+  requireValue(
+    (runnerMetadata as RecordValue).logical_cpus === logicalCpus,
+    `host-width disagreement: collector=${logicalCpus}, runner=${(runnerMetadata as RecordValue).logical_cpus}`,
+  );
   validateMatrix(rows, samples, lanes, runnerMetadata as RecordValue);
   return { runner_metadata: runnerMetadata as RecordValue, rows, lanes };
 }
@@ -351,7 +359,7 @@ export function render(
     "",
     "## Cold Context and compiler pressure",
     "",
-    "| lanes | mode | wall p50 | process CPU p50 | summed compiler p50 | CPU / wall | wall scaling | wall RSD | baseline publications | generated code | peak RSS p50 |",
+    "| lanes | mode | wall p50 | process CPU p50 | summed compiler p50 | CPU / wall | throughput scaling | wall RSD | baseline publications | generated code | peak RSS p50 |",
     "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
   const oneLane: Record<string, number> = {};
@@ -367,12 +375,12 @@ export function render(
         generated = median(group.map((row) => row.compiler.generated_code_bytes)),
         peak = median(group.map((row) => row.process.peak_rss_bytes_after));
       lines.push(
-        `| ${laneCount} | ${mode} | ${(elapsed / 1e6).toFixed(2)} ms | ${(cpu / 1e6).toFixed(2)} ms | ${(compile / 1e6).toFixed(2)} ms | ${(cpu / elapsed).toFixed(2)}x | ${(oneLane[mode] / elapsed).toFixed(2)}x | ${rsd(group.map((row) => row.elapsed_ns)).toFixed(2)}% | ${publications.toFixed(0)} | ${(generated / 1024 / 1024).toFixed(2)} MiB | ${(peak / 1024 / 1024).toFixed(2)} MiB |`,
+        `| ${laneCount} | ${mode} | ${(elapsed / 1e6).toFixed(2)} ms | ${(cpu / 1e6).toFixed(2)} ms | ${(compile / 1e6).toFixed(2)} ms | ${(cpu / elapsed).toFixed(2)}x | ${((oneLane[mode] * laneCount) / elapsed).toFixed(2)}x | ${rsd(group.map((row) => row.elapsed_ns)).toFixed(2)}% | ${publications.toFixed(0)} | ${(generated / 1024 / 1024).toFixed(2)} MiB | ${(peak / 1024 / 1024).toFixed(2)} MiB |`,
       );
     }
   lines.push(
     "",
-    "Wall scaling is one-lane wall divided by current wall. Process CPU divided by wall shows aggregate concurrency; summed compiler time adds independently timed tier attempts across lanes and can exceed wall time.",
+    "Throughput scaling is one-lane wall multiplied by lanes, then divided by current wall. Process CPU divided by wall shows aggregate concurrency; summed compiler time adds independently timed tier attempts across lanes and can exceed wall time.",
     "",
     "## Warm execution control",
     "",
@@ -392,9 +400,9 @@ export function render(
     "## Method and boundaries",
     "",
     `The matrix contains ${rows.length.toLocaleString("en-US")} phase rows. Each cell uses ${info.Samples} fresh-process samples after ${info.Warmups} discarded warmup process(es); JIT-on/off launch order alternates. Reported values are medians, with sample RSD shown for wall time.`,
-    `The fixed source is \`bench/compiler_pressure.js\` at SHA-256 \`${sourceSha}\`. Each lane owns a fresh creator-thread-affine Context. Cold timing starts before OS-thread creation and includes Context construction, source parsing/bytecode setup, ten fixture invocations, native compilation/publication, and the completion join.`,
+    `The fixed source is \`bench/compiler_pressure.js\` at SHA-256 \`${sourceSha}\`. Each lane owns a fresh creator-thread-affine Context. Cold timing starts before OS-thread creation and includes Context construction, source parsing/bytecode setup, ten fixture invocations, native compilation/publication, and the completion wait.`,
     "Warm timing reuses the live Contexts for three invocations. Context destruction is outside both timed phases. Process CPU comes from `getrusage`; peak and retained RSS use Darwin `task_vm_info`.",
-    "The current engine compiles synchronously on the calling lane. This baseline therefore measures the uncoordinated behavior that runtime admission changes must improve without changing checksums, publication counts, or warm behavior.",
+    "The measured revision compiles synchronously on the calling lane. This baseline therefore measures the uncoordinated behavior that runtime admission changes must improve without changing checksums, publication counts, or warm behavior.",
     "",
     "## Reproduce",
     "",
