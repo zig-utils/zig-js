@@ -6531,7 +6531,11 @@ pub const Context = struct {
                 const io = agent.engineIo();
                 for (self.js_threads.items) |rec| {
                     rec.join_mutex.lockUncancelable(io);
-                    while (!rec.exited) rec.done_cond.wait(io, &rec.join_mutex) catch {};
+                    while (!rec.exited) {
+                        var blocking = runtime_threads.beginBlocking();
+                        defer blocking.end();
+                        rec.done_cond.wait(io, &rec.join_mutex) catch {};
+                    }
                     rec.join_mutex.unlock(io);
                 }
             } else {
@@ -6542,7 +6546,11 @@ pub const Context = struct {
                 g.release();
             }
             for (self.js_threads.items) |rec| {
-                if (rec.thread) |t| t.join();
+                if (rec.thread) |t| {
+                    var blocking = runtime_threads.beginBlocking();
+                    defer blocking.end();
+                    t.join();
+                }
             }
             var property_cleanup = self.interpreter();
             jsthread.abandonPropAsync(&property_cleanup);
@@ -7447,6 +7455,8 @@ pub const Context = struct {
             // without leaving the owner asleep until the old deadline.
             const park_ns = @min(next - now, 5 * std.time.ns_per_ms);
             const release_gil = machine.use_thread_gil and machine.gil != null;
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             if (release_gil) machine.gil.?.release();
             std.Io.sleep(agent.engineIo(), .fromNanoseconds(@intCast(park_ns)), .awake) catch {};
             if (release_gil) machine.gil.?.acquire();
@@ -8779,6 +8789,8 @@ pub const Context = struct {
         defer if (entered_conductor) self.leaveJitGcConductor();
         if (self.gc_marker) |t| {
             self.gc_marker_stop.store(true, .release);
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             t.join();
             self.gc_marker = null;
         }
@@ -10083,6 +10095,8 @@ pub const Context = struct {
                         rec.join_mutex.lockUncancelable(io);
                         if (rec.exited) break;
                         stack_scan.beginPark();
+                        var blocking = runtime_threads.beginBlocking();
+                        defer blocking.end();
                         io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
                             .raw = .fromMilliseconds(5),
                             .clock = .awake,

@@ -150,6 +150,8 @@ pub fn parkUntilBroadcast() ?*SharedBufferStorage {
     group.mutex.lockUncancelable(io);
     defer group.mutex.unlock(io);
     while (group.bcast_gen == a.acked_gen and !group.stopping) {
+        var blocking = runtime_threads.beginBlocking();
+        defer blocking.end();
         group.cond.waitUncancelable(io, &group.mutex);
     }
     if (group.stopping) return null;
@@ -179,13 +181,17 @@ pub fn broadcast(storage: *SharedBufferStorage) void {
             if (agentNeedsBroadcastAck(a, group.bcast_gen)) pending += 1;
         }
         if (pending == 0) break;
-        io_compat.conditionWaitTimeout(&group.cond, io, &group.mutex, .{ .duration = .{
-            .raw = .fromSeconds(10),
-            .clock = .awake,
-        } }) catch {
-            rounds += 1;
-            if (rounds >= 2) break; // ~20s of silence: proceed without the ack
-        };
+        {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
+            io_compat.conditionWaitTimeout(&group.cond, io, &group.mutex, .{ .duration = .{
+                .raw = .fromSeconds(10),
+                .clock = .awake,
+            } }) catch {
+                rounds += 1;
+                if (rounds >= 2) break; // ~20s of silence: proceed without the ack
+            };
+        }
     }
 }
 
@@ -255,7 +261,11 @@ pub fn reset() void {
     group.mutex.unlock(io);
     wakeAllWaiters();
     for (group.agents.items) |a| {
-        if (a.thread) |t| t.join();
+        if (a.thread) |t| {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
+            t.join();
+        }
     }
     group.mutex.lockUncancelable(io);
     for (group.agents.items) |a| {
@@ -281,7 +291,44 @@ pub fn sleepMs(ms: f64) void {
     if (!(ms > 0)) return; // NaN/negative/zero: no wait
     const io = engineIo();
     const capped = @min(ms, 60_000.0); // one test must not outlive the runner watchdog
+    var blocking = runtime_threads.beginBlocking();
+    defer blocking.end();
     std.Io.sleep(io, .fromMilliseconds(@intFromFloat(capped)), .awake) catch {};
+}
+
+test "test262 agent broadcast park publishes blocked runtime state" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    reset();
+    defer reset();
+    const before = runtime_threads.snapshot().resource(.test262_agent);
+    const Body = struct {
+        fn run(_: []const u8) void {
+            _ = parkUntilBroadcast();
+        }
+    };
+    try start("", Body.run);
+    const deadline = std.Io.Timestamp.now(engineIo(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    var parked: ?runtime_threads.ResourceSnapshot = null;
+    while (std.Io.Timestamp.now(engineIo(), .awake).nanoseconds < deadline) {
+        const current = runtime_threads.snapshot().resource(.test262_agent);
+        if (current.blocked == before.blocked + 1) {
+            parked = current;
+            break;
+        }
+        std.Thread.yield() catch {};
+    }
+    const observed = parked orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(before.live + 1, observed.live);
+    try std.testing.expectEqual(observed.live, observed.runnable + observed.blocked);
+    reset();
+    const after = runtime_threads.snapshot().resource(.test262_agent);
+    try std.testing.expectEqual(before.live, after.live);
+    try std.testing.expectEqual(before.blocked, after.blocked);
+    try std.testing.expect(after.block_transitions > before.block_transitions);
+    try std.testing.expectEqual(
+        after.block_transitions - before.block_transitions,
+        after.runnable_transitions - before.runnable_transitions,
+    );
 }
 
 var mono_base = std.atomic.Value(i64).init(0);
@@ -555,13 +602,17 @@ pub fn waitInterruptible(storage: *SharedBufferStorage, offset: usize, comptime 
             outcome = .timed_out;
             break;
         }
-        io_compat.conditionWaitTimeout(&ticket.cond, io, &waiters_mutex, deadline) catch |err| switch (err) {
-            error.Timeout => {
-                if (!ticket.woken) outcome = .timed_out;
-                break;
-            },
-            error.Canceled => continue,
-        };
+        {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
+            io_compat.conditionWaitTimeout(&ticket.cond, io, &waiters_mutex, deadline) catch |err| switch (err) {
+                error.Timeout => {
+                    if (!ticket.woken) outcome = .timed_out;
+                    break;
+                },
+                error.Canceled => continue,
+            };
+        }
     }
     // Unlink before returning — unless notify/teardown already unlinked the
     // stack ticket before signaling us.
@@ -790,10 +841,14 @@ pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
         if (n > 0 or outstanding == 0) return n;
         if (!group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
         const wait_ns: u64 = if (nearest) |d| @intCast(@max(1, d - now)) else 100 * std.time.ns_per_ms;
-        io_compat.conditionWaitTimeout(&waiters_cond, io, &waiters_mutex, .{ .duration = .{
-            .raw = .fromNanoseconds(wait_ns),
-            .clock = .awake,
-        } }) catch {};
+        {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
+            io_compat.conditionWaitTimeout(&waiters_cond, io, &waiters_mutex, .{ .duration = .{
+                .raw = .fromNanoseconds(wait_ns),
+                .clock = .awake,
+            } }) catch {};
+        }
     }
 }
 

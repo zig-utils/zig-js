@@ -9,12 +9,12 @@
       "call_sites": [{ "path": "src/agent.zig", "count": 1 }],
       "owner": "Process-wide agent Group; records are reclaimed by agent.reset",
       "multiplicity": "One OS thread per live agent record",
-      "admission": "No coordinator limit; allocation and OS spawn failure return OutOfMemory",
+      "admission": "Process-wide per-resource thread and configured-stack limits; allocation, policy, or OS spawn failure returns OutOfMemory",
       "stack_policy": "Platform default",
-      "blocking": "May park in broadcast, Atomics.wait, or agent sleep",
+      "blocking": "Broadcast, Atomics.wait, agent sleep, and teardown joins publish nested runnable/blocked transitions",
       "shutdown": "agent.reset interrupts waiters and joins every started agent",
       "scratch_memory": "Fresh realm plus process-allocator Agent source/report state",
-      "coordinator_status": "uncoordinated"
+      "coordinator_status": "admission_and_state_accounting"
     },
     {
       "id": "concurrent_gc_marker",
@@ -22,12 +22,12 @@
       "call_sites": [{ "path": "src/context.zig", "count": 1 }],
       "owner": "Context",
       "multiplicity": "At most one marker per Context",
-      "admission": "Only when gc_concurrent is enabled and an old collection is due; spawn failure finishes marking synchronously",
+      "admission": "Only when gc_concurrent is enabled and an old collection is due, within process-wide per-resource thread and configured-stack limits; any spawn failure finishes marking synchronously",
       "stack_policy": "Platform default",
-      "blocking": "CPU tracing loop; synchronizes through heap mark state",
+      "blocking": "CPU tracing loop; the joining mutator publishes its blocked transition",
       "shutdown": "finishConcurrentGCIfActive signals and joins before cycle completion or Context teardown",
       "scratch_memory": "Collector mark work owned and reported by the Context heap",
-      "coordinator_status": "uncoordinated"
+      "coordinator_status": "admission_and_state_accounting"
     },
     {
       "id": "javascript_thread",
@@ -35,12 +35,12 @@
       "call_sites": [{ "path": "src/jsthread.zig", "count": 1 }],
       "owner": "Context ThreadRecord and realm GIL/cooperative-root protocol",
       "multiplicity": "One OS thread per live JavaScript Thread",
-      "admission": "Optional Context max_js_threads cap plus 15-bit thread-id space",
+      "admission": "Optional Context max_js_threads cap, 15-bit thread-id space, and process-wide per-resource thread/configured-stack limits",
       "stack_policy": "64 MiB reserved stack",
-      "blocking": "May block in Lock, Condition, Atomics.wait, join, host work, or GC safepoints",
+      "blocking": "Lock, Condition, Atomics.wait, join, GIL contention, and engine backoff publish nested runnable/blocked transitions",
       "shutdown": "Thread completion is published once; join/asyncJoin and Context teardown reclaim records",
       "scratch_memory": "Per-thread interpreter registration, microtask queue, entry arguments, and native stack",
-      "coordinator_status": "uncoordinated"
+      "coordinator_status": "admission_and_state_accounting"
     },
     {
       "id": "script_worker",
@@ -48,12 +48,12 @@
       "call_sites": [{ "path": "src/worker.zig", "count": 1 }],
       "owner": "Caller-owned Worker object",
       "multiplicity": "One OS thread and Context per Worker",
-      "admission": "No coordinator limit; allocation/OS spawn failure returns OutOfMemory",
+      "admission": "Process-wide per-resource thread and configured-stack limits; allocation, policy, or OS spawn failure returns OutOfMemory",
       "stack_policy": "Platform default",
-      "blocking": "Parks on inbox, inspector command queue, module/host work, or termination",
+      "blocking": "Inbox and inspector queues, engine waits, and teardown joins publish nested runnable/blocked transitions",
       "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
       "scratch_memory": "Isolated Context, bounded channels, structured-clone buffers, optional inspector state",
-      "coordinator_status": "uncoordinated"
+      "coordinator_status": "admission_and_state_accounting"
     },
     {
       "id": "module_worker",
@@ -61,12 +61,12 @@
       "call_sites": [{ "path": "src/worker.zig", "count": 1 }],
       "owner": "Caller-owned Worker object",
       "multiplicity": "One OS thread and Context per Worker",
-      "admission": "No coordinator limit; allocation/OS spawn failure returns OutOfMemory",
+      "admission": "Process-wide per-resource thread and configured-stack limits; allocation, policy, or OS spawn failure returns OutOfMemory",
       "stack_policy": "Platform default",
-      "blocking": "May block in module host callbacks, inbox, inspector commands, or termination",
+      "blocking": "Inbox and inspector queues, engine waits, and teardown joins publish nested runnable/blocked transitions",
       "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
       "scratch_memory": "Isolated Context, module registry/source copies, bounded channels, optional inspector state",
-      "coordinator_status": "uncoordinated"
+      "coordinator_status": "admission_and_state_accounting"
     },
     {
       "id": "execution_watchdog",
@@ -74,12 +74,12 @@
       "call_sites": [{ "path": "src/c_api.zig", "count": 1 }],
       "owner": "CContextGroup",
       "multiplicity": "At most one lazily-created watchdog per ContextGroup",
-      "admission": "Created on first finite time limit; spawn failure leaves synchronous checkpoint enforcement active",
+      "admission": "Created on first finite time limit within process-wide per-resource thread and configured-stack limits; spawn failure leaves synchronous checkpoint enforcement active",
       "stack_policy": "Platform default",
-      "blocking": "Sleeps in bounded intervals and interrupts engine waiters when a deadline fires",
+      "blocking": "Every bounded deadline sleep publishes a runnable/blocked transition",
       "shutdown": "ContextGroup destruction sets watchdog_stop and joins the thread",
       "scratch_memory": "No dynamic work queue; fixed ContextGroup atomics and native stack",
-      "coordinator_status": "uncoordinated"
+      "coordinator_status": "admission_and_state_accounting"
     }
   ],
   "synchronous_subsystems": [
@@ -107,7 +107,7 @@
     { "path": "src/jit/optimizer_compiler.zig", "count": 1 },
     { "path": "src/jit.zig", "count": 13 },
     { "path": "src/jsstring.zig", "count": 1 },
-    { "path": "src/jsthread.zig", "count": 2 },
+    { "path": "src/jsthread.zig", "count": 3 },
     { "path": "src/parallel_lock.zig", "count": 2 },
     { "path": "src/root_handshake.zig", "count": 1 },
     { "path": "src/shape.zig", "count": 3 },

@@ -1,8 +1,9 @@
 //! Typed creation boundary for every OS thread the production engine owns.
 //!
-//! The kind is intentionally behavior-neutral today. It makes ownership
-//! auditable now and is the stable admission point for #502's resource
-//! coordinator without changing stack, scheduling, or lifecycle semantics.
+//! The boundary owns admission, lifecycle telemetry, and runnable/blocked
+//! state. Scheduling policy remains separate: blocking scopes establish the
+//! exact state transitions a shared CPU-slot coordinator needs without yet
+//! changing which thread may run.
 
 const std = @import("std");
 
@@ -31,6 +32,12 @@ const Counters = struct {
     max_configured_stack_bytes: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     live: std.atomic.Value(u64) = .init(0),
     peak_live: std.atomic.Value(u64) = .init(0),
+    runnable: std.atomic.Value(u64) = .init(0),
+    peak_runnable: std.atomic.Value(u64) = .init(0),
+    blocked: std.atomic.Value(u64) = .init(0),
+    peak_blocked: std.atomic.Value(u64) = .init(0),
+    block_transitions: std.atomic.Value(u64) = .init(0),
+    runnable_transitions: std.atomic.Value(u64) = .init(0),
     configured_stack_bytes: std.atomic.Value(u64) = .init(0),
     peak_configured_stack_bytes: std.atomic.Value(u64) = .init(0),
 };
@@ -52,6 +59,12 @@ pub const ResourceSnapshot = struct {
     max_configured_stack_bytes: u64,
     live: u64,
     peak_live: u64,
+    runnable: u64,
+    peak_runnable: u64,
+    blocked: u64,
+    peak_blocked: u64,
+    block_transitions: u64,
+    runnable_transitions: u64,
     configured_stack_bytes: u64,
     peak_configured_stack_bytes: u64,
 };
@@ -62,7 +75,7 @@ pub const Limits = struct {
 };
 
 pub const Snapshot = struct {
-    schema_version: u32 = 2,
+    schema_version: u32 = 3,
     generation: u64,
     resources: [kind_count]ResourceSnapshot,
 
@@ -70,6 +83,13 @@ pub const Snapshot = struct {
         return self.resources[@backingInt(kind)];
     }
 };
+
+const ThreadState = struct {
+    kind: Kind,
+    blocking_depth: usize = 0,
+};
+
+threadlocal var current_thread: ?ThreadState = null;
 
 fn beginMutation() void {
     _ = mutation_writers.fetchAdd(1, .acquire);
@@ -125,6 +145,8 @@ fn recordStart(kind: Kind, stack_bytes: usize) void {
     _ = state.starts.fetchAdd(1, .monotonic);
     const live = state.live.fetchAdd(1, .monotonic) + 1;
     recordPeak(&state.peak_live, live);
+    const runnable = state.runnable.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&state.peak_runnable, runnable);
     const stack = state.configured_stack_bytes.fetchAdd(stack_bytes, .monotonic) + stack_bytes;
     recordPeak(&state.peak_configured_stack_bytes, stack);
 }
@@ -151,9 +173,32 @@ fn recordCompletion(kind: Kind, stack_bytes: usize) void {
     const state = &counters[@backingInt(kind)];
     _ = state.completions.fetchAdd(1, .monotonic);
     const live = state.live.fetchSub(1, .monotonic);
+    const runnable = state.runnable.fetchSub(1, .monotonic);
     const stack = state.configured_stack_bytes.fetchSub(stack_bytes, .monotonic);
-    std.debug.assert(live > 0 and stack >= stack_bytes);
+    std.debug.assert(live > 0 and runnable > 0 and stack >= stack_bytes);
     releaseAdmission(state, stack_bytes);
+}
+
+fn recordBlocked(kind: Kind) void {
+    beginMutation();
+    defer finishMutation();
+    const state = &counters[@backingInt(kind)];
+    const runnable = state.runnable.fetchSub(1, .monotonic);
+    std.debug.assert(runnable > 0);
+    const blocked = state.blocked.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&state.peak_blocked, blocked);
+    _ = state.block_transitions.fetchAdd(1, .monotonic);
+}
+
+fn recordRunnable(kind: Kind) void {
+    beginMutation();
+    defer finishMutation();
+    const state = &counters[@backingInt(kind)];
+    const blocked = state.blocked.fetchSub(1, .monotonic);
+    std.debug.assert(blocked > 0);
+    const runnable = state.runnable.fetchAdd(1, .monotonic) + 1;
+    recordPeak(&state.peak_runnable, runnable);
+    _ = state.runnable_transitions.fetchAdd(1, .monotonic);
 }
 
 fn loadResource(state: *const Counters) ResourceSnapshot {
@@ -170,6 +215,12 @@ fn loadResource(state: *const Counters) ResourceSnapshot {
         .max_configured_stack_bytes = state.max_configured_stack_bytes.load(.acquire),
         .live = state.live.load(.acquire),
         .peak_live = state.peak_live.load(.acquire),
+        .runnable = state.runnable.load(.acquire),
+        .peak_runnable = state.peak_runnable.load(.acquire),
+        .blocked = state.blocked.load(.acquire),
+        .peak_blocked = state.peak_blocked.load(.acquire),
+        .block_transitions = state.block_transitions.load(.acquire),
+        .runnable_transitions = state.runnable_transitions.load(.acquire),
         .configured_stack_bytes = state.configured_stack_bytes.load(.acquire),
         .peak_configured_stack_bytes = state.peak_configured_stack_bytes.load(.acquire),
     };
@@ -214,6 +265,29 @@ pub fn setLimits(kind: Kind, limits: Limits) Limits {
     return previous;
 }
 
+/// Marks the current engine-owned thread blocked until `end` runs. Nested
+/// scopes count as one outer transition. Calls from host and test threads that
+/// did not enter through `spawn` are inert.
+pub const BlockingScope = struct {
+    active: bool,
+
+    pub fn end(scope: *BlockingScope) void {
+        if (!scope.active) return;
+        scope.active = false;
+        const state = if (current_thread) |*value| value else unreachable;
+        std.debug.assert(state.blocking_depth > 0);
+        state.blocking_depth -= 1;
+        if (state.blocking_depth == 0) recordRunnable(state.kind);
+    }
+};
+
+pub fn beginBlocking() BlockingScope {
+    const state = if (current_thread) |*value| value else return .{ .active = false };
+    if (state.blocking_depth == 0) recordBlocked(state.kind);
+    state.blocking_depth += 1;
+    return .{ .active = true };
+}
+
 pub fn spawn(
     comptime kind: Kind,
     config: std.Thread.SpawnConfig,
@@ -223,8 +297,15 @@ pub fn spawn(
     if (!tryAdmit(kind, config.stack_size)) return error.ThreadQuotaExceeded;
     const Runner = struct {
         fn run(call_args: @TypeOf(args), stack_bytes: usize) void {
+            std.debug.assert(current_thread == null);
+            current_thread = .{ .kind = kind };
             recordStart(kind, stack_bytes);
-            defer recordCompletion(kind, stack_bytes);
+            defer {
+                const state = current_thread orelse unreachable;
+                std.debug.assert(state.kind == kind and state.blocking_depth == 0);
+                recordCompletion(kind, stack_bytes);
+                current_thread = null;
+            }
             @call(.auto, function, call_args);
         }
     };
@@ -249,6 +330,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
         const live = snapshot().resource(.script_worker);
         try std.testing.expectEqual(live.attempts, live.starts + live.spawn_failures + live.admission_rejections + live.in_flight_attempts);
         try std.testing.expectEqual(live.live, live.starts - live.completions);
+        try std.testing.expectEqual(live.live, live.runnable + live.blocked);
         if (live.live - before.live == threads.len) {
             try std.testing.expectEqual(@as(u64, threads.len), live.starts - before.starts);
             try std.testing.expectEqual(@as(u64, threads.len * std.Thread.SpawnConfig.default_stack_size), live.configured_stack_bytes - before.configured_stack_bytes);
@@ -266,7 +348,57 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
     try std.testing.expectEqual(@as(u64, 0), after.spawn_failures - before.spawn_failures);
     try std.testing.expectEqual(@as(u64, 0), after.admission_rejections - before.admission_rejections);
     try std.testing.expectEqual(before.live, after.live);
+    try std.testing.expectEqual(after.live, after.runnable + after.blocked);
     try std.testing.expectEqual(before.configured_stack_bytes, after.configured_stack_bytes);
+}
+
+test "runtime blocking scopes account nested and concurrent transitions once" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(u32, 3), snapshot().schema_version);
+    const before = snapshot().resource(.script_worker);
+    var blocked = std.atomic.Value(u64).init(0);
+    var release = std.atomic.Value(bool).init(false);
+    var resumed = std.atomic.Value(u64).init(0);
+    var finish = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn run(blocked_count: *std.atomic.Value(u64), release_gate: *std.atomic.Value(bool), resumed_count: *std.atomic.Value(u64), finish_gate: *std.atomic.Value(bool)) void {
+            var outer = beginBlocking();
+            var inner = beginBlocking();
+            _ = blocked_count.fetchAdd(1, .release);
+            while (!release_gate.load(.acquire)) std.atomic.spinLoopHint();
+            inner.end();
+            outer.end();
+            _ = resumed_count.fetchAdd(1, .release);
+            while (!finish_gate.load(.acquire)) std.atomic.spinLoopHint();
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try spawn(.script_worker, .{}, Worker.run, .{ &blocked, &release, &resumed, &finish });
+    while (blocked.load(.acquire) != threads.len) std.atomic.spinLoopHint();
+    const parked = snapshot().resource(.script_worker);
+    try std.testing.expectEqual(before.live + threads.len, parked.live);
+    try std.testing.expectEqual(before.blocked + threads.len, parked.blocked);
+    try std.testing.expectEqual(before.runnable, parked.runnable);
+    try std.testing.expectEqual(before.block_transitions + threads.len, parked.block_transitions);
+    try std.testing.expectEqual(before.runnable_transitions, parked.runnable_transitions);
+    try std.testing.expectEqual(parked.live, parked.runnable + parked.blocked);
+
+    release.store(true, .release);
+    while (resumed.load(.acquire) != threads.len) std.atomic.spinLoopHint();
+    const running = snapshot().resource(.script_worker);
+    try std.testing.expectEqual(before.live + threads.len, running.live);
+    try std.testing.expectEqual(before.blocked, running.blocked);
+    try std.testing.expectEqual(before.runnable + threads.len, running.runnable);
+    try std.testing.expectEqual(before.runnable_transitions + threads.len, running.runnable_transitions);
+    try std.testing.expectEqual(running.live, running.runnable + running.blocked);
+
+    finish.store(true, .release);
+    for (&threads) |*thread| thread.join();
+    const after = snapshot().resource(.script_worker);
+    try std.testing.expectEqual(before.live, after.live);
+    try std.testing.expectEqual(before.runnable, after.runnable);
+    try std.testing.expectEqual(before.blocked, after.blocked);
+    try std.testing.expectEqual(after.live, after.runnable + after.blocked);
 }
 
 test "runtime thread telemetry distinguishes failed and in-flight attempts" {

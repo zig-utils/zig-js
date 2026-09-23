@@ -889,7 +889,11 @@ fn acquireGilForTeardown(self: *Interpreter, g: *gil_mod.Gil) void {
         // the oversubscription that makes this path flake in CI.
         self.serviceMutatorStopSafepoint();
         self.serviceGcSafepoint();
-        std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+        {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
+            std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+        }
     }
 }
 
@@ -2661,6 +2665,8 @@ fn timeoutMillisToNs(ms: f64) value.HostError!?u64 {
 
 fn waitOnLockCond(self: *Interpreter, rec: *LockRecord, timeout: std.Io.Timeout) void {
     const io = agent.engineIo();
+    var blocking = runtime_threads.beginBlocking();
+    defer blocking.end();
     if (self.use_thread_gil) {
         const g = rec.gil;
         stack_scan.beginPark();
@@ -2905,6 +2911,8 @@ fn ackSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
 
 fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeout) void {
     const io = agent.engineIo();
+    var blocking = runtime_threads.beginBlocking();
+    defer blocking.end();
     if (self.use_thread_gil) {
         const g = rec.gil;
         stack_scan.beginPark();
@@ -4194,6 +4202,8 @@ test "property waiter metadata counts against heap budget" {
 
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
     const io = agent.engineIo();
+    var blocking = runtime_threads.beginBlocking();
+    defer blocking.end();
     if (self.use_thread_gil) {
         var timed_out = false;
         stack_scan.beginPark();
@@ -4773,6 +4783,8 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     if (released_gil) rec.gil.release();
     recordThreadJoinPark();
     const wait_start = startLifecycleTimer();
+    var blocking = runtime_threads.beginBlocking();
+    defer blocking.end();
     io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,
@@ -5109,6 +5121,81 @@ test "Thread capped admission counts completion under its publication mutex" {
     const final = liveThreadCountLocked(&pointers);
     g.unlockApi();
     try std.testing.expectEqual(@as(u32, 0), final);
+}
+
+test "JavaScript Thread Atomics park publishes blocked runtime state" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const before = runtime_threads.snapshot().resource(.javascript_thread);
+    var passed = std.atomic.Value(bool).init(false);
+    var finished = std.atomic.Value(bool).init(false);
+    var release = std.atomic.Value(bool).init(false);
+    const Owner = struct {
+        fn hold(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const gate: *std.atomic.Value(bool) = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            while (!gate.load(.acquire))
+                std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+            return Value.undef();
+        }
+
+        fn run(ok: *std.atomic.Value(bool), done: *std.atomic.Value(bool), release_gate: *std.atomic.Value(bool)) void {
+            defer done.store(true, .release);
+            const ctx = Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_threads = true,
+                .enable_gc = true,
+                .parallel_gc = true,
+            }) catch return;
+            defer ctx.destroy();
+            interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "__runtimeHold", 0, hold) catch return;
+            ctx.global_object.getOwn("__runtimeHold").?.asObj().private_data = release_gate;
+            const result = ctx.evaluate(
+                \\const runtimeState = { ready: 0, lane: 0 };
+                \\const runtimeWaiter = new Thread(function () {
+                \\  Atomics.store(runtimeState, "ready", 1);
+                \\  Atomics.notify(runtimeState, "ready", 1);
+                \\  return Atomics.wait(runtimeState, "lane", 0);
+                \\});
+                \\while (Atomics.load(runtimeState, "ready") === 0)
+                \\  Atomics.wait(runtimeState, "ready", 0, 100);
+                \\__runtimeHold();
+                \\Atomics.store(runtimeState, "lane", 1);
+                \\Atomics.notify(runtimeState, "lane", 1);
+                \\runtimeWaiter.join() === "ok";
+            ) catch return;
+            ok.store(result.isBoolean() and result.asBool(), .release);
+        }
+    };
+    const owner = try std.Thread.spawn(.{}, Owner.run, .{ &passed, &finished, &release });
+    var joined = false;
+    defer if (!joined) {
+        release.store(true, .release);
+        owner.join();
+    };
+    const deadline = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + 30 * std.time.ns_per_s;
+    var parked: ?runtime_threads.ResourceSnapshot = null;
+    while (!finished.load(.acquire) and std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds < deadline) {
+        const current = runtime_threads.snapshot().resource(.javascript_thread);
+        if (current.blocked == before.blocked + 1) {
+            parked = current;
+            break;
+        }
+        std.Thread.yield() catch {};
+    }
+    const observed = parked orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(before.live + 1, observed.live);
+    try std.testing.expectEqual(observed.live, observed.runnable + observed.blocked);
+    release.store(true, .release);
+    owner.join();
+    joined = true;
+    try std.testing.expect(passed.load(.acquire));
+    const after = runtime_threads.snapshot().resource(.javascript_thread);
+    try std.testing.expectEqual(before.live, after.live);
+    try std.testing.expectEqual(before.blocked, after.blocked);
+    try std.testing.expect(after.block_transitions > before.block_transitions);
+    try std.testing.expectEqual(
+        after.block_transitions - before.block_transitions,
+        after.runnable_transitions - before.runnable_transitions,
+    );
 }
 
 test "Thread capped admission refuses without consuming IDs and admits after completion" {

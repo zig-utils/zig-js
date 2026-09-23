@@ -1599,6 +1599,8 @@ const CContextGroup = struct {
         // join latency below ~1ms.
         if (self.watchdog_thread) |thread| {
             self.watchdog_stop.store(true, .release);
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             thread.join();
             self.watchdog_thread = null;
         }
@@ -15204,12 +15206,16 @@ fn privateExecutionWatchdog(group: *CContextGroup) void {
     while (!group.watchdog_stop.load(.acquire)) {
         const deadline = group.execution_deadline_ns.load(.acquire);
         if (deadline == 0 or group.watchdog_fired_ns.load(.acquire) == deadline) {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             std.Io.sleep(io, .fromNanoseconds(500_000), .awake) catch {};
             continue;
         }
         const now = privateMonotonicNowNs();
         if (now < deadline) {
             const remaining = @min(deadline - now, 1_000_000);
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             std.Io.sleep(io, .fromNanoseconds(@intCast(remaining)), .awake) catch {};
             continue;
         }
@@ -36723,10 +36729,24 @@ test "private VM termination watchdog never sets the owner's permanent stop" {
     const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
     defer JSContextGroupRelease(group_ref);
     const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const before = runtime_threads.snapshot().resource(.execution_watchdog);
     for (0..2) |_| {
         JSC__VM__setExecutionTimeLimit(group_ref, 0);
         try std.testing.expect(group.watchdog_thread != null);
         while (!JSC__VM__hasTerminationRequest(group_ref)) std.atomic.spinLoopHint();
+        const deadline = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+        var parked: ?runtime_threads.ResourceSnapshot = null;
+        while (std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds < deadline) {
+            const current = runtime_threads.snapshot().resource(.execution_watchdog);
+            if (current.blocked == before.blocked + 1) {
+                parked = current;
+                break;
+            }
+            std.Thread.yield() catch {};
+        }
+        const observed = parked orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(before.live + 1, observed.live);
+        try std.testing.expectEqual(observed.live, observed.runnable + observed.blocked);
         JSC__VM__clearExecutionTimeLimit(group_ref);
         JSC__VM__clearHasTerminationRequest(group_ref);
         try std.testing.expect(!primary.teardown_stop.load(.acquire));

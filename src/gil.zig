@@ -9,6 +9,7 @@ const std = @import("std");
 const io_compat = @import("io_compat.zig");
 const agent = @import("agent.zig");
 const gc_runtime = @import("gc_runtime.zig");
+const runtime_threads = @import("runtime_threads.zig");
 const stack_scan = @import("stack_scan.zig");
 
 pub const Gil = struct {
@@ -264,6 +265,8 @@ pub const Gil = struct {
             g.tasks_in_flight.load(.acquire) > owned_count and
             g.tasks_queued.load(.acquire) == 0)
         {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             g.task_state_cond.waitUncancelable(io, &g.task_state_mutex);
         }
         g.task_state_mutex.unlock(io);
@@ -409,6 +412,8 @@ pub const Gil = struct {
         const io = agent.engineIo();
         if (!g.mutex.tryLock()) {
             _ = g.contenders.fetchAdd(1, .monotonic);
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             // Publish this thread's stack range while blocked (#722). A peer
             // waiting here is not at an Atomics/Condition park, so without
             // publication `allOthersParked` never observes it and an
@@ -452,6 +457,8 @@ pub const Gil = struct {
         // thread that takes the lock may collect and must see this stack.
         stack_scan.beginPark();
         defer stack_scan.endPark();
+        var blocking = runtime_threads.beginBlocking();
+        defer blocking.end();
         g.release();
         while (g.contenders.load(.acquire) != 0) {
             std.Thread.yield() catch {};
@@ -468,6 +475,8 @@ pub const Gil = struct {
         // it is reacquired (so a collector on another thread can root us).
         stack_scan.beginPark();
         defer stack_scan.endPark();
+        var blocking = runtime_threads.beginBlocking();
+        defer blocking.end();
         g.holder.store(0, .monotonic);
         cond.waitUncancelable(io, &g.mutex);
         g.holder.store(currentId(), .monotonic);
@@ -479,6 +488,8 @@ pub const Gil = struct {
         const io = agent.engineIo();
         stack_scan.beginPark();
         defer stack_scan.endPark();
+        var blocking = runtime_threads.beginBlocking();
+        defer blocking.end();
         g.holder.store(0, .monotonic);
         defer g.holder.store(currentId(), .monotonic);
         io_compat.conditionWaitTimeout(cond, io, &g.mutex, timeout) catch |err| switch (err) {

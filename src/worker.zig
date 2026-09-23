@@ -187,13 +187,17 @@ const Channel = struct {
                 .raw = boundedWaitDuration(ms),
                 .clock = .awake,
             } } else .none;
-            io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
-                error.Timeout => if (!ch.hasQueued()) {
-                    jsthread.recordWorkerChannelEmptyPop();
-                    return null;
-                } else break,
-                error.Canceled => continue,
-            };
+            {
+                var blocking = runtime_threads.beginBlocking();
+                defer blocking.end();
+                io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
+                    error.Timeout => if (!ch.hasQueued()) {
+                        jsthread.recordWorkerChannelEmptyPop();
+                        return null;
+                    } else break,
+                    error.Canceled => continue,
+                };
+            }
         }
         const bytes = ch.queue.items[ch.queue_head];
         ch.queue.items[ch.queue_head] = undefined;
@@ -293,10 +297,14 @@ const InspectorEventQueue = struct {
                 .raw = boundedWaitDuration(ms),
                 .clock = .awake,
             } } else .none;
-            io_compat.conditionWaitTimeout(&q.cond, io, &q.mutex, tmo) catch |err| switch (err) {
-                error.Timeout => return null,
-                error.Canceled => continue,
-            };
+            {
+                var blocking = runtime_threads.beginBlocking();
+                defer blocking.end();
+                io_compat.conditionWaitTimeout(&q.cond, io, &q.mutex, tmo) catch |err| switch (err) {
+                    error.Timeout => return null,
+                    error.Canceled => continue,
+                };
+            }
         }
         const event = q.items.items[q.head];
         q.head += 1;
@@ -332,7 +340,11 @@ const InspectorEventQueue = struct {
         const io = agent.engineIo();
         q.mutex.lockUncancelable(io);
         defer q.mutex.unlock(io);
-        while (!runtime_detached.load(.acquire)) q.cond.wait(io, &q.mutex) catch continue;
+        while (!runtime_detached.load(.acquire)) {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
+            q.cond.wait(io, &q.mutex) catch continue;
+        }
     }
 
     fn deinit(q: *InspectorEventQueue) void {
@@ -419,6 +431,8 @@ const InspectorCommandQueue = struct {
                 q.items.clearRetainingCapacity();
                 q.head = 0;
             }
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             q.cond.wait(io, &q.mutex) catch continue;
         }
         const command = q.items.items[q.head];
@@ -912,6 +926,8 @@ pub const Worker = struct {
 
     pub fn join(w: *Worker) void {
         if (w.thread) |t| {
+            var blocking = runtime_threads.beginBlocking();
+            defer blocking.end();
             t.join();
             w.thread = null;
         }
@@ -1203,6 +1219,43 @@ fn workerCloseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const w = workerOf(self) orelse return Value.undef();
     w.close(); // delivery loop drains queued messages and paused transport wakes
     return Value.undef();
+}
+
+test "worker inbox park publishes blocked runtime state" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const before = runtime_threads.snapshot().resource(.script_worker);
+    const w = try Worker.spawn("globalThis.onmessage = function () { close(); };");
+    var destroyed = false;
+    defer if (!destroyed) {
+        w.terminate();
+        w.join();
+        w.destroy();
+    };
+    const deadline = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    var parked: ?runtime_threads.ResourceSnapshot = null;
+    while (std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds < deadline) {
+        const current = runtime_threads.snapshot().resource(.script_worker);
+        if (current.blocked == before.blocked + 1) {
+            parked = current;
+            break;
+        }
+        std.Thread.yield() catch {};
+    }
+    const observed = parked orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(before.live + 1, observed.live);
+    try std.testing.expectEqual(observed.live, observed.runnable + observed.blocked);
+    w.close();
+    w.join();
+    w.destroy();
+    destroyed = true;
+    const after = runtime_threads.snapshot().resource(.script_worker);
+    try std.testing.expectEqual(before.live, after.live);
+    try std.testing.expectEqual(before.blocked, after.blocked);
+    try std.testing.expect(after.block_transitions > before.block_transitions);
+    try std.testing.expectEqual(
+        after.block_transitions - before.block_transitions,
+        after.runnable_transitions - before.runnable_transitions,
+    );
 }
 
 test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
