@@ -2286,6 +2286,23 @@ pub fn build(b: *std.Build) void {
     const install_frontend_parse_benchmark = b.addInstallArtifact(frontend_parse_benchmark, .{});
     const frontend_parse_benchmark_step = b.step("frontend-parse-benchmark-bin", "Build the parse and compile frontend growth runner");
     frontend_parse_benchmark_step.dependOn(&install_frontend_parse_benchmark.step);
+    const compiler_pressure_benchmark = b.addExecutable(.{
+        .name = "compiler-pressure-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/compiler_pressure.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const install_compiler_pressure_benchmark = b.addInstallArtifact(compiler_pressure_benchmark, .{});
+    const compiler_pressure_benchmark_bin_step = b.step("compiler-pressure-benchmark-bin", "Build the synchronous compiler pressure runner");
+    compiler_pressure_benchmark_bin_step.dependOn(&install_compiler_pressure_benchmark.step);
+    const run_compiler_pressure_self_test = b.addRunArtifact(compiler_pressure_benchmark);
+    run_compiler_pressure_self_test.addArg("--self-test");
+    const compiler_pressure_benchmark_test_step = b.step("compiler-pressure-benchmark-test", "Validate compiler pressure checksums and JIT controls");
+    compiler_pressure_benchmark_test_step.dependOn(&run_compiler_pressure_self_test.step);
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
             .name = "bench-comparison-zig-js",
