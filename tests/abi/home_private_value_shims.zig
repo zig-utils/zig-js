@@ -7102,19 +7102,25 @@ pub fn main() void {
     const tz_alias_bytes = "America/Atka";
     var tz_alias = ZigString{ .tagged_ptr = @intFromPtr(tz_alias_bytes.ptr), .len = tz_alias_bytes.len };
     var tz_empty = ZigString{ .tagged_ptr = 0, .len = 0 };
-    if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'UTC'")) or
-        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
+    if (!JSC__JSValue__toBoolean(evaluate(context,
+        "globalThis.__hostDefaultTimeZone = new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone;" ++
+            "Temporal.Now.timeZoneId() === __hostDefaultTimeZone")))
         fail("private time zone default baseline mismatch");
     if (JSGlobalObject__setTimeZone(null, &tz_ny) or JSGlobalObject__setTimeZone(context, null))
         fail("private setTimeZone null-boundary mismatch");
     if (JSGlobalObject__setTimeZone(context, &tz_bad))
         fail("private setTimeZone accepted unknown zone");
-    if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'UTC'")))
+    if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === __hostDefaultTimeZone")))
         fail("private setTimeZone rejection disturbed state");
     if (!JSGlobalObject__setTimeZone(context, &tz_ny))
         fail("private setTimeZone rejected canonical zone");
     if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'America/New_York'")) or
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'America/New_York'")) or
+        !JSC__JSValue__toBoolean(evaluate(context,
+            "new Date(Date.UTC(2024,0,1)).getTimezoneOffset() === 300 &&" ++
+                "new Date(2024,0,1).getTime() === Date.UTC(2024,0,1,5) &&" ++
+                "Date.parse('2024-01-01T00:00:00') === Date.UTC(2024,0,1,5) &&" ++
+                "new Date(Date.UTC(2024,0,1)).toString().includes('GMT-0500')")) or
         !JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo' }).resolvedOptions().timeZone === 'Asia/Tokyo'")) or
         !JSC__JSValue__toBoolean(evaluate(foreign_context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'America/New_York'")))
         fail("private time zone override consumer mismatch");
@@ -7125,8 +7131,8 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'America/Adak'")))
         fail("private setTimeZone alias canonicalization mismatch");
     if (!JSGlobalObject__setTimeZone(context, &tz_empty) or
-        !JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'UTC'")) or
-        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
+        !JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === __hostDefaultTimeZone")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === __hostDefaultTimeZone")))
         fail("private setTimeZone empty reset mismatch");
 
     // Owned structured serialization (#323): exact returned layout, stable

@@ -836,12 +836,16 @@ clear/reuse and rearm. Budget-exhaustion errors do not satisfy that witness.
 The process-wide default-timezone boundary mirrors `WTF::setTimeZoneOverride`:
 empty input clears the override, unknown names return false without disturbing
 state, and accepted names are case-normalized, alias-resolved, and stored in
-canonical IANA form exactly like the engine's Intl pipeline. The override
-supplies the default zone for `Intl.DateTimeFormat` — and therefore
-`Date#toLocaleString` — and for `Temporal.Now`, while explicit options keep
-precedence; foreign context groups observe the same process-wide zone, and the
-pinned date-cache reset is vacuous because zig-js caches none. zig-js `Date`
-local-time methods remain UTC-coincident by engine design.
+canonical IANA form exactly like the engine's Intl pipeline. Without an
+override, zig-js discovers the host zone once from `TZ` or the Unix
+`/etc/localtime` IANA link, falling back to UTC when neither supplies a
+canonical zone. The resulting process default drives `Intl.DateTimeFormat`,
+`Temporal.Now`, and every local `Date` operation, including component
+construction, offset-less date-time parsing, getters, setters, and string or
+locale formatting. Explicit Intl options keep precedence, UTC `Date` methods
+remain epoch-based, and foreign context groups observe the same process-wide
+zone. The generated IANA transition table supplies historical offsets and DST;
+local gaps and overlaps use ECMAScript compatible disambiguation.
 
 The VM trap-notification slices implement all three pinned `VMTraps`
 notifications used by zig-js consumers. `JSC__VM__notifyNeedWatchdogCheck` sets a VM-wide trap
