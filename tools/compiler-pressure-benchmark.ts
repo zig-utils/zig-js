@@ -464,6 +464,9 @@ export function render(
   rawPath: string | null,
   baseline: Baseline | null = null,
 ): string {
+  const reportPath = rawPath?.endsWith(".json")
+    ? `${rawPath.slice(0, -5)}.md`
+    : "docs/.data/compiler-pressure-YYYY-MM-DD.md";
   const lines = [
     `# Synchronous compiler pressure — ${info.Date.slice(0, 10)}`,
     "",
@@ -506,7 +509,7 @@ export function render(
       "",
       "## Exact pre-admission comparison",
       "",
-      `The control is ${baseline.path.split("/").pop()} at SHA-256 \`${baseline.sha256}\`, revision \`${baseline.evidence.metadata["zig-js"]}\`. Host, OS, Zig, zig-gc, zig-regex, source checksum, lane widths, invocation counts, samples, and warmups match; only the zig-js revision and runner telemetry schema differ.`,
+      `The control is ${baseline.path.split("/").pop()} at SHA-256 \`${baseline.sha256}\`, revision \`${baseline.evidence.metadata["zig-js"]}\`. Host, OS, Zig, zig-gc, zig-regex, source checksum, lane widths, invocation counts, samples, and warmups match. The zig-js revision and runner schema differ; each artifact records its own collection time, runner hash, and power status.`,
       "",
       "| lanes | baseline wall p50 | coordinated wall p50 | wall change | baseline CPU p50 | coordinated CPU p50 | CPU change |",
       "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -564,11 +567,12 @@ export function render(
     `The fixed source is \`bench/compiler_pressure.js\` at SHA-256 \`${sourceSha}\`. Each lane owns a fresh creator-thread-affine Context. Cold timing starts before OS-thread creation and includes Context construction, source parsing/bytecode setup, ten fixture invocations, native compilation/publication, and the completion wait.`,
     "Warm timing reuses the live Contexts for three invocations. Context destruction is outside both timed phases. Process CPU comes from `getrusage`; peak and retained RSS use Darwin `task_vm_info`.",
     "The measured revision compiles synchronously on the calling lane. Runtime admission bounds simultaneous compiler CPU work without changing checksums, publication counts, or warm behavior.",
+    rawPath ? `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})` : "Raw evidence was printed only; pass --raw-out to preserve it.",
     "",
     "## Reproduce",
     "",
     "```bash",
-    `zig build compiler-pressure-benchmark -Dcompiler-pressure-raw-out=${rawPath || "docs/.data/compiler-pressure-YYYY-MM-DD.json"} -Dcompiler-pressure-markdown-out=docs/.data/compiler-pressure-YYYY-MM-DD.md`,
+    `zig build compiler-pressure-benchmark -Dcompiler-pressure-raw-out=${rawPath || "docs/.data/compiler-pressure-YYYY-MM-DD.json"} -Dcompiler-pressure-markdown-out=${reportPath}`,
     "```",
     "",
   );
