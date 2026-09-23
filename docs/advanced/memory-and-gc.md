@@ -140,6 +140,24 @@ Published compaction evidence: 90.8% less retained fragmented backing
 throughput ([report](https://github.com/zig-utils/zig-js/blob/main/docs/.data/gc-compaction-2026-07-19.md)).
 Automatic shared/mid-script compaction evidence remains an open release gate.
 
+## Host pressure checkpoints
+
+`Context.relieveMemoryPressure()` gives a Zig embedder one coordinated,
+quiescent checkpoint for the Context-owned precise heap and native-code cache.
+It performs at most one full compaction and one native-code epoch rotation while
+holding the existing GC/JIT conductor. The returned `MemoryPressureResult`
+contains exact before/after heap, cell-backing, live-code, retired-code, and
+cumulative reclaimed-code gauges together with moved-cell and moved-byte counts.
+
+Each domain has an explicit status: `unavailable`, `observed_shared`, `unsafe`,
+`unchanged`, `reclaimed`, `retired_pending`, or `out_of_memory`. Shared siblings
+are observation-only; call the checkpoint on the primary owner to act on shared
+storage. Moving collection reports `unsafe` while an evaluation or another
+unrewritable boundary is active. Native mappings protected by an active reader
+move to `retired_pending` and are unmapped after the last reader releases its
+epoch. A compaction planning allocation failure reports `out_of_memory` without
+mutating roots, cells, or slab backing.
+
 ## Heap budgets
 
 ```zig

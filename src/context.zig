@@ -6074,6 +6074,42 @@ pub const Context = struct {
         accounted_owned_current_bytes: u64,
     };
 
+    pub const MemoryPressureDomainStatus = enum(u8) {
+        unavailable,
+        observed_shared,
+        unsafe,
+        unchanged,
+        reclaimed,
+        retired_pending,
+        out_of_memory,
+    };
+
+    /// Allocation-free result from one explicit host pressure checkpoint
+    /// (#975). Byte fields are exact gauges sampled around the operation; the
+    /// owner flags and per-domain statuses keep shared observations and skipped
+    /// movement out of reclaimed-byte claims.
+    pub const MemoryPressureResult = struct {
+        pub const schema_version = 1;
+
+        schema: u32 = schema_version,
+        owns_precise_heap: bool,
+        owns_native_code: bool,
+        heap_status: MemoryPressureDomainStatus,
+        native_code_status: MemoryPressureDomainStatus,
+        heap_live_bytes_before: u64,
+        heap_live_bytes_after: u64,
+        cell_backing_capacity_bytes_before: u64,
+        cell_backing_capacity_bytes_after: u64,
+        native_live_bytes_before: u64,
+        native_live_bytes_after: u64,
+        native_retired_bytes_before: u64,
+        native_retired_bytes_after: u64,
+        native_reclaimed_bytes_total_before: u64,
+        native_reclaimed_bytes_total_after: u64,
+        moved_cells: u64,
+        moved_bytes: u64,
+    };
+
     pub const NativeCodeAttributionSnapshot = struct {
         live_artifacts: usize,
         live_bytes: usize,
@@ -8176,6 +8212,90 @@ pub const Context = struct {
         defer self.leaveJitGcConductor();
         (self.shared_jit_owner orelse &self.jit_owner).clear();
         _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
+    }
+
+    /// Apply explicit host memory pressure at a quiescent Context boundary.
+    /// The precise heap and native-code owner share one conductor acquisition,
+    /// so moving collection cannot overlap artifact invalidation. A shared
+    /// sibling is observation-only for both domains; the primary owner may
+    /// reclaim the shared storage once every sibling is quiescent.
+    pub fn relieveMemoryPressure(self: *Context) MemoryPressureResult {
+        const owns_precise_heap = if (self.gc_state) |state| state.realms.owner == self else false;
+        const owns_native_code = self.shared_jit_owner == null;
+        const owner = self.shared_jit_owner orelse &self.jit_owner;
+        const heap_before = self.heapMemorySnapshots().runtime;
+        const backing_before = if (self.gc_cell_backing) |backing| backing.stats() else GcCellBacking.Stats{};
+        const native_before = owner.stats();
+
+        var result = MemoryPressureResult{
+            .owns_precise_heap = owns_precise_heap,
+            .owns_native_code = owns_native_code,
+            .heap_status = if (self.gc == null)
+                .unavailable
+            else if (!owns_precise_heap)
+                .observed_shared
+            else
+                .unchanged,
+            .native_code_status = if (!self.enable_jit or !jit.supported)
+                .unavailable
+            else if (!owns_native_code)
+                .observed_shared
+            else
+                .unchanged,
+            .heap_live_bytes_before = @intCast(heap_before.live_bytes),
+            .heap_live_bytes_after = @intCast(heap_before.live_bytes),
+            .cell_backing_capacity_bytes_before = @intCast(backing_before.capacity_bytes),
+            .cell_backing_capacity_bytes_after = @intCast(backing_before.capacity_bytes),
+            .native_live_bytes_before = @intCast(native_before.live_bytes),
+            .native_live_bytes_after = @intCast(native_before.live_bytes),
+            .native_retired_bytes_before = @intCast(native_before.retired_bytes),
+            .native_retired_bytes_after = @intCast(native_before.retired_bytes),
+            .native_reclaimed_bytes_total_before = @intCast(native_before.reclaimed_bytes),
+            .native_reclaimed_bytes_total_after = @intCast(native_before.reclaimed_bytes),
+            .moved_cells = 0,
+            .moved_bytes = 0,
+        };
+
+        const pressure_heap = owns_precise_heap and self.gc != null;
+        const pressure_code = owns_native_code and self.enable_jit and jit.supported and
+            (native_before.live_artifacts != 0 or native_before.retired_artifacts != 0);
+        if (!pressure_heap and !pressure_code) return result;
+
+        self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
+
+        if (pressure_heap) {
+            const compacted = self.compactGarbageWithConductor(null);
+            result.heap_status = switch (compacted.status) {
+                .unsupported => .unsafe,
+                .no_candidates => .unchanged,
+                .out_of_memory => .out_of_memory,
+                .compacted => .reclaimed,
+            };
+            result.moved_cells = @intCast(compacted.moved_cells);
+            result.moved_bytes = @intCast(compacted.moved_bytes);
+        }
+
+        if (pressure_code) {
+            owner.clear();
+            const native_after_clear = owner.stats();
+            result.native_code_status = if (native_after_clear.live_artifacts != 0)
+                .unsafe
+            else if (native_after_clear.retired_artifacts != 0)
+                .retired_pending
+            else
+                .reclaimed;
+        }
+
+        const heap_after = self.heapMemorySnapshots().runtime;
+        const backing_after = if (self.gc_cell_backing) |backing| backing.stats() else GcCellBacking.Stats{};
+        const native_after = owner.stats();
+        result.heap_live_bytes_after = @intCast(heap_after.live_bytes);
+        result.cell_backing_capacity_bytes_after = @intCast(backing_after.capacity_bytes);
+        result.native_live_bytes_after = @intCast(native_after.live_bytes);
+        result.native_retired_bytes_after = @intCast(native_after.retired_bytes);
+        result.native_reclaimed_bytes_total_after = @intCast(native_after.reclaimed_bytes);
+        return result;
     }
 
     fn clearJitCodeFromInterpreter(raw_context: *anyopaque, machine: *interp.Interpreter, shape_token: usize) void {
@@ -37687,6 +37807,213 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
         @as(u64, 1),
         profiled_host.tierAttributionSnapshot().execution.count(.host_callbacks),
     );
+}
+
+test "memory pressure checkpoint reports unavailable domains without state" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_jit = false,
+        .enable_gc = false,
+    });
+    defer ctx.destroy();
+
+    const pressure = ctx.relieveMemoryPressure();
+    try std.testing.expectEqual(@as(u32, Context.MemoryPressureResult.schema_version), pressure.schema);
+    try std.testing.expect(!pressure.owns_precise_heap);
+    try std.testing.expect(pressure.owns_native_code);
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.unavailable, pressure.heap_status);
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.unavailable, pressure.native_code_status);
+    try std.testing.expect(pressure.heap_live_bytes_before > 0);
+    try std.testing.expectEqual(pressure.heap_live_bytes_before, pressure.heap_live_bytes_after);
+    try std.testing.expectEqual(@as(u64, 0), pressure.cell_backing_capacity_bytes_before);
+    try std.testing.expectEqual(@as(u64, 0), pressure.cell_backing_capacity_bytes_after);
+    try std.testing.expectEqual(@as(u64, 0), pressure.native_live_bytes_before);
+    try std.testing.expectEqual(@as(u64, 0), pressure.native_live_bytes_after);
+}
+
+test "memory pressure checkpoint compacts precise heap and retires owned code" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+        .profile_execution_tiers = true,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.pressureKeep = { marker: 451 };
+        \\globalThis.pressureDiscard = [];
+        \\for (let i = 0; i < 4096; i = i + 1)
+        \\  pressureDiscard.push({ value: i, child: { value: i + 1 } });
+        \\function pressureHot(n) {
+        \\  let total = 0;
+        \\  for (let i = 0; i < n; i = i + 1) total = total + i;
+        \\  return total + pressureKeep.marker;
+        \\}
+        \\for (let warm = 0; warm < 10; warm = warm + 1) pressureHot(64);
+        \\pressureDiscard = null;
+    );
+    const keep = try ctx.protectValue(ctx.global_object.getOwn("pressureKeep").?);
+    defer std.debug.assert(ctx.unprotectValue(keep));
+    const budget_before = ctx.heapBudgetStats().?;
+    const pressure = ctx.relieveMemoryPressure();
+    const budget_after = ctx.heapBudgetStats().?;
+
+    try std.testing.expect(pressure.owns_precise_heap);
+    try std.testing.expect(pressure.owns_native_code);
+    try std.testing.expect(pressure.heap_status == .reclaimed or pressure.heap_status == .unchanged);
+    try std.testing.expect(pressure.heap_live_bytes_after <= pressure.heap_live_bytes_before);
+    try std.testing.expect(pressure.cell_backing_capacity_bytes_after <= pressure.cell_backing_capacity_bytes_before);
+    try std.testing.expectEqual(budget_before.limit_bytes, budget_after.limit_bytes);
+    try std.testing.expect(budget_after.used_bytes <= budget_before.used_bytes);
+    try std.testing.expectEqual(budget_after.limit_bytes - budget_after.used_bytes, budget_after.remaining_bytes);
+    try std.testing.expectEqual(@as(f64, 451), keep.get().asObj().getOwn("marker").?.asNum());
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        try std.testing.expect(pressure.native_live_bytes_before > 0);
+        try std.testing.expectEqual(Context.MemoryPressureDomainStatus.reclaimed, pressure.native_code_status);
+        try std.testing.expectEqual(@as(u64, 0), pressure.native_live_bytes_after);
+        try std.testing.expectEqual(@as(u64, 0), pressure.native_retired_bytes_after);
+        try std.testing.expect(
+            pressure.native_reclaimed_bytes_total_after >=
+                pressure.native_reclaimed_bytes_total_before + pressure.native_live_bytes_before + pressure.native_retired_bytes_before,
+        );
+    } else {
+        try std.testing.expectEqual(Context.MemoryPressureDomainStatus.unavailable, pressure.native_code_status);
+    }
+    try std.testing.expectEqual(@as(f64, 2467), (try ctx.evaluate("pressureHot(64)")).asNum());
+}
+
+test "memory pressure checkpoint leaves shared ownership with the primary" {
+    const primary = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .profile_execution_tiers = true,
+    });
+    defer primary.destroy();
+    const sibling = try Context.createSharedPreciseRealm(primary);
+    defer sibling.destroySharedPreciseRealm() catch unreachable;
+
+    _ = try primary.evaluate("globalThis.pressureOwner = { value: 29 };");
+    _ = try sibling.evaluate("globalThis.pressureSibling = { value: 31 };");
+    const owner_before = primary.memoryInventorySnapshot().?;
+    const observed = sibling.relieveMemoryPressure();
+    const owner_after = primary.memoryInventorySnapshot().?;
+
+    try std.testing.expect(!observed.owns_precise_heap);
+    try std.testing.expect(!observed.owns_native_code);
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.observed_shared, observed.heap_status);
+    try std.testing.expectEqual(
+        if (jit.supported) Context.MemoryPressureDomainStatus.observed_shared else Context.MemoryPressureDomainStatus.unavailable,
+        observed.native_code_status,
+    );
+    try std.testing.expectEqual(owner_before.heap_logical_live_bytes, owner_after.heap_logical_live_bytes);
+    try std.testing.expectEqual(owner_before.accounted_owned_current_bytes, owner_after.accounted_owned_current_bytes);
+    try std.testing.expectEqual(@as(f64, 29), primary.global_object.getOwn("pressureOwner").?.asObj().getOwn("value").?.asNum());
+    try std.testing.expectEqual(@as(f64, 31), sibling.global_object.getOwn("pressureSibling").?.asObj().getOwn("value").?.asNum());
+
+    const reclaimed = primary.relieveMemoryPressure();
+    try std.testing.expect(reclaimed.owns_precise_heap);
+    try std.testing.expect(reclaimed.owns_native_code);
+    try std.testing.expect(reclaimed.heap_status == .reclaimed or reclaimed.heap_status == .unchanged);
+    try std.testing.expectEqual(@as(f64, 29), primary.global_object.getOwn("pressureOwner").?.asObj().getOwn("value").?.asNum());
+    try std.testing.expectEqual(@as(f64, 31), sibling.global_object.getOwn("pressureSibling").?.asObj().getOwn("value").?.asNum());
+}
+
+test "memory pressure checkpoint fails moving collection closed inside evaluation" {
+    const Host = struct {
+        fn pressure(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const ctx: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            const result = ctx.relieveMemoryPressure();
+            return Value.num(@floatFromInt(@as(u8, @backingInt(result.heap_status))));
+        }
+    };
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    {
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        const object = try gc_mod.allocObj(ctx.arena());
+        object.* = .{ .native = Host.pressure };
+        try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "pressureInside", Value.obj(object));
+        try ctx.env.put("pressureInside", Value.obj(object));
+    }
+    const result = try ctx.evaluate("pressureInside()");
+    try std.testing.expectEqual(
+        @as(f64, @floatFromInt(@as(u8, @backingInt(Context.MemoryPressureDomainStatus.unsafe)))),
+        result.asNum(),
+    );
+}
+
+test "memory pressure checkpoint defers native reclamation for an active reader" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = false,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+    var tier = jit.Tier{};
+    var compilation = ctx.jit_owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    _ = try ctx.jit_owner.adoptAndPublish(&tier, try jit.compileConstantEntry(0x975));
+    compilation.release();
+    var execution = ctx.jit_owner.enterExecution() orelse return error.TestUnexpectedResult;
+    var execution_released = false;
+    defer if (!execution_released) execution.release();
+
+    const pressure = ctx.relieveMemoryPressure();
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.unavailable, pressure.heap_status);
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.retired_pending, pressure.native_code_status);
+    try std.testing.expect(pressure.native_live_bytes_before > 0);
+    try std.testing.expectEqual(@as(u64, 0), pressure.native_live_bytes_after);
+    try std.testing.expect(pressure.native_retired_bytes_after >= pressure.native_live_bytes_before);
+    try std.testing.expectEqual(
+        pressure.native_reclaimed_bytes_total_before,
+        pressure.native_reclaimed_bytes_total_after,
+    );
+
+    execution.release();
+    execution_released = true;
+    const after_release = ctx.jit_owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), after_release.retired_artifacts);
+    try std.testing.expect(after_release.reclaimed_bytes >= pressure.native_live_bytes_before);
+}
+
+test "memory pressure checkpoint reports compaction allocation failure without mutation" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.pressureOomDiscard = [];
+        \\for (let i = 0; i < 4096; i++) pressureOomDiscard.push({ i, dead: true });
+        \\pressureOomDiscard = null;
+        \\globalThis.pressureOomRoot = { marker: 975 };
+    );
+    const root = try ctx.protectValue(ctx.global_object.getOwn("pressureOomRoot").?);
+    defer std.debug.assert(ctx.unprotectValue(root));
+    ctx.collectGarbage();
+    const heap_before = ctx.gc.?.accounting();
+    const backing_before = ctx.gc_cell_backing.?.stats();
+    const root_before = root.get().asObj();
+
+    var no_scratch: [1]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&no_scratch);
+    const saved_aux = ctx.gc.?.aux;
+    ctx.gc.?.aux = fixed.allocator();
+    const pressure = ctx.relieveMemoryPressure();
+    ctx.gc.?.aux = saved_aux;
+
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.out_of_memory, pressure.heap_status);
+    try std.testing.expectEqual(Context.MemoryPressureDomainStatus.unavailable, pressure.native_code_status);
+    try std.testing.expectEqual(root_before, root.get().asObj());
+    try std.testing.expectEqual(@as(f64, 975), root.get().asObj().getOwn("marker").?.asNum());
+    const heap_after = ctx.gc.?.accounting();
+    try std.testing.expectEqual(heap_before.live_cells, heap_after.live_cells);
+    try std.testing.expectEqual(heap_before.live_bytes, heap_after.live_bytes);
+    try std.testing.expectEqual(backing_before, ctx.gc_cell_backing.?.stats());
 }
 
 test "memory inventory reconciles disjoint owned domains and exposes coverage" {

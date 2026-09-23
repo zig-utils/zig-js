@@ -171,6 +171,7 @@ Collection and diagnostics:
 ctx.collectGarbage();                  // quiescent collection (enable_gc)
 ctx.requestGarbageCollection();        // request at the next safepoint
 _ = ctx.requestGarbageCompaction();    // explicit compaction
+_ = ctx.relieveMemoryPressure();       // compact heap + retire native code
 _ = ctx.heapBudgetStats();
 _ = ctx.parallelGcStats();
 _ = ctx.runtimeHeapAccounting();
