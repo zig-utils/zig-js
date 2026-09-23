@@ -60,6 +60,18 @@ Ratios above 1.00x favor zig-js. JSC has no public shared-realm embedding equiva
 - **Explicit compaction:** 90.8% less retained fragmented backing (8.81 → 0.81 MiB) with a 0.99 ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).
 <!-- release-compatibility:gc-compaction:end -->
 
+### Regex dependency cost (diagnostic)
+
+Four identical-output controls for the bounded-repeat capture fix, measured on
+Apple M2 Pro with Zig 0.17.0-dev.1441, seven alternating pairs per row:
+
+| scope | candidate / exact-parent median elapsed time | evidence |
+| --- | ---: | --- |
+| zig-regex library only, four controls | 0.987–1.002× | [dated report](docs/.data/regex-capture-cost-2026-09-23.md) · [56 raw samples](docs/.data/regex-capture-cost-2026-09-23.json) |
+
+Lower means less elapsed time. This desktop diagnostic is not an engine/JSC
+score, a speedup claim, or a general overhead bound.
+
 Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use
