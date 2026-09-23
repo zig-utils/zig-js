@@ -27,16 +27,29 @@ The public Zig module exposes a coherent process-wide telemetry snapshot:
 ```zig
 const resources = js.runtimeThreadSnapshot();
 const workers = resources.resource(.script_worker);
+
+const previous = js.setRuntimeThreadLimits(.script_worker, .{
+    .max_threads = 8,
+    .max_configured_stack_bytes = 128 * 1024 * 1024,
+});
 ```
 
 Each resource row reports attempts, successful starts, completions, spawn
-failures, in-flight spawn calls, live and peak threads, and current/peak
-configured stack bytes. The invariants are `attempts = starts + failures +
-in_flight_attempts` and `live = starts - completions`. Configured stack bytes
-describe the `std.Thread.SpawnConfig` reservation, not resident or committed
-process memory. Counters mutate only at OS-thread creation and exit; snapshot
-readers retry across those short mutations so they cannot combine fields from
-different completed states.
+failures, policy rejections, in-flight spawn calls, admitted reservations, live
+and peak threads, current/peak configured stack bytes, and the active limits.
+The schema-v2 invariants are `attempts = starts + spawn_failures +
+admission_rejections + in_flight_attempts` and `live = starts - completions`.
+Configured stack bytes describe the `std.Thread.SpawnConfig` reservation, not
+resident or committed process memory. Counters mutate only at OS-thread
+creation and exit; snapshot readers retry across those short mutations so they
+cannot combine fields from different completed states.
+
+Limits are process-wide per resource class. A spawn reserves one thread and its
+configured stack before calling the OS; concurrent callers cannot cross either
+limit. OS failure and thread exit release both reservations. Lowering a limit
+below current use leaves existing threads alone and refuses new ones until use
+falls below the limit. The defaults are unlimited, preserving existing
+admission behavior.
 
 Run the fail-closed audit after adding or removing any runtime or test thread:
 
@@ -50,7 +63,8 @@ missing inventory row, or direct spawn in a new source file fails. Update the
 JSON only after reviewing whether the new work belongs to production, test
 scaffolding, or an existing resource class.
 
-The typed boundary and telemetry do not yet change scheduling. All six resource
-classes are currently marked `uncoordinated`; issue
+The boundary controls live-thread and configured-stack admission. It does not
+yet allocate runnable CPU slots or change scheduling; all six resource classes
+remain marked `uncoordinated` for that work. Issue
 [#502](https://github.com/zig-utils/zig-js/issues/502) owns shared CPU slots,
 backpressure, cancellation, memory pressure, and embedder controls.
