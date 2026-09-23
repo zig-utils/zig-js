@@ -123,8 +123,10 @@ export function parseInvocation(text: string): {
   );
   integer(metadata.logical_cpus, "metadata.logical_cpus");
   integer(metadata.runtime_thread_schema, "metadata.runtime_thread_schema");
+  integer(metadata.lane_configured_stack_bytes, "metadata.lane_configured_stack_bytes");
   requireValue(metadata.logical_cpus > 0, "logical CPU count must be positive");
   requireValue(metadata.runtime_thread_schema === 7, "unexpected runtime-thread telemetry schema");
+  requireValue(metadata.lane_configured_stack_bytes > 0, "configured lane stack must be positive");
   requireValue(typeof metadata.jit_supported === "boolean", "jit_supported must be boolean");
   return { metadata, rows };
 }
@@ -152,7 +154,12 @@ export function validateInvocation(
     );
     integer(row.elapsed_ns, `${mode}/${lanes}/${row.phase}.elapsed_ns`);
     integer(row.checksum, `${mode}/${lanes}/${row.phase}.checksum`);
+    integer(row.configured_stack_bytes, `${mode}/${lanes}/${row.phase}.configured_stack_bytes`);
     requireValue(row.elapsed_ns > 0 && row.checksum > 0, `invalid timing/checksum: ${JSON.stringify(row)}`);
+    requireValue(
+      row.configured_stack_bytes === lanes * metadata.lane_configured_stack_bytes,
+      `configured stack total mismatch: ${JSON.stringify(row)}`,
+    );
     for (const field of [
       "cpu_user_ns",
       "cpu_system_ns",
@@ -483,8 +490,8 @@ export function render(
     "",
     "## Cold Context and compiler pressure",
     "",
-    "| lanes | mode | wall p50 | process CPU p50 | summed compiler p50 | CPU / wall | throughput scaling | wall RSD | baseline publications | generated code | peak RSS p50 |",
-    "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| lanes | mode | wall p50 | process CPU p50 | summed compiler p50 | CPU / wall | throughput scaling | wall RSD | baseline publications | generated code | configured stacks | peak RSS p50 |",
+    "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
   const oneLane: Record<string, number> = {};
   for (const mode of MODES)
@@ -497,9 +504,10 @@ export function render(
         compile = median(group.map(compilerNs)),
         publications = median(group.map((row) => row.compiler.baseline_publications)),
         generated = median(group.map((row) => row.compiler.generated_code_bytes)),
+        configuredStack = median(group.map((row) => row.configured_stack_bytes)),
         peak = median(group.map((row) => row.process.peak_rss_bytes_after));
       lines.push(
-        `| ${laneCount} | ${mode} | ${(elapsed / 1e6).toFixed(2)} ms | ${(cpu / 1e6).toFixed(2)} ms | ${(compile / 1e6).toFixed(2)} ms | ${(cpu / elapsed).toFixed(2)}x | ${((oneLane[mode] * laneCount) / elapsed).toFixed(2)}x | ${rsd(group.map((row) => row.elapsed_ns)).toFixed(2)}% | ${publications.toFixed(0)} | ${(generated / 1024 / 1024).toFixed(2)} MiB | ${(peak / 1024 / 1024).toFixed(2)} MiB |`,
+        `| ${laneCount} | ${mode} | ${(elapsed / 1e6).toFixed(2)} ms | ${(cpu / 1e6).toFixed(2)} ms | ${(compile / 1e6).toFixed(2)} ms | ${(cpu / elapsed).toFixed(2)}x | ${((oneLane[mode] * laneCount) / elapsed).toFixed(2)}x | ${rsd(group.map((row) => row.elapsed_ns)).toFixed(2)}% | ${publications.toFixed(0)} | ${(generated / 1024 / 1024).toFixed(2)} MiB | ${(configuredStack / 1024 / 1024).toFixed(2)} MiB | ${(peak / 1024 / 1024).toFixed(2)} MiB |`,
       );
     }
   if (baseline) {
@@ -545,6 +553,24 @@ export function render(
   lines.push(
     "",
     "Every runtime row is captured from the process-wide schema-v7 snapshot. The harness requires completed request/start/completion balance, zero residual active work or waiters, no typed or nested reuse in these untyped host lanes, and an exact reserved-plus-general admission total. The 2×-logical-CPU samples must enter the compiler queue.",
+  );
+  const oversubscribedLanes = lanes[lanes.length - 1],
+    hostLanes = oversubscribedLanes / 2,
+    hostRows = selected(rows, "jit_on", "cold", hostLanes),
+    oversubscribedRows = selected(rows, "jit_on", "cold", oversubscribedLanes),
+    hostWall = median(hostRows.map((row) => row.elapsed_ns)),
+    baselineHostRows = baseline
+      ? selected(baseline.evidence.rows as Row[], "jit_on", "cold", hostLanes)
+      : null,
+    hostWallChange = baselineHostRows
+      ? (hostWall / median(baselineHostRows.map((row) => row.elapsed_ns)) - 1) * 100
+      : null;
+  lines.push(
+    "",
+    "## Decision",
+    "",
+    `At ${hostLanes} lanes, peak compiler work reaches the ${hostLanes}-CPU host capacity${hostWallChange === null ? "" : ` while cold JIT wall changes ${hostWallChange.toFixed(1)}% from the exact pre-admission baseline`}. At ${oversubscribedLanes} lanes, the median queues ${median(oversubscribedRows.map((row) => row.runtime.waits)).toFixed(0)} of ${median(oversubscribedRows.map((row) => row.runtime.requests)).toFixed(0)} compiler attempts and holds peak active work to ${median(oversubscribedRows.map((row) => row.runtime.peak_active_after)).toFixed(0)}.`,
+    "This evidence does not justify an asynchronous artifact queue. Synchronous admission already saturates the available CPU budget at host width and applies bounded backpressure when oversubscribed; an asynchronous queue would add artifact ownership, cancellation, and teardown lifetimes without adding execution capacity.",
     "",
     "## Warm execution control",
     "",
@@ -595,6 +621,7 @@ function fixtureRow(mode: string, phase: string, lanes: number, iteration: numbe
     iteration,
     elapsed_ns: (phase === "cold" ? 20_000_000 : 1_000_000) * lanes,
     checksum: 1000 + lanes,
+    configured_stack_bytes: lanes * 16 * 1024 * 1024,
     process: {
       cpu_user_ns: (phase === "cold" ? 18_000_000 : 900_000) * lanes,
       cpu_system_ns: 100_000 * lanes,
@@ -657,6 +684,7 @@ function selfTest(): void {
       cold_invocations: 10,
       warm_invocations: 3,
       runtime_thread_schema: 7,
+      lane_configured_stack_bytes: 16 * 1024 * 1024,
     },
     lanes = [1, 2, 4, 8, 16],
     rows: Row[] = [];

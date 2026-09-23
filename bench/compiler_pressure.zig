@@ -330,8 +330,8 @@ fn laneMain(lane: *Lane) void {
 fn printMetadata(writer: *std.Io.Writer, logical_cpus: usize) !void {
     const runtime = RuntimePoint.capture();
     try writer.print(
-        "{{\"kind\":\"zig-js-compiler-pressure-metadata\",\"schema\":{d},\"source_path\":\"{s}\",\"source_sha256\":\"{s}\",\"logical_cpus\":{d},\"jit_supported\":{s},\"cold_invocations\":{d},\"warm_invocations\":{d},\"runtime_thread_schema\":{d}}}\n",
-        .{ schema_version, workload_source_path, workload_source_sha256, logical_cpus, if (js.jit.supported) "true" else "false", cold_invocations, warm_invocations, runtime.schema_version },
+        "{{\"kind\":\"zig-js-compiler-pressure-metadata\",\"schema\":{d},\"source_path\":\"{s}\",\"source_sha256\":\"{s}\",\"logical_cpus\":{d},\"jit_supported\":{s},\"cold_invocations\":{d},\"warm_invocations\":{d},\"runtime_thread_schema\":{d},\"lane_configured_stack_bytes\":{d}}}\n",
+        .{ schema_version, workload_source_path, workload_source_sha256, logical_cpus, if (js.jit.supported) "true" else "false", cold_invocations, warm_invocations, runtime.schema_version, std.Thread.SpawnConfig.default_stack_size },
     );
 }
 
@@ -350,7 +350,7 @@ fn printRow(
     after: ProcessResourceSnapshot,
 ) !void {
     try writer.print(
-        "{{\"kind\":\"zig-js-compiler-pressure\",\"schema\":{d},\"mode\":\"{s}\",\"phase\":\"{s}\",\"source_sha256\":\"{s}\",\"lanes\":{d},\"jobs_per_lane\":{d},\"sample\":{d},\"elapsed_ns\":{d},\"checksum\":{d:.0},\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes_before\":{d},\"peak_rss_bytes_after\":{d},\"retained_rss_bytes_before\":{d},\"retained_rss_bytes_after\":{d}}},\"compiler\":{{",
+        "{{\"kind\":\"zig-js-compiler-pressure\",\"schema\":{d},\"mode\":\"{s}\",\"phase\":\"{s}\",\"source_sha256\":\"{s}\",\"lanes\":{d},\"jobs_per_lane\":{d},\"sample\":{d},\"elapsed_ns\":{d},\"checksum\":{d:.0},\"configured_stack_bytes\":{d},\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes_before\":{d},\"peak_rss_bytes_after\":{d},\"retained_rss_bytes_before\":{d},\"retained_rss_bytes_after\":{d}}},\"compiler\":{{",
         .{
             schema_version,
             @tagName(mode),
@@ -361,6 +361,7 @@ fn printRow(
             sample,
             elapsed_ns,
             checksum,
+            lanes * std.Thread.SpawnConfig.default_stack_size,
             after.cpu_user_ns -| before.cpu_user_ns,
             after.cpu_system_ns -| before.cpu_system_ns,
             before.peak_rss_bytes,
