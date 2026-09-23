@@ -17,7 +17,7 @@ const workload_source = @embedFile("compiler_pressure.js");
 const workload_source_path = "bench/compiler_pressure.js";
 const workload_source_sha256 = "7260df7f15efb177a067d8457df244044b6ea3c4c7e39b3225726228ba46d83f";
 const benchmark_allocator = std.heap.c_allocator;
-const schema_version = 1;
+const schema_version = 2;
 const cold_invocations = 10;
 const warm_invocations = 3;
 
@@ -86,6 +86,107 @@ const CompilerSnapshot = struct {
 
     fn publications(self: CompilerSnapshot) u64 {
         return self.baseline_publications + self.optimizer_publications;
+    }
+};
+
+const RuntimePoint = struct {
+    schema_version: u32,
+    requests: u64,
+    starts: u64,
+    completions: u64,
+    typed_slot_reuses: u64,
+    nested_reuses: u64,
+    host_reserved_admissions: u64,
+    general_slot_admissions: u64,
+    waits: u64,
+    wait_ns: u64,
+    active: u64,
+    waiters: u64,
+    peak_active: u64,
+    peak_waiters: u64,
+    wait_ns_max: u64,
+    general_active: u64,
+    host_reserved_active: u64,
+    peak_general_active: u64,
+    peak_host_reserved_active: u64,
+
+    fn capture() RuntimePoint {
+        const snapshot = js.runtimeThreadSnapshot();
+        const work = snapshot.work(.native_compilation);
+        return .{
+            .schema_version = snapshot.schema_version,
+            .requests = work.requests,
+            .starts = work.starts,
+            .completions = work.completions,
+            .typed_slot_reuses = work.typed_slot_reuses,
+            .nested_reuses = work.nested_reuses,
+            .host_reserved_admissions = work.host_reserved_admissions,
+            .general_slot_admissions = work.general_slot_admissions,
+            .waits = work.waits,
+            .wait_ns = work.wait_ns,
+            .active = work.active,
+            .waiters = work.waiters,
+            .peak_active = work.peak_active,
+            .peak_waiters = work.peak_waiters,
+            .wait_ns_max = work.wait_ns_max,
+            .general_active = snapshot.scheduler.internal_work_general_active,
+            .host_reserved_active = snapshot.scheduler.host_work_reserved_active,
+            .peak_general_active = snapshot.scheduler.peak_internal_work_general_active,
+            .peak_host_reserved_active = snapshot.scheduler.peak_host_work_reserved_active,
+        };
+    }
+};
+
+const RuntimePhase = struct {
+    requests: u64,
+    starts: u64,
+    completions: u64,
+    typed_slot_reuses: u64,
+    nested_reuses: u64,
+    host_reserved_admissions: u64,
+    general_slot_admissions: u64,
+    waits: u64,
+    wait_ns: u64,
+    active_before: u64,
+    active_after: u64,
+    waiters_before: u64,
+    waiters_after: u64,
+    peak_active_after: u64,
+    peak_waiters_after: u64,
+    wait_ns_max_after: u64,
+    general_active_before: u64,
+    general_active_after: u64,
+    host_reserved_active_before: u64,
+    host_reserved_active_after: u64,
+    peak_general_active_after: u64,
+    peak_host_reserved_active_after: u64,
+
+    fn between(before: RuntimePoint, after: RuntimePoint) RuntimePhase {
+        std.debug.assert(before.schema_version == after.schema_version);
+        return .{
+            .requests = after.requests -| before.requests,
+            .starts = after.starts -| before.starts,
+            .completions = after.completions -| before.completions,
+            .typed_slot_reuses = after.typed_slot_reuses -| before.typed_slot_reuses,
+            .nested_reuses = after.nested_reuses -| before.nested_reuses,
+            .host_reserved_admissions = after.host_reserved_admissions -| before.host_reserved_admissions,
+            .general_slot_admissions = after.general_slot_admissions -| before.general_slot_admissions,
+            .waits = after.waits -| before.waits,
+            .wait_ns = after.wait_ns -| before.wait_ns,
+            .active_before = before.active,
+            .active_after = after.active,
+            .waiters_before = before.waiters,
+            .waiters_after = after.waiters,
+            .peak_active_after = after.peak_active,
+            .peak_waiters_after = after.peak_waiters,
+            .wait_ns_max_after = after.wait_ns_max,
+            .general_active_before = before.general_active,
+            .general_active_after = after.general_active,
+            .host_reserved_active_before = before.host_reserved_active,
+            .host_reserved_active_after = after.host_reserved_active,
+            .peak_general_active_after = after.peak_general_active,
+            .peak_host_reserved_active_after = after.peak_host_reserved_active,
+        };
     }
 };
 
@@ -227,9 +328,10 @@ fn laneMain(lane: *Lane) void {
 }
 
 fn printMetadata(writer: *std.Io.Writer, logical_cpus: usize) !void {
+    const runtime = RuntimePoint.capture();
     try writer.print(
-        "{{\"kind\":\"zig-js-compiler-pressure-metadata\",\"schema\":{d},\"source_path\":\"{s}\",\"source_sha256\":\"{s}\",\"logical_cpus\":{d},\"jit_supported\":{s},\"cold_invocations\":{d},\"warm_invocations\":{d}}}\n",
-        .{ schema_version, workload_source_path, workload_source_sha256, logical_cpus, if (js.jit.supported) "true" else "false", cold_invocations, warm_invocations },
+        "{{\"kind\":\"zig-js-compiler-pressure-metadata\",\"schema\":{d},\"source_path\":\"{s}\",\"source_sha256\":\"{s}\",\"logical_cpus\":{d},\"jit_supported\":{s},\"cold_invocations\":{d},\"warm_invocations\":{d},\"runtime_thread_schema\":{d}}}\n",
+        .{ schema_version, workload_source_path, workload_source_sha256, logical_cpus, if (js.jit.supported) "true" else "false", cold_invocations, warm_invocations, runtime.schema_version },
     );
 }
 
@@ -243,6 +345,7 @@ fn printRow(
     elapsed_ns: u64,
     checksum: f64,
     compiler: CompilerSnapshot,
+    runtime: RuntimePhase,
     before: ProcessResourceSnapshot,
     after: ProcessResourceSnapshot,
 ) !void {
@@ -269,6 +372,11 @@ fn printRow(
     inline for (comptime std.meta.fieldNames(CompilerSnapshot), 0..) |name, index| {
         if (index != 0) try writer.writeByte(',');
         try writer.print("\"{s}\":{d}", .{ name, @field(compiler, name) });
+    }
+    try writer.writeAll("},\"runtime\":{");
+    inline for (comptime std.meta.fieldNames(RuntimePhase), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(runtime, name) });
     }
     try writer.writeAll("}}\n");
 }
@@ -297,6 +405,7 @@ fn runSample(
         for (threads[0..spawned]) |thread| thread.join();
     }
 
+    const cold_runtime_before = RuntimePoint.capture();
     const cold_process_before = try processResourceSnapshot();
     const cold_started = nowNs(io);
     for (lanes, 0..) |*lane, lane_index| {
@@ -314,6 +423,7 @@ fn runSample(
     for (0..lane_count) |_| cold_done.waitUncancelable(io);
     const cold_elapsed: u64 = @intCast(nowNs(io) - cold_started);
     const cold_process_after = try processResourceSnapshot();
+    const cold_runtime_after = RuntimePoint.capture();
     for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
 
     var cold: CompilerSnapshot = .{};
@@ -329,14 +439,16 @@ fn runSample(
         return error.JitOffPublishedNativeCode;
     if (mode == .jit_on and js.jit.supported and cold.publications() == 0)
         return error.JitOnDidNotPublishNativeCode;
-    try printRow(writer, mode, .cold, lane_count, jobs, sample, cold_elapsed, checksum, cold, cold_process_before, cold_process_after);
+    try printRow(writer, mode, .cold, lane_count, jobs, sample, cold_elapsed, checksum, cold, RuntimePhase.between(cold_runtime_before, cold_runtime_after), cold_process_before, cold_process_after);
 
+    const warm_runtime_before = RuntimePoint.capture();
     const warm_process_before = try processResourceSnapshot();
     const warm_started = nowNs(io);
     for (lanes) |*lane| lane.start_warm.post(io);
     for (0..lane_count) |_| warm_done.waitUncancelable(io);
     const warm_elapsed: u64 = @intCast(nowNs(io) - warm_started);
     const warm_process_after = try processResourceSnapshot();
+    const warm_runtime_after = RuntimePoint.capture();
     for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
 
     var cumulative_warm: CompilerSnapshot = .{};
@@ -347,7 +459,7 @@ fn runSample(
     }
     if (checksum != expected_checksum) return error.ChecksumMismatch;
     const warm = CompilerSnapshot.subtract(cumulative_warm, cold);
-    try printRow(writer, mode, .warm, lane_count, jobs, sample, warm_elapsed, checksum, warm, warm_process_before, warm_process_after);
+    try printRow(writer, mode, .warm, lane_count, jobs, sample, warm_elapsed, checksum, warm, RuntimePhase.between(warm_runtime_before, warm_runtime_after), warm_process_before, warm_process_after);
 
     for (lanes) |*lane| lane.release.post(io);
 }

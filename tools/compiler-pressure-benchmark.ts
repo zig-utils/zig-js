@@ -1,5 +1,5 @@
 /** Collect and publish the independent-Context synchronous compiler-pressure matrix. */
-import { cpuCount, run, sha256File, writeText } from "./lib/home";
+import { cpuCount, readText, run, sha256File, writeText } from "./lib/home";
 
 declare const __dirname: string;
 declare const __filename: string;
@@ -25,9 +25,40 @@ const COMPILER_FIELDS = [
   "optimizer_publications",
   "generated_code_bytes",
 ];
+const RUNTIME_DELTA_FIELDS = [
+  "requests",
+  "starts",
+  "completions",
+  "typed_slot_reuses",
+  "nested_reuses",
+  "host_reserved_admissions",
+  "general_slot_admissions",
+  "waits",
+  "wait_ns",
+];
+const RUNTIME_STATE_FIELDS = [
+  "active_before",
+  "active_after",
+  "waiters_before",
+  "waiters_after",
+  "peak_active_after",
+  "peak_waiters_after",
+  "wait_ns_max_after",
+  "general_active_before",
+  "general_active_after",
+  "host_reserved_active_before",
+  "host_reserved_active_after",
+  "peak_general_active_after",
+  "peak_host_reserved_active_after",
+];
 
 type RecordValue = Record<string, any>;
 type Row = RecordValue & { iteration: number };
+type Baseline = {
+  path: string;
+  sha256: string;
+  evidence: RecordValue;
+};
 
 function requireValue(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -83,7 +114,7 @@ export function parseInvocation(text: string): {
     rows = records.slice(1);
   requireValue(
     metadata.kind === "zig-js-compiler-pressure-metadata" &&
-      metadata.schema === 1 &&
+      metadata.schema === 2 &&
       metadata.source_path === "bench/compiler_pressure.js" &&
       /^[0-9a-f]{64}$/.test(metadata.source_sha256) &&
       metadata.cold_invocations === 10 &&
@@ -91,7 +122,9 @@ export function parseInvocation(text: string): {
     `invalid runner metadata: ${JSON.stringify(metadata)}`,
   );
   integer(metadata.logical_cpus, "metadata.logical_cpus");
+  integer(metadata.runtime_thread_schema, "metadata.runtime_thread_schema");
   requireValue(metadata.logical_cpus > 0, "logical CPU count must be positive");
+  requireValue(metadata.runtime_thread_schema === 7, "unexpected runtime-thread telemetry schema");
   requireValue(typeof metadata.jit_supported === "boolean", "jit_supported must be boolean");
   return { metadata, rows };
 }
@@ -134,15 +167,42 @@ export function validateInvocation(
     );
     for (const field of COMPILER_FIELDS)
       integer(row.compiler[field], `${mode}/${lanes}/${row.phase}.compiler.${field}`);
+    for (const field of RUNTIME_DELTA_FIELDS.concat(RUNTIME_STATE_FIELDS))
+      integer(row.runtime[field], `${mode}/${lanes}/${row.phase}.runtime.${field}`);
+    requireValue(
+      row.runtime.requests === row.runtime.starts &&
+        row.runtime.starts === row.runtime.completions &&
+        row.runtime.active_before === 0 &&
+        row.runtime.active_after === 0 &&
+        row.runtime.waiters_before === 0 &&
+        row.runtime.waiters_after === 0 &&
+        row.runtime.general_active_before === 0 &&
+        row.runtime.general_active_after === 0 &&
+        row.runtime.host_reserved_active_before === 0 &&
+        row.runtime.host_reserved_active_after === 0 &&
+        row.runtime.typed_slot_reuses === 0 &&
+        row.runtime.nested_reuses === 0 &&
+        row.runtime.starts ===
+          row.runtime.host_reserved_admissions + row.runtime.general_slot_admissions,
+      `runtime admission invariants failed: ${JSON.stringify(row.runtime)}`,
+    );
   });
   requireValue(rows[0].checksum === rows[1].checksum, `${mode}/${lanes}: phase checksum mismatch`);
 
-  const cold = rows[0].compiler,
-    warm = rows[1].compiler;
+  const coldRow = rows[0],
+    warmRow = rows[1],
+    cold = coldRow.compiler,
+    warm = warmRow.compiler;
   if (mode === "jit_off") {
     requireValue(
       COMPILER_FIELDS.every((field) => cold[field] === 0 && warm[field] === 0),
       `JIT-off published or attempted native code: ${JSON.stringify(rows)}`,
+    );
+    requireValue(
+      RUNTIME_DELTA_FIELDS.every(
+        (field) => coldRow.runtime[field] === 0 && warmRow.runtime[field] === 0,
+      ),
+      `JIT-off entered native compiler admission: ${JSON.stringify(rows)}`,
     );
   } else if (metadata.jit_supported) {
     requireValue(
@@ -158,6 +218,15 @@ export function validateInvocation(
         warm.optimizer_publications === 0 &&
         warm.generated_code_bytes === 0,
       `warm phase unexpectedly compiled native code: ${JSON.stringify(warm)}`,
+    );
+    requireValue(
+      coldRow.runtime.requests === cold.baseline_attempts + cold.optimizer_attempts &&
+        coldRow.runtime.requests > 0,
+      `native compiler attempts and runtime admissions disagree: ${JSON.stringify(rows[0])}`,
+    );
+    requireValue(
+      RUNTIME_DELTA_FIELDS.every((field) => warmRow.runtime[field] === 0),
+      `warm phase unexpectedly entered compiler admission: ${JSON.stringify(warmRow.runtime)}`,
     );
   }
 }
@@ -183,8 +252,10 @@ function runInvocation(
 }
 
 function matrixLanes(logicalCpus: number): number[] {
-  return [1, 2, 4, logicalCpus]
+  return [1, 2, 4]
     .filter((value) => value <= logicalCpus)
+    .concat([logicalCpus, logicalCpus * 2])
+    .filter((value) => value <= 1024)
     .filter((value, index, values) => values.indexOf(value) === index);
 }
 
@@ -279,6 +350,13 @@ export function validateMatrix(
         checksums["jit_off\twarm"] === checksums["jit_on\twarm"],
       `JIT-on/off checksum mismatch at ${laneCount} lanes`,
     );
+    if (laneCount === metadata.logical_cpus * 2)
+      requireValue(
+        (groups[["jit_on", "cold", laneCount].join("\t")] || []).every(
+          (row) => row.runtime.waits > 0 && row.runtime.wait_ns > 0,
+        ),
+        `oversubscribed JIT-on samples did not exercise the compiler queue`,
+      );
   }
 }
 
@@ -328,6 +406,48 @@ function selected(rows: Row[], mode: string, phase: string, lanes: number): Row[
   return result;
 }
 
+function loadBaseline(
+  path: string,
+  runnerMetadata: RecordValue,
+  info: Record<string, string>,
+): Baseline {
+  const evidence = JSON.parse(readText(path));
+  requireValue(
+    evidence.kind === "zig-js-compiler-pressure-evidence" &&
+      evidence.schema === 1 &&
+      evidence.runner_metadata?.schema === 1 &&
+      evidence.runner_metadata?.source_sha256 === runnerMetadata.source_sha256 &&
+      evidence.runner_metadata?.logical_cpus === runnerMetadata.logical_cpus &&
+      evidence.runner_metadata?.jit_supported === runnerMetadata.jit_supported &&
+      evidence.runner_metadata?.cold_invocations === runnerMetadata.cold_invocations &&
+      evidence.runner_metadata?.warm_invocations === runnerMetadata.warm_invocations &&
+      Array.isArray(evidence.lanes) &&
+      Array.isArray(evidence.rows) &&
+      evidence.rows.length > 0,
+    `invalid compiler-pressure baseline ${path}`,
+  );
+  for (const key of ["Host", "OS", "Zig", "zig-gc", "zig-regex", "Samples", "Warmups"])
+    requireValue(
+      evidence.metadata?.[key] === info[key],
+      `baseline environment mismatch for ${key}: ${evidence.metadata?.[key]} != ${info[key]}`,
+    );
+  for (const row of evidence.rows) {
+    requireValue(
+      row.kind === "zig-js-compiler-pressure" &&
+        row.schema === 1 &&
+        MODES.includes(row.mode) &&
+        PHASES.includes(row.phase) &&
+        evidence.lanes.includes(row.lanes) &&
+        row.source_sha256 === runnerMetadata.source_sha256,
+      `invalid baseline row: ${JSON.stringify(row)}`,
+    );
+    integer(row.elapsed_ns, "baseline.elapsed_ns");
+    integer(row.iteration, "baseline.iteration");
+    for (const field of COMPILER_FIELDS) integer(row.compiler[field], `baseline.compiler.${field}`);
+  }
+  return { path, sha256: sha256File(path), evidence };
+}
+
 const compilerNs = (row: Row): number =>
   row.compiler.baseline_tier_up_ns +
   row.compiler.baseline_failure_ns +
@@ -342,6 +462,7 @@ export function render(
   lanes: number[],
   info: Record<string, string>,
   rawPath: string | null,
+  baseline: Baseline | null = null,
 ): string {
   const lines = [
     `# Synchronous compiler pressure — ${info.Date.slice(0, 10)}`,
@@ -378,9 +499,49 @@ export function render(
         `| ${laneCount} | ${mode} | ${(elapsed / 1e6).toFixed(2)} ms | ${(cpu / 1e6).toFixed(2)} ms | ${(compile / 1e6).toFixed(2)} ms | ${(cpu / elapsed).toFixed(2)}x | ${((oneLane[mode] * laneCount) / elapsed).toFixed(2)}x | ${rsd(group.map((row) => row.elapsed_ns)).toFixed(2)}% | ${publications.toFixed(0)} | ${(generated / 1024 / 1024).toFixed(2)} MiB | ${(peak / 1024 / 1024).toFixed(2)} MiB |`,
       );
     }
+  if (baseline) {
+    const baselineRows = baseline.evidence.rows as Row[],
+      commonLanes = baseline.evidence.lanes.filter((lane: number) => lanes.includes(lane));
+    lines.push(
+      "",
+      "## Exact pre-admission comparison",
+      "",
+      `The control is ${baseline.path.split("/").pop()} at SHA-256 \`${baseline.sha256}\`, revision \`${baseline.evidence.metadata["zig-js"]}\`. Host, OS, Zig, zig-gc, zig-regex, source checksum, lane widths, invocation counts, samples, and warmups match; only the zig-js revision and runner telemetry schema differ.`,
+      "",
+      "| lanes | baseline wall p50 | coordinated wall p50 | wall change | baseline CPU p50 | coordinated CPU p50 | CPU change |",
+      "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    );
+    for (const laneCount of commonLanes) {
+      const before = selected(baselineRows, "jit_on", "cold", laneCount),
+        after = selected(rows, "jit_on", "cold", laneCount),
+        beforeWall = median(before.map((row) => row.elapsed_ns)),
+        afterWall = median(after.map((row) => row.elapsed_ns)),
+        beforeCpu = median(before.map(processCpuNs)),
+        afterCpu = median(after.map(processCpuNs));
+      lines.push(
+        `| ${laneCount} | ${(beforeWall / 1e6).toFixed(2)} ms | ${(afterWall / 1e6).toFixed(2)} ms | ${(((afterWall / beforeWall) - 1) * 100).toFixed(1)}% | ${(beforeCpu / 1e6).toFixed(2)} ms | ${(afterCpu / 1e6).toFixed(2)} ms | ${(((afterCpu / beforeCpu) - 1) * 100).toFixed(1)}% |`,
+      );
+    }
+  }
   lines.push(
     "",
     "Throughput scaling is one-lane wall multiplied by lanes, then divided by current wall. Process CPU divided by wall shows aggregate concurrency; summed compiler time adds independently timed tier attempts across lanes and can exceed wall time.",
+    "",
+    "## Runtime admission",
+    "",
+    "| lanes | mode | requests p50 | reserved p50 | general p50 | queued p50 | total wait p50 | peak compiler work | peak general slots | peak reserved lane |",
+    "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const laneCount of lanes)
+    for (const mode of MODES) {
+      const group = selected(rows, mode, "cold", laneCount);
+      lines.push(
+        `| ${laneCount} | ${mode} | ${median(group.map((row) => row.runtime.requests)).toFixed(0)} | ${median(group.map((row) => row.runtime.host_reserved_admissions)).toFixed(0)} | ${median(group.map((row) => row.runtime.general_slot_admissions)).toFixed(0)} | ${median(group.map((row) => row.runtime.waits)).toFixed(0)} | ${(median(group.map((row) => row.runtime.wait_ns)) / 1e6).toFixed(2)} ms | ${median(group.map((row) => row.runtime.peak_active_after)).toFixed(0)} | ${median(group.map((row) => row.runtime.peak_general_active_after)).toFixed(0)} | ${median(group.map((row) => row.runtime.peak_host_reserved_active_after)).toFixed(0)} |`,
+      );
+    }
+  lines.push(
+    "",
+    "Every runtime row is captured from the process-wide schema-v7 snapshot. The harness requires completed request/start/completion balance, zero residual active work or waiters, no typed or nested reuse in these untyped host lanes, and an exact reserved-plus-general admission total. The 2×-logical-CPU samples must enter the compiler queue.",
     "",
     "## Warm execution control",
     "",
@@ -402,7 +563,7 @@ export function render(
     `The matrix contains ${rows.length.toLocaleString("en-US")} phase rows. Each cell uses ${info.Samples} fresh-process samples after ${info.Warmups} discarded warmup process(es); JIT-on/off launch order alternates. Reported values are medians, with sample RSD shown for wall time.`,
     `The fixed source is \`bench/compiler_pressure.js\` at SHA-256 \`${sourceSha}\`. Each lane owns a fresh creator-thread-affine Context. Cold timing starts before OS-thread creation and includes Context construction, source parsing/bytecode setup, ten fixture invocations, native compilation/publication, and the completion wait.`,
     "Warm timing reuses the live Contexts for three invocations. Context destruction is outside both timed phases. Process CPU comes from `getrusage`; peak and retained RSS use Darwin `task_vm_info`.",
-    "The measured revision compiles synchronously on the calling lane. This baseline therefore measures the uncoordinated behavior that runtime admission changes must improve without changing checksums, publication counts, or warm behavior.",
+    "The measured revision compiles synchronously on the calling lane. Runtime admission bounds simultaneous compiler CPU work without changing checksums, publication counts, or warm behavior.",
     "",
     "## Reproduce",
     "",
@@ -415,10 +576,12 @@ export function render(
 }
 
 function fixtureRow(mode: string, phase: string, lanes: number, iteration: number): Row {
-  const enabled = mode === "jit_on" && phase === "cold";
+  const enabled = mode === "jit_on" && phase === "cold",
+    requests = enabled ? 64 * lanes : 0,
+    waits = enabled && lanes > 8 ? 64 : 0;
   return {
     kind: "zig-js-compiler-pressure",
-    schema: 1,
+    schema: 2,
     mode,
     phase,
     source_sha256: "a".repeat(64),
@@ -452,21 +615,46 @@ function fixtureRow(mode: string, phase: string, lanes: number, iteration: numbe
           : 0,
       ]),
     ),
+    runtime: {
+      requests,
+      starts: requests,
+      completions: requests,
+      typed_slot_reuses: 0,
+      nested_reuses: 0,
+      host_reserved_admissions: enabled ? 64 : 0,
+      general_slot_admissions: enabled ? requests - 64 : 0,
+      waits,
+      wait_ns: waits * 1000,
+      active_before: 0,
+      active_after: 0,
+      waiters_before: 0,
+      waiters_after: 0,
+      peak_active_after: enabled ? Math.min(lanes, 8) : 0,
+      peak_waiters_after: waits ? lanes - 8 : 0,
+      wait_ns_max_after: waits ? 1000 : 0,
+      general_active_before: 0,
+      general_active_after: 0,
+      host_reserved_active_before: 0,
+      host_reserved_active_after: 0,
+      peak_general_active_after: enabled ? Math.min(Math.max(lanes - 1, 0), 7) : 0,
+      peak_host_reserved_active_after: enabled ? 1 : 0,
+    },
   };
 }
 
 function selfTest(): void {
   const metadata = {
       kind: "zig-js-compiler-pressure-metadata",
-      schema: 1,
+      schema: 2,
       source_path: "bench/compiler_pressure.js",
       source_sha256: "a".repeat(64),
       logical_cpus: 8,
       jit_supported: true,
       cold_invocations: 10,
       warm_invocations: 3,
+      runtime_thread_schema: 7,
     },
-    lanes = [1, 2, 4, 8],
+    lanes = [1, 2, 4, 8, 16],
     rows: Row[] = [];
   for (const laneCount of lanes)
     for (const mode of MODES)
@@ -475,7 +663,7 @@ function selfTest(): void {
           rows.push(fixtureRow(mode, phase, laneCount, iteration));
   validateMatrix(rows, 3, lanes, metadata);
   const report = render(rows, lanes, { Date: "2026-09-22", Samples: "3", Warmups: "1" }, "raw.json");
-  requireValue(report.includes("| 8 | jit_on |") && report.includes("48 phase rows"), "report fixture was not rendered");
+  requireValue(report.includes("| 16 | jit_on |") && report.includes("60 phase rows"), "report fixture was not rendered");
 
   const invocation = [
     JSON.stringify(metadata),
@@ -512,6 +700,7 @@ function main(): void {
     zig = argument(args, "--zig") || "zig",
     rawPath = argument(args, "--raw-out"),
     markdownPath = argument(args, "--markdown-out"),
+    baselinePath = argument(args, "--baseline") || `${ROOT}/docs/.data/compiler-pressure-2026-09-22.json`,
     configuredSamples = Number(argument(args, "--samples") || "9"),
     configuredWarmups = Number(argument(args, "--warmups") || "1"),
     quick = args.includes("--quick");
@@ -530,15 +719,17 @@ function main(): void {
   const logicalCpus = cpuCount(),
     result = collect(runner as string, samples, warmups, logicalCpus),
     info = environment(runner as string, zig, samples, warmups),
+    baseline = quick ? null : loadBaseline(baselinePath, result.runner_metadata, info),
     raw = {
-      schema: 1,
+      schema: 2,
       kind: "zig-js-compiler-pressure-evidence",
       metadata: info,
       runner_metadata: result.runner_metadata,
+      baseline: baseline ? { path: baseline.path, sha256: baseline.sha256 } : null,
       lanes: result.lanes,
       rows: result.rows,
     },
-    report = render(result.rows, result.lanes, info, rawPath);
+    report = render(result.rows, result.lanes, info, rawPath, baseline);
   if (rawPath) writeText(rawPath, JSON.stringify(raw, null, 2) + "\n");
   if (markdownPath) writeText(markdownPath, report);
   if (!markdownPath) console.log(report);
