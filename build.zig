@@ -26,6 +26,22 @@ pub fn build(b: *std.Build) void {
     const dependency_audit_step = b.step("dependency-audit", "Reject unclassified dependency, link, fetch, and tooling edges");
     dependency_audit_step.dependOn(&run_dependency_audit.step);
 
+    // Production OS-thread ownership is a closed, machine-readable boundary
+    // (#978). Any new resource class or direct spawn must update the reviewed
+    // inventory before it can silently bypass #502's future coordinator.
+    const runtime_thread_audit = b.addExecutable(.{
+        .name = "runtime-thread-audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/runtime_thread_audit.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_runtime_thread_audit = b.addRunArtifact(runtime_thread_audit);
+    run_runtime_thread_audit.setCwd(b.path("."));
+    const runtime_thread_audit_step = b.step("runtime-thread-audit", "Audit every production engine-created OS thread");
+    runtime_thread_audit_step.dependOn(&run_runtime_thread_audit.step);
+
     // Independent suites remain explicit operator inputs outside the tree. This
     // offline gate validates their exact source/file pins, license/applicability
     // decisions, adapter limits, and per-run engine identity contract (#504).

@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "policy_id": "zig-js-runtime-threads-v1",
+  "owner_issue": 978,
+  "resources": [
+    {
+      "id": "test262_agent",
+      "purpose": "Run one $262.agent realm concurrently for the conformance host",
+      "call_sites": [{ "path": "src/agent.zig", "count": 1 }],
+      "owner": "Process-wide agent Group; records are reclaimed by agent.reset",
+      "multiplicity": "One OS thread per live agent record",
+      "admission": "No coordinator limit; allocation and OS spawn failure return OutOfMemory",
+      "stack_policy": "Platform default",
+      "blocking": "May park in broadcast, Atomics.wait, or agent sleep",
+      "shutdown": "agent.reset interrupts waiters and joins every started agent",
+      "scratch_memory": "Fresh realm plus process-allocator Agent source/report state",
+      "coordinator_status": "uncoordinated"
+    },
+    {
+      "id": "concurrent_gc_marker",
+      "purpose": "Trace one Context precise heap concurrently with its single mutator",
+      "call_sites": [{ "path": "src/context.zig", "count": 1 }],
+      "owner": "Context",
+      "multiplicity": "At most one marker per Context",
+      "admission": "Only when gc_concurrent is enabled and an old collection is due; spawn failure finishes marking synchronously",
+      "stack_policy": "Platform default",
+      "blocking": "CPU tracing loop; synchronizes through heap mark state",
+      "shutdown": "finishConcurrentGCIfActive signals and joins before cycle completion or Context teardown",
+      "scratch_memory": "Collector mark work owned and reported by the Context heap",
+      "coordinator_status": "uncoordinated"
+    },
+    {
+      "id": "javascript_thread",
+      "purpose": "Run a shared-realm JavaScript Thread entry function",
+      "call_sites": [{ "path": "src/jsthread.zig", "count": 1 }],
+      "owner": "Context ThreadRecord and realm GIL/cooperative-root protocol",
+      "multiplicity": "One OS thread per live JavaScript Thread",
+      "admission": "Optional Context max_js_threads cap plus 15-bit thread-id space",
+      "stack_policy": "64 MiB reserved stack",
+      "blocking": "May block in Lock, Condition, Atomics.wait, join, host work, or GC safepoints",
+      "shutdown": "Thread completion is published once; join/asyncJoin and Context teardown reclaim records",
+      "scratch_memory": "Per-thread interpreter registration, microtask queue, entry arguments, and native stack",
+      "coordinator_status": "uncoordinated"
+    },
+    {
+      "id": "script_worker",
+      "purpose": "Run an isolated script Worker realm and message loop",
+      "call_sites": [{ "path": "src/worker.zig", "count": 1 }],
+      "owner": "Caller-owned Worker object",
+      "multiplicity": "One OS thread and Context per Worker",
+      "admission": "No coordinator limit; allocation/OS spawn failure returns OutOfMemory",
+      "stack_policy": "Platform default",
+      "blocking": "Parks on inbox, inspector command queue, module/host work, or termination",
+      "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
+      "scratch_memory": "Isolated Context, bounded channels, structured-clone buffers, optional inspector state",
+      "coordinator_status": "uncoordinated"
+    },
+    {
+      "id": "module_worker",
+      "purpose": "Run an isolated module Worker realm, module graph, and message loop",
+      "call_sites": [{ "path": "src/worker.zig", "count": 1 }],
+      "owner": "Caller-owned Worker object",
+      "multiplicity": "One OS thread and Context per Worker",
+      "admission": "No coordinator limit; allocation/OS spawn failure returns OutOfMemory",
+      "stack_policy": "Platform default",
+      "blocking": "May block in module host callbacks, inbox, inspector commands, or termination",
+      "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
+      "scratch_memory": "Isolated Context, module registry/source copies, bounded channels, optional inspector state",
+      "coordinator_status": "uncoordinated"
+    },
+    {
+      "id": "execution_watchdog",
+      "purpose": "Raise a private-ABI ContextGroup termination request at its armed deadline",
+      "call_sites": [{ "path": "src/c_api.zig", "count": 1 }],
+      "owner": "CContextGroup",
+      "multiplicity": "At most one lazily-created watchdog per ContextGroup",
+      "admission": "Created on first finite time limit; spawn failure leaves synchronous checkpoint enforcement active",
+      "stack_policy": "Platform default",
+      "blocking": "Sleeps in bounded intervals and interrupts engine waiters when a deadline fires",
+      "shutdown": "ContextGroup destruction sets watchdog_stop and joins the thread",
+      "scratch_memory": "No dynamic work queue; fixed ContextGroup atomics and native stack",
+      "coordinator_status": "uncoordinated"
+    }
+  ],
+  "synchronous_subsystems": [
+    {
+      "id": "jit_compilation",
+      "path": "src/jit.zig",
+      "status": "Compilation runs synchronously on the requesting JavaScript/host thread; there is no production compiler helper or queue"
+    },
+    {
+      "id": "wasm_compilation",
+      "path": "src/wasm",
+      "status": "Decode, validation, and compilation run synchronously on the requesting JavaScript/host thread; production Wasm creates no helper pool"
+    }
+  ],
+  "test_only_direct_spawns": [
+    { "path": "src/agent.zig", "count": 2 },
+    { "path": "src/bytecode.zig", "count": 12 },
+    { "path": "src/c_api.zig", "count": 10 },
+    { "path": "src/context.zig", "count": 33 },
+    { "path": "src/fetch_headers.zig", "count": 1 },
+    { "path": "src/gc.zig", "count": 2 },
+    { "path": "src/gil.zig", "count": 2 },
+    { "path": "src/interpreter.zig", "count": 13 },
+    { "path": "src/jit/gdb_jit.zig", "count": 1 },
+    { "path": "src/jit/optimizer_compiler.zig", "count": 1 },
+    { "path": "src/jit.zig", "count": 13 },
+    { "path": "src/jsstring.zig", "count": 1 },
+    { "path": "src/jsthread.zig", "count": 2 },
+    { "path": "src/parallel_lock.zig", "count": 2 },
+    { "path": "src/root_handshake.zig", "count": 1 },
+    { "path": "src/shape.zig", "count": 3 },
+    { "path": "src/shared_buffer.zig", "count": 1 },
+    { "path": "src/strcell.zig", "count": 4 },
+    { "path": "src/structured_clone.zig", "count": 1 },
+    { "path": "src/value.zig", "count": 20 },
+    { "path": "src/vm.zig", "count": 8 },
+    { "path": "src/wasm/exec.zig", "count": 8 }
+  ]
+}

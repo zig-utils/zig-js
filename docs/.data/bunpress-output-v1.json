@@ -180,13 +180,13 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 267642,
-      "sha256": "432bdb164d5ea145def0e87c4894e787c66a17da2bfa1f19a18a09932aa0fedd"
+      "bytes": 268572,
+      "sha256": "d45b661fc1f07c5034d39f67378cf9af5cf63e9b3a05bc75b8ee1181f79abc56"
     },
     {
       "path": "sitemap.xml",
-      "bytes": 6739,
-      "sha256": "3b8c2d92dcedaedf111150d4d39bca1cb6a09601b510b41a74a9c9781c8c5ae7"
+      "bytes": 6886,
+      "sha256": "be55f1a642d08f76d935afe249c96b175adecd82d42d103d787d29ae70a839c1"
     },
     {
       "path": "threads/api/index.html",
@@ -205,8 +205,8 @@
     },
     {
       "path": "threads/index.html",
-      "bytes": 221043,
-      "sha256": "aebe37b4daa6cee78fd485c78a7cef2b40c3e3bd3869cad23d5833ae52439896"
+      "bytes": 221212,
+      "sha256": "e66832b22f569ea648922d75f5ad290d4c29843a80ddd93f3b3cf28e682883cc"
     },
     {
       "path": "threads/limits/index.html",
@@ -254,6 +254,11 @@
       "sha256": "8986a8ba717086682716fd8ea8b6b9cdea833f698c80cb80ecdcca22b19bc8d1"
     },
     {
+      "path": "threads/resource-coordination/index.html",
+      "bytes": 199934,
+      "sha256": "cfb5877dca06872767fe98a103b2576914b94ddfa79fea64b338520841f57fe3"
+    },
+    {
       "path": "threads/testing/index.html",
       "bytes": 362555,
       "sha256": "89e8c5c725832df1c2874e1f5b782e1e8363606d5d7707f2d2505a0ef2dab809"
@@ -274,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "0291cf7ffca746b60a762b2aa94a1cd8928939d248aef59cfb163cf7b25b6189"
+  "tree_sha256": "2d9b82f3675a03f7945c8755eb409081fe743d239831c14920b7fe1f4511492a"
 }

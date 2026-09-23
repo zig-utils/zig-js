@@ -77,6 +77,8 @@ rules.
   the TSan suppression boundary.
 - [GC Relocation Contract](./gc-relocation.md) - the audited pointer, stable
   identity, forwarding, rewrite, and pinning boundary for moving collection.
+- [Runtime Thread Inventory](./resource-coordination.md) - every production OS
+  thread's ownership, admission, blocking, memory, and shutdown contract.
 - [Production Readiness](./production-readiness.md) - current no-GIL status and
   remaining hardening work.
 - [Limits & Roadmap](./limits.md) - unsupported surfaces, test-only knobs, and

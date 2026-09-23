@@ -12,6 +12,7 @@
 //! Installed only on `enable_threads` Contexts.
 
 const std = @import("std");
+const runtime_threads = @import("runtime_threads.zig");
 const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
 const gc_relocation = @import("gc_relocation.zig");
@@ -854,7 +855,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     ctx.js_threads.appendAssumeCapacity(rec);
     if (ctx.js_threads.items.len >= 3) ctx.enableCooperativeGcTracking();
 
-    rec.thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, threadMain, .{rec}) catch {
+    rec.thread = runtime_threads.spawn(.javascript_thread, .{ .stack_size = 64 << 20 }, threadMain, .{rec}) catch {
         rec.done = true;
         rec.exited = true;
         rec.entry_function = Value.undef();

@@ -12,6 +12,7 @@
 //!   waiter table; neither is ever held while running JS.
 
 const std = @import("std");
+const runtime_threads = @import("runtime_threads.zig");
 const io_compat = @import("io_compat.zig");
 const shared_buffer = @import("shared_buffer.zig");
 const SharedBufferStorage = shared_buffer.SharedBufferStorage;
@@ -112,7 +113,7 @@ pub fn start(src: []const u8, run: RunFn) error{OutOfMemory}!void {
         return error.OutOfMemory;
     };
     group.mutex.unlock(io);
-    a.thread = std.Thread.spawn(.{}, agentMain, .{ a, run }) catch {
+    a.thread = runtime_threads.spawn(.test262_agent, .{}, agentMain, .{ a, run }) catch {
         // Spawn failure: record the agent as already done so broadcast never
         // waits on it (the record stays in the list for reset to free).
         group.mutex.lockUncancelable(io);

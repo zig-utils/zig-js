@@ -12,6 +12,7 @@
 //! serialized bytes (process-allocator-owned) and retained SAB storage.
 
 const std = @import("std");
+const runtime_threads = @import("runtime_threads.zig");
 const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
@@ -825,7 +826,7 @@ pub const Worker = struct {
             .src = try alloc.dupe(u8, src),
         };
         errdefer alloc.free(w.src);
-        w.thread = std.Thread.spawn(.{}, workerMain, .{w}) catch return error.OutOfMemory;
+        w.thread = runtime_threads.spawn(.script_worker, .{}, workerMain, .{w}) catch return error.OutOfMemory;
         return w;
     }
 
@@ -865,7 +866,7 @@ pub const Worker = struct {
             .src = &.{},
             .module = .{ .entry_path = path_copy, .entry_source = src_copy, .host = host },
         };
-        w.thread = std.Thread.spawn(.{}, workerMain, .{w}) catch return error.OutOfMemory;
+        w.thread = runtime_threads.spawn(.module_worker, .{}, workerMain, .{w}) catch return error.OutOfMemory;
         return w;
     }
 

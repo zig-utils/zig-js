@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_threads = @import("runtime_threads.zig");
 const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
 const builtin = @import("builtin");
@@ -9224,7 +9225,7 @@ pub const Context = struct {
                 h.beginConcurrentMark();
                 self.gc_scan_native_stack = false;
                 self.gc_marker_stop.store(false, .release);
-                self.gc_marker = std.Thread.spawn(.{}, gcMarkerLoop, .{self}) catch blk: {
+                self.gc_marker = runtime_threads.spawn(.concurrent_gc_marker, .{}, gcMarkerLoop, .{self}) catch blk: {
                     self.gc_scan_native_stack = true;
                     h.finishConcurrentMark();
                     self.gc_scan_native_stack = false;

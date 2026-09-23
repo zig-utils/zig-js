@@ -27,6 +27,7 @@
 //! be created, retained, and released on any thread.
 
 const std = @import("std");
+const runtime_threads = @import("runtime_threads.zig");
 const builtin = @import("builtin");
 const regex_mod = @import("regex");
 const ast = @import("ast.zig");
@@ -15239,7 +15240,7 @@ export fn JSC__VM__setExecutionTimeLimit(vm_ref: ?*anyopaque, timeout: f64) call
     };
     group.execution_deadline_ns.store(deadline, .release);
     if (deadline != 0 and group.watchdog_thread == null) {
-        group.watchdog_thread = std.Thread.spawn(.{}, privateExecutionWatchdog, .{group}) catch null;
+        group.watchdog_thread = runtime_threads.spawn(.execution_watchdog, .{}, privateExecutionWatchdog, .{group}) catch null;
     }
 }
 
