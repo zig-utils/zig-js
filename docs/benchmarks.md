@@ -16,6 +16,31 @@ zig-js keeps six benchmark families separate:
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
 
+## RegExp compiled-program retention diagnostic
+
+Issue [#989](https://github.com/zig-utils/zig-js/issues/989) is tracked by a
+Debug retained-footprint diagnostic rather than a throughput benchmark. Its
+unchanged pinned test262 witness exceeded the standard 3072 MiB process-tree
+guard on the exact parent. The candidate completes that witness three times at
+an identical 145,818,056-byte per-process peak and completes all 2,526 affected
+and Annex B cases with zero observed regressions among previously completed
+baseline outcomes.
+
+The [dated report](.data/regexp-retention-2026-09-25.md) and [raw evidence
+bundle](.data/regexp-retention-2026-09-25.json) preserve 56 alternating
+before/after samples across four controls. Fresh identical RegExp construction
+with replace falls from 186.58 to 12.78 MiB median peak footprint, and
+construction without matching falls from 155.94 to 10.30 MiB. A hoisted-program
+control and a 2,048-unique-pattern miss control are unchanged at displayed
+precision. This triangulates duplicate immutable compilation; it does not
+claim a general Context-arena bound, throughput change, or JSC comparison.
+
+The baseline's guard-termination reading and the candidate's `/usr/bin/time -l`
+peak use different measurement domains, so no ratio is computed between them.
+Collectors must retain that distinction, require exact output checksums, run
+fresh processes in alternating order, and preserve failed attempts rather than
+retrying them out of the record.
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)

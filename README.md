@@ -60,17 +60,19 @@ Ratios above 1.00x favor zig-js. JSC has no public shared-realm embedding equiva
 - **Explicit compaction:** 90.8% less retained fragmented backing (8.81 → 0.81 MiB) with a 0.99 ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).
 <!-- release-compatibility:gc-compaction:end -->
 
-### Regex dependency cost (diagnostic)
+### Regex diagnostics
 
-Four identical-output controls for the bounded-repeat capture fix, measured on
-Apple M2 Pro with Zig 0.17.0-dev.1441, seven alternating pairs per row:
+Debug and dependency-level diagnostics measured on Apple M2 Pro with Zig
+0.17.0-dev.1441. These are narrow controls, not engine/JSC scorecard rows:
 
-| scope | candidate / exact-parent median elapsed time | evidence |
+| scope | result | evidence |
 | --- | ---: | --- |
-| zig-regex library only, four controls | 0.987–1.002× | [dated report](docs/.data/regex-capture-cost-2026-09-23.md) · [56 raw samples](docs/.data/regex-capture-cost-2026-09-23.json) |
+| repeated immutable RegExp compilation, fresh-literal replace | 186.58 → 12.78 MiB median peak footprint | [dated report](docs/.data/regexp-retention-2026-09-25.md) · [56 raw samples and corpus receipts](docs/.data/regexp-retention-2026-09-25.json) |
+| zig-regex bounded-repeat capture cost, four controls | 0.987–1.002× candidate / exact-parent elapsed time | [dated report](docs/.data/regex-capture-cost-2026-09-23.md) · [56 raw samples](docs/.data/regex-capture-cost-2026-09-23.json) |
 
-Lower means less elapsed time. This desktop diagnostic is not an engine/JSC
-score, a speedup claim, or a general overhead bound.
+For the retention row, lower means less peak process footprint; the hoisted and
+unique-pattern controls were unchanged at displayed precision. For the cost
+row, lower means less elapsed time. Neither is a general memory or speed claim.
 
 Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
