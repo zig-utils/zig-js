@@ -1396,6 +1396,47 @@ const runtime_cases = [_]Case{
         .expected = 1023,
     },
     .{
+        // #989: sharing compiled code must not share observable RegExp state.
+        .name = "RegExp program reuse preserves fresh objects flags and compile mutation",
+        .source =
+        \\function fresh() { return /a/g; }
+        \\var first = fresh(), second = fresh(), checks = [];
+        \\checks.push(first !== second && first.lastIndex === 0 && second.lastIndex === 0);
+        \\checks.push(first.exec("aa").index === 0 && first.lastIndex === 1 && second.lastIndex === 0);
+        \\checks.push(second.exec("aa").index === 0 && second.lastIndex === 1 && first.lastIndex === 1);
+        \\first.compile("b", "y");
+        \\checks.push(first.source === "b" && first.flags === "y" && first.lastIndex === 0);
+        \\checks.push(second.source === "a" && second.flags === "g" && second.exec("aa").index === 1);
+        \\checks.push(fresh().exec("a")[0] === "a");
+        \\try { first.compile("[", "g"); checks.push(false); } catch (e) { checks.push(e instanceof SyntaxError); }
+        \\checks.push(first.source === "b" && first.flags === "y" && first.test("b"));
+        \\checks.push(new RegExp("a", "i").test("A") && !new RegExp("a", "").test("A"));
+        \\checks.push(new RegExp(".", "s").test("\n") && !new RegExp(".", "").test("\n"));
+        \\checks.push(new RegExp("^b", "m").test("a\nb") && !new RegExp("^b", "").test("a\nb"));
+        \\checks.push(new RegExp(".", "u").exec("\uD83D\uDE00")[0].length === 2 && new RegExp(".", "").exec("\uD83D\uDE00")[0].length === 1);
+        \\checks.push(new RegExp("a", "d").exec("a").indices[0][1] === 1 && new RegExp("a", "").exec("a").indices === undefined);
+        \\var sticky = new RegExp("a", "y"), global = new RegExp("a", "g");
+        \\checks.push(sticky.exec("ba") === null && global.exec("ba").index === 1);
+        \\var old = /a/g;
+        \\for (var i = 0; i < 80; i++) new RegExp("x" + i).test("x" + i);
+        \\checks.push(old.exec("a")[0] === "a" && fresh().lastIndex === 0);
+        \\var seen = [];
+        \\checks.push("aa".replace(/(a)/g, function (m, capture, at) {
+        \\  seen.push(capture + at); new RegExp("(a)", "g").exec("za"); return "b";
+        \\}) === "bb" && seen.join() === "a0,a1");
+        \\var order = [];
+        \\var p = { toString: function () { order.push("p"); return "a"; } };
+        \\var f = { toString: function () { order.push("f"); return "g"; } };
+        \\new RegExp(p, f); new RegExp(p, f);
+        \\checks.push(order.join() === "p,f,p,f");
+        \\var invalid = 0;
+        \\for (var n = 0; n < 2; n++) try { new RegExp("["); } catch (e) { if (e instanceof SyntaxError) invalid++; }
+        \\checks.push(invalid === 2 && new RegExp("[a]").test("a"));
+        \\checks.every(function (ok) { return ok; }) ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
         // zig-regex#31: the regex engine's ReDoS analyzer ran on every compile
         // and refused "critical" patterns outright, so nested quantifiers --
         // ordinary JavaScript -- threw a SyntaxError before they could match.

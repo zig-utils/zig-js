@@ -7,6 +7,7 @@ const bc = @import("bytecode.zig");
 const builtins = @import("builtins.zig");
 const regex = @import("regex");
 const regexp_compat = @import("regexp_compat.zig");
+const RegExpProgramCache = @import("regexp_program_cache.zig").Cache;
 const vm = @import("vm.zig");
 const promise = @import("promise.zig");
 const promise_profile = @import("promise_profile.zig");
@@ -3888,6 +3889,10 @@ pub const Interpreter = struct {
     /// rebuilding the Thompson VM for every `exec` and prevents worker threads
     /// from sharing mutable matcher state.
     regex_matchers: SecureIdentityMapUnmanaged(regex.Regex.Matcher) = .{},
+    /// Only immutable compiled programs are reused; RegExp objects, lastIndex,
+    /// and per-interpreter matching scratch keep their existing ownership.
+    /// Allocated lazily rather than adding the bounded table to every frame.
+    regex_programs: ?*RegExpProgramCache = null,
     signal: Signal = .none,
     ret_value: Value = Value.undef(),
     /// The `this` binding for the currently-executing function (undefined at
@@ -12436,9 +12441,8 @@ pub const Interpreter = struct {
         } else if (self.env.get("RegExp")) |c| {
             if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
         }
-        // Eagerly compile to validate the pattern — RegExp construction reports a
-        // SyntaxError for an invalid pattern (the compiled form is discarded;
-        // methods recompile on demand).
+        // Eagerly validate even an unused RegExp. Repeated construction may
+        // reuse the immutable program, never the freshly allocated JS object.
         _ = try self.compileRegex(o);
         return Value.obj(o);
     }
@@ -12486,6 +12490,17 @@ pub const Interpreter = struct {
         if (o.regexCompiled()) |cached| return @ptrCast(@alignCast(cached));
         const raw_src = o.regexSource();
         const flags = o.regexFlags();
+        const programs = self.regex_programs orelse blk: {
+            const cache = try self.arena.create(RegExpProgramCache);
+            cache.* = .{};
+            self.regex_programs = cache;
+            break :blk cache;
+        };
+        if (programs.get(raw_src, flags)) |cached| {
+            const regex_state = try o.ensureRegexState(self.arena);
+            regex_state.compiled = @ptrCast(cached);
+            return cached;
+        }
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const scratch = self.scratch_allocator orelse self.arena;
         const normalized = if (unicode)
@@ -12515,6 +12530,7 @@ pub const Interpreter = struct {
         };
         const regex_state = try o.ensureRegexState(self.arena);
         regex_state.compiled = @ptrCast(compiled);
+        programs.insert(raw_src, flags, compiled);
         return compiled;
     }
 
@@ -60455,6 +60471,31 @@ test "RegExp exec reuses interpreter-local Thompson matcher scratch" {
     try std.testing.expectEqual(@as(usize, 1), interp.regex_matchers.count());
     var matchers = interp.regex_matchers.valueIterator();
     try std.testing.expect(matchers.next().?.vm_cell != null);
+}
+
+test "fresh RegExp objects reuse one immutable program and local matcher" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    var previous: ?*value.Object = null;
+    var program: ?*regex.Regex = null;
+    for (0..128) |_| {
+        const object = (try machine.makeRegex("\\S+", "g")).asObj();
+        try std.testing.expect(object != previous);
+        const compiled = try machine.compileRegex(object);
+        if (program) |expected| try std.testing.expectEqual(expected, compiled);
+        program = compiled;
+        try std.testing.expectEqual(@as(f64, 0), object.getOwn("lastIndex").?.asNum());
+        _ = try machine.regexMethod(object, "exec", &.{Value.str("a")});
+        try std.testing.expectEqual(@as(f64, 1), object.getOwn("lastIndex").?.asNum());
+        previous = object;
+    }
+    try std.testing.expectEqual(@as(usize, 1), machine.regex_programs.?.len);
+    try std.testing.expectEqual(@as(usize, 1), machine.regex_matchers.count());
 }
 
 test "Intl.DateTimeFormat German numeric date pattern" {
