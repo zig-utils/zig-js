@@ -1,0 +1,106 @@
+{
+  "schema": "zig-js-regexp-cache-ownership-evidence-v1",
+  "issue": "https://github.com/zig-utils/zig-js/issues/990",
+  "generatedAt": "2026-09-25T14:29:26Z",
+  "measurement": {
+    "kind": "diagnostic-memory",
+    "baseline": "e3e2ca49119937119d8dbe32bc731f0743a2a5bc",
+    "candidate": "fe0d3260aa1119c59b0cf4eacdc70909bc397a47",
+    "binarySha256": {
+      "baseline": "f5368e2a4276de686d98ec3199e572dc461904c71e458bbd1a5e4a698c1019b5",
+      "candidate": "95fafb0b8b642b3f7f5283457d9d61e9ca75de4ece229e8ee4e390530ca69c45"
+    },
+    "workloadTemplateSha256": "5b6a6a9f73b4e071e198a0615069299157781d46a98e359f9eef33b1727d776e",
+    "workloadTemplate": "const mode = \"__MODE__\";\nconst count = __COUNT__;\nlet checksum = 0;\nfor (let i = 0; i < count; i++) {\n  const source = \"token_\" + i + \"_(?:alpha|beta)+$\";\n  if (mode === \"strings\") {\n    checksum += source.length;\n  } else {\n    const expression = new RegExp(source);\n    checksum += expression.source.length;\n    if (mode === \"match\" && expression.test(\"token_\" + i + \"_alphabeta\"))\n      checksum += 1;\n  }\n}\nchecksum;\n",
+    "samplesPerPoint": 1,
+    "samples": [
+      { "mode": "strings", "patterns": 512, "baseline": { "rssBytes": 19988480, "peakFootprintBytes": 9666896, "realSeconds": 0.10, "userSeconds": 0.05, "result": "OK 13202" }, "candidate": { "rssBytes": 20037632, "peakFootprintBytes": 9683280, "realSeconds": 0.97, "userSeconds": 0.04, "result": "OK 13202" } },
+      { "mode": "strings", "patterns": 2048, "baseline": { "rssBytes": 21495808, "peakFootprintBytes": 11174224, "realSeconds": 0.07, "userSeconds": 0.07, "result": "OK 54186" }, "candidate": { "rssBytes": 21561344, "peakFootprintBytes": 11223400, "realSeconds": 0.07, "userSeconds": 0.07, "result": "OK 54186" } },
+      { "mode": "strings", "patterns": 8192, "baseline": { "rssBytes": 27361280, "peakFootprintBytes": 17056104, "realSeconds": 0.16, "userSeconds": 0.15, "result": "OK 220074" }, "candidate": { "rssBytes": 27394048, "peakFootprintBytes": 17039696, "realSeconds": 0.16, "userSeconds": 0.15, "result": "OK 220074" } },
+      { "mode": "strings", "patterns": 32768, "baseline": { "rssBytes": 51003392, "peakFootprintBytes": 40698216, "realSeconds": 0.52, "userSeconds": 0.50, "result": "OK 906394" }, "candidate": { "rssBytes": 51036160, "peakFootprintBytes": 40698216, "realSeconds": 0.54, "userSeconds": 0.52, "result": "OK 906394" } },
+      { "mode": "construct", "patterns": 512, "baseline": { "rssBytes": 24756224, "peakFootprintBytes": 13730128, "realSeconds": 0.08, "userSeconds": 0.07, "result": "OK 13202" }, "candidate": { "rssBytes": 24068096, "peakFootprintBytes": 13222224, "realSeconds": 0.20, "userSeconds": 0.19, "result": "OK 13202" } },
+      { "mode": "construct", "patterns": 2048, "baseline": { "rssBytes": 38436864, "peakFootprintBytes": 27427176, "realSeconds": 0.17, "userSeconds": 0.16, "result": "OK 54186" }, "candidate": { "rssBytes": 28000256, "peakFootprintBytes": 17170792, "realSeconds": 0.31, "userSeconds": 0.30, "result": "OK 54186" } },
+      { "mode": "construct", "patterns": 8192, "baseline": { "rssBytes": 93257728, "peakFootprintBytes": 82280856, "realSeconds": 0.58, "userSeconds": 0.54, "result": "OK 220074" }, "candidate": { "rssBytes": 43597824, "peakFootprintBytes": 32768360, "realSeconds": 0.81, "userSeconds": 0.78, "result": "OK 220074" } },
+      { "mode": "construct", "patterns": 32768, "baseline": { "rssBytes": 316293120, "peakFootprintBytes": 305431104, "realSeconds": 2.12, "userSeconds": 2.03, "result": "OK 906394" }, "candidate": { "rssBytes": 76906496, "peakFootprintBytes": 95273368, "realSeconds": 3.16, "userSeconds": 2.92, "result": "OK 906394" } },
+      { "mode": "match", "patterns": 512, "baseline": { "rssBytes": 28622848, "peakFootprintBytes": 17400168, "realSeconds": 0.12, "userSeconds": 0.11, "result": "OK 13714" }, "candidate": { "rssBytes": 26296320, "peakFootprintBytes": 15270224, "realSeconds": 0.34, "userSeconds": 0.32, "result": "OK 13714" } },
+      { "mode": "match", "patterns": 2048, "baseline": { "rssBytes": 53395456, "peakFootprintBytes": 42189184, "realSeconds": 0.36, "userSeconds": 0.34, "result": "OK 56234" }, "candidate": { "rssBytes": 30457856, "peakFootprintBytes": 19448168, "realSeconds": 0.66, "userSeconds": 0.59, "result": "OK 56234" } },
+      { "mode": "match", "patterns": 8192, "baseline": { "rssBytes": 152748032, "peakFootprintBytes": 141607392, "realSeconds": 1.28, "userSeconds": 1.24, "result": "OK 228266" }, "candidate": { "rssBytes": 47038464, "peakFootprintBytes": 36028776, "realSeconds": 1.70, "userSeconds": 1.62, "result": "OK 228266" } },
+      { "mode": "match", "patterns": 32768, "baseline": { "rssBytes": 557334528, "peakFootprintBytes": 546423600, "realSeconds": 5.16, "userSeconds": 4.95, "result": "OK 939162" }, "candidate": { "rssBytes": 113541120, "peakFootprintBytes": 102580656, "realSeconds": 5.78, "userSeconds": 5.67, "result": "OK 939162" } }
+    ],
+    "summary": {
+      "at32768": {
+        "stringsRssReductionPercent": -0.1,
+        "constructRssReductionPercent": 75.7,
+        "matchRssReductionPercent": 79.6
+      },
+      "at8192": {
+        "constructRssReductionPercent": 53.3,
+        "matchRssReductionPercent": 69.2
+      }
+    }
+  },
+  "verification": {
+    "cacheUnit": { "passed": 6, "failed": 0, "peakTreeFootprintMiB": 243 },
+    "interpreterIntegration": { "passed": 2, "failed": 0, "linkedJitTestPassed": true },
+    "upstreamWitness": { "path": "test/built-ins/RegExp/character-class-escape-non-whitespace.js", "protocol": ["0:p", "DONE"], "peakTreeFootprintMiB": 127 },
+    "executionTiers": {
+      "fixture": "match-8192.js",
+      "tree": "OK 228266",
+      "vm": "OK 228266",
+      "peakTreeFootprintMiB": 32
+    },
+    "test262": {
+      "mode": "ReleaseFast",
+      "corpusRevision": "4249661388e5d3f92a85186213da140a6481490f",
+      "passed": 2456,
+      "failed": 0,
+      "subtrees": [
+        { "path": "test/built-ins/RegExp", "passed": 1879, "failed": 0 },
+        { "path": "test/language/literals/regexp", "passed": 238, "failed": 0 },
+        { "path": "test/built-ins/String/prototype/match", "passed": 51, "failed": 0 },
+        { "path": "test/built-ins/String/prototype/matchAll", "passed": 25, "failed": 0 },
+        { "path": "test/built-ins/String/prototype/replace", "passed": 55, "failed": 0 },
+        { "path": "test/built-ins/String/prototype/replaceAll", "passed": 45, "failed": 0 },
+        { "path": "test/built-ins/String/prototype/search", "passed": 43, "failed": 0 },
+        { "path": "test/built-ins/String/prototype/split", "passed": 120, "failed": 0 }
+      ],
+      "runnerBuildPeakTreeFootprintMiB": 3057,
+      "regexpSubtreePeakTreeFootprintMiB": 1388,
+      "integrationSubtreesPeakTreeFootprintMiB": 238
+    },
+    "noGilTsan": {
+      "collector": "0285ef801dd221a4ae8e88b31a09ae31627657a3",
+      "buildPeakTreeFootprintMiB": 2247,
+      "cases": [
+        { "path": "semantics/regexp-lastindex-shared.js", "passed": true, "durationMs": 17402, "peakTreeFootprintMiB": 124 },
+        { "path": "vmstate/regexp-churn-threads.js", "passed": true, "durationMs": 14296, "peakTreeFootprintMiB": 145 }
+      ],
+      "sanitizerReports": 0
+    },
+    "interruptedAttempts": [
+      {
+        "command": "test262 --diag test/built-ins/RegExp",
+        "mode": "Debug",
+        "wallClockLimitSeconds": 1200,
+        "result": "timeout",
+        "observedFailuresBeforeTimeout": 0,
+        "supersededBy": "complete ReleaseFast 1879/1879 run"
+      }
+    ]
+  },
+  "environment": {
+    "zig": "0.17.0-dev.1441+d5181a9c9",
+    "zigRegex": "601edb49ba0579f1a30e4318290a7d7fb919aeed",
+    "zigGc": "0285ef801dd221a4ae8e88b31a09ae31627657a3",
+    "hardware": "Apple M2 Pro, 16 GiB",
+    "os": "macOS 26.3.1 (a), build 25D771280a",
+    "processTreeLimitMiB": 3072
+  },
+  "caveats": [
+    "This is a one-sample Debug retained-memory diagnostic, not a throughput benchmark or JavaScriptCore comparison.",
+    "The desktop was not qualified as a quiet reference host; timing fields are preserved only as raw diagnostics and support no speed claim.",
+    "RSS and peak process footprint are both preserved, but the public comparison uses same-domain RSS only.",
+    "The strings control includes source, JavaScript object, and Context-arena retention outside the owned compiled-program cache.",
+    "The TSan witnesses used the real zig-gc collector checkout because the repository's local sibling was a documented measurement-only shim."
+  ]
+}

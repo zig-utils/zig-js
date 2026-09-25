@@ -41,6 +41,31 @@ Collectors must retain that distinction, require exact output checksums, run
 fresh processes in alternating order, and preserve failed attempts rather than
 retrying them out of the record.
 
+## RegExp owned-cache retention diagnostic
+
+Issue [#990](https://github.com/zig-utils/zig-js/issues/990) extends the #989
+lookup optimization into an explicit ownership bound. Compiled graphs,
+interpreter-local matcher scratch, and resettable result storage now live in
+separate per-program arenas behind a 64-entry lease cache. Unpinned eviction
+recycles those arenas; pinned slots do not move; all-pinned reentrant calls use
+a transient owner; mutable backtracking state remains isolated by RegExp object
+identity.
+
+The [dated report](.data/regexp-cache-ownership-2026-09-25.md) and [raw
+evidence](.data/regexp-cache-ownership-2026-09-25.json) compare exact parent
+`e3e2ca49` with candidate `fe0d3260`. At 32,768 distinct patterns, construction
+peak RSS falls from 301.64 to 73.34 MiB (75.7%), and construction plus one
+successful match falls from 531.52 to 108.28 MiB (79.6%). The same-size
+source-string control is unchanged within 0.1%, and every before/after checksum
+matches.
+
+This is a one-sample Debug retained-memory diagnostic from a non-quiet host,
+not a throughput claim. The raw timing fields are preserved but not promoted.
+Correctness evidence covers 2,456 affected test262 cases with zero failures,
+matching tree/VM checksums, the unchanged upstream high-retention witness, six
+cache ownership tests, and two no-GIL TSan RegExp witnesses using the real
+collector checkout.
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)

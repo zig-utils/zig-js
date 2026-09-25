@@ -68,11 +68,13 @@ Debug and dependency-level diagnostics measured on Apple M2 Pro with Zig
 | scope | result | evidence |
 | --- | ---: | --- |
 | repeated immutable RegExp compilation, fresh-literal replace | 186.58 → 12.78 MiB median peak footprint | [dated report](docs/.data/regexp-retention-2026-09-25.md) · [56 raw samples and corpus receipts](docs/.data/regexp-retention-2026-09-25.json) |
+| 32,768 distinct RegExp programs, construction / first match | 301.64 → 73.34 MiB / 531.52 → 108.28 MiB peak RSS | [dated report](docs/.data/regexp-cache-ownership-2026-09-25.md) · [raw matrix and gate receipts](docs/.data/regexp-cache-ownership-2026-09-25.json) |
 | zig-regex bounded-repeat capture cost, four controls | 0.987–1.002× candidate / exact-parent elapsed time | [dated report](docs/.data/regex-capture-cost-2026-09-23.md) · [56 raw samples](docs/.data/regex-capture-cost-2026-09-23.json) |
 
-For the retention row, lower means less peak process footprint; the hoisted and
-unique-pattern controls were unchanged at displayed precision. For the cost
-row, lower means less elapsed time. Neither is a general memory or speed claim.
+For the retention rows, lower means less retained memory: the #989 hoisted and
+unique-pattern controls and the #990 source-string control were unchanged at
+displayed precision. For the cost row, lower means less elapsed time. None is a
+general memory or speed claim.
 
 Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
