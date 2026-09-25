@@ -12506,14 +12506,16 @@ pub const Interpreter = struct {
         };
         if (programs.acquire(raw_src, flags, identity)) |cached| return cached;
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
-        const scratch = programs.allocator;
+        const owned = try programs.ownerForMiss();
+        errdefer owned.deinit();
+        const scratch = owned.compileAllocator();
         const normalized = if (unicode)
             regexp_compat.NormalizedPattern.borrowed(raw_src)
         else
             try regexp_compat.normalizeAnnexBClassRanges(scratch, raw_src);
         defer normalized.deinit(scratch);
         const compat_src = normalized.bytes;
-        const src = if (unicode) compat_src else try self.regexpSearchInput(compat_src, false);
+        const src = if (unicode) compat_src else try regexpSearchInputAlloc(scratch, compat_src, false);
         const cf = regex.common.CompileFlags{
             .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,
             .multiline = std.mem.indexOfScalar(u8, flags, 'm') != null,
@@ -12525,15 +12527,15 @@ pub const Interpreter = struct {
             .unicode_sets = std.mem.indexOfScalar(u8, flags, 'v') != null,
             .ecmascript = true,
         };
-        const compiled = try programs.allocator.create(regex.Regex);
-        errdefer programs.allocator.destroy(compiled);
+        const compiled = try scratch.create(regex.Regex);
         var diagnostic: ?regex.CompileErrorReason = null;
-        compiled.* = regex.Regex.compileWithFlagsDiagnostic(programs.allocator, src, cf, &diagnostic) catch {
+        compiled.* = regex.Regex.compileWithFlagsDiagnostic(scratch, src, cf, &diagnostic) catch {
             if (diagnostic) |reason|
                 return self.throwError("SyntaxError", regexp_compat.compileErrorMessage(reason));
             return self.throwError("SyntaxError", "invalid regular expression");
         };
-        return programs.adopt(raw_src, flags, identity, compiled);
+        owned.publish(compiled);
+        return programs.adopt(raw_src, flags, identity, owned);
     }
 
     /// Whether `o` is the `%RegExp.prototype%` intrinsic (which the source/flags
@@ -12612,11 +12614,11 @@ pub const Interpreter = struct {
             var program = try self.compileRegex(o);
             defer program.release();
             const re = program.program();
-            const matcher = program.matcher();
-            const found = regex.Regex.Matcher.findFrom(matcher, search_input, start) catch null;
+            const found = program.findFrom(search_input, start) catch null;
             if (found) |match| {
-                var m = match;
-                defer m.deinit(program.allocator());
+                var owned_match = match;
+                defer owned_match.deinit();
+                const m = owned_match.value;
                 // Sticky matches must begin exactly at lastIndex.
                 if (sticky and m.start != start) {
                     try self.setRegExpLastIndex(o, 0);
@@ -12669,11 +12671,11 @@ pub const Interpreter = struct {
         const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
         var program = try self.compileRegex(o);
         defer program.release();
-        const matcher = program.matcher();
-        const found = regex.Regex.Matcher.findFrom(matcher, search_input, start) catch null;
+        const found = program.findFrom(search_input, start) catch null;
         if (found) |match| {
-            var m = match;
-            defer m.deinit(program.allocator());
+            var owned_match = match;
+            defer owned_match.deinit();
+            const m = owned_match.value;
             if (sticky and m.start != start) {
                 try self.setRegExpLastIndex(o, 0);
                 return false;
@@ -13446,11 +13448,11 @@ pub const Interpreter = struct {
         var program = try self.compileRegex(o);
         defer program.release();
         const re = program.program();
-        const matcher = program.matcher();
-        const found = regex.Regex.Matcher.findFrom(matcher, search_input, start) catch null;
+        const found = program.findFrom(search_input, start) catch null;
         if (found) |match| {
-            var m = match;
-            defer m.deinit(program.allocator());
+            var owned_match = match;
+            defer owned_match.deinit();
+            const m = owned_match.value;
             if (sticky and m.start != start) {
                 try self.setRegExpLastIndex(o, 0);
                 return Value.nul();
@@ -20487,22 +20489,22 @@ pub const Interpreter = struct {
             if (args[0].isObject() and args[0].asObj().behavior.is_regex) {
                 var program = try self.compileRegex(args[0].asObj());
                 defer program.release();
-                const matcher = program.matcher();
                 if (lim == 0) return result;
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
-                    if (matcher.find(s) catch null) |match| {
-                        var m = match;
-                        defer m.deinit(program.allocator());
+                    if (program.find(s) catch null) |match| {
+                        var owned_match = match;
+                        defer owned_match.deinit();
                     } else try out.append(self.arena, try Value.strAlloc(self.arena, s));
                     return result;
                 }
                 var p: usize = 0; // end of the previous piece
                 var q: usize = 0; // scan cursor
                 while (q < s.len) {
-                    const match = matcher.find(s[q..]) catch null orelse break;
-                    var m = match;
-                    defer m.deinit(program.allocator());
+                    const match = program.find(s[q..]) catch null orelse break;
+                    var owned_match = match;
+                    defer owned_match.deinit();
+                    const m = owned_match.value;
                     const m_start = q + m.start;
                     const m_end = q + m.end;
                     if (m_end == p) { // empty match flush against the last split — skip
@@ -20701,14 +20703,14 @@ pub const Interpreter = struct {
                 var program = try self.compileRegex(ro);
                 defer program.release();
                 const re = program.program();
-                const matcher = program.matcher();
                 const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
                 var last: usize = 0; // end of the last copied region
                 var search: usize = 0; // absolute scan cursor
                 while (search <= s.len) {
-                    const match = matcher.find(s[search..]) catch null orelse break;
-                    var m = match;
-                    defer m.deinit(program.allocator());
+                    const match = program.find(s[search..]) catch null orelse break;
+                    var owned_match = match;
+                    defer owned_match.deinit();
+                    const m = owned_match.value;
                     const mstart = search + m.start;
                     const mend = search + m.end;
                     try buf.appendSlice(a, s[last..mstart]);
