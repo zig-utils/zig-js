@@ -2600,7 +2600,6 @@ pub const ObjectPrimitiveState = extern union {
 pub const ObjectRegexState = struct {
     source: []const u8 = "",
     flags: []const u8 = "",
-    compiled: ?*anyopaque = null,
 };
 
 /// Instance-only tracing metadata lives behind one arena-owned pointer so the
@@ -4272,12 +4271,6 @@ pub const Object = struct {
         const cold = self.coldState() orelse return "";
         if (!cold.hasRare(.regex)) return "";
         return cold.rare.regex.flags;
-    }
-
-    pub inline fn regexCompiled(self: *const Object) ?*anyopaque {
-        const cold = self.coldState() orelse return null;
-        if (!cold.hasRare(.regex)) return null;
-        return cold.rare.regex.compiled;
     }
 
     pub fn ensureRegexState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*ObjectRegexState {

@@ -7985,6 +7985,10 @@ pub const Context = struct {
     }
 
     pub fn popActiveInterpreter(self: *Context, machine: *interp.Interpreter) void {
+        // Interpreter-local caches use the Context's freeable backing allocator;
+        // unregistering is the lifetime boundary for reclaiming them. Declaring
+        // this first makes any later lock-unwind defer run before destruction.
+        defer machine.deinit();
         if (!self.gc_cooperative_enabled) {
             self.lockActiveInterpreters();
             defer self.unlockActiveInterpreters();

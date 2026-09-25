@@ -1170,6 +1170,7 @@ fn workerMain(w: *Worker) void {
         };
         defer alloc.free(bytes);
         var machine = ctx.interpreter();
+        defer machine.deinit();
         const data = structured_clone.deserialize(&machine, bytes) catch continue;
         const handler = machine.getProperty(Value.obj(ctx.global_object), "onmessage") catch continue;
         if (!handler.isObject()) continue;
