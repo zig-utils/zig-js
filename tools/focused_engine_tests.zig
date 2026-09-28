@@ -1878,6 +1878,40 @@ const runtime_cases = [_]Case{
         .expected = 85,
     },
     .{
+        .name = "JSON exact integers preserve rounding signed zero and source",
+        .source =
+        \\var tokens = ['0', '-0', '1', '-1', '999999999999999', '-999999999999999',
+        \\  '1000000000000000', '-1000000000000000', '9007199254740991',
+        \\  '9007199254740992', '9007199254740993', '-9007199254740993',
+        \\  '18446744073709551615', '18446744073709551616', '1.5', '-0.0',
+        \\  '-0e0', '1e3', '5e-324', '-1e-400', '1e400', '-1e400', '9'.repeat(512)];
+        \\for (var i = 0; i < tokens.length; i++) {
+        \\  var actual = JSON.parse(tokens[i]);
+        \\  if (!Object.is(actual, Number(tokens[i]))) throw new Error('number mismatch: ' + tokens[i]);
+        \\}
+        \\var invalid = ['01', '-01', '+1', '-', '1.', '1e', '1e+', '1e-', '1.e2',
+        \\  '.5', '0x1', '1_0', 'NaN', 'Infinity', '--1', '[1e]', '[1 2]', '{"n":01}'];
+        \\for (var j = 0; j < invalid.length; j++) {
+        \\  var rejected = false;
+        \\  try { JSON.parse(invalid[j]); } catch (error) {
+        \\    if (!(error instanceof SyntaxError)) throw error;
+        \\    rejected = true;
+        \\  }
+        \\  if (!rejected) throw new Error('invalid number accepted: ' + invalid[j]);
+        \\}
+        \\var sources = [];
+        \\var values = JSON.parse('[-0,999999999999999,9007199254740993,1e3]', function(key, value, context) {
+        \\  if (typeof value === 'number') sources.push(context.source);
+        \\  return value;
+        \\});
+        \\if (sources.join('|') !== '-0|999999999999999|9007199254740993|1e3' ||
+        \\    !Object.is(values[0], -0) || values[1] !== 999999999999999 ||
+        \\    values[2] !== 9007199254740992 || values[3] !== 1000) throw new Error('reviver mismatch');
+        \\1;
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "JSON hostile nesting is catchable",
         .source =
         \\function rejectsDepth(text) {

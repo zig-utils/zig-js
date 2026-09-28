@@ -3847,6 +3847,7 @@ const JsonParser = struct {
         const start = p.i;
         const digit = std.ascii.isDigit;
         if (p.i < p.s.len and p.s[p.i] == '-') p.i += 1; // optional minus (no leading '+')
+        const digit_start = p.i;
         // Integer part: a lone '0', or [1-9] followed by digits (no leading zeros).
         if (p.i >= p.s.len) return p.fail(.invalid_number);
         if (p.s[p.i] == '0') {
@@ -3854,6 +3855,7 @@ const JsonParser = struct {
         } else if (p.s[p.i] >= '1' and p.s[p.i] <= '9') {
             while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
         } else return p.fail(.invalid_number);
+        const integer_end = p.i;
         // Fraction: a '.' must be followed by at least one digit.
         if (p.i < p.s.len and p.s[p.i] == '.') {
             p.i += 1;
@@ -3867,7 +3869,16 @@ const JsonParser = struct {
             if (p.i >= p.s.len or !digit(p.s[p.i])) return p.fail(.invalid_exponent);
             while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
         }
-        const n = std.fmt.parseFloat(f64, p.s[start..p.i]) catch return p.fail(.invalid_number);
+        // JSON Number conversion: every integer of at most 15 decimal digits
+        // is exactly representable in binary64. Keep the correctly rounded
+        // general converter for longer integers, fractions and exponents.
+        const n = if (p.i == integer_end and integer_end - digit_start <= 15) exact: {
+            var integer: u64 = 0;
+            for (p.s[digit_start..integer_end]) |d| integer = integer * 10 + (d - '0');
+            const magnitude: f64 = @floatFromInt(integer);
+            // Negating the floating value, not the integer, preserves -0.
+            break :exact if (digit_start != start) -magnitude else magnitude;
+        } else std.fmt.parseFloat(f64, p.s[start..p.i]) catch return p.fail(.invalid_number);
         return p.parsed(Value.num(n), p.s[start..p.i], .none);
     }
 
@@ -4045,6 +4056,39 @@ const JsonParser = struct {
         }
     }
 };
+
+test "JSON parser short integers match correctly rounded conversion bit for bit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const Check = struct {
+        fn number(interp_: *Interpreter, source: []const u8) !void {
+            var parser = JsonParser{ .s = source, .i = 0, .interp = interp_ };
+            const parsed = try parser.parseNumber();
+            const expected = try std.fmt.parseFloat(f64, source);
+            try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(parsed.value.asNum())));
+            try std.testing.expectEqual(source.len, parser.i);
+        }
+    };
+    for ([_][]const u8{
+        "0",                    "-0",                   "1",                "-1",               "999999999999999",  "-999999999999999",
+        "1000000000000000",     "-1000000000000000",    "9007199254740991", "9007199254740992", "9007199254740993", "-9007199254740993",
+        "18446744073709551615", "18446744073709551616", "1.5",              "-0.0",             "-0e0",             "1e3",
+        "5e-324",               "-1e-400",              "1e400",            "-1e400",
+    }) |source| try Check.number(&machine, source);
+    var random = std.Random.DefaultPrng.init(0x991);
+    var buffer: [64]u8 = undefined;
+    for (0..2048) |_| {
+        const magnitude = random.random().int(u64) % 1_000_000_000_000_000;
+        for ([_][]const u8{ "", "-" }) |sign| {
+            const source = try std.fmt.bufPrint(&buffer, "{s}{d}", .{ sign, magnitude });
+            try Check.number(&machine, source);
+        }
+    }
+}
 
 test "JSON parser borrows validated unescaped strings without scratch allocation" {
     var owner_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
