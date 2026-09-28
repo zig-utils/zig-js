@@ -66,6 +66,27 @@ matching tree/VM checksums, the unchanged upstream high-retention witness, six
 cache ownership tests, and two no-GIL TSan RegExp witnesses using the real
 collector checkout.
 
+## JSON parsing CPU-work diagnostics
+
+Issues [#991](https://github.com/zig-utils/zig-js/issues/991) and
+[#992](https://github.com/zig-utils/zig-js/issues/992) have separate exact-parent
+comparisons in the [dated report](.data/json-parse-cpu-work-2026-09-29.md) and
+[56-sample raw bundle](.data/json-parse-cpu-work-2026-09-29.json).
+The owned workloads are `bench/json_parse_escaped.js` and its
+`bench/json_parse_plain.js` control, then `bench/json_parse_integers.js` and its
+`bench/json_parse_decimals.js` control. The `test262 --eval <file> tree` runner
+and `/usr/bin/time -l` measure the complete process, including input preparation.
+
+On Apple M2 Pro with Zig 0.17.0-dev.1770 Debug, seven alternating pairs show
+51.7% fewer retired instructions for long escaped strings and 27.5% fewer for
+short-integer arrays. The plain-string control changes by -0.08%; the fractional
+control costs 0.41% more. All checksums match. The report preserves exact
+revisions, source/binary hashes, profiles, dispersion and JSON correctness gates.
+
+These use the default **arena allocator, with runtime GC off**. They are not
+ReleaseFast, warmed-context or JSC throughput scores, and their timings do not
+enter the representative matrix or generated README benchmark scorecard.
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)

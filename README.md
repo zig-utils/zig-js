@@ -76,6 +76,17 @@ unique-pattern controls and the #990 source-string control were unchanged at
 displayed precision. For the cost row, lower means less elapsed time. None is a
 general memory or speed claim.
 
+### JSON parsing diagnostics
+
+Apple M2 Pro, Zig 0.17.0-dev.1770 **Debug**, default arena mode (GC off), seven
+alternating exact-parent pairs per workload. These measure whole-process CPU
+work, not production/JSC throughput:
+
+| scope | median retired instructions | evidence |
+| --- | ---: | --- |
+| long strings with a sparse escape | 51.7% fewer; unescaped control -0.08% | [report](docs/.data/json-parse-cpu-work-2026-09-29.md) · [raw samples](docs/.data/json-parse-cpu-work-2026-09-29.json) |
+| arrays of short integers | 27.5% fewer; fractional control +0.41% | [report](docs/.data/json-parse-cpu-work-2026-09-29.md) · [raw samples](docs/.data/json-parse-cpu-work-2026-09-29.json) |
+
 Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use
