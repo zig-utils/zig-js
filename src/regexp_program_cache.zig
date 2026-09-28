@@ -19,7 +19,6 @@ pub const Cache = struct {
         result_arena: std.heap.ArenaAllocator,
         backing_allocator: std.mem.Allocator,
         regex: ?*Regex = null,
-        matcher_primed: bool = false,
 
         pub fn create(backing: std.mem.Allocator) !*OwnedProgram {
             const owned = try backing.create(OwnedProgram);
@@ -39,9 +38,6 @@ pub const Cache = struct {
         pub fn publish(self: *OwnedProgram, compiled: *Regex) void {
             std.debug.assert(self.regex == null);
             self.regex = compiled;
-            // The immutable graph remains in compile_arena. Prime persistent
-            // matcher scratch separately from the resettable result arena.
-            self.setRuntimeAllocator(self.matcher_arena.allocator());
         }
 
         fn setRuntimeAllocator(self: *OwnedProgram, allocator: std.mem.Allocator) void {
@@ -50,18 +46,14 @@ pub const Cache = struct {
             if (compiled.backtrack_engine) |*engine| engine.allocator = allocator;
         }
 
-        fn beginMatch(self: *OwnedProgram) struct { allocator: std.mem.Allocator, reset_result: bool } {
-            if (!self.matcher_primed) {
-                self.setRuntimeAllocator(self.matcher_arena.allocator());
-                return .{ .allocator = self.matcher_arena.allocator(), .reset_result = false };
-            }
-            self.setRuntimeAllocator(self.result_arena.allocator());
-            return .{ .allocator = self.result_arena.allocator(), .reset_result = true };
+        fn beginMatch(self: *OwnedProgram) std.mem.Allocator {
+            const allocator = self.result_arena.allocator();
+            self.setRuntimeAllocator(allocator);
+            return allocator;
         }
 
-        fn finishMatchAttempt(self: *OwnedProgram, reset_result: bool, matched: bool) void {
-            self.matcher_primed = true;
-            if (reset_result and !matched) _ = self.result_arena.reset(.retain_capacity);
+        fn finishMatchAttempt(self: *OwnedProgram, matched: bool) void {
+            if (!matched) _ = self.result_arena.reset(.retain_capacity);
         }
 
         fn reset(self: *OwnedProgram) void {
@@ -70,7 +62,6 @@ pub const Cache = struct {
             _ = self.matcher_arena.reset(.retain_capacity);
             _ = self.result_arena.reset(.retain_capacity);
             self.regex = null;
-            self.matcher_primed = false;
         }
 
         pub fn deinit(self: *OwnedProgram) void {
@@ -117,11 +108,10 @@ pub const Cache = struct {
             value: regex.Match,
             allocator: std.mem.Allocator,
             owner: *OwnedProgram,
-            reset_result: bool,
 
             pub fn deinit(self: *OwnedMatch) void {
                 self.value.deinit(self.allocator);
-                if (self.reset_result) _ = self.owner.result_arena.reset(.retain_capacity);
+                _ = self.owner.result_arena.reset(.retain_capacity);
             }
         };
 
@@ -145,11 +135,11 @@ pub const Cache = struct {
             return switch (self.owner) {
                 .cached => |cached| blk: {
                     const entry = &cached.cache.entries[cached.index];
-                    if (entry.matcher == null) entry.matcher = entry.owned.regex.?.matcher();
+                    if (entry.matcher == null) entry.matcher = entry.owned.regex.?.matcherWithScratchAllocator(entry.owned.matcher_arena.allocator());
                     break :blk &entry.matcher.?;
                 },
                 .transient => |*transient| blk: {
-                    if (transient.matcher == null) transient.matcher = transient.owned.regex.?.matcher();
+                    if (transient.matcher == null) transient.matcher = transient.owned.regex.?.matcherWithScratchAllocator(transient.owned.matcher_arena.allocator());
                     break :blk &transient.matcher.?;
                 },
                 .released => unreachable,
@@ -158,33 +148,31 @@ pub const Cache = struct {
 
         pub fn find(self: *Lease, input: []const u8) !?OwnedMatch {
             const owned_program = self.owned();
-            const attempt = owned_program.beginMatch();
+            const allocator = owned_program.beginMatch();
             const found = self.matcher().find(input) catch |err| {
-                owned_program.finishMatchAttempt(attempt.reset_result, false);
+                owned_program.finishMatchAttempt(false);
                 return err;
             };
-            owned_program.finishMatchAttempt(attempt.reset_result, found != null);
+            owned_program.finishMatchAttempt(found != null);
             return if (found) |match| .{
                 .value = match,
-                .allocator = attempt.allocator,
+                .allocator = allocator,
                 .owner = owned_program,
-                .reset_result = attempt.reset_result,
             } else null;
         }
 
         pub fn findFrom(self: *Lease, input: []const u8, start: usize) !?OwnedMatch {
             const owned_program = self.owned();
-            const attempt = owned_program.beginMatch();
+            const allocator = owned_program.beginMatch();
             const found = self.matcher().findFrom(input, start) catch |err| {
-                owned_program.finishMatchAttempt(attempt.reset_result, false);
+                owned_program.finishMatchAttempt(false);
                 return err;
             };
-            owned_program.finishMatchAttempt(attempt.reset_result, found != null);
+            owned_program.finishMatchAttempt(found != null);
             return if (found) |match| .{
                 .value = match,
-                .allocator = attempt.allocator,
+                .allocator = allocator,
                 .owner = owned_program,
-                .reset_result = attempt.reset_result,
             } else null;
         }
 
@@ -406,6 +394,25 @@ test "RegExp program cache reuses matcher and result arenas across hot matches" 
         try std.testing.expectEqualStrings("aaa", found.value.captures[0]);
         try std.testing.expectEqualStrings("b", found.value.captures[1]);
     }
+}
+
+test "RegExp program cache keeps lazy DFA scratch across result resets" {
+    var cache = Cache.init(std.testing.allocator);
+    defer cache.deinit();
+    var lease = cache.adopt("(ab+)", "", 1, try compileOwned(std.testing.allocator, "(ab+)"));
+    defer lease.release();
+
+    // A shared global RegExp can first be observed with nonzero lastIndex in
+    // one interpreter, priming only VM scratch. A later zero start lazily
+    // creates the DFA; resetting that match result must not free the DFA.
+    var from_middle = (try lease.findFrom("xxabbb", 2)).?;
+    from_middle.deinit();
+    var first = (try lease.findFrom("xxabbb", 0)).?;
+    first.deinit();
+    var reused = (try lease.findFrom("xxabbb", 0)).?;
+    defer reused.deinit();
+    try std.testing.expectEqualStrings("abbb", reused.value.slice);
+    try std.testing.expectEqualStrings("abbb", reused.value.captures[0]);
 }
 
 test "RegExp program cache uses a transient lease when every slot is pinned" {

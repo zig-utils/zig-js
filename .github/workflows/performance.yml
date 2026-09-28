@@ -47,7 +47,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 601edb49ba0579f1a30e4318290a7d7fb919aeed
+          ref: fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
