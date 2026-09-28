@@ -3889,11 +3889,11 @@ const JsonParser = struct {
         // common unescaped case above returns a validated view into the input;
         // its caller immediately establishes the final runtime string/property
         // ownership, avoiding one arena allocation and one complete byte copy.
-        // Restart from the first source byte so the escape path remains one
-        // exact implementation for all prefix and Unicode combinations.
-        p.i = source_start;
+        // The prefix was already validated. Copy it once rather than scanning
+        // it again through the decoding loop's per-byte append path.
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         const a = p.interp.arena;
+        try buf.appendSlice(a, p.s[source_start..p.i]);
         while (p.i < p.s.len) {
             const c = p.s[p.i];
             if (c == '"') {
@@ -3948,8 +3948,15 @@ const JsonParser = struct {
             } else if (c < 0x20) {
                 return p.fail(.unterminated_string); // JSC words a raw control byte this way
             } else {
-                try buf.append(a, c);
+                // JSONStringCharacter excludes quotes, escapes and controls.
+                // Copy a whole ordinary run; its WTF-8 bytes are unchanged.
+                const run_start = p.i;
                 p.i += 1;
+                while (p.i < p.s.len) : (p.i += 1) {
+                    const next = p.s[p.i];
+                    if (next == '"' or next == '\\' or next < 0x20) break;
+                }
+                try buf.appendSlice(a, p.s[run_start..p.i]);
             }
         }
         return p.fail(.unterminated_string);
@@ -4065,6 +4072,63 @@ test "JSON parser borrows validated unescaped strings without scratch allocation
 
     var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
     try std.testing.expectError(error.Invalid, control.parseString());
+}
+
+test "JSON parser escaped runs preserve byte boundaries and Unicode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const prefix = &@as([16384]u8, @splat('a'));
+    const suffix = &@as([16384]u8, @splat('b'));
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "\"" ++ prefix ++ "\\n" ++ suffix ++ "\"", .expected = prefix ++ "\n" ++ suffix },
+        .{ .source = "\"\\t" ++ prefix ++ "\\r" ++ suffix ++ "\\n\"", .expected = "\t" ++ prefix ++ "\r" ++ suffix ++ "\n" },
+        .{ .source = "\"" ++ prefix ++ suffix ++ "\\t\"", .expected = prefix ++ suffix ++ "\t" },
+        .{ .source = "\"\\n\\t\\r\\b\\f\\/\\\\\\\"\"", .expected = "\n\t\r\x08\x0c/\\\"" },
+        .{ .source = "\"é\\n💩\\uD800x\\uDC00\\uD83D\\uDCA9\"", .expected = "é\n💩\xed\xa0\x80x\xed\xb0\x80💩" },
+        .{ .source = "\"\\uD800\\u0061\"", .expected = "\xed\xa0\x80a" },
+        .{ .source = "\"\\uD800\\uD800\"", .expected = "\xed\xa0\x80\xed\xa0\x80" },
+        .{ .source = "\"" ++ prefix ++ "\\u0000" ++ suffix ++ "\"", .expected = prefix ++ "\x00" ++ suffix },
+    };
+    for (cases) |case| {
+        var parser = JsonParser{ .s = case.source, .i = 0, .interp = &machine };
+        try std.testing.expectEqualStrings(case.expected, try parser.parseString());
+        try std.testing.expectEqual(case.source.len, parser.i);
+    }
+    // Raw JSON controls are invalid both before and after decoding begins.
+    for (0..0x20) |code| {
+        for ([_][]const u8{ prefix, prefix ++ "\\n" ++ suffix }) |before| {
+            const text = try std.fmt.allocPrint(allocator, "\"{s}{c}\"", .{ before, @as(u8, @intCast(code)) });
+            var parser = JsonParser{ .s = text, .i = 0, .interp = &machine };
+            try std.testing.expectError(error.Invalid, parser.parseString());
+            try std.testing.expectEqual(.unterminated_string, std.meta.activeTag(parser.fault));
+        }
+    }
+    for ([_][]const u8{ "\"abc", "\"abc\\", "\"abc\\nxyz", "\"abc\\x20\"", "\"abc\\u123\"", "\"abc\\uXXXX\"", "\"abc\\uD800\\uXXXX\"", "\"abc\\n" ++ suffix ++ "\\q\"" }) |text| {
+        var parser = JsonParser{ .s = text, .i = 0, .interp = &machine };
+        try std.testing.expectError(error.Invalid, parser.parseString());
+    }
+}
+
+test "JSON parser escaped runs propagate every arena allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+            var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+            var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+            const span = &@as([16384]u8, @splat('a'));
+            const text = "\"" ++ span ++ "\\n" ++ span ++ "\\uD800\"";
+            var parser = JsonParser{ .s = text, .i = 0, .interp = &machine };
+            try std.testing.expectEqualStrings(span ++ "\n" ++ span ++ "\xed\xa0\x80", try parser.parseString());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "String construction retains existing flat Latin-1 StringData" {

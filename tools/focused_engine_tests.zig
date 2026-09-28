@@ -1831,6 +1831,53 @@ const runtime_cases = [_]Case{
         .expected = 1,
     },
     .{
+        .name = "JSON escaped string runs preserve source and property keys",
+        .source =
+        \\var passed = 0;
+        \\function equal(actual, expected) {
+        \\  if (actual !== expected) throw new Error("JSON string mismatch at case " + passed);
+        \\  passed++;
+        \\}
+        \\function rejects(text) {
+        \\  try { JSON.parse(text); } catch (error) {
+        \\    if (error instanceof SyntaxError) { passed++; return; }
+        \\    throw error;
+        \\  }
+        \\  throw new Error("Accepted invalid JSON string");
+        \\}
+        \\var prefix = "abcdefghijklmnop".repeat(1024);
+        \\var suffix = "qrstuvwxyz012345".repeat(1024);
+        \\equal(JSON.parse('"' + prefix + '\\n' + suffix + '"'), prefix + '\n' + suffix);
+        \\equal(JSON.parse('"\\t' + prefix + '\\r' + suffix + '\\n"'), '\t' + prefix + '\r' + suffix + '\n');
+        \\equal(JSON.parse('"' + prefix + suffix + '\\t"'), prefix + suffix + '\t');
+        \\equal(JSON.parse('"\\n\\t\\r\\b\\f\\/\\\\\\\""'), '\n\t\r\b\f/\\"');
+        \\equal(JSON.parse('"é\\n💩\\uD800x\\uDC00\\uD83D\\uDCA9"'), 'é\n💩\uD800x\uDC00💩');
+        \\equal(JSON.parse('"\\uD800\\u0061"'), '\uD800a');
+        \\equal(JSON.parse('"\\uD800\\uD800"'), '\uD800\uD800');
+        \\equal(JSON.parse('"' + prefix + '\\u0000' + suffix + '"'), prefix + '\u0000' + suffix);
+        \\var source = '"' + prefix + '\\u0061' + suffix + '"';
+        \\var observed;
+        \\var revived = JSON.parse(source, function(key, value, context) {
+        \\  if (key === "") observed = context.source;
+        \\  return value;
+        \\});
+        \\equal(revived, prefix + 'a' + suffix);
+        \\equal(observed, source);
+        \\var object = JSON.parse('{"\\u0000x": "a\\nb", "a\\u0062": 1, "ab": 2}');
+        \\equal(object['\u0000x'], 'a\nb');
+        \\equal(object.ab, 2);
+        \\equal(Object.keys(object).join('|'), '\u0000x|ab');
+        \\for (var code = 0; code < 32; code++) {
+        \\  rejects('"' + prefix + String.fromCharCode(code) + '"');
+        \\  rejects('"' + prefix + '\\n' + suffix + String.fromCharCode(code) + '"');
+        \\}
+        \\var invalid = ['"abc', '"abc\\', '"abc\\nxyz', '"abc\\x20"', '"abc\\u123"', '"abc\\uXXXX"', '"abc\\uD800\\uXXXX"', '"abc\\n' + suffix + '\\q"'];
+        \\for (var i = 0; i < invalid.length; i++) rejects(invalid[i]);
+        \\passed;
+        ,
+        .expected = 85,
+    },
+    .{
         .name = "JSON hostile nesting is catchable",
         .source =
         \\function rejectsDepth(text) {
