@@ -3743,11 +3743,15 @@ pub const Interpreter = struct {
     /// so a JIT safepoint reached through a handler/getter can compact the cell
     /// and the helper resumes from the rewritten address.
     gc_temp_promise_roots: std.ArrayListUnmanaged(*promise.Promise) = .empty,
-    /// Default-initialized Object cells reserved by the fixed-shape allocation
-    /// loop. A bounded per-interpreter tranche amortizes shared-heap publication
-    /// across multiple step checkpoints; tracing this list keeps the unused
-    /// suffix alive until later loop entries consume it.
+    /// Default-initialized Object cells reserved by allocation-specialized VM
+    /// loops and sustained native private builders. A bounded per-interpreter
+    /// tranche amortizes shared-heap publication; tracing this list keeps the
+    /// unused suffix alive until later allocations consume it.
     gc_object_reserve: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// Keep one-shot native builders on exact single-cell allocation. Once one
+    /// Interpreter invocation proves sustained private-container demand, later
+    /// allocations may refill the traced reserve in bounded batches.
+    gc_unpublished_object_warmup: u8 = 0,
     /// Number of currently running shared-realm Thread workers. Fixed-shape
     /// allocation uses a larger reserve as soon as a worker can overlap its
     /// creator, while creator-only execution stays on checkpoint-sized batches.
@@ -10989,6 +10993,43 @@ pub const Interpreter = struct {
         // the prototype instead of zeroing the large Object payload a second
         // time on the dominant allocation path.
         obj.proto = self.objectProto();
+        return Value.obj(obj);
+    }
+
+    /// Allocate a container that cannot become observable until its native
+    /// builder publishes the complete result. Precise-GC realms amortize slab,
+    /// heap-metadata, and ownership publication locks across a bounded batch;
+    /// the unused suffix stays in `gc_object_reserve`, which the collector
+    /// traces and relocates as an ordinary Interpreter root. Arena mode keeps
+    /// its one-allocation behavior and OOM footprint unchanged.
+    fn takeUnpublishedObjectAllocation(self: *Interpreter) EvalError!*value.Object {
+        if (self.gc == null) return gc_mod.allocObject(null, self.arena);
+        if (self.gc_object_reserve.items.len == 0) {
+            const reserve_batch = 16;
+            if (self.gc_unpublished_object_warmup < reserve_batch) {
+                self.gc_unpublished_object_warmup += 1;
+                return gc_mod.allocObject(self.gc, self.arena);
+            }
+            try self.gc_object_reserve.ensureUnusedCapacity(self.arena, reserve_batch);
+            var fresh: [reserve_batch]*value.Object = undefined;
+            const count = try gc_mod.allocObjectBatch(self.gc, self.arena, &fresh);
+            std.debug.assert(count != 0);
+            for (fresh[0..count]) |object|
+                self.gc_object_reserve.appendAssumeCapacity(object);
+        }
+        return self.gc_object_reserve.pop().?;
+    }
+
+    pub fn newUnpublishedObject(self: *Interpreter) EvalError!Value {
+        const obj = try self.takeUnpublishedObjectAllocation();
+        obj.proto = self.objectProto();
+        return Value.obj(obj);
+    }
+
+    pub fn newUnpublishedArray(self: *Interpreter) EvalError!Value {
+        const obj = try self.takeUnpublishedObjectAllocation();
+        obj.is_array = true;
+        obj.proto = self.arrayProto();
         return Value.obj(obj);
     }
 

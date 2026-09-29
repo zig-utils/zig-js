@@ -4172,7 +4172,7 @@ const JsonParser = struct {
 
     fn parseArray(p: *JsonParser) JErr!JsonParsed {
         p.i += 1; // [
-        const result = try p.interp.newArray();
+        const result = try p.interp.newUnpublishedArray();
         var elements: std.ArrayListUnmanaged(*JsonParseRecord) = .empty;
         p.skipWs();
         if (p.i < p.s.len and p.s[p.i] == ']') {
@@ -4212,7 +4212,7 @@ const JsonParser = struct {
 
     fn parseObject(p: *JsonParser) JErr!JsonParsed {
         p.i += 1; // {
-        const result = try p.interp.newObject();
+        const result = try p.interp.newUnpublishedObject();
         var entries: JsonParseEntries = .{};
         p.skipWs();
         if (p.i < p.s.len and p.s[p.i] == '}') {

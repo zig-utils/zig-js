@@ -14053,6 +14053,31 @@ test "JSON parse private arrays isolate shared no-GIL callers" {
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
+test "JSON parse batches private object cells only after sustained use" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+
+    const batches_before = gc_mod.objectBatchCellsForTesting();
+    const cold = try ctx.evaluate(
+        \\var coldTotal = 0;
+        \\for (var i = 0; i < 16; i++) coldTotal += JSON.parse('{"value":1}').value;
+        \\coldTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 16), cold.asNum());
+    try std.testing.expectEqual(batches_before, gc_mod.objectBatchCellsForTesting());
+
+    const sustained = try ctx.evaluate(
+        \\var sustainedTotal = 0;
+        \\for (var i = 0; i < 17; i++) sustainedTotal += JSON.parse('{"value":1}').value;
+        \\sustainedTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 17), sustained.asNum());
+    try std.testing.expectEqual(@as(u64, 16), gc_mod.objectBatchCellsForTesting() - batches_before);
+}
+
 test "JSON stringify key snapshots isolate shared no-GIL callers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
