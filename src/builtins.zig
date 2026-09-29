@@ -2881,6 +2881,54 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 
 // ---- JSON --------------------------------------------------------------
 
+const JsonSnapshotBacking = struct {
+    fixed: std.heap.FixedBufferAllocator,
+    fallback: std.mem.Allocator,
+
+    fn init(storage: []u8, fallback: std.mem.Allocator) JsonSnapshotBacking {
+        return .{ .fixed = .init(storage), .fallback = fallback };
+    }
+
+    fn allocator(self: *JsonSnapshotBacking) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *JsonSnapshotBacking = @ptrCast(@alignCast(ctx));
+        return self.fixed.allocator().rawAlloc(len, alignment, ret_addr) orelse
+            self.fallback.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *JsonSnapshotBacking = @ptrCast(@alignCast(ctx));
+        if (self.fixed.ownsSlice(memory))
+            return self.fixed.allocator().rawResize(memory, alignment, new_len, ret_addr);
+        return self.fallback.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *JsonSnapshotBacking = @ptrCast(@alignCast(ctx));
+        if (self.fixed.ownsSlice(memory))
+            return self.fixed.allocator().rawRemap(memory, alignment, new_len, ret_addr);
+        return self.fallback.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *JsonSnapshotBacking = @ptrCast(@alignCast(ctx));
+        if (self.fixed.ownsSlice(memory))
+            self.fixed.allocator().rawFree(memory, alignment, ret_addr)
+        else
+            self.fallback.rawFree(memory, alignment, ret_addr);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+};
+
 pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
@@ -2888,10 +2936,14 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     defer leaveActiveNativeRealm(self, realm);
     const a = self.arena;
     const temporary_allocator = gc_mod.temporaryAllocator(a);
+    // Keep the ordinary small-object key vectors off the shared heap. The
+    // fallback remains exact for wide objects, deletion histories, and accessors.
+    var key_snapshot_storage: [4096]u8 align(@alignOf(usize)) = undefined;
+    var key_snapshot_backing = JsonSnapshotBacking.init(&key_snapshot_storage, temporary_allocator);
     var key_snapshot_arena: ?std.heap.ArenaAllocator = if (temporary_allocator.ptr == a.ptr and temporary_allocator.vtable == a.vtable)
         null
     else
-        std.heap.ArenaAllocator.init(temporary_allocator);
+        std.heap.ArenaAllocator.init(key_snapshot_backing.allocator());
     defer if (key_snapshot_arena) |*arena| arena.deinit();
     var st = Stringifier{
         .self = self,
@@ -4340,6 +4392,23 @@ test "JSON stringifier emits flat Latin-1 into prepared output without allocatio
     var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
     try writeJsonValueString(unavailable.allocator(), &output, string);
     try std.testing.expectEqualStrings(expected, output.items);
+}
+
+test "JSON key snapshot arena spills past its stack backing without capping input" {
+    var storage: [128]u8 align(@alignOf(usize)) = undefined;
+    var backing = JsonSnapshotBacking.init(&storage, std.testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(backing.allocator());
+    defer arena.deinit();
+
+    const local = try arena.allocator().alloc(u8, 16);
+    try std.testing.expect(backing.fixed.ownsSlice(local));
+    @memset(local, 0xa5);
+
+    const spilled = try arena.allocator().alloc(u8, 4096);
+    try std.testing.expect(!backing.fixed.ownsSlice(spilled));
+    @memset(spilled, 0x5a);
+    try std.testing.expectEqual(@as(u8, 0xa5), local[0]);
+    try std.testing.expectEqual(@as(u8, 0x5a), spilled[spilled.len - 1]);
 }
 
 test "JSON parse record indexes install exact seeded contexts failure atomically" {
