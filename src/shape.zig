@@ -439,6 +439,14 @@ pub const Shape = struct {
         present: u32,
     };
 
+    pub const DataWritePlan = union(enum) {
+        present: u32,
+        transition: struct {
+            shape: *Shape,
+            slot: u32,
+        },
+    };
+
     const LookupTree = PersistentStringTree(LookupState);
     const TransitionList = ConcurrentStringSkipList(*Shape);
 
@@ -503,6 +511,32 @@ pub const Shape = struct {
         return self.transitionFromState(name, self.lookupState(name));
     }
 
+    /// Resolve the shape operation for a low-level own-data write. A cached
+    /// immutable edge already proves the current state: an addition child means
+    /// the name is absent/deleted, while a deletion child means the parent still
+    /// contains the slot being removed. Reuse that proof before walking the
+    /// parent chain; cache misses retain the complete lookup/transition path.
+    pub fn planDataWrite(self: *Shape, name: []const u8) std.mem.Allocator.Error!DataWritePlan {
+        if (self.findTransitionCached(name)) |child| {
+            if (child.deleted) return .{ .present = child.slot };
+            bumpShapeStat("transition_requests");
+            bumpShapeStat("transition_hits");
+            return .{ .transition = .{ .shape = child, .slot = child.slot } };
+        }
+        const state = self.lookupState(name);
+        return switch (state) {
+            .present => |slot| .{ .present = slot },
+            .absent => {
+                const child = try self.transitionFromStateAfterCacheMiss(name, state);
+                return .{ .transition = .{ .shape = child, .slot = child.slot } };
+            },
+            .deleted => |slot| .{ .transition = .{
+                .shape = try self.transitionFromStateAfterCacheMiss(name, state),
+                .slot = slot,
+            } },
+        };
+    }
+
     pub fn transitionFromState(self: *Shape, name: []const u8, state: LookupState) std.mem.Allocator.Error!*Shape {
         if (state == .present) return self;
         // An immediate delete/re-add is an exact undo: return to the immutable
@@ -516,6 +550,52 @@ pub const Shape = struct {
             return child;
         }
 
+        switch (self.lockTransitionsOrCached(name)) {
+            .locked => {},
+            .cached => |child| {
+                bumpShapeStat("transition_hits");
+                return child;
+            },
+        }
+        defer self.transition_lock.unlock();
+
+        if (self.findTransitionCached(name)) |child| {
+            bumpShapeStat("transition_hits");
+            return child;
+        }
+        bumpShapeStat("transition_misses");
+        const arena = self.owner.arena;
+        const owned = try arena.dupe(u8, name);
+        const child = try arena.create(Shape);
+        const slot = switch (state) {
+            .deleted => |deleted_slot| deleted_slot,
+            .absent => self.count,
+            .present => unreachable,
+        };
+        const lookup_root = try self.nextLookupRoot(owned, slot, false);
+        child.* = .{
+            .parent = self,
+            .name = owned,
+            .slot = slot,
+            .deleted = false,
+            .count = if (state == .absent) self.count + 1 else self.count,
+            .live_count = self.live_count + 1,
+            .depth = self.depth + 1,
+            .lookup_root = lookup_root,
+            .owner = self.owner,
+        };
+        try self.publishTransition(child);
+        return child;
+    }
+
+    /// Complete a transition after an exact cache miss. The writer acquisition
+    /// and its recheck still close the concurrent-publication race; only the
+    /// redundant lock-free probe is omitted.
+    fn transitionFromStateAfterCacheMiss(self: *Shape, name: []const u8, state: LookupState) std.mem.Allocator.Error!*Shape {
+        std.debug.assert(state != .present);
+        if (state == .deleted and self.deleted and self.name != null and std.mem.eql(u8, self.name.?, name))
+            return self.parent.?;
+        bumpShapeStat("transition_requests");
         switch (self.lockTransitionsOrCached(name)) {
             .locked => {},
             .cached => |child| {
@@ -700,6 +780,35 @@ test "shape transitions share structure and assign sequential slots" {
     const sa2 = try root.transition("a");
     const sab2 = try sa2.transition("b");
     try std.testing.expectEqual(sab, sab2);
+}
+
+test "data write plans distinguish cached additions and deletions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    const a = try root.transition("a");
+    const ab = try a.transition("b");
+
+    switch (try root.planDataWrite("a")) {
+        .transition => |transition| {
+            try std.testing.expectEqual(a, transition.shape);
+            try std.testing.expectEqual(@as(u32, 0), transition.slot);
+        },
+        .present => return error.TestUnexpectedResult,
+    }
+
+    const without_a = (try ab.deleteTransition("a")).?;
+    switch (try ab.planDataWrite("a")) {
+        .present => |slot| try std.testing.expectEqual(@as(u32, 0), slot),
+        .transition => return error.TestUnexpectedResult,
+    }
+    switch (try without_a.planDataWrite("a")) {
+        .transition => |transition| {
+            try std.testing.expectEqual(ab, transition.shape);
+            try std.testing.expectEqual(@as(u32, 0), transition.slot);
+        },
+        .present => return error.TestUnexpectedResult,
+    }
 }
 
 test "transition map keys are deterministic and domain separated for a fixed realm seed" {

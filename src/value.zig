@@ -6446,7 +6446,7 @@ pub const Object = struct {
     /// only the unnecessary per-object mutex is omitted. The caller must stop
     /// using this entry point before publishing any path to the object.
     pub fn setOwnUnpublished(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
-        try self.setOwnUnlocked(arena, root, name, v);
+        try self.setOwnUnpublishedUnlocked(arena, root, name, v);
     }
 
     /// Publish one low-level data value and its final attributes as a single
@@ -6544,6 +6544,55 @@ pub const Object = struct {
             .absent => child.slot,
             .present => unreachable,
         };
+        if (target_slot < self.slotsItems().len) {
+            self.slotsItems()[target_slot] = v;
+        } else {
+            try self.appendSlot(arena, v);
+        }
+        self.publishShapeUnlocked(child);
+        if (canonicalIndex(name) != null) {
+            self.has_indexed_property.store(true, .monotonic);
+            self.indexed_own_seen.store(true, .release);
+        }
+        // A new data key on an accessor-bearing object records its creation order
+        // (a data↔accessor conversion keeps its position; an explicit delete
+        // operation makes a genuinely re-added key land at the end).
+        if (pending_order_key) |stable| {
+            self.keyOrder().?.appendAssumeCapacity(.{ .key = stable, .owned = false });
+            pending_order_key = null;
+        }
+        self.maybeCompactKeyOrderUnlocked(arena);
+    }
+
+    fn setOwnUnpublishedUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
+        gcBarrier(self, v); // stored into this cell's slots on either path below
+        const base = self.shape orelse root;
+        const transition = switch (try base.planDataWrite(name)) {
+            .present => |slot| {
+                self.slotsItems()[slot] = v;
+                return;
+            },
+            .transition => |planned| planned,
+        };
+        const child = transition.shape;
+        var pending_order_key: ?[]const u8 = null;
+        if (self.keyOrder()) |order| {
+            const should_append = keyOrderNeedsAdd(order, name);
+            if (should_append) {
+                const alloc = try self.keyOrderAllocator(arena);
+                try order.ensureUnusedCapacity(alloc, 1);
+                // `planDataWrite` either returns a child whose immutable
+                // arena-owned operation name is `name`, or undoes an immediate
+                // delete and returns its parent. In that undo case `base` is
+                // the matching delete operation. Either slice outlives Object.
+                pending_order_key = if (child.name) |stable|
+                    if (std.mem.eql(u8, stable, name)) stable else base.name.?
+                else
+                    base.name.?;
+                std.debug.assert(std.mem.eql(u8, pending_order_key.?, name));
+            }
+        }
+        const target_slot = transition.slot;
         if (target_slot < self.slotsItems().len) {
             self.slotsItems()[target_slot] = v;
         } else {
@@ -7974,6 +8023,34 @@ test "ordinary named descriptor snapshots are coherent across representations" {
     }
     try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+}
+
+test "cached deletion transitions preserve an existing data write" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var keeper = Object{};
+    var deleter = Object{};
+    for ([_]*Object{ &keeper, &deleter }) |object| {
+        try object.setOwn(arena, root, "a", Value.num(1));
+        try object.setOwn(arena, root, "b", Value.num(2));
+    }
+    const shared_shape = keeper.shape.?;
+    try std.testing.expectEqual(shared_shape, deleter.shape.?);
+
+    try std.testing.expect(try deleter.deleteNamedDataOwn(arena, root, "a"));
+    try keeper.setOwnUnpublished(arena, root, "a", Value.num(9));
+
+    try std.testing.expectEqual(shared_shape, keeper.shape.?);
+    try std.testing.expectEqual(@as(f64, 9), keeper.getOwn("a").?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), keeper.getOwn("b").?.asNum());
+    try std.testing.expect(deleter.getOwn("a") == null);
+
+    try deleter.setOwnUnpublished(arena, root, "a", Value.num(7));
+    try std.testing.expectEqual(shared_shape, deleter.shape.?);
+    try std.testing.expectEqual(@as(f64, 7), deleter.getOwn("a").?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), deleter.getOwn("b").?.asNum());
 }
 
 test "stable own data key snapshots preserve order and revalidate representation" {
