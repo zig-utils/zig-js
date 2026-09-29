@@ -13786,6 +13786,32 @@ test "JSON stringify snapshots enumerable keys before serializing values" {
         \\    value: 3, writable: true, enumerable: true, configurable: true
         \\  });
         \\  var ordinaryResult = JSON.stringify(ordinary);
+        \\  var updated = {};
+        \\  Object.defineProperty(updated, "first", {
+        \\    enumerable: true,
+        \\    get: function () { updated.later = 9; return 1; }
+        \\  });
+        \\  Object.defineProperty(updated, "later", {
+        \\    value: 3, writable: true, enumerable: true, configurable: true
+        \\  });
+        \\  var updatedResult = JSON.stringify(updated);
+        \\  var accessorTrace = [];
+        \\  var accessor = {};
+        \\  Object.defineProperty(accessor, "first", {
+        \\    enumerable: true,
+        \\    get: function () {
+        \\      Object.defineProperty(accessor, "later", {
+        \\        enumerable: true,
+        \\        configurable: true,
+        \\        get: function () { accessorTrace.push("later"); return 8; }
+        \\      });
+        \\      return 1;
+        \\    }
+        \\  });
+        \\  Object.defineProperty(accessor, "later", {
+        \\    value: 3, writable: true, enumerable: true, configurable: true
+        \\  });
+        \\  var accessorResult = JSON.stringify(accessor);
         \\  var inherited = { later: 2 };
         \\  var deleted = Object.create(inherited);
         \\  Object.defineProperty(deleted, "first", {
@@ -13810,6 +13836,9 @@ test "JSON stringify snapshots enumerable keys before serializing values" {
         \\  var hidden = {};
         \\  Object.defineProperty(hidden, "value", { value: 7, enumerable: false });
         \\  return ordinaryResult === '{"first":1,"later":3}' &&
+        \\    updatedResult === '{"first":1,"later":9}' &&
+        \\    accessorResult === '{"first":1,"later":8}' &&
+        \\    accessorTrace.join(",") === "later" &&
         \\    deletedResult === '{"first":1,"later":2}' &&
         \\    proxyResult === '{"first":1,"later":3}' &&
         \\    trace.join(",") === "get:toJSON,ownKeys,desc:first,desc:later,get:first,get:later" &&

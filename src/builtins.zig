@@ -3087,6 +3087,16 @@ const Stringifier = struct {
     /// SerializeJSONProperty: write `holder[key]` (after toJSON + replacer +
     /// wrapper unwrapping) into `buf`. Returns false when the value is omitted.
     fn serialize(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, key: []const u8) HostError!bool {
+        return st.serializeProperty(buf, holder, key, null);
+    }
+
+    fn serializeProperty(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        holder: Value,
+        key: []const u8,
+        ordinary_object: ?*value.Object,
+    ) HostError!bool {
         const self = st.self;
         // Count each nested serialize toward the call-depth limit so a replacer
         // that fabricates ever-deeper values (`(k,v)=>[v]`) — non-circular, so the
@@ -3095,6 +3105,17 @@ const Stringifier = struct {
         self.depth += 1;
         defer self.depth -= 1;
         try self.stackGuard();
+
+        // SerializeJSONProperty performs a live Get after the key list has been
+        // snapshotted. For a direct ordinary object, a current own data
+        // descriptor is that exact result; accessors and misses must still take
+        // the generic path so getter calls and inherited replacements remain
+        // observable. namedOwnPropertySnapshot keeps the value/descriptor read
+        // in one property-lock transaction for shared no-GIL realms.
+        if (ordinary_object) |object| switch (object.namedOwnPropertySnapshot(key)) {
+            .data => |own| return st.serializeLoaded(buf, own.value, holder, key),
+            .accessor, .absent => {},
+        };
         return st.serializeLoaded(buf, try self.getProperty(holder, key), holder, key);
     }
 
@@ -3226,6 +3247,7 @@ const Stringifier = struct {
         // grow Context backing until teardown.
         const key_allocator = st.key_snapshot_allocator orelse a;
         const keys = if (st.allow) |al| al else try st.jsonEnumerableObjectKeys(v.asObj(), shape, key_allocator);
+        const ordinary_object: ?*value.Object = if (jsonDirectOrdinaryObject(v.asObj(), shape)) shape else null;
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var count: usize = 0;
@@ -3243,7 +3265,7 @@ const Stringifier = struct {
             try writeJsonString(output_allocator, buf, value.decodeStringKey(k));
             try buf.append(output_allocator, ':');
             if (st.gap.len != 0) try buf.append(output_allocator, ' ');
-            if (!try st.serialize(buf, v, k)) {
+            if (!try st.serializeProperty(buf, v, k, ordinary_object)) {
                 buf.shrinkRetainingCapacity(mark);
                 continue;
             }
@@ -3273,12 +3295,7 @@ const Stringifier = struct {
         // A direct ordinary object with no dense elements or exotic own-key
         // provider can filter the same low-level ordered snapshot into bounded
         // backing. Every observable exotic continues through the interpreter.
-        if (object == shape and
-            object.elementsLen() == 0 and
-            object.hostClassHooks() == null and
-            object.moduleNs() == null and
-            object.typedArray() == null)
-        {
+        if (jsonDirectOrdinaryObject(object, shape)) {
             const keys = try shape.ownKeysWithScratch(snapshot_allocator, snapshot_allocator);
             // The outer slice is a fresh snapshot owned by snapshot_allocator;
             // compact it in place instead of allocating a second key vector.
@@ -3292,6 +3309,14 @@ const Stringifier = struct {
             return enumerable[0..enumerable_len];
         }
         return ownEnumerableKeys(st.self, object);
+    }
+
+    fn jsonDirectOrdinaryObject(object: *value.Object, shape: *value.Object) bool {
+        return object == shape and
+            object.elementsLen() == 0 and
+            object.hostClassHooks() == null and
+            object.moduleNs() == null and
+            object.typedArray() == null;
     }
 
     /// Emit a newline + the current indent when pretty-printing (no-op for the

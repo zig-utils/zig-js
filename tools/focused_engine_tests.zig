@@ -900,6 +900,33 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        // #1001: SerializeJSONObject may read a direct ordinary data slot, but
+        // every key's value is still live after the key-list snapshot. A prior
+        // getter can update it, replace it with an accessor, or delete it to
+        // expose an inherited property; the latter two must return to [[Get]].
+        .name = "JSON stringify keeps live ordinary property reads",
+        .source =
+        \\var checks = [];
+        \\var updated = {};
+        \\Object.defineProperty(updated, "first", { enumerable: true, get: function () { updated.later = 9; return 1; } });
+        \\Object.defineProperty(updated, "later", { value: 3, writable: true, enumerable: true, configurable: true });
+        \\checks.push(JSON.stringify(updated) === '{"first":1,"later":9}');
+        \\var accessor = {}, accessorCalls = 0;
+        \\Object.defineProperty(accessor, "first", { enumerable: true, get: function () {
+        \\  Object.defineProperty(accessor, "later", { enumerable: true, configurable: true, get: function () { accessorCalls++; return 8; } });
+        \\  return 1;
+        \\} });
+        \\Object.defineProperty(accessor, "later", { value: 3, writable: true, enumerable: true, configurable: true });
+        \\checks.push(JSON.stringify(accessor) === '{"first":1,"later":8}' && accessorCalls === 1);
+        \\var inherited = { later: 2 }, deleted = Object.create(inherited);
+        \\Object.defineProperty(deleted, "first", { enumerable: true, get: function () { delete deleted.later; return 1; } });
+        \\deleted.later = 3;
+        \\checks.push(JSON.stringify(deleted) === '{"first":1,"later":2}');
+        \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 7,
+    },
+    .{
         // #933 item 8b: every `(` that starts an AssignmentExpression asked
         // whether its matching `)` is followed by `=>`, each by scanning to the
         // match, so N nested groups rescanned the rest of the group N times.
