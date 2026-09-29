@@ -2997,12 +2997,18 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
         else => {},
     }
 
-    // Wrap the value in a holder { "": value } so toJSON/replacer apply to it.
-    const holder = (try self.newObject()).asObj();
-    try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(temporary_allocator);
-    if (!try st.serialize(&buf, Value.obj(holder), "")) return Value.undef();
+    if (st.replacer_fn == null) {
+        // SerializeJSONProperty's root holder is observable only as the `this`
+        // value of a callable replacer. Without one, its own "" data property
+        // can be supplied directly while preserving toJSON's key and receiver.
+        if (!try st.serializeRoot(&buf, arg(args, 0))) return Value.undef();
+    } else {
+        const holder = (try self.newObject()).asObj();
+        try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
+        if (!try st.serialize(&buf, Value.obj(holder), "")) return Value.undef();
+    }
     if (temporary_allocator.ptr == a.ptr and temporary_allocator.vtable == a.vtable)
         return try Value.strOwned(a, try buf.toOwnedSlice(a));
     return try Value.strAlloc(a, buf.items);
@@ -3034,9 +3040,28 @@ const Stringifier = struct {
         self.depth += 1;
         defer self.depth -= 1;
         try self.stackGuard();
+        return st.serializeLoaded(buf, try self.getProperty(holder, key), holder, key);
+    }
+
+    fn serializeRoot(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), root: Value) HostError!bool {
+        const self = st.self;
+        self.depth += 1;
+        defer self.depth -= 1;
+        try self.stackGuard();
+        return st.serializeLoaded(buf, root, Value.undef(), "");
+    }
+
+    fn serializeLoaded(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        initial: Value,
+        holder: Value,
+        key: []const u8,
+    ) HostError!bool {
+        const self = st.self;
         const a = self.arena;
         const output_allocator = st.output_allocator;
-        var v = try self.getProperty(holder, key);
+        var v = initial;
         if (v.isObject() and !v.asObj().is_symbol) {
             const tj = try self.getProperty(v, "toJSON");
             if (tj.isObject() and tj.asObj().isCallableObject())

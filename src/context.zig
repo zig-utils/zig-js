@@ -13771,6 +13771,27 @@ test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }
 
+test "JSON stringify exposes its root holder only to a callable replacer" {
+    try std.testing.expect((try evalIn(
+        \\(function () {
+        \\  var source = {value: 7, toJSON(key) {
+        \\    if (key !== '' || this !== source) throw 91;
+        \\    return {value: this.value};
+        \\  }};
+        \\  var receiver, replaced;
+        \\  var encoded = JSON.stringify(source, function (key, value) {
+        \\    if (key === '') { receiver = this; replaced = value; }
+        \\    return value;
+        \\  });
+        \\  return encoded === '{"value":7}' && replaced.value === 7 &&
+        \\    receiver !== source && receiver[''] === source &&
+        \\    Reflect.ownKeys(receiver).length === 1 &&
+        \\    JSON.stringify({a: 1, b: 2}, ['a']) === '{"a":1}' &&
+        \\    JSON.stringify(3) === '3';
+        \\})()
+    )).asBool());
+}
+
 test "JSON StringData readers canonicalize physical storage" {
     try std.testing.expect((try evalIn(
         \\const key = "caf\u00e9\u00ff";
