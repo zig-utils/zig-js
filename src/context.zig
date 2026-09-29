@@ -1880,6 +1880,15 @@ pub const GcCellBacking = struct {
         std.math.maxInt(usize),
     },
     bucket_addr_max: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    /// Ever-issued slab envelope for rejecting ordinary conservative machine
+    /// words before taking any size-class lock. Chunk trimming deliberately
+    /// leaves this range wide: stale inclusion costs only the existing exact
+    /// lookup, while stale exclusion could hide a live cell. The sequence word
+    /// gives lock-free readers one coherent min/max pair as concurrently added
+    /// chunks expand either edge.
+    conservative_addr_sequence: std.atomic.Value(u64) = .init(0),
+    conservative_addr_min: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
+    conservative_addr_max: std.atomic.Value(usize) = .init(0),
 
     const LockAcquireStats = struct {
         contended: bool = false,
@@ -2058,12 +2067,39 @@ pub const GcCellBacking = struct {
         self.bucket_addr_index[idx].insertAssumeCapacity(self.chunkAddrInsertIndexLocked(idx, start), addr_entry);
         self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
         self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
+        self.expandConservativeAddressRange(start, end);
         self.bucket_chunk_counts[idx] += 1;
         self.bucket_capacity_bytes[idx] += chunk.len;
         self.bucket_capacity_slots[idx] += slots;
         self.bucket_owns_hint[idx] = chunk_idx;
         self.bucket_bump_hint[idx] = chunk_idx;
         return true;
+    }
+
+    fn expandConservativeAddressRange(self: *GcCellBacking, start: usize, end: usize) void {
+        const old_min = self.conservative_addr_min.load(.monotonic);
+        const old_max = self.conservative_addr_max.load(.monotonic);
+        if (start >= old_min and end <= old_max) return;
+        const sequence = self.conservative_addr_sequence.fetchAdd(1, .acq_rel);
+        std.debug.assert(sequence & 1 == 0);
+        self.conservative_addr_min.store(@min(old_min, start), .monotonic);
+        self.conservative_addr_max.store(@max(old_max, end), .monotonic);
+        const published = self.conservative_addr_sequence.fetchAdd(1, .release);
+        std.debug.assert(published == sequence + 1);
+    }
+
+    fn conservativeAddressMayBeOwned(self: *GcCellBacking, address: usize) bool {
+        while (true) {
+            const before = self.conservative_addr_sequence.load(.acquire);
+            if (before & 1 != 0) {
+                std.atomic.spinLoopHint();
+                continue;
+            }
+            const min = self.conservative_addr_min.load(.monotonic);
+            const max = self.conservative_addr_max.load(.monotonic);
+            const after = self.conservative_addr_sequence.load(.acquire);
+            if (before == after) return address >= min and address < max;
+        }
     }
 
     fn recordFreshBump(self: *GcCellBacking, idx: usize, chunk_idx: usize, off: usize) void {
@@ -2247,6 +2283,7 @@ pub const GcCellBacking = struct {
     /// indexes. The collector still validates header magic and the exact payload
     /// extent; this method only maps owned issued storage back to its slot base.
     pub fn classifyConservativeInterior(self: *GcCellBacking, address: usize) @import("gc").InteriorOwnership {
+        if (!self.conservativeAddressMayBeOwned(address)) return .outside;
         const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint < bucket_count) {
             self.acquireOwnershipBucket(hint, .conservative_interior);
@@ -3524,6 +3561,69 @@ test "GC cell backing rejects pointers outside bucket address spans before scann
     try std.testing.expect(@intFromPtr(cell.ptr) < backing.bucket_addr_max[idx]);
 }
 
+test "GC cell backing rejects conservative words outside its slab envelope without bucket locks" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const allocator = backing.allocator();
+    const cell = try allocator.alignedAlloc(u8, .@"16", 200);
+    backing.publishCellAllocation(@ptrCast(cell.ptr), 200);
+    defer {
+        backing.unpublishCellAllocation(@ptrCast(cell.ptr), 200);
+        allocator.free(cell);
+    }
+
+    const before = backing.bucket_lock_acquisitions_for_testing;
+    try std.testing.expectEqual(
+        @import("gc").InteriorOwnership.outside,
+        backing.classifyConservativeInterior(0),
+    );
+    try std.testing.expectEqualSlices(usize, &before, &backing.bucket_lock_acquisitions_for_testing);
+
+    switch (backing.classifyConservativeInterior(@intFromPtr(cell.ptr + 16))) {
+        .allocation => |base| try std.testing.expectEqual(@intFromPtr(cell.ptr), @intFromPtr(base)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "GC cell backing publishes coherent conservative slab envelope expansion" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+
+    const base: usize = 1 << 30;
+    const width: usize = 1 << 20;
+    const iterations: usize = 10_000;
+    var completed: std.atomic.Value(usize) = .init(0);
+    const Expander = struct {
+        fn run(target: *GcCellBacking, progress: *std.atomic.Value(usize)) void {
+            for (1..iterations + 1) |step| {
+                target.expandConservativeAddressRange(base - step, base + width + step);
+                progress.store(step, .release);
+            }
+        }
+    };
+
+    const expander = try std.Thread.spawn(.{}, Expander.run, .{ &backing, &completed });
+    var coherent = true;
+    while (true) {
+        const step = completed.load(.acquire);
+        if (step != 0 and
+            (!backing.conservativeAddressMayBeOwned(base - step) or
+                !backing.conservativeAddressMayBeOwned(base + width + step - 1)))
+        {
+            coherent = false;
+            break;
+        }
+        if (step == iterations) break;
+        std.atomic.spinLoopHint();
+    }
+    expander.join();
+
+    try std.testing.expect(coherent);
+    try std.testing.expect(backing.conservativeAddressMayBeOwned(base - iterations));
+    try std.testing.expect(backing.conservativeAddressMayBeOwned(base + width + iterations - 1));
+    try std.testing.expect(!backing.conservativeAddressMayBeOwned(0));
+}
+
 test "GC cell backing recognizes exact issued allocation starts" {
     var backing = GcCellBacking{ .inner = std.testing.allocator };
     defer backing.deinit();
@@ -3744,6 +3844,7 @@ test "GC cell backing drops all reuse bitmaps when trimming its whole bucket" {
     defer std.testing.allocator.free(cells);
 
     for (cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", 200);
+    const retired_address = @intFromPtr(cells[cells.len - 1].ptr);
     for (cells) |cell| a.free(cell);
     try std.testing.expectEqual(slots + 1, backing.bucket_free_counts[idx]);
 
@@ -3753,6 +3854,11 @@ test "GC cell backing drops all reuse bitmaps when trimming its whole bucket" {
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_issued_slots[idx]);
+    // Trimming may leave the lock-free envelope conservative, but the exact
+    // chunk indexes still reject the retired address. Never shrinking the
+    // envelope prevents a concurrent reader from missing a still-live chunk.
+    try std.testing.expect(backing.conservativeAddressMayBeOwned(retired_address));
+    try std.testing.expect(std.meta.activeTag(backing.classifyConservativeInterior(retired_address)) == .outside);
 }
 
 test "GC cell backing keeps non-empty tail and empty inner chunks" {
