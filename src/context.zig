@@ -13771,6 +13771,39 @@ test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }
 
+test "JSON stringify preserves observable array index keys and sparse reads" {
+    try std.testing.expect((try evalIn(
+        \\(function () {
+        \\  var toJSONKeys = [];
+        \\  var retainedKey;
+        \\  var values = [{ toJSON: function (key) {
+        \\    toJSONKeys.push(key);
+        \\    retainedKey = key;
+        \\    return 1;
+        \\  } }, 2];
+        \\  var replacerKeys = [];
+        \\  var encoded = JSON.stringify(values, function (key, value) {
+        \\    if (key !== "") replacerKeys.push(key);
+        \\    return value;
+        \\  });
+        \\  var sparse = [];
+        \\  sparse.length = 2;
+        \\  Object.setPrototypeOf(sparse, { 0: 7 });
+        \\  Object.defineProperty(sparse, "1", {
+        \\    configurable: true,
+        \\    get: function () { return 8; }
+        \\  });
+        \\  var wide = new Array(11);
+        \\  wide[10] = { toJSON: function (key) { return key; } };
+        \\  return encoded === "[1,2]" &&
+        \\    toJSONKeys.join(",") === "0" && retainedKey === "0" &&
+        \\    replacerKeys.join(",") === "0,1" &&
+        \\    JSON.stringify(sparse) === "[7,8]" &&
+        \\    JSON.parse(JSON.stringify(wide))[10] === "10";
+        \\})()
+    )).asBool());
+}
+
 test "JSON stringify snapshots enumerable keys before serializing values" {
     try std.testing.expect((try evalIn(
         \\(function () {

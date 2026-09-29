@@ -900,6 +900,24 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        // #1003: array-index keys are borrowed stack spellings internally, but
+        // every callback observes an ordinary durable JavaScript String and
+        // holes/accessors still use the full [[Get]] path.
+        .name = "JSON stringify preserves array index callback keys",
+        .source =
+        \\var toJSONKey, retainedKey, replacerKeys = [];
+        \\var values = [{ toJSON: function (key) { toJSONKey = key; retainedKey = key; return 1; } }, 2];
+        \\var encoded = JSON.stringify(values, function (key, value) { if (key !== "") replacerKeys.push(key); return value; });
+        \\var sparse = []; sparse.length = 2; Object.setPrototypeOf(sparse, { 0: 7 });
+        \\Object.defineProperty(sparse, "1", { configurable: true, get: function () { return 8; } });
+        \\var wide = new Array(11); wide[10] = { toJSON: function (key) { return key; } };
+        \\[encoded === "[1,2]", toJSONKey === "0" && retainedKey === "0", replacerKeys.join(",") === "0,1",
+        \\ JSON.stringify(sparse) === "[7,8]", JSON.parse(JSON.stringify(wide))[10] === "10"]
+        \\  .reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 31,
+    },
+    .{
         // #1001: SerializeJSONObject may read a direct ordinary data slot, but
         // every key's value is still live after the key-list snapshot. A prior
         // getter can update it, replace it with an accessor, or delete it to

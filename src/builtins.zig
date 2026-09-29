@@ -3235,7 +3235,11 @@ const Stringifier = struct {
         while (i < len) : (i += 1) {
             if (i != 0) try buf.append(output_allocator, ',');
             try st.newlineIndent(buf);
-            const key = try std.fmt.allocPrint(a, "{d}", .{i});
+            // SerializeJSONProperty consumes the decimal index synchronously;
+            // toJSON/replacer callbacks materialize their own JS String before
+            // user code runs. Keep this transient spelling off Context backing.
+            var key_storage: [32]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_storage, "{d}", .{i}) catch unreachable;
             if (!try st.serialize(buf, holder, key)) try buf.appendSlice(output_allocator, "null");
         }
         st.indent.shrinkRetainingCapacity(outer);
