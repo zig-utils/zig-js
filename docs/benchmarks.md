@@ -23,6 +23,7 @@ order, or attribution contract:
 ```sh
 zig build representative-benchmark \
   -Drepresentative-benchmark-families=json \
+  -Drepresentative-benchmark-zig-gc-repo=/path/to/clean/zig-gc \
   -Drepresentative-benchmark-raw-out=docs/.data/representative-json-YYYY-MM-DD.tsv \
   -Drepresentative-benchmark-tier-attribution-out=docs/.data/representative-json-attribution-YYYY-MM-DD.json \
   -Drepresentative-benchmark-markdown-out=docs/.data/representative-json-YYYY-MM-DD.md
@@ -32,6 +33,10 @@ The report names the selected families and treats every unselected family as
 outside the report, never as a pass, failure, or exclusion. Full-work
 publication still requires the frozen seven samples per row and all normal
 clean-worktree, checksum, timing-floor, and attribution gates.
+When a runner is built against a non-sibling dependency checkout, the matching
+repository option is required so publication records and checks that exact Git
+revision. Reports also preserve SHA-256 identities for both engine runners and
+the frozen workload source.
 
 ## RegExp compiled-program retention diagnostic
 

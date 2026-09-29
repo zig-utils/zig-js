@@ -9,6 +9,7 @@ import {
 } from "./benchmark-comparison";
 import {
   DEFAULT_MANIFEST,
+  ROOT,
   loadManifest,
   validate as validateManifest,
 } from "./representative-matrix";
@@ -18,7 +19,7 @@ import {
   render as renderTierAttribution,
   validate as validateTierAttribution,
 } from "./representative-tier-attribution";
-import { run, writeText } from "./lib/home";
+import { checked, run, sha256File, writeText } from "./lib/home";
 // Inventory-visible module edges: tools/benchmark-comparison.ts and tools/representative-matrix.ts.
 declare const __filename: string;
 function requireValue(condition: boolean, message: string): void {
@@ -77,6 +78,38 @@ export function selectFamilies(
       families: families.map((family: any) => family.family),
       fullFamilyCount: manifest.implemented_families.length,
     },
+  };
+}
+export function runnerProvenance(
+  zigJs: string,
+  jsc: string,
+): Record<string, string> {
+  return {
+    "zig-js runner SHA-256": sha256File(zigJs),
+    "JavaScriptCore runner SHA-256": sha256File(jsc),
+    "workload source SHA-256": sha256File(
+      ROOT + "/bench/representative_comparison.js",
+    ),
+  };
+}
+export function exactRepositoryRevision(path: string): string {
+  const commit = checked(
+      ["git", "-C", path, "rev-parse", "HEAD"],
+      `cannot resolve repository revision for ${path}`,
+    ).trim(),
+    dirty = checked(
+      ["git", "-C", path, "status", "--porcelain", "--untracked-files=no"],
+      `cannot inspect repository status for ${path}`,
+    ).trim();
+  return commit + (dirty ? " (tracked worktree dirty)" : "");
+}
+export function dependencyProvenance(
+  zigGcRepository = ROOT + "/../zig-gc",
+  zigRegexRepository = ROOT + "/../zig-regex",
+): Record<string, string> {
+  return {
+    "zig-gc": exactRepositoryRevision(zigGcRepository),
+    "zig-regex": exactRepositoryRevision(zigRegexRepository),
   };
 }
 export function collect(
@@ -706,6 +739,20 @@ export function selfTest(): void {
     () => selectFamilies(manifest, "not-a-family"),
     "unknown representative family",
   );
+  expectFailure(
+    () => exactRepositoryRevision(ROOT + "/.not-a-repository"),
+    "cannot resolve repository revision",
+  );
+  const provenance = runnerProvenance(
+    ROOT + "/tools/representative-benchmark.ts",
+    ROOT + "/tools/representative-benchmark.ts",
+  );
+  requireValue(
+    Object.values(provenance).every((digest) => /^[0-9a-f]{64}$/.test(digest)) &&
+      provenance["zig-js runner SHA-256"] ===
+        provenance["JavaScriptCore runner SHA-256"],
+    "runner provenance did not preserve exact file identities",
+  );
   console.log(
     "OK representative benchmark self-test: matrix, frozen checksums, and timing floor verified",
   );
@@ -734,6 +781,8 @@ function main(): void {
       else if (name === "--samples") options.samples = Number(value);
       else if (name === "--lanes") options.lanes = value;
       else if (name === "--families") options.families = value;
+      else if (name === "--zig-gc-repo") options.zigGcRepo = value;
+      else if (name === "--zig-regex-repo") options.zigRegexRepo = value;
       else if (name === "--raw-out") options.raw = value;
       else if (name === "--tier-attribution-out") options.tierAttribution = value;
       else if (name === "--markdown-out") options.markdown = value;
@@ -763,6 +812,11 @@ function main(): void {
     "runner does not exist",
   );
   const info = metadata();
+  Object.assign(
+    info,
+    dependencyProvenance(options.zigGcRepo, options.zigRegexRepo),
+  );
+  Object.assign(info, runnerProvenance(args[0], args[1]));
   ensurePublishable(info, Boolean(options.raw || options.tierAttribution || options.markdown));
   requireValue(
     (!options.raw && !options.markdown) || Boolean(options.tierAttribution),

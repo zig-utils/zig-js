@@ -2381,6 +2381,12 @@ pub fn build(b: *std.Build) void {
         if (b.option([]const u8, "representative-benchmark-families", "Comma-separated frozen representative families to collect")) |families| {
             run_representative.addArgs(&.{ "--families", families });
         }
+        if (b.option([]const u8, "representative-benchmark-zig-gc-repo", "Git checkout used to build the representative zig-gc dependency")) |path| {
+            run_representative.addArgs(&.{ "--zig-gc-repo", path });
+        }
+        if (b.option([]const u8, "representative-benchmark-zig-regex-repo", "Git checkout used to build the representative zig-regex dependency")) |path| {
+            run_representative.addArgs(&.{ "--zig-regex-repo", path });
+        }
         if (b.option(bool, "representative-benchmark-quick", "Run one reduced representative validation sample") orelse false)
             run_representative.addArg("--quick");
         if (b.option([]const u8, "representative-benchmark-raw-out", "Write raw representative samples to this TSV path")) |path| {
