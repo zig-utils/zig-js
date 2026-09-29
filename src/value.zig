@@ -5412,6 +5412,19 @@ pub const Object = struct {
         return self.elementsItems()[i];
     }
 
+    /// Read one present dense own element only when the same index has no own
+    /// accessor. JSON serialization already knows the numeric index and can use
+    /// this exact ordinary-Array case without repeating generic string lookup.
+    /// Shared realms take the indexed transaction around both backing stores so
+    /// an accessor/data conversion cannot expose an impossible mixed state.
+    pub fn denseElementWithoutAccessor(self: *const Object, key: []const u8, i: usize) ?Value {
+        const indexed_locked = element_locks_enabled.load(.acquire);
+        if (indexed_locked) self.lockIndexedProperty();
+        defer if (indexed_locked) self.unlockIndexedProperty();
+        if (self.getAccessor(key) != null) return null;
+        return self.denseElement(i);
+    }
+
     pub fn denseElementIndices(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]usize {
         const elements_locked_33 = self.lockElements();
         defer self.unlockElements(elements_locked_33);

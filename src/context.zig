@@ -13804,6 +13804,41 @@ test "JSON stringify preserves observable array index keys and sparse reads" {
     )).asBool());
 }
 
+test "JSON stringify reads every array element live through observable fallbacks" {
+    try std.testing.expect((try evalIn(
+        \\(function () {
+        \\  var values = [{ toJSON: function () { values[1] = 9; return 1; } }, 2];
+        \\  var live = JSON.stringify(values) === "[1,9]";
+        \\  var accessorHits = 0;
+        \\  var accessor = [1, 2];
+        \\  Object.defineProperty(accessor, "1", {
+        \\    configurable: true,
+        \\    get: function () { accessorHits++; return 8; }
+        \\  });
+        \\  var accessorOk = JSON.stringify(accessor) === "[1,8]" && accessorHits === 1;
+        \\  var inherited = []; inherited.length = 2; inherited[1] = 4;
+        \\  Object.setPrototypeOf(inherited, { 0: 7 });
+        \\  var inheritedOk = JSON.stringify(inherited) === "[7,4]";
+        \\  var proxyGets = [];
+        \\  var proxy = new Proxy([3, 4], {
+        \\    get: function (target, key, receiver) {
+        \\      if (key === "0" || key === "1") proxyGets.push(key);
+        \\      return Reflect.get(target, key, receiver);
+        \\    }
+        \\  });
+        \\  var proxyOk = JSON.stringify(proxy) === "[3,4]" && proxyGets.join(",") === "0,1";
+        \\  var mappedOk = (function (a, b) {
+        \\    var encoded = JSON.stringify(arguments, function (key, value) {
+        \\      if (key === "0") b = 6;
+        \\      return value;
+        \\    });
+        \\    return encoded.indexOf("6") !== -1;
+        \\  })(1, 2);
+        \\  return live && accessorOk && inheritedOk && proxyOk && mappedOk;
+        \\})()
+    )).asBool());
+}
+
 test "JSON stringify snapshots enumerable keys before serializing values" {
     try std.testing.expect((try evalIn(
         \\(function () {

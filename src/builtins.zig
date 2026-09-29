@@ -3240,11 +3240,30 @@ const Stringifier = struct {
             // user code runs. Keep this transient spelling off Context backing.
             var key_storage: [32]u8 = undefined;
             const key = std.fmt.bufPrint(&key_storage, "{d}", .{i}) catch unreachable;
-            if (!try st.serialize(buf, holder, key)) try buf.appendSlice(output_allocator, "null");
+            if (!try st.serializeArrayElement(buf, holder, shape, key, i)) try buf.appendSlice(output_allocator, "null");
         }
         st.indent.shrinkRetainingCapacity(outer);
         try st.newlineIndent(buf);
         try buf.append(output_allocator, ']');
+    }
+
+    fn serializeArrayElement(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        holder: Value,
+        shape: *value.Object,
+        key: []const u8,
+        index: usize,
+    ) HostError!bool {
+        if (holder.isObject() and jsonDirectOrdinaryArray(holder.asObj(), shape)) {
+            try st.self.checkRestricted(shape);
+            // Read each element immediately before its callbacks: an earlier
+            // toJSON/replacer may mutate a later index. Accessors and holes fall
+            // through to full [[Get]] for getter/prototype observability.
+            if (shape.denseElementWithoutAccessor(key, index)) |loaded|
+                return st.serializeLoaded(buf, loaded, holder, key);
+        }
+        return st.serialize(buf, holder, key);
     }
 
     fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value, shape: *value.Object) HostError!void {
@@ -3348,6 +3367,15 @@ const Stringifier = struct {
     fn jsonDirectOrdinaryObject(object: *value.Object, shape: *value.Object) bool {
         return object == shape and
             object.elementsLen() == 0 and
+            object.hostClassHooks() == null and
+            object.moduleNs() == null and
+            object.typedArray() == null;
+    }
+
+    fn jsonDirectOrdinaryArray(object: *value.Object, shape: *value.Object) bool {
+        return object == shape and
+            object.is_array and
+            !object.is_arguments and
             object.hostClassHooks() == null and
             object.moduleNs() == null and
             object.typedArray() == null;

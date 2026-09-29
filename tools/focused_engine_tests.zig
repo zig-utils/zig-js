@@ -900,6 +900,30 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        // #1004: only a current present dense own element bypasses generic
+        // [[Get]]. Every observable indexed-property case keeps the slow path.
+        .name = "JSON stringify reads dense array elements live",
+        .source =
+        \\var values = [{ toJSON: function () { values[1] = 9; return 1; } }, 2];
+        \\var live = JSON.stringify(values) === "[1,9]";
+        \\var hits = 0, accessor = [1, 2];
+        \\Object.defineProperty(accessor, "1", { configurable: true, get: function () { hits++; return 8; } });
+        \\var accessorOk = JSON.stringify(accessor) === "[1,8]" && hits === 1;
+        \\var inherited = []; inherited.length = 2; inherited[1] = 4; Object.setPrototypeOf(inherited, { 0: 7 });
+        \\var inheritedOk = JSON.stringify(inherited) === "[7,4]";
+        \\var gets = [], proxy = new Proxy([3, 4], { get: function (target, key, receiver) {
+        \\  if (key === "0" || key === "1") gets.push(key); return Reflect.get(target, key, receiver);
+        \\} });
+        \\var proxyOk = JSON.stringify(proxy) === "[3,4]" && gets.join(",") === "0,1";
+        \\var mappedOk = (function (a, b) { var encoded = JSON.stringify(arguments, function (key, value) {
+        \\  if (key === "0") b = 6; return value;
+        \\}); return encoded.indexOf("6") !== -1; })(1, 2);
+        \\[live, accessorOk, inheritedOk, proxyOk, mappedOk]
+        \\  .reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
+        ,
+        .expected = 31,
+    },
+    .{
         // #1003: array-index keys are borrowed stack spellings internally, but
         // every callback observes an ordinary durable JavaScript String and
         // holes/accessors still use the full [[Get]] path.
