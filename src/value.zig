@@ -6205,10 +6205,11 @@ pub const Object = struct {
         slot: u32,
     };
 
-    /// One lock-scoped snapshot of an ordinary named descriptor. Interpreter
+    /// One coherent snapshot of an ordinary named descriptor. Interpreter
     /// [[Get]]/[[Set]] paths need accessor/data/attribute state from the same
-    /// object; probing each map separately multiplies atomic lock traffic and
-    /// can combine states from different concurrent mutations.
+    /// object; probing each map separately can combine states from different
+    /// concurrent mutations. Shared realms serialize the mutable data state;
+    /// single-owner realms use the same representation checks without a mutex.
     pub const NamedOwnPropertySnapshot = union(enum) {
         absent,
         data: struct {
@@ -6284,8 +6285,9 @@ pub const Object = struct {
         // An exact accessor-map snapshot and a miss in the acquire-published
         // immutable Shape are a complete absent descriptor even when this
         // object has unrelated accessors. A concurrent insertion may linearize
-        // after either observation; present data state still takes
-        // `property_lock` before touching mutable storage.
+        // after either observation. Once an object can be observed concurrently,
+        // present data state still takes `property_lock` before touching mutable
+        // storage; single-owner realms need only the same representation checks.
         if (self.accessorSnapshot(name)) |accessor| return .{ .accessor = accessor };
         var observed_shape: ?*Shape = null;
         var observed_slot: ?u32 = null;
@@ -6293,8 +6295,8 @@ pub const Object = struct {
         const published_slot = (@constCast(published)).lookup(name) orelse return .absent;
         observed_shape = published;
         observed_slot = published_slot;
-        self.lockPropertiesFor(.named_snapshot);
-        defer self.unlockProperties();
+        const properties_locked = self.lockPropertySnapshot();
+        defer self.unlockPropertySnapshot(properties_locked);
         if (self.getAccessorUnlocked(name)) |accessor| {
             return .{ .accessor = accessor };
         }
@@ -7894,6 +7896,8 @@ test "ordinary named descriptor snapshots are coherent across representations" {
     try object.setOwn(arena, root, "field", Value.num(17));
     try object.setAttr(arena, "field", .{ .writable = false, .enumerable = true, .configurable = false });
 
+    const previous = Object.property_snapshot_locks_enabled.swap(false, .acq_rel);
+    defer Object.property_snapshot_locks_enabled.store(previous, .release);
     object_profile.reset();
     defer object_profile.disable();
     switch (object.namedOwnPropertySnapshot("field")) {
@@ -7907,7 +7911,24 @@ test "ordinary named descriptor snapshots are coherent across representations" {
         },
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
+
+    Object.property_snapshot_locks_enabled.store(true, .release);
+    object_profile.reset();
+    switch (object.namedOwnPropertySnapshot("field")) {
+        .data => |own| {
+            try std.testing.expectEqual(@as(f64, 17), own.value.asNum());
+            try std.testing.expectEqual(object.shape.?, own.shape);
+            try std.testing.expectEqual(@as(u32, 0), own.slot);
+            try std.testing.expect(!own.attr.writable);
+            try std.testing.expect(own.attr.enumerable);
+            try std.testing.expect(!own.attr.configurable);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    const locked_profile = object_profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), locked_profile.object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), locked_profile.object_property_named_snapshot_acquires);
 
     try object.setAccessor(arena, "field", Value.num(3), Value.num(5));
     object_profile.reset();
@@ -8123,6 +8144,8 @@ test "initialized data descriptor restores prior attributes on shape OOM" {
 
 test "initialized data descriptor publication is race safe" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = Object.property_snapshot_locks_enabled.swap(true, .acq_rel);
+    defer Object.property_snapshot_locks_enabled.store(previous, .release);
     const root = try Shape.createRoot(std.heap.page_allocator);
     var object = Object{};
     var start = std.atomic.Value(bool).init(false);
@@ -8180,6 +8203,8 @@ test "absent named descriptor snapshots use immutable shape publication" {
     var object = Object{};
     try object.setOwn(arena, root, "present", Value.num(11));
 
+    const previous = Object.property_snapshot_locks_enabled.swap(true, .acq_rel);
+    defer Object.property_snapshot_locks_enabled.store(previous, .release);
     object_profile.reset();
     defer object_profile.disable();
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
@@ -8201,6 +8226,8 @@ test "absent named descriptor snapshots use immutable shape publication" {
 
 test "named descriptor miss publication is race safe" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = Object.property_snapshot_locks_enabled.swap(true, .acq_rel);
+    defer Object.property_snapshot_locks_enabled.store(previous, .release);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
