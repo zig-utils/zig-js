@@ -3748,10 +3748,17 @@ pub const Interpreter = struct {
     /// tranche amortizes shared-heap publication; tracing this list keeps the
     /// unused suffix alive until later allocations consume it.
     gc_object_reserve: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// Default-initialized managed string cells reserved after sustained
+    /// allocation. Cells stay valid empty strings until their caller installs
+    /// immutable bytes, so a safepoint can trace/finalize the unused suffix.
+    gc_string_reserve: std.ArrayListUnmanaged(*StringCell) = .empty,
     /// Keep one-shot native builders on exact single-cell allocation. Once one
     /// Interpreter invocation proves sustained private-container demand, later
     /// allocations may refill the traced reserve in bounded batches.
     gc_unpublished_object_warmup: u8 = 0,
+    /// As above for managed strings: cold invocations retain exact allocation,
+    /// while sustained string production can amortize publication metadata.
+    gc_managed_string_warmup: u8 = 0,
     /// Number of currently running shared-realm Thread workers. Fixed-shape
     /// allocation uses a larger reserve as soon as a worker can overlap its
     /// creator, while creator-only execution stays on checkpoint-sized batches.

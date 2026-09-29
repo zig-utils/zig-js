@@ -39,11 +39,16 @@ const Environment = interp.Environment;
 const StringCell = strcell.StringCell;
 
 var object_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
+var string_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
 var relocation_verifications_for_testing: std.atomic.Value(u64) = .init(0);
 var plain_object_finalizer_skips_for_testing: std.atomic.Value(u64) = .init(0);
 
 pub fn objectBatchCellsForTesting() u64 {
     return object_batch_cells_for_testing.load(.monotonic);
+}
+
+pub fn stringBatchCellsForTesting() u64 {
+    return string_batch_cells_for_testing.load(.monotonic);
 }
 
 pub fn relocationVerificationsForTesting() u64 {
@@ -2969,6 +2974,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     for (machine.gc_temp_roots.items) |root| markValue(v, root);
     for (machine.gc_temp_promise_roots.items) |root| markManaged(v, root);
     for (machine.gc_object_reserve.items) |object| v.mark(object);
+    for (machine.gc_string_reserve.items) |string| v.mark(string);
     var literal_it = machine.string_literal_cache.valueIterator();
     while (literal_it.next()) |literal| markValue(v, literal.*);
     var template_it = machine.template_cache.valueIterator();
@@ -3132,6 +3138,8 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteRequiredSlot(v, promise.Promise, root);
     for (machine.gc_object_reserve.items) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
+    for (machine.gc_string_reserve.items) |*string|
+        gc_relocation.rewriteRequiredSlot(v, StringCell, string);
     var literal_it = machine.string_literal_cache.valueIterator();
     while (literal_it.next()) |literal| gc_relocation.rewriteValueSlot(v, literal);
     var template_it = machine.template_cache.valueIterator();
@@ -3322,6 +3330,8 @@ test "realm root relocation rewrites active interpreter containers" {
     var machine = context.interpreter();
     var old_objects: [29]Object = undefined;
     var new_objects: [29]Object = undefined;
+    var old_string = StringCell{ .bytes = "old", .hash = strcell.uninternedHashState("old") };
+    var new_string = StringCell{ .bytes = "new", .hash = strcell.uninternedHashState("new") };
     var old_promise = promise.Promise{ .gc_owned = true };
     var new_promise = promise.Promise{ .gc_owned = true };
     var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
@@ -3346,6 +3356,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try machine.gc_temp_roots.append(machine.arena, Value.obj(&old_objects[11]));
     try machine.gc_temp_promise_roots.append(machine.arena, &old_promise);
     try machine.gc_object_reserve.append(machine.arena, &old_objects[12]);
+    try machine.gc_string_reserve.append(machine.arena, &old_string);
     try machine.with_stack.append(machine.arena, &old_objects[13]);
     var literal_node: ast.Node = .undefined_lit;
     try machine.string_literal_cache.put(machine.arena, &machine, @intFromPtr(&literal_node), Value.obj(&old_objects[14]));
@@ -3418,6 +3429,27 @@ test "realm root relocation rewrites active interpreter containers" {
         .scratch_slot_count = native_scratch.len,
     };
 
+    const ReserveTrace = struct {
+        target: *StringCell,
+        seen: bool = false,
+
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            if (@intFromPtr(cell) == @intFromPtr(self.target)) self.seen = true;
+        }
+    };
+    var reserve_trace = ReserveTrace{ .target = &old_string };
+    traceInterpreterRoots(&machine, &reserve_trace);
+    try std.testing.expect(reserve_trace.seen);
+
     const Plan = struct {
         old_objects: *[29]Object,
         new_objects: *[29]Object,
@@ -3429,6 +3461,8 @@ test "realm root relocation rewrites active interpreter containers" {
         new_cached_call_environment: *Environment,
         old_promise: *promise.Promise,
         new_promise: *promise.Promise,
+        old_string: *StringCell,
+        new_string: *StringCell,
 
         pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
             for (self.old_objects, 0..) |*object, index|
@@ -3442,6 +3476,8 @@ test "realm root relocation rewrites active interpreter containers" {
                 return @ptrCast(self.new_cached_call_environment);
             if (old == @as(*anyopaque, @ptrCast(self.old_promise)))
                 return @ptrCast(self.new_promise);
+            if (old == @as(*anyopaque, @ptrCast(self.old_string)))
+                return @ptrCast(self.new_string);
             return old;
         }
     };
@@ -3456,6 +3492,8 @@ test "realm root relocation rewrites active interpreter containers" {
         .new_cached_call_environment = &new_cached_call_environment,
         .old_promise = &old_promise,
         .new_promise = &new_promise,
+        .old_string = &old_string,
+        .new_string = &new_string,
     };
     relocateInterpreterRoots(&machine, &plan);
 
@@ -3473,6 +3511,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[11], machine.gc_temp_roots.items[0].asObj());
     try std.testing.expectEqual(&new_promise, machine.gc_temp_promise_roots.items[0]);
     try std.testing.expectEqual(&new_objects[12], machine.gc_object_reserve.items[0]);
+    try std.testing.expectEqual(&new_string, machine.gc_string_reserve.items[0]);
     try std.testing.expectEqual(&new_objects[13], machine.with_stack.items[0]);
     try std.testing.expectEqual(&new_objects[14], machine.string_literal_cache.get(&machine, @intFromPtr(&literal_node)).?.asObj());
     try std.testing.expectEqual(&new_objects[28], machine.template_cache.get(&machine, @intFromPtr(&template_node)).?.asObj());
@@ -5200,11 +5239,41 @@ pub fn setActiveMachineContext(machine: *interp.Interpreter) ActiveContextState 
 fn finishManagedStoredString(heap: *Heap, stored: []u8, hash: u64) std.mem.Allocator.Error!*StringCell {
     const realm = active_realm_context orelse heap.ctx.context;
     errdefer realm.gpa.free(stored);
-    const cell = try heap.create(StringCell, .string);
+    const cell = try takeManagedStringCell(heap, realm);
     cell.* = .{ .bytes = stored, .hash = hash };
     cell.setGcManaged(true);
     _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, stored.len, .monotonic);
     return cell;
+}
+
+/// Keep one-shot string construction exact, then reuse the active
+/// interpreter's relocatable reserve for sustained production. A reserve is
+/// realm-local even when sibling Contexts share one heap: finalization must
+/// release each string's bytes through the allocator that created them.
+fn takeManagedStringCell(heap: *Heap, realm: *ContextMod.Context) std.mem.Allocator.Error!*StringCell {
+    const machine = active_interpreter orelse return heap.create(StringCell, .string);
+    if (machine.gc != @as(*anyopaque, @ptrCast(heap)) or
+        machine.gc_realm_context != @as(*anyopaque, @ptrCast(realm)))
+        return heap.create(StringCell, .string);
+
+    const reserve_batch = 16;
+    if (machine.gc_string_reserve.items.len == 0) {
+        if (machine.gc_managed_string_warmup < reserve_batch) {
+            machine.gc_managed_string_warmup += 1;
+            return heap.create(StringCell, .string);
+        }
+        try machine.gc_string_reserve.ensureUnusedCapacity(machine.arena, reserve_batch);
+        var fresh: [reserve_batch]*StringCell = undefined;
+        const count = try heap.createBatch(StringCell, .string, &fresh);
+        std.debug.assert(count != 0);
+        for (fresh[0..count]) |cell| {
+            cell.* = .{ .bytes = &.{}, .hash = strcell.uninternedHashState("") };
+            cell.setGcManaged(true);
+            machine.gc_string_reserve.appendAssumeCapacity(cell);
+        }
+        if (builtin.is_test) _ = string_batch_cells_for_testing.fetchAdd(count, .monotonic);
+    }
+    return machine.gc_string_reserve.pop().?;
 }
 
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {

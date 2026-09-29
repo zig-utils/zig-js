@@ -14078,6 +14078,31 @@ test "JSON parse batches private object cells only after sustained use" {
     try std.testing.expectEqual(@as(u64, 16), gc_mod.objectBatchCellsForTesting() - batches_before);
 }
 
+test "managed string cells batch only after sustained interpreter allocation" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const saved_heap = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(saved_heap);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+
+    const batches_before = gc_mod.stringBatchCellsForTesting();
+    for (0..16) |_| {
+        const string = try Value.strAlloc(machine.arena, "value");
+        try std.testing.expectEqualStrings("value", string.asStr());
+    }
+    try std.testing.expectEqual(batches_before, gc_mod.stringBatchCellsForTesting());
+
+    const sustained = try Value.strAlloc(machine.arena, "value");
+    try std.testing.expectEqualStrings("value", sustained.asStr());
+    try std.testing.expectEqual(@as(u64, 16), gc_mod.stringBatchCellsForTesting() - batches_before);
+    try std.testing.expectEqual(@as(usize, 15), machine.gc_string_reserve.items.len);
+}
+
 test "JSON stringify key snapshots isolate shared no-GIL callers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
