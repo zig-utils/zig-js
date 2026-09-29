@@ -3009,9 +3009,12 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
         try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
         if (!try st.serialize(&buf, Value.obj(holder), "")) return Value.undef();
     }
-    if (temporary_allocator.ptr == a.ptr and temporary_allocator.vtable == a.vtable)
-        return try Value.strOwned(a, try buf.toOwnedSlice(a));
-    return try Value.strAlloc(a, buf.items);
+    // The precise heap's temporary allocator is also the managed string
+    // factory's backing allocator. Transfer the completed canonical output so
+    // the factory can consume or transcode it without first copying the whole
+    // JSON text into a second canonical buffer. Arena-only contexts keep the
+    // same ownership path they already used.
+    return try Value.strOwned(temporary_allocator, try buf.toOwnedSlice(temporary_allocator));
 }
 
 /// Carries the `JSON.stringify` options (replacer / allowlist / indent gap)
