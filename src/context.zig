@@ -14020,6 +14020,39 @@ test "JSON stringify deep cycle membership preserves forced execution tiers" {
     try std.testing.expect(Value.fromRawBits(results[0]).asBool());
 }
 
+test "JSON parse private arrays isolate shared no-GIL callers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    const result = try ctx.evaluate(
+        \\var jsonParseText = '{"values":[1,2,3],"nested":[[4],[5,6]],"tag":"ok"}';
+        \\function parseLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw 99;
+        \\  var total = 0;
+        \\  for (var i = 0; i < 64; i++) {
+        \\    var parsed = JSON.parse(jsonParseText);
+        \\    if (parsed.tag !== 'ok' || parsed.values.length !== 3 || parsed.nested.length !== 2) throw 98;
+        \\    total += parsed.values[seed % 3] + parsed.nested[0][0] + parsed.nested[1][1];
+        \\  }
+        \\  return total;
+        \\}
+        \\var parseLanes = [];
+        \\for (var lane = 0; lane < 4; lane++) parseLanes.push(new Thread(parseLane, lane));
+        \\var parseTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) parseTotal += parseLanes[lane].join();
+        \\parseTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 3008), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "JSON stringify key snapshots isolate shared no-GIL callers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

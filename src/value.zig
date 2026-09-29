@@ -4806,6 +4806,39 @@ pub const Object = struct {
         try elements.append(self.elementsAllocator(arena), v);
     }
 
+    /// Prepared append state for an object that is still unreachable from
+    /// JavaScript or another worker. Storage installation and allocator
+    /// selection happen once; every append retains the ordinary GC barrier and
+    /// indexed-own publication bit without re-entering published-object locks.
+    /// The caller must discard this handle before publishing any path to the
+    /// object.
+    pub const UnpublishedElementAppender = struct {
+        owner: *Object,
+        elements: *std.ArrayListUnmanaged(Value),
+        allocator: std.mem.Allocator,
+
+        pub fn append(appender: *@This(), v: Value) std.mem.Allocator.Error!void {
+            gcBarrier(appender.owner, v);
+            appender.owner.indexed_own_seen.store(true, .release);
+            try appender.elements.append(appender.allocator, v);
+        }
+    };
+
+    /// Append `first` with the same barrier-before-allocation ordering as
+    /// `appendElement`, then return a private handle for the remaining values.
+    pub fn beginUnpublishedElementAppend(self: *Object, arena: std.mem.Allocator, first: Value) std.mem.Allocator.Error!UnpublishedElementAppender {
+        gcBarrier(self, first);
+        self.indexed_own_seen.store(true, .release);
+        const elements = try self.ensureElementsList(arena);
+        var appender = UnpublishedElementAppender{
+            .owner = self,
+            .elements = elements,
+            .allocator = self.elementsAllocator(arena),
+        };
+        try appender.elements.append(appender.allocator, first);
+        return appender;
+    }
+
     pub fn appendElementIfLen(self: *Object, arena: std.mem.Allocator, expected_len: usize, v: Value) std.mem.Allocator.Error!bool {
         const elements_locked_6 = self.lockElements();
         defer self.unlockElements(elements_locked_6);
@@ -8910,6 +8943,30 @@ test "Object element lock pairs unlock with actual acquisition" {
 
     try std.testing.expect(o.elements_lock.tryLock());
     o.elements_lock.unlock();
+}
+
+test "unpublished element appends skip published synchronization" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var object = Object{ .is_array = true };
+
+    const previous = Object.element_locks_enabled.swap(true, .acq_rel);
+    defer Object.element_locks_enabled.store(previous, .release);
+    object_profile.reset();
+    defer object_profile.disable();
+
+    var unpublished = try object.beginUnpublishedElementAppend(arena_state.allocator(), Value.num(3));
+    try unpublished.append(Value.num(4));
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_element_lock_acquires);
+    try std.testing.expectEqual(@as(usize, 2), object.elementsItems().len);
+    try std.testing.expectEqual(@as(f64, 3), object.elementsItems()[0].asNum());
+    try std.testing.expectEqual(@as(f64, 4), object.elementsItems()[1].asNum());
+    try std.testing.expect(object.indexed_own_seen.load(.acquire));
+
+    try object.appendElement(arena_state.allocator(), Value.num(5));
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_element_lock_acquires);
+    try std.testing.expectEqual(@as(usize, 3), object.elementsItems().len);
+    try std.testing.expectEqual(@as(f64, 5), object.elementsItems()[2].asNum());
 }
 
 test "Object.has_indexed_property atomic flag converges under concurrent set" {

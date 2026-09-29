@@ -4179,9 +4179,18 @@ const JsonParser = struct {
             p.i += 1;
             return p.parsed(result, null, .{ .elements = elements });
         }
+        var unpublished_elements: ?value.Object.UnpublishedElementAppender = null;
         while (true) {
             const child = try p.parseValue();
-            try result.asObj().appendElement(p.interp.arena, child.value);
+            // No parser callback can observe a partially-built container. Keep
+            // the ordinary dense-element barrier and storage ownership, but do
+            // not repeat synchronization, storage lookup, or allocator selection
+            // that are reserved for independently published array mutations.
+            if (unpublished_elements) |*appender| {
+                try appender.append(child.value);
+            } else {
+                unpublished_elements = try result.asObj().beginUnpublishedElementAppend(p.interp.arena, child.value);
+            }
             if (p.track_records) try elements.append(p.interp.arena, child.record.?);
             p.skipWs();
             if (p.i >= p.s.len) return p.fail(.expected_array_close);
@@ -4316,6 +4325,35 @@ test "JSON parser publishes private object fields without property locks" {
     try std.testing.expectEqual(@as(f64, 5), result.getOwn("\x00\x00\x00key").?.asNum());
 }
 
+test "JSON parser appends private array elements without element locks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const source = "[1,[2,3],4]";
+    var parser = JsonParser{ .s = source, .i = 0, .interp = &machine };
+
+    const previous = value.Object.element_locks_enabled.swap(true, .acq_rel);
+    defer value.Object.element_locks_enabled.store(previous, .release);
+    object_profile.reset();
+    defer object_profile.disable();
+    const parsed = try parser.parseValue();
+    const private_stats = object_profile.snapshot();
+
+    try std.testing.expectEqual(source.len, parser.i);
+    try std.testing.expectEqual(@as(u64, 0), private_stats.object_element_lock_acquires);
+    const result = parsed.value.asObj();
+    try std.testing.expectEqual(@as(f64, 1), result.elementsItems()[0].asNum());
+    try std.testing.expectEqual(@as(f64, 3), result.elementsItems()[1].asObj().elementsItems()[1].asNum());
+    try std.testing.expectEqual(@as(f64, 4), result.elementsItems()[2].asNum());
+
+    object_profile.reset();
+    try result.appendElement(allocator, Value.num(5));
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_element_lock_acquires);
+}
+
 test "JSON parser private object publication propagates every allocation failure" {
     const Probe = struct {
         fn run(backing: std.mem.Allocator) !void {
@@ -4330,6 +4368,29 @@ test "JSON parser private object publication propagates every allocation failure
             const parsed = try parser.parseValue();
             try std.testing.expectEqual(source.len, parser.i);
             try std.testing.expectEqual(@as(f64, 3), parsed.value.asObj().getOwn("a").?.asNum());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "JSON parser private array appends propagate every allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+            var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+            var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+            const source = "[1,[2,3],{\"v\":[4,5,6]},7]";
+            var parser = JsonParser{ .s = source, .i = 0, .interp = &machine };
+            const parsed = try parser.parseValue();
+            try std.testing.expectEqual(source.len, parser.i);
+            const result = parsed.value.asObj();
+            try std.testing.expectEqual(@as(usize, 4), result.elementsItems().len);
+            try std.testing.expectEqual(@as(f64, 3), result.elementsItems()[1].asObj().elementsItems()[1].asNum());
+            const nested = result.elementsItems()[2].asObj().getOwn("v").?.asObj();
+            try std.testing.expectEqual(@as(f64, 6), nested.elementsItems()[2].asNum());
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
