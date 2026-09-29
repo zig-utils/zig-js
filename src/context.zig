@@ -13827,6 +13827,44 @@ test "JSON stringify deep cycle membership preserves forced execution tiers" {
     try std.testing.expect(Value.fromRawBits(results[0]).asBool());
 }
 
+test "JSON stringify key snapshots isolate shared no-GIL callers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    const result = try ctx.evaluate(
+        \\var jsonShared = {stable: 7, nested: {left: 1, right: 2}};
+        \\Object.defineProperty(jsonShared, 'hidden', {value: 8});
+        \\Object.defineProperty(jsonShared, 'computed', {enumerable: true, get() { return 9; }});
+        \\jsonShared[Symbol('ignored')] = 10;
+        \\function stringifyLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw 99;
+        \\  for (var i = 0; i < 64; i++) {
+        \\    var local = {lane: seed, iteration: i, stale: 0};
+        \\    delete local.stale;
+        \\    local.shared = jsonShared;
+        \\    Object.defineProperty(local, 'hidden', {value: 11});
+        \\    var expected = '{"lane":' + seed + ',"iteration":' + i + ',"shared":{"stable":7,"nested":{"left":1,"right":2},"computed":9}}';
+        \\    if (JSON.stringify(local) !== expected) throw 98;
+        \\  }
+        \\  return seed * 1000 + 64;
+        \\}
+        \\var stringifyLanes = [];
+        \\for (var lane = 0; lane < 4; lane++) stringifyLanes.push(new Thread(stringifyLane, lane));
+        \\var stringifyTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) stringifyTotal += stringifyLanes[lane].join();
+        \\stringifyTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 6256), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "enable_gc: JSON stringify active index survives a callback collection request" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

@@ -2888,10 +2888,16 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     defer leaveActiveNativeRealm(self, realm);
     const a = self.arena;
     const temporary_allocator = gc_mod.temporaryAllocator(a);
+    var key_snapshot_arena: ?std.heap.ArenaAllocator = if (temporary_allocator.ptr == a.ptr and temporary_allocator.vtable == a.vtable)
+        null
+    else
+        std.heap.ArenaAllocator.init(temporary_allocator);
+    defer if (key_snapshot_arena) |*arena| arena.deinit();
     var st = Stringifier{
         .self = self,
         .cycle_allocator = temporary_allocator,
         .output_allocator = temporary_allocator,
+        .key_snapshot_allocator = if (key_snapshot_arena) |*arena| arena.allocator() else null,
     };
     defer st.active.deinit(a, temporary_allocator);
 
@@ -3008,6 +3014,9 @@ const Stringifier = struct {
     self: *Interpreter,
     cycle_allocator: std.mem.Allocator,
     output_allocator: std.mem.Allocator,
+    /// Present only when the active precise heap exposes reclaimable temporary
+    /// backing. Arena-only contexts retain their established allocation path.
+    key_snapshot_allocator: ?std.mem.Allocator,
     replacer_fn: ?Value = null,
     allow: ?[]const []const u8 = null,
     gap: []const u8 = "",
@@ -3131,7 +3140,12 @@ const Stringifier = struct {
         const self = st.self;
         const a = self.arena;
         const output_allocator = st.output_allocator;
-        const keys = if (st.allow) |al| al else try st.jsonObjectKeys(v.asObj(), shape);
+        // OrdinaryOwnPropertyKeys snapshots are invocation-local. In a precise
+        // realm, collect their intermediate vectors in the invocation's scoped
+        // arena; retaining them in `self.arena` made repeated stringify calls
+        // grow Context backing until teardown.
+        const key_allocator = st.key_snapshot_allocator orelse a;
+        const keys = if (st.allow) |al| al else try st.jsonObjectKeys(v.asObj(), shape, key_allocator);
         // A Proxy's enumerability comes from [[GetOwnProperty]] (the
         // getOwnPropertyDescriptor trap), which EnumerableOwnPropertyNames runs
         // per key — the raw shape can't answer it, and a throwing or
@@ -3174,14 +3188,29 @@ const Stringifier = struct {
         try buf.append(output_allocator, '}');
     }
 
-    fn jsonObjectKeys(st: *Stringifier, object: *value.Object, shape: *value.Object) HostError![]const []const u8 {
-        _ = shape;
+    fn jsonObjectKeys(
+        st: *Stringifier,
+        object: *value.Object,
+        shape: *value.Object,
+        snapshot_allocator: std.mem.Allocator,
+    ) HostError![]const []const u8 {
         // Full [[OwnPropertyKeys]] order, which includes integer-indexed dense
         // elements. Those live in `elements`, outside the shape, so `shape.ownKeys`
         // would drop a key set via `o[0]=…` on an ordinary object — making
         // `JSON.stringify({...; o[0]="a"})` wrongly emit `{}`. SerializeJSONObject
         // enumerates every own *string* key; symbols/private are filtered by
         // `jsonHiddenKey` in the caller, non-enumerables by the live attr check.
+        // A direct ordinary object with no dense elements or exotic own-key
+        // provider can use the same low-level ordered snapshot with bounded
+        // backing. Every observable exotic continues through the interpreter.
+        if (object == shape and
+            object.elementsLen() == 0 and
+            object.hostClassHooks() == null and
+            object.moduleNs() == null and
+            object.typedArray() == null)
+        {
+            return shape.ownKeysWithScratch(snapshot_allocator, snapshot_allocator);
+        }
         return st.self.objectOwnKeysList(object);
     }
 
