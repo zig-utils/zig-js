@@ -38,6 +38,47 @@ const isCapabilityFamily = (family: any): boolean =>
   Boolean(family.availability);
 const isModuleCapability = (family: any): boolean =>
   family.availability && family.availability.kind === "zig_js_module_capability";
+export type FamilyScope = {
+  families: string[];
+  fullFamilyCount: number;
+};
+export function selectFamilies(
+  manifest: any,
+  value: string,
+): { manifest: any; scope: FamilyScope } {
+  const requested = value.split(",").map((name) => name.trim());
+  requireValue(
+    requested.length > 0 && requested.every(Boolean),
+    "family selection must contain one or more non-empty names",
+  );
+  requireValue(
+    new Set(requested).size === requested.length,
+    "family selection contains duplicate names",
+  );
+  const known = new Set(
+    manifest.implemented_families.map((family: any) => family.family),
+  );
+  const unknown = requested.filter((name) => !known.has(name));
+  requireValue(
+    unknown.length === 0,
+    `unknown representative family selection: ${unknown.join(", ")}`,
+  );
+  const selected = new Set(requested),
+    families = manifest.implemented_families.filter((family: any) =>
+      selected.has(family.family)
+    );
+  return {
+    manifest: {
+      ...manifest,
+      implemented_families: families,
+      additional_panels: [],
+    },
+    scope: {
+      families: families.map((family: any) => family.family),
+      fullFamilyCount: manifest.implemented_families.length,
+    },
+  };
+}
 export function collect(
   zigJs: string,
   jsc: string,
@@ -313,14 +354,15 @@ export function render(
   lanes: number[],
   rawPath: string | null,
   info: Record<string, string>,
+  scope: FamilyScope | null = null,
 ): string {
   const groups = grouped(rows),
     allLanes = [1, ...lanes],
     lines = [
-      `# Representative zig-js / JavaScriptCore matrix — ${info.Date}`,
+      `# ${scope ? "Focused representative" : "Representative"} zig-js / JavaScriptCore matrix — ${info.Date}`,
       "",
       "> This is a dated, workload-scoped measurement. It is not a universal engine score.",
-      `> Contract: \`${manifest.matrix_id}\`; deferred families remain outside this report.`,
+      `> Contract: \`${manifest.matrix_id}\`; deferred${scope ? " and unselected" : ""} families remain outside this report.`,
       "",
       "## Environment",
       "",
@@ -473,13 +515,22 @@ export function render(
     "",
     "## Coverage boundary",
     "",
-    `Implemented families in this version: ${manifest.implemented_families.length}.`,
   );
-  if (manifest.deferred_families.length === 0) {
+  if (scope) {
+    lines.push(
+      `Focused families: ${scope.families.map((name) => `\`${name}\``).join(", ")} (${scope.families.length} of ${scope.fullFamilyCount} implemented families in the frozen contract).`,
+      "Every unselected family is outside this report, not a pass, failure, or exclusion.",
+    );
+  } else {
+    lines.push(
+      `Implemented families in this version: ${manifest.implemented_families.length}.`,
+    );
+  }
+  if (!scope && manifest.deferred_families.length === 0) {
     lines.push(
       "All pre-registered workload families are implemented in this version.",
     );
-  } else {
+  } else if (!scope) {
     lines.push(
       "The following pre-registered families are explicit deferrals, not passes or exclusions:",
       "",
@@ -619,6 +670,42 @@ export function selfTest(): void {
       ),
     "timing floor",
   );
+  const selection = selectFamilies(manifest, "json,regexp");
+  requireValue(
+    selection.scope.families.join(",") === "regexp,json" &&
+      selection.scope.fullFamilyCount === manifest.implemented_families.length,
+    "family selection did not preserve frozen manifest order",
+  );
+  validate(
+    syntheticRows(selection.manifest),
+    selection.manifest,
+    1,
+    [2, 4, 8],
+    true,
+  );
+  const focusedReport = render(
+    syntheticRows(selection.manifest),
+    selection.manifest,
+    [2, 4, 8],
+    null,
+    { Date: "2026-09-29" },
+    selection.scope,
+  );
+  requireValue(
+    focusedReport.includes("Focused representative") &&
+      focusedReport.includes("2 of") &&
+      focusedReport.includes("outside this report, not a pass"),
+    "focused report did not retain its coverage boundary",
+  );
+  expectFailure(() => selectFamilies(manifest, ""), "non-empty names");
+  expectFailure(
+    () => selectFamilies(manifest, "json,json"),
+    "duplicate names",
+  );
+  expectFailure(
+    () => selectFamilies(manifest, "not-a-family"),
+    "unknown representative family",
+  );
   console.log(
     "OK representative benchmark self-test: matrix, frozen checksums, and timing floor verified",
   );
@@ -646,14 +733,19 @@ function main(): void {
       if (name === "--manifest") options.manifest = value;
       else if (name === "--samples") options.samples = Number(value);
       else if (name === "--lanes") options.lanes = value;
+      else if (name === "--families") options.families = value;
       else if (name === "--raw-out") options.raw = value;
       else if (name === "--tier-attribution-out") options.tierAttribution = value;
       else if (name === "--markdown-out") options.markdown = value;
       else throw new Error(`unknown argument: ${name}`);
     }
   }
-  const manifest = loadManifest(options.manifest);
-  validateManifest(manifest);
+  const fullManifest = loadManifest(options.manifest);
+  validateManifest(fullManifest);
+  const selection = options.families
+      ? selectFamilies(fullManifest, options.families)
+      : null,
+    manifest = selection ? selection.manifest : fullManifest;
   const lanes = [
     ...new Set(options.lanes.split(",").filter(Boolean).map(Number)),
   ].sort((a, b) => a - b);
@@ -687,7 +779,14 @@ function main(): void {
   validate(rows, manifest, samples, lanes, options.quick);
   const tierSnapshots = collectTierAttribution(args[0], manifest, options.quick),
     tierDeltas = validateTierAttribution(tierSnapshots, manifest, options.quick),
-    report = render(rows, manifest, lanes, options.raw || null, info) + "\n" +
+    report = render(
+      rows,
+      manifest,
+      lanes,
+      options.raw || null,
+      info,
+      selection ? selection.scope : null,
+    ) + "\n" +
       renderTierAttribution(tierDeltas, manifest, "##", options.tierAttribution || null);
   if (options.raw) writeRaw(options.raw, rows);
   if (options.tierAttribution)

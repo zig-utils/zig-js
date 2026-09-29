@@ -2378,6 +2378,9 @@ pub fn build(b: *std.Build) void {
         if (b.option([]const u8, "representative-benchmark-lanes", "Comma-separated representative lane counts above one")) |lanes| {
             run_representative.addArgs(&.{ "--lanes", lanes });
         }
+        if (b.option([]const u8, "representative-benchmark-families", "Comma-separated frozen representative families to collect")) |families| {
+            run_representative.addArgs(&.{ "--families", families });
+        }
         if (b.option(bool, "representative-benchmark-quick", "Run one reduced representative validation sample") orelse false)
             run_representative.addArg("--quick");
         if (b.option([]const u8, "representative-benchmark-raw-out", "Write raw representative samples to this TSV path")) |path| {

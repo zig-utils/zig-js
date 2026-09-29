@@ -16,6 +16,23 @@ zig-js keeps six benchmark families separate:
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
 
+A focused publication can select one or more already-frozen representative
+families without changing their source, jobs, checksums, timing floor, runner
+order, or attribution contract:
+
+```sh
+zig build representative-benchmark \
+  -Drepresentative-benchmark-families=json \
+  -Drepresentative-benchmark-raw-out=docs/.data/representative-json-YYYY-MM-DD.tsv \
+  -Drepresentative-benchmark-tier-attribution-out=docs/.data/representative-json-attribution-YYYY-MM-DD.json \
+  -Drepresentative-benchmark-markdown-out=docs/.data/representative-json-YYYY-MM-DD.md
+```
+
+The report names the selected families and treats every unselected family as
+outside the report, never as a pass, failure, or exclusion. Full-work
+publication still requires the frozen seven samples per row and all normal
+clean-worktree, checksum, timing-floor, and attribution gates.
+
 ## RegExp compiled-program retention diagnostic
 
 Issue [#989](https://github.com/zig-utils/zig-js/issues/989) is tracked by a
