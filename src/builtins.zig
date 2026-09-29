@@ -13,6 +13,7 @@ const parser_mod = @import("parser.zig");
 const Parser = parser_mod.Parser;
 const promise = @import("promise.zig");
 const agent = @import("agent.zig");
+const object_profile = @import("object_profile.zig");
 
 const Value = value.Value;
 const HostError = value.HostError;
@@ -4034,7 +4035,11 @@ const JsonParser = struct {
             // CreateDataPropertyOrThrow: define an own data property (default
             // attrs). Not [[Set]] — so "__proto__" becomes a normal own property
             // and duplicate keys overwrite without invoking inherited setters.
-            try result.asObj().setOwn(p.interp.arena, p.interp.root_shape, storage_key, child.value);
+            // The result and every container reachable through it remain
+            // private until the complete parse succeeds. The Shape transition
+            // and GC barrier still run, but no peer can require this Object's
+            // property mutex during construction.
+            try result.asObj().setOwnUnpublished(p.interp.arena, p.interp.root_shape, storage_key, child.value);
             if (p.track_records) try entries.putWithContext(
                 p.interp.arena,
                 storage_key,
@@ -4088,6 +4093,50 @@ test "JSON parser short integers match correctly rounded conversion bit for bit"
             try Check.number(&machine, source);
         }
     }
+}
+
+test "JSON parser publishes private object fields without property locks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const source = "{\"a\":1,\"nested\":{\"b\":2},\"a\":3,\"__proto__\":4,\"\\u0000key\":5}";
+    var parser = JsonParser{ .s = source, .i = 0, .interp = &machine };
+
+    object_profile.reset();
+    defer object_profile.disable();
+    const parsed = try parser.parseValue();
+    const stats = object_profile.snapshot();
+    object_profile.disable();
+
+    try std.testing.expectEqual(source.len, parser.i);
+    try std.testing.expectEqual(@as(u64, 0), stats.object_property_lock_acquires);
+    const result = parsed.value.asObj();
+    try std.testing.expectEqual(@as(f64, 3), result.getOwn("a").?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), result.getOwn("nested").?.asObj().getOwn("b").?.asNum());
+    try std.testing.expectEqual(@as(f64, 4), result.getOwn("__proto__").?.asNum());
+    try std.testing.expectEqual(@as(f64, 5), result.getOwn("\x00\x00\x00key").?.asNum());
+}
+
+test "JSON parser private object publication propagates every allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+            var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+            var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+            const source = "{\"a\":1,\"nested\":{\"b\":2},\"a\":3,\"__proto__\":4,\"\\u0000key\":5}";
+            var parser = JsonParser{ .s = source, .i = 0, .interp = &machine };
+            const parsed = try parser.parseValue();
+            try std.testing.expectEqual(source.len, parser.i);
+            try std.testing.expectEqual(@as(f64, 3), parsed.value.asObj().getOwn("a").?.asNum());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "JSON parser borrows validated unescaped strings without scratch allocation" {

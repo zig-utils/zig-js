@@ -6316,6 +6316,15 @@ pub const Object = struct {
         try self.setOwnUnlocked(arena, root, name, v);
     }
 
+    /// Set a data property while `self` is still unreachable from JavaScript or
+    /// another worker. Shape transitions retain their own synchronization and
+    /// `setOwnUnlocked` still performs the GC barrier plus release publication;
+    /// only the unnecessary per-object mutex is omitted. The caller must stop
+    /// using this entry point before publishing any path to the object.
+    pub fn setOwnUnpublished(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
+        try self.setOwnUnlocked(arena, root, name, v);
+    }
+
     /// Publish one low-level data value and its final attributes as a single
     /// named-property transaction. This deliberately mirrors `setOwn` followed
     /// by `setAttr`; it is not OrdinarySet or DefineOwnProperty and therefore
