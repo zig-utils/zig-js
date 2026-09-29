@@ -922,9 +922,20 @@ const runtime_cases = [_]Case{
         \\Object.defineProperty(deleted, "first", { enumerable: true, get: function () { delete deleted.later; return 1; } });
         \\deleted.later = 3;
         \\checks.push(JSON.stringify(deleted) === '{"first":1,"later":2}');
+        \\var directUpdated = { first: { toJSON: function () { directUpdated.later = 9; return 1; } }, later: 3 };
+        \\checks.push(JSON.stringify(directUpdated) === '{"first":1,"later":9}');
+        \\var directAccessor = { first: { toJSON: function () {
+        \\  Object.defineProperty(directAccessor, "later", { enumerable: true, configurable: true, get: function () { return 8; } });
+        \\  return 1;
+        \\} }, later: 3 };
+        \\checks.push(JSON.stringify(directAccessor) === '{"first":1,"later":8}');
+        \\var directInherited = { later: 2 }, directDeleted = Object.create(directInherited);
+        \\directDeleted.first = { toJSON: function () { delete directDeleted.later; return 1; } };
+        \\directDeleted.later = 3;
+        \\checks.push(JSON.stringify(directDeleted) === '{"first":1,"later":2}');
         \\checks.reduce(function (bits, ok, i) { return ok ? bits | (1 << i) : bits; }, 0)
         ,
-        .expected = 7,
+        .expected = 63,
     },
     .{
         // #933 item 8b: every `(` that starts an AssignmentExpression asked

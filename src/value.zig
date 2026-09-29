@@ -6191,6 +6191,66 @@ pub const Object = struct {
         accessor: Accessor,
     };
 
+    /// One insertion-ordered key from an all-data Shape, carrying the exact
+    /// slot that Shape assigned it. The Shape is immutable; callers must still
+    /// revalidate that the Object publishes this same Shape before loading the
+    /// mutable slot value.
+    pub const StableOwnDataKey = struct {
+        name: []const u8,
+        shape: *Shape,
+        slot: u32,
+    };
+
+    /// Snapshot the simple ordinary-own-key case without rebuilding a name
+    /// index. A null result asks the caller to use full OrdinaryOwnPropertyKeys:
+    /// accessors, descriptor attributes, delete/re-add history, and canonical
+    /// indices all need its richer ordering/filtering machinery.
+    pub fn stableOwnDataKeysSnapshot(
+        self: *const Object,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!?[]const StableOwnDataKey {
+        self.lockPropertiesFor(.named_snapshot);
+        defer self.unlockProperties();
+        if (self.accessorsMap() != null or self.attrsMap() != null or self.keyOrder() != null) return null;
+        const shape = self.shape orelse return &.{};
+        if (shape.depth != shape.count or shape.live_count != shape.count) return null;
+
+        // Validate before allocating: a late canonical index must not spill a
+        // large rejected snapshot from the Stringifier's stack-first arena.
+        var cursor: ?*Shape = shape;
+        var key_count: usize = 0;
+        while (cursor) |operation| : (cursor = operation.parent) {
+            const name = operation.name orelse continue;
+            if (operation.deleted or canonicalIndex(name) != null) return null;
+            key_count += 1;
+        }
+        if (key_count != @as(usize, shape.live_count)) return null;
+
+        var keys: std.ArrayListUnmanaged(StableOwnDataKey) = .empty;
+        try keys.ensureTotalCapacityPrecise(allocator, key_count);
+        cursor = shape;
+        while (cursor) |operation| : (cursor = operation.parent) {
+            const name = operation.name orelse continue;
+            keys.appendAssumeCapacity(.{ .name = name, .shape = shape, .slot = operation.slot });
+        }
+        std.mem.reverse(StableOwnDataKey, keys.items);
+        return keys.items;
+    }
+
+    /// Read the current value at a previously snapshotted Shape/slot. A null
+    /// result is not a missing JavaScript value; it means representation changed
+    /// and the caller must perform ordinary [[Get]]. Value.undef remains a
+    /// present optional payload.
+    pub fn valueAtStableOwnDataKey(self: *const Object, key: StableOwnDataKey) ?Value {
+        self.lockPropertiesFor(.named_snapshot);
+        defer self.unlockProperties();
+        if (self.shape != key.shape or self.getAccessorUnlocked(key.name) != null) return null;
+        const slots = self.slotsItems();
+        const slot: usize = key.slot;
+        if (slot >= slots.len) return null;
+        return slots[slot];
+    }
+
     pub fn namedOwnPropertySnapshot(self: *const Object, name: []const u8) NamedOwnPropertySnapshot {
         // An exact accessor-map snapshot and a miss in the acquire-published
         // immutable Shape are a complete absent descriptor even when this
@@ -7831,6 +7891,40 @@ test "ordinary named descriptor snapshots are coherent across representations" {
     }
     try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+}
+
+test "stable own data key snapshots preserve order and revalidate representation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    try object.setOwn(arena, root, "first", Value.num(1));
+    try object.setOwn(arena, root, "later", Value.num(3));
+
+    const keys = (try object.stableOwnDataKeysSnapshot(arena)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), keys.len);
+    try std.testing.expectEqualStrings("first", keys[0].name);
+    try std.testing.expectEqualStrings("later", keys[1].name);
+    try std.testing.expectEqual(@as(f64, 1), object.valueAtStableOwnDataKey(keys[0]).?.asNum());
+    try std.testing.expectEqual(@as(f64, 3), object.valueAtStableOwnDataKey(keys[1]).?.asNum());
+
+    // A value update keeps the Shape and must be read live, not frozen with the
+    // key snapshot. Deletion invalidates the slot; re-add may converge on the
+    // same immutable Shape and is again safe to read at that Shape's slot.
+    try object.setOwn(arena, root, "later", Value.num(9));
+    try std.testing.expectEqual(@as(f64, 9), object.valueAtStableOwnDataKey(keys[1]).?.asNum());
+    try std.testing.expect(try object.deleteNamedDataOwn(arena, root, "later"));
+    try std.testing.expect(object.valueAtStableOwnDataKey(keys[1]) == null);
+    try object.setOwn(arena, root, "later", Value.num(11));
+    try std.testing.expectEqual(@as(f64, 11), object.valueAtStableOwnDataKey(keys[1]).?.asNum());
+    try object.setAccessor(arena, "later", Value.num(17), null);
+    try std.testing.expect(object.valueAtStableOwnDataKey(keys[1]) == null);
+
+    var attributed = Object{};
+    try attributed.setOwn(arena, root, "field", Value.num(1));
+    try attributed.setAttr(arena, "field", .{ .enumerable = false });
+    try std.testing.expect((try attributed.stableOwnDataKeysSnapshot(arena)) == null);
 }
 
 test "sparse Array hole index disperses chosen default-seed collisions exactly" {

@@ -3087,7 +3087,7 @@ const Stringifier = struct {
     /// SerializeJSONProperty: write `holder[key]` (after toJSON + replacer +
     /// wrapper unwrapping) into `buf`. Returns false when the value is omitted.
     fn serialize(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, key: []const u8) HostError!bool {
-        return st.serializeProperty(buf, holder, key, null);
+        return st.serializeProperty(buf, holder, key, null, null);
     }
 
     fn serializeProperty(
@@ -3096,6 +3096,7 @@ const Stringifier = struct {
         holder: Value,
         key: []const u8,
         ordinary_object: ?*value.Object,
+        stable_key: ?value.Object.StableOwnDataKey,
     ) HostError!bool {
         const self = st.self;
         // Count each nested serialize toward the call-depth limit so a replacer
@@ -3112,6 +3113,11 @@ const Stringifier = struct {
         // the generic path so getter calls and inherited replacements remain
         // observable. namedOwnPropertySnapshot keeps the value/descriptor read
         // in one property-lock transaction for shared no-GIL realms.
+        if (stable_key) |snapshot| {
+            const object = ordinary_object orelse unreachable;
+            if (object.valueAtStableOwnDataKey(snapshot)) |loaded|
+                return st.serializeLoaded(buf, loaded, holder, key);
+        }
         if (ordinary_object) |object| switch (object.namedOwnPropertySnapshot(key)) {
             .data => |own| return st.serializeLoaded(buf, own.value, holder, key),
             .accessor, .absent => {},
@@ -3246,36 +3252,60 @@ const Stringifier = struct {
         // arena; retaining them in `self.arena` made repeated stringify calls
         // grow Context backing until teardown.
         const key_allocator = st.key_snapshot_allocator orelse a;
-        const keys = if (st.allow) |al| al else try st.jsonEnumerableObjectKeys(v.asObj(), shape, key_allocator);
         const ordinary_object: ?*value.Object = if (jsonDirectOrdinaryObject(v.asObj(), shape)) shape else null;
+        const stable_keys = if (st.allow == null and ordinary_object != null)
+            try ordinary_object.?.stableOwnDataKeysSnapshot(key_allocator)
+        else
+            null;
+        const keys = if (stable_keys == null)
+            if (st.allow) |al| al else try st.jsonEnumerableObjectKeys(v.asObj(), shape, key_allocator)
+        else
+            &.{};
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var count: usize = 0;
         try buf.append(output_allocator, '{');
-        for (keys) |k| {
-            if (jsonHiddenKey(k)) continue;
-            // Serialize directly into the authoritative output. A temporary
-            // member buffer recopies a successful descendant suffix at every
-            // ancestor, making a depth-n chain quadratic in output bytes. The
-            // mark retains exact omission semantics without publishing a comma
-            // or key when SerializeJSONProperty returns undefined.
-            const mark = buf.items.len;
-            if (count != 0) try buf.append(output_allocator, ',');
-            try st.newlineIndent(buf);
-            try writeJsonString(output_allocator, buf, value.decodeStringKey(k));
-            try buf.append(output_allocator, ':');
-            if (st.gap.len != 0) try buf.append(output_allocator, ' ');
-            if (!try st.serializeProperty(buf, v, k, ordinary_object)) {
-                buf.shrinkRetainingCapacity(mark);
-                continue;
-            }
-            count += 1;
+        if (stable_keys) |snapshots| {
+            for (snapshots) |snapshot|
+                try st.serializeObjectEntry(buf, v, snapshot.name, ordinary_object, snapshot, &count);
+        } else {
+            for (keys) |k|
+                try st.serializeObjectEntry(buf, v, k, ordinary_object, null, &count);
         }
         st.indent.shrinkRetainingCapacity(outer);
         if (count != 0) {
             try st.newlineIndent(buf);
         }
         try buf.append(output_allocator, '}');
+    }
+
+    fn serializeObjectEntry(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        holder: Value,
+        k: []const u8,
+        ordinary_object: ?*value.Object,
+        stable_key: ?value.Object.StableOwnDataKey,
+        count: *usize,
+    ) HostError!void {
+        const output_allocator = st.output_allocator;
+        if (jsonHiddenKey(k)) return;
+        // Serialize directly into the authoritative output. A temporary
+        // member buffer recopies a successful descendant suffix at every
+        // ancestor, making a depth-n chain quadratic in output bytes. The
+        // mark retains exact omission semantics without publishing a comma
+        // or key when SerializeJSONProperty returns undefined.
+        const mark = buf.items.len;
+        if (count.* != 0) try buf.append(output_allocator, ',');
+        try st.newlineIndent(buf);
+        try writeJsonString(output_allocator, buf, value.decodeStringKey(k));
+        try buf.append(output_allocator, ':');
+        if (st.gap.len != 0) try buf.append(output_allocator, ' ');
+        if (!try st.serializeProperty(buf, holder, k, ordinary_object, stable_key)) {
+            buf.shrinkRetainingCapacity(mark);
+            return;
+        }
+        count.* += 1;
     }
 
     fn jsonEnumerableObjectKeys(
