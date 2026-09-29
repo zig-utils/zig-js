@@ -4079,12 +4079,13 @@ test "GC cell backing shards parallel allocation locks by size class" {
 
 /// An isolated engine instance — the homegrown analogue of a JSC
 /// Enable the process-wide parallel/concurrent synchronization protocols as ONE
-/// unit: Environment binding locks, Object element/backing locks + the `bytes()`
-/// seqlock, and the bytecode inline-cache seqlock. The helper is enable-only so
-/// production code cannot reintroduce a false→true→false race while another
-/// context is starting.
+/// unit: Environment binding locks, Object published-property snapshots,
+/// element/backing locks + the `bytes()` seqlock, and the bytecode inline-cache
+/// seqlock. The helper is enable-only so production code cannot reintroduce a
+/// false→true→false race while another context is starting.
 pub fn enableParallelSync() void {
     interp.Environment.binding_locks_enabled.store(true, .release);
+    value.Object.property_snapshot_locks_enabled.store(true, .release);
     value.Object.element_locks_enabled.store(true, .release);
     @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
 }

@@ -4603,6 +4603,22 @@ pub const Object = struct {
         return self.ensureBackingFor(fallback, "arg_map_severed");
     }
 
+    /// Enable-only process gate for read snapshots of published named data.
+    /// Context construction raises it before concurrent GC or parallel JS can
+    /// observe any object. Single-owner realms can otherwise read their own
+    /// immutable Shape plus mutable slots without paying a mutex round trip.
+    pub var property_snapshot_locks_enabled: std.atomic.Value(bool) = .init(false);
+
+    fn lockPropertySnapshot(self: *const Object) bool {
+        if (!property_snapshot_locks_enabled.load(.acquire)) return false;
+        self.lockPropertiesFor(.named_snapshot);
+        return true;
+    }
+
+    fn unlockPropertySnapshot(self: *const Object, held: bool) void {
+        if (held) self.unlockProperties();
+    }
+
     pub fn lockProperties(self: *const Object) void {
         self.lockPropertiesFor(.other);
     }
@@ -6222,8 +6238,8 @@ pub const Object = struct {
         self: *const Object,
         allocator: std.mem.Allocator,
     ) std.mem.Allocator.Error!?[]const StableOwnDataKey {
-        self.lockPropertiesFor(.named_snapshot);
-        defer self.unlockProperties();
+        const properties_locked = self.lockPropertySnapshot();
+        defer self.unlockPropertySnapshot(properties_locked);
         if (self.accessorsMap() != null or self.attrsMap() != null or self.keyOrder() != null) return null;
         const shape = self.shape orelse return &.{};
         if (shape.depth != shape.count or shape.live_count != shape.count) return null;
@@ -6255,8 +6271,8 @@ pub const Object = struct {
     /// and the caller must perform ordinary [[Get]]. Value.undef remains a
     /// present optional payload.
     pub fn valueAtStableOwnDataKey(self: *const Object, key: StableOwnDataKey) ?Value {
-        self.lockPropertiesFor(.named_snapshot);
-        defer self.unlockProperties();
+        const properties_locked = self.lockPropertySnapshot();
+        defer self.unlockPropertySnapshot(properties_locked);
         if (self.shape != key.shape or self.getAccessorUnlocked(key.name) != null) return null;
         const slots = self.slotsItems();
         const slot: usize = key.slot;
@@ -7938,6 +7954,31 @@ test "stable own data key snapshots preserve order and revalidate representation
     try attributed.setOwn(arena, root, "field", Value.num(1));
     try attributed.setAttr(arena, "field", .{ .enumerable = false });
     try std.testing.expect((try attributed.stableOwnDataKeysSnapshot(arena)) == null);
+}
+
+test "stable own data snapshots lock only after parallel publication" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    try object.setOwn(arena, root, "field", Value.num(17));
+
+    const previous = Object.property_snapshot_locks_enabled.swap(false, .acq_rel);
+    defer Object.property_snapshot_locks_enabled.store(previous, .release);
+    object_profile.reset();
+    defer object_profile.disable();
+    const unlocked_keys = (try object.stableOwnDataKeysSnapshot(arena)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 17), object.valueAtStableOwnDataKey(unlocked_keys[0]).?.asNum());
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
+
+    Object.property_snapshot_locks_enabled.store(true, .release);
+    object_profile.reset();
+    const locked_keys = (try object.stableOwnDataKeysSnapshot(arena)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 17), object.valueAtStableOwnDataKey(locked_keys[0]).?.asNum());
+    const profile = object_profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 2), profile.object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 2), profile.object_property_named_snapshot_acquires);
 }
 
 test "sparse Array hole index disperses chosen default-seed collisions exactly" {
