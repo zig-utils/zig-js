@@ -3225,25 +3225,13 @@ const Stringifier = struct {
         // arena; retaining them in `self.arena` made repeated stringify calls
         // grow Context backing until teardown.
         const key_allocator = st.key_snapshot_allocator orelse a;
-        const keys = if (st.allow) |al| al else try st.jsonObjectKeys(v.asObj(), shape, key_allocator);
-        // A Proxy's enumerability comes from [[GetOwnProperty]] (the
-        // getOwnPropertyDescriptor trap), which EnumerableOwnPropertyNames runs
-        // per key — the raw shape can't answer it, and a throwing or
-        // absent-descriptor trap must be observed (not silently serialized).
-        const is_proxy = v.asObj().proxyHandler() != null or v.asObj().proxy_revoked;
+        const keys = if (st.allow) |al| al else try st.jsonEnumerableObjectKeys(v.asObj(), shape, key_allocator);
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var count: usize = 0;
         try buf.append(output_allocator, '{');
         for (keys) |k| {
             if (jsonHiddenKey(k)) continue;
-            if (st.allow == null) {
-                const enumerable = if (is_proxy) blk: {
-                    const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ v, try self.keyToValue(k) });
-                    break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
-                } else shape.getAttr(k).enumerable;
-                if (!enumerable) continue;
-            }
             // Serialize directly into the authoritative output. A temporary
             // member buffer recopies a successful descendant suffix at every
             // ancestor, making a depth-n chain quadratic in output bytes. The
@@ -3268,20 +3256,22 @@ const Stringifier = struct {
         try buf.append(output_allocator, '}');
     }
 
-    fn jsonObjectKeys(
+    fn jsonEnumerableObjectKeys(
         st: *Stringifier,
         object: *value.Object,
         shape: *value.Object,
         snapshot_allocator: std.mem.Allocator,
     ) HostError![]const []const u8 {
-        // Full [[OwnPropertyKeys]] order, which includes integer-indexed dense
-        // elements. Those live in `elements`, outside the shape, so `shape.ownKeys`
-        // would drop a key set via `o[0]=…` on an ordinary object — making
-        // `JSON.stringify({...; o[0]="a"})` wrongly emit `{}`. SerializeJSONObject
-        // enumerates every own *string* key; symbols/private are filtered by
-        // `jsonHiddenKey` in the caller, non-enumerables by the live attr check.
+        // SerializeJSONObject obtains every enumerable own string key before it
+        // serializes the first value. A getter for an earlier key therefore
+        // cannot change whether a later key participates, and every Proxy
+        // getOwnPropertyDescriptor trap precedes every value get trap.
+        try st.self.checkRestricted(object);
+        // Full [[OwnPropertyKeys]] order includes integer-indexed dense elements.
+        // Those live outside the shape, so the bounded direct path is only for
+        // ordinary objects without elements or another exotic key provider.
         // A direct ordinary object with no dense elements or exotic own-key
-        // provider can use the same low-level ordered snapshot with bounded
+        // provider can filter the same low-level ordered snapshot into bounded
         // backing. Every observable exotic continues through the interpreter.
         if (object == shape and
             object.elementsLen() == 0 and
@@ -3289,9 +3279,19 @@ const Stringifier = struct {
             object.moduleNs() == null and
             object.typedArray() == null)
         {
-            return shape.ownKeysWithScratch(snapshot_allocator, snapshot_allocator);
+            const keys = try shape.ownKeysWithScratch(snapshot_allocator, snapshot_allocator);
+            // The outer slice is a fresh snapshot owned by snapshot_allocator;
+            // compact it in place instead of allocating a second key vector.
+            const enumerable: [][]const u8 = @constCast(keys);
+            var enumerable_len: usize = 0;
+            for (keys) |key| {
+                if (jsonHiddenKey(key) or !shape.getAttr(key).enumerable) continue;
+                enumerable[enumerable_len] = key;
+                enumerable_len += 1;
+            }
+            return enumerable[0..enumerable_len];
         }
-        return st.self.objectOwnKeysList(object);
+        return ownEnumerableKeys(st.self, object);
     }
 
     /// Emit a newline + the current indent when pretty-printing (no-op for the

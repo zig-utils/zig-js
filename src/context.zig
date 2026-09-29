@@ -13771,6 +13771,53 @@ test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }
 
+test "JSON stringify snapshots enumerable keys before serializing values" {
+    try std.testing.expect((try evalIn(
+        \\(function () {
+        \\  var ordinary = {};
+        \\  Object.defineProperty(ordinary, "first", {
+        \\    enumerable: true,
+        \\    get: function () {
+        \\      Object.defineProperty(ordinary, "later", { enumerable: false });
+        \\      return 1;
+        \\    }
+        \\  });
+        \\  Object.defineProperty(ordinary, "later", {
+        \\    value: 3, writable: true, enumerable: true, configurable: true
+        \\  });
+        \\  var ordinaryResult = JSON.stringify(ordinary);
+        \\  var inherited = { later: 2 };
+        \\  var deleted = Object.create(inherited);
+        \\  Object.defineProperty(deleted, "first", {
+        \\    enumerable: true,
+        \\    get: function () { delete deleted.later; return 1; }
+        \\  });
+        \\  deleted.later = 3;
+        \\  var deletedResult = JSON.stringify(deleted);
+        \\  var trace = [];
+        \\  var proxy = new Proxy({ first: 1, later: 3 }, {
+        \\    ownKeys: function (target) { trace.push("ownKeys"); return Reflect.ownKeys(target); },
+        \\    getOwnPropertyDescriptor: function (target, key) {
+        \\      trace.push("desc:" + key);
+        \\      return Reflect.getOwnPropertyDescriptor(target, key);
+        \\    },
+        \\    get: function (target, key, receiver) {
+        \\      trace.push("get:" + key);
+        \\      return Reflect.get(target, key, receiver);
+        \\    }
+        \\  });
+        \\  var proxyResult = JSON.stringify(proxy);
+        \\  var hidden = {};
+        \\  Object.defineProperty(hidden, "value", { value: 7, enumerable: false });
+        \\  return ordinaryResult === '{"first":1,"later":3}' &&
+        \\    deletedResult === '{"first":1,"later":2}' &&
+        \\    proxyResult === '{"first":1,"later":3}' &&
+        \\    trace.join(",") === "get:toJSON,ownKeys,desc:first,desc:later,get:first,get:later" &&
+        \\    JSON.stringify(hidden, ["value"]) === '{"value":7}';
+        \\})()
+    )).asBool());
+}
+
 test "JSON stringify exposes its root holder only to a callable replacer" {
     try std.testing.expect((try evalIn(
         \\(function () {
