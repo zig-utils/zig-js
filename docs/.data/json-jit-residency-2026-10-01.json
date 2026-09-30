@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "kind": "focused_json_tier_residency",
+  "metadata": {
+    "date": "2026-10-01",
+    "host": "Apple M2 Pro; 17179869184 bytes",
+    "os": "macOS 26.3.1 (25D771280a)",
+    "power": "Now drawing from 'AC Power' -InternalBattery-0 (id=21364835) 100%; finishing charge; 0:00 remaining present: true",
+    "zig_version": "0.17.0-dev.2163+89ff10d56",
+    "collector_revision": "8c2a68bb3f2afbb177bd3f862b8155a3d0cc6d0c",
+    "zig_js_binary_revision": "8ca0d15b180ff40fa942e21821ac36ddfe4d272d",
+    "zig_gc_revision": "0285ef801dd221a4ae8e88b31a09ae31627657a3",
+    "zig_regex_revision": "fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b",
+    "workload_source": "bench/representative_comparison.js",
+    "workload_source_sha256": "89a7e4ebceb8993fa287d3ab886cec55d63436d74c21c139cfe57b24b08f9c34",
+    "zig_js_binary_sha256": "3e8803419aa33b45b7c6a79b3595917c834dfba340b5a61cc4dd47405a1e4ae3",
+    "optimize": "ReleaseFast",
+    "allocator": "real precise collector; GC enabled",
+    "timed_boundary": "warmed persistent context; one exact invocation",
+    "samples": 7,
+    "minimum_median_ns": 50000000,
+    "sample_order": "fresh-process alternating pairs, offset by workload",
+    "host_class": "diagnostic"
+  },
+  "workloads": [
+    {
+      "name": "representative_json",
+      "jobs": 2200,
+      "checksum": 324952086,
+      "role": "frozen parse/stringify row"
+    },
+    {
+      "name": "representative_json_variant",
+      "jobs": 2200,
+      "checksum": 324952086,
+      "role": "anti-specialization variant"
+    }
+  ],
+  "summary": [
+    {
+      "workload": "representative_json",
+      "jobs": 2200,
+      "checksum": 324952086,
+      "jit_median_ns": 358241125,
+      "jit_rsd": 0.025486610899723438,
+      "required_vm_median_ns": 361719500,
+      "required_vm_rsd": 0.11245038132299004,
+      "jit_over_required_vm": 0.9903837780379549
+    },
+    {
+      "workload": "representative_json_variant",
+      "jobs": 2200,
+      "checksum": 324952086,
+      "jit_median_ns": 354176792,
+      "jit_rsd": 0.020932451372768526,
+      "required_vm_median_ns": 357100209,
+      "required_vm_rsd": 0.018111123869213326,
+      "jit_over_required_vm": 0.9918134548053429
+    }
+  ],
+  "samples": [
+    {
+      "pair_sample": 0,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 366931084,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 0,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 473087833,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 1,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 387357333,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 1,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 360147959,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 2,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 366285250,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 2,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 354193125,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 3,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 370490583,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 3,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 352825709,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 4,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 349479167,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 4,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 359601417,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 5,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 353063875,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 5,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 341946667,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 6,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 358241125,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 6,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 361719500,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 0,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 347863708,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 0,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 351325083,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 1,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 354176792,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 1,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 363204542,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 2,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 355695833,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 2,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 345296834,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 3,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 365612500,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 3,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 357100209,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 4,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 362907292,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 4,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 359933667,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 5,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 345446834,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 5,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 364445125,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 6,
+      "order": 0,
+      "engine": "zig-js",
+      "mode": "single_no_jit",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 350778459,
+      "checksum": 324952086
+    },
+    {
+      "pair_sample": 6,
+      "order": 1,
+      "engine": "zig-js",
+      "mode": "single",
+      "workload": "representative_json_variant",
+      "lanes": 1,
+      "jobs": 2200,
+      "elapsed_ns": 355795625,
+      "checksum": 324952086
+    }
+  ]
+}
