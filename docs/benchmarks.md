@@ -878,6 +878,7 @@ tool refuses a dirty tracked zig-js, zig-gc, or zig-regex worktree.
   --parent-revision HEAD^ --candidate-revision HEAD \
   --binary-provenance direct \
   --parent-binary-revision HEAD^ --candidate-binary-revision HEAD \
+  --zig-gc-repository ../zig-gc --zig-regex-repository ../zig-regex \
   --source bench/representative_comparison.js \
   --mode single --workload representative_json --jobs 2200 --lanes 1 \
   --material-change cpu_work \
@@ -886,6 +887,12 @@ tool refuses a dirty tracked zig-js, zig-gc, or zig-regex worktree.
   --raw-out docs/.data/exact-parent-YYYY-MM-DD.json \
   --markdown-out docs/.data/exact-parent-YYYY-MM-DD.md
 ```
+
+The dependency repository options default to the two sibling checkouts. Pass
+the exact clean checkout used by both binaries when a production experiment
+uses a separately pinned dependency; the collector records that repository's
+revision and refuses a dirty checkout instead of silently attributing the
+sibling revision to a different binary.
 
 An ordinary VM-only allocation replay may continue to use
 `--allocation-replay-mode attribution_no_jit` under its historical fail-closed
