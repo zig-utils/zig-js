@@ -334,6 +334,300 @@ fn selectLoopOsrMetadata(
     );
 }
 
+fn selectedNaturalLoopHeader(plan: *const optimizer.Plan, outermost: bool) !u32 {
+    var selected: ?u32 = null;
+    for (plan.blocks) |header| {
+        var has_backedge = false;
+        for (plan.graph.edges) |edge| {
+            if (edge.to != header.id or edge.from == optimizer.Block.none) continue;
+            if (edge.from >= plan.blocks.len) return error.UnsupportedChunk;
+            if (plan.blocks[edge.from].start >= header.start) {
+                has_backedge = true;
+                break;
+            }
+        }
+        if (!has_backedge) continue;
+        if (outermost) return header.id;
+        selected = header.id;
+    }
+    return selected orelse error.UnsupportedChunk;
+}
+
+/// Own a value-compact copy of one natural loop. The optimizer graph is
+/// function-wide because every exact frame state is a liveness root, while a
+/// native OSR artifact executes only one loop region. Keeping global SSA ids as
+/// scratch indexes made unrelated pre-loop work consume the fixed native frame.
+///
+/// External entries into the loop body are rejected before their edges are
+/// removed. The selected header is the only legal bytecode-to-native entry;
+/// its block arguments are repopulated from exact OSR imports.
+fn compactSelectedLoopPlan(
+    plan: *const optimizer.Plan,
+    allocator: std.mem.Allocator,
+    outermost: bool,
+) !optimizer.Plan {
+    const graph = &plan.graph;
+    if (plan.blocks.len == 0 or graph.nodes.len == 0 or graph.edges.len != graph.edge_states.len)
+        return error.UnsupportedChunk;
+    const header = try selectedNaturalLoopHeader(plan, outermost);
+    if (header >= plan.blocks.len) return error.UnsupportedChunk;
+
+    // A lexical backedge alone does not make a natural loop: the header must
+    // dominate every latch. Otherwise pruning the alternate entry would turn
+    // irreducible control flow into a falsely single-entry native region.
+    if (header != 0) {
+        const without_header = try allocator.alloc(bool, plan.blocks.len);
+        defer allocator.free(without_header);
+        @memset(without_header, false);
+        var dominance_queue: std.ArrayListUnmanaged(u32) = .empty;
+        defer dominance_queue.deinit(allocator);
+        without_header[0] = true;
+        try dominance_queue.append(allocator, 0);
+        var dominance_index: usize = 0;
+        while (dominance_index < dominance_queue.items.len) : (dominance_index += 1) {
+            const block = plan.blocks[dominance_queue.items[dominance_index]];
+            for (block.successors[0..block.successor_count]) |successor| {
+                if (successor >= plan.blocks.len) return error.UnsupportedChunk;
+                if (successor == header or without_header[successor]) continue;
+                without_header[successor] = true;
+                try dominance_queue.append(allocator, successor);
+            }
+        }
+        for (graph.edges) |edge| {
+            if (edge.to != header or edge.from == optimizer.Block.none) continue;
+            if (edge.from >= plan.blocks.len) return error.UnsupportedChunk;
+            if (plan.blocks[edge.from].start >= plan.blocks[header].start and without_header[edge.from])
+                return error.UnsupportedChunk;
+        }
+    }
+
+    const included = try allocator.alloc(bool, plan.blocks.len);
+    defer allocator.free(included);
+    @memset(included, false);
+    included[header] = true;
+    var block_queue: std.ArrayListUnmanaged(u32) = .empty;
+    defer block_queue.deinit(allocator);
+    for (graph.edges) |edge| {
+        if (edge.to != header or edge.from == optimizer.Block.none) continue;
+        if (edge.from >= plan.blocks.len) return error.UnsupportedChunk;
+        if (plan.blocks[edge.from].start < plan.blocks[header].start) continue;
+        if (!included[edge.from]) {
+            included[edge.from] = true;
+            try block_queue.append(allocator, edge.from);
+        }
+    }
+    if (block_queue.items.len == 0) return error.UnsupportedChunk;
+    var block_index: usize = 0;
+    while (block_index < block_queue.items.len) : (block_index += 1) {
+        const block = block_queue.items[block_index];
+        for (graph.edges) |edge| {
+            if (edge.to != block or edge.from == optimizer.Block.none or edge.from == header) continue;
+            if (edge.from >= plan.blocks.len) return error.UnsupportedChunk;
+            if (!included[edge.from]) {
+                included[edge.from] = true;
+                try block_queue.append(allocator, edge.from);
+            }
+        }
+    }
+
+    // Dropping an external edge into an interior block would make an
+    // irreducible region look single-entry. Refuse it before compacting.
+    for (graph.edges) |edge| {
+        if (edge.to >= included.len or !included[edge.to] or edge.to == header or
+            edge.from == optimizer.Block.none)
+            continue;
+        if (edge.from >= included.len or !included[edge.from]) return error.UnsupportedChunk;
+    }
+
+    const live = try allocator.alloc(bool, graph.nodes.len);
+    defer allocator.free(live);
+    @memset(live, false);
+    var value_queue: std.ArrayListUnmanaged(optimizer.ValueId) = .empty;
+    defer value_queue.deinit(allocator);
+    for (graph.nodes) |node| {
+        if (node.block < included.len and included[node.block]) try value_queue.append(allocator, node.id);
+    }
+    for (graph.returns) |ret| {
+        if (ret.block >= included.len) return error.UnsupportedChunk;
+        if (included[ret.block]) try value_queue.append(allocator, ret.value);
+    }
+    for (graph.branches) |branch| {
+        if (branch.block >= included.len) return error.UnsupportedChunk;
+        if (included[branch.block]) try value_queue.append(allocator, branch.condition);
+    }
+    for (graph.frame_states) |state| {
+        if (state.block >= included.len) return error.UnsupportedChunk;
+        if (!included[state.block]) continue;
+        const first: usize = state.first_value;
+        const count: usize = state.local_count + state.stack_count;
+        if (first > graph.frame_state_values.len or count > graph.frame_state_values.len - first)
+            return error.UnsupportedChunk;
+        try value_queue.appendSlice(allocator, graph.frame_state_values[first .. first + count]);
+    }
+    for (graph.edges) |edge| {
+        if (edge.from == optimizer.Block.none or edge.from >= included.len or !included[edge.from]) continue;
+        const first: usize = edge.first_argument;
+        const count: usize = edge.argument_count;
+        if (first > graph.edge_arguments.len or count > graph.edge_arguments.len - first)
+            return error.UnsupportedChunk;
+        try value_queue.appendSlice(allocator, graph.edge_arguments[first .. first + count]);
+    }
+    var value_index: usize = 0;
+    while (value_index < value_queue.items.len) : (value_index += 1) {
+        const id = value_queue.items[value_index];
+        if (id >= graph.nodes.len) return error.UnsupportedChunk;
+        if (live[id]) continue;
+        live[id] = true;
+        const node = graph.nodes[id];
+        if (node.lhs != optimizer.ValueNode.none) try value_queue.append(allocator, node.lhs);
+        if (node.rhs != optimizer.ValueNode.none) try value_queue.append(allocator, node.rhs);
+        if (node.third != optimizer.ValueNode.none) try value_queue.append(allocator, node.third);
+    }
+
+    const remap = try allocator.alloc(optimizer.ValueId, graph.nodes.len);
+    defer allocator.free(remap);
+    @memset(remap, optimizer.ValueNode.none);
+    var node_count: usize = 0;
+    for (live, 0..) |is_live, old_id| {
+        if (!is_live) continue;
+        remap[old_id] = @intCast(node_count);
+        node_count += 1;
+    }
+    if (node_count == 0 or node_count > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+    const nodes = try allocator.alloc(optimizer.ValueNode, node_count);
+    errdefer allocator.free(nodes);
+    var next_node: usize = 0;
+    for (graph.nodes, 0..) |old, old_id| {
+        if (!live[old_id]) continue;
+        var node = old;
+        node.id = remap[old_id];
+        if (node.lhs != optimizer.ValueNode.none) node.lhs = remap[node.lhs];
+        if (node.rhs != optimizer.ValueNode.none) node.rhs = remap[node.rhs];
+        if (node.third != optimizer.ValueNode.none) node.third = remap[node.third];
+        nodes[next_node] = node;
+        next_node += 1;
+    }
+
+    var edge_list: std.ArrayListUnmanaged(optimizer.Edge) = .empty;
+    errdefer edge_list.deinit(allocator);
+    var edge_arguments: std.ArrayListUnmanaged(optimizer.ValueId) = .empty;
+    errdefer edge_arguments.deinit(allocator);
+    var edge_states: std.ArrayListUnmanaged(optimizer.EdgeState) = .empty;
+    errdefer edge_states.deinit(allocator);
+    for (graph.edges, 0..) |edge, edge_index| {
+        if (edge.from == optimizer.Block.none or edge.from >= included.len or !included[edge.from]) continue;
+        const first: usize = edge.first_argument;
+        const count: usize = edge.argument_count;
+        if (first > graph.edge_arguments.len or count > graph.edge_arguments.len - first)
+            return error.UnsupportedChunk;
+        const compact_first: u32 = @intCast(edge_arguments.items.len);
+        for (graph.edge_arguments[first .. first + count]) |value| {
+            if (value >= remap.len or remap[value] == optimizer.ValueNode.none) return error.UnsupportedChunk;
+            try edge_arguments.append(allocator, remap[value]);
+        }
+        try edge_list.append(allocator, .{
+            .from = edge.from,
+            .to = edge.to,
+            .first_argument = compact_first,
+            .argument_count = edge.argument_count,
+            .kind = edge.kind,
+        });
+        const old_state = graph.edge_states[edge_index];
+        if (old_state.from != edge.from or old_state.to != edge.to or
+            old_state.local_count + old_state.stack_count != edge.argument_count)
+            return error.UnsupportedChunk;
+        var state = old_state;
+        state.first_value = compact_first;
+        try edge_states.append(allocator, state);
+    }
+
+    var returns: std.ArrayListUnmanaged(optimizer.ReturnValue) = .empty;
+    errdefer returns.deinit(allocator);
+    for (graph.returns) |old| {
+        if (!included[old.block]) continue;
+        if (old.value >= remap.len or remap[old.value] == optimizer.ValueNode.none)
+            return error.UnsupportedChunk;
+        var ret = old;
+        ret.value = remap[old.value];
+        try returns.append(allocator, ret);
+    }
+    var branches: std.ArrayListUnmanaged(optimizer.BranchValue) = .empty;
+    errdefer branches.deinit(allocator);
+    for (graph.branches) |old| {
+        if (!included[old.block]) continue;
+        if (old.condition >= remap.len or remap[old.condition] == optimizer.ValueNode.none)
+            return error.UnsupportedChunk;
+        var branch = old;
+        branch.condition = remap[old.condition];
+        try branches.append(allocator, branch);
+    }
+    var frame_states: std.ArrayListUnmanaged(optimizer.FrameState) = .empty;
+    errdefer frame_states.deinit(allocator);
+    var frame_state_values: std.ArrayListUnmanaged(optimizer.ValueId) = .empty;
+    errdefer frame_state_values.deinit(allocator);
+    for (graph.frame_states) |old| {
+        if (!included[old.block]) continue;
+        const first: usize = old.first_value;
+        const count: usize = old.local_count + old.stack_count;
+        if (first > graph.frame_state_values.len or count > graph.frame_state_values.len - first)
+            return error.UnsupportedChunk;
+        var state = old;
+        state.first_value = @intCast(frame_state_values.items.len);
+        for (graph.frame_state_values[first .. first + count]) |value| {
+            if (value >= remap.len or remap[value] == optimizer.ValueNode.none) return error.UnsupportedChunk;
+            try frame_state_values.append(allocator, remap[value]);
+        }
+        try frame_states.append(allocator, state);
+    }
+    var exceptional_targets: std.ArrayListUnmanaged(optimizer.ExceptionalTarget) = .empty;
+    errdefer exceptional_targets.deinit(allocator);
+    for (graph.exceptional_targets) |target| {
+        if (target.block >= included.len) return error.UnsupportedChunk;
+        if (included[target.block]) try exceptional_targets.append(allocator, target);
+    }
+
+    const owned_edges = try edge_list.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_edges);
+    const owned_edge_arguments = try edge_arguments.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_edge_arguments);
+    const owned_edge_states = try edge_states.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_edge_states);
+    const owned_returns = try returns.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_returns);
+    const owned_branches = try branches.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_branches);
+    const owned_frame_states = try frame_states.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_frame_states);
+    const owned_frame_state_values = try frame_state_values.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_frame_state_values);
+    const handlers = try allocator.dupe(optimizer.HandlerState, graph.handler_states);
+    errdefer allocator.free(handlers);
+    const owned_exceptional_targets = try exceptional_targets.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_exceptional_targets);
+    const blocks = try allocator.dupe(optimizer.Block, plan.blocks);
+    errdefer allocator.free(blocks);
+    const instructions = try allocator.dupe(optimizer.Instruction, plan.instructions);
+    errdefer allocator.free(instructions);
+    return .{
+        .allocator = allocator,
+        .blocks = blocks,
+        .instructions = instructions,
+        .graph = .{
+            .allocator = allocator,
+            .nodes = nodes,
+            .edges = owned_edges,
+            .edge_arguments = owned_edge_arguments,
+            .returns = owned_returns,
+            .branches = owned_branches,
+            .frame_states = owned_frame_states,
+            .frame_state_values = owned_frame_state_values,
+            .handler_states = handlers,
+            .edge_states = owned_edge_states,
+            .exceptional_targets = owned_exceptional_targets,
+        },
+    };
+}
+
 const ValueType = enum { number, boolean, other };
 
 const NativeOperationStepMode = enum { deterministic, block_local };
@@ -2866,13 +3160,43 @@ pub fn compileObserved(chunk: *const bc.Chunk) !jit.CompiledCode {
     return compileWithObservability(chunk, true);
 }
 
+fn lowerCompactedLoop(
+    chunk: *const bc.Chunk,
+    plan: *const optimizer.Plan,
+    allocator: std.mem.Allocator,
+) !Program {
+    if (plan.graph.nodes.len <= jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+
+    var outer = compactSelectedLoopPlan(plan, allocator, true) catch |err| switch (err) {
+        error.UnsupportedChunk => null,
+        else => return err,
+    };
+    if (outer) |*compact| {
+        defer compact.deinit();
+        if (lowerFusedLoopOsr(chunk, compact, allocator)) |program| return program else |err| switch (err) {
+            error.UnsupportedChunk => {},
+            else => return err,
+        }
+    }
+
+    var inner = try compactSelectedLoopPlan(plan, allocator, false);
+    defer inner.deinit();
+    return lowerLoopOsr(chunk, &inner, allocator) catch |err| switch (err) {
+        error.UnsupportedChunk => try lowerGeneralLoopOsr(chunk, &inner, allocator),
+        else => return err,
+    };
+}
+
 fn compileWithObservability(chunk: *const bc.Chunk, native_observability: bool) !jit.CompiledCode {
     var plan = try optimizer.build(chunk, std.heap.page_allocator);
     defer plan.deinit();
     var program = lower(chunk, &plan, std.heap.page_allocator) catch |err| switch (err) {
         error.UnsupportedChunk => lowerFusedLoopOsr(chunk, &plan, std.heap.page_allocator) catch |fused_err| switch (fused_err) {
             error.UnsupportedChunk => lowerLoopOsr(chunk, &plan, std.heap.page_allocator) catch |loop_err| switch (loop_err) {
-                error.UnsupportedChunk => try lowerGeneralLoopOsr(chunk, &plan, std.heap.page_allocator),
+                error.UnsupportedChunk => lowerGeneralLoopOsr(chunk, &plan, std.heap.page_allocator) catch |general_err| switch (general_err) {
+                    error.UnsupportedChunk => try lowerCompactedLoop(chunk, &plan, std.heap.page_allocator),
+                    else => return general_err,
+                },
                 else => return loop_err,
             },
             else => return fused_err,
@@ -6223,6 +6547,88 @@ test "optimizer loop OSR imports managed constants from the exact VM frame" {
     try std.testing.expectEqual(marker_root, stack_map.scratch_pointer_slots & marker_root);
 }
 
+test "optimizer compacts function-wide SSA before loop OSR" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 3;
+    const marker = try Value.strAlloc(arena.allocator(), "managed-constant-marker");
+    const marker_index = try chunk.addConst(marker);
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    for (0..130) |_| {
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.load_const, one);
+        _ = try chunk.emit(.add, 0);
+        _ = try chunk.emit(.pop, 0);
+    }
+    _ = try chunk.emit(.load_const, marker_index);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    const to_header = try chunk.emit(.jump, 0);
+    const header: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[to_header].a = header;
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    const to_exit = try chunk.emit(.jump_if_false, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, header);
+    const exit: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[to_exit].a = exit;
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expect(plan.graph.nodes.len > jit.numeric_scratch_capacity);
+    var compact = try compactSelectedLoopPlan(&plan, std.testing.allocator, false);
+    defer compact.deinit();
+    try std.testing.expect(compact.graph.nodes.len < jit.numeric_scratch_capacity);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expect(!compiled.entry_enabled);
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(header, 3, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    const entry = osr.entries[entry_index];
+    const marker_import = osr.imports[entry.first_import + 2];
+    var slots = [_]u64{ Value.num(4).rawBits(), Value.num(0).rawBits(), marker.rawBits() };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, exit), frame.exit_ip);
+    const point = compiled.deopt.?.points[frame.deopt_index];
+    const recovered_i = compiled.deopt.?.values[point.first_value + 1].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 4), Value.fromRawBits(recovered_i).asNum());
+    const recovered_marker = compiled.deopt.?.values[point.first_value + 2].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(marker.rawBits(), recovered_marker);
+    const stack_map = compiled.stack_maps.?.forDeopt(frame.deopt_index) orelse
+        return error.TestUnexpectedResult;
+    const marker_root = @as(u128, 1) << @intCast(marker_import.destination);
+    try std.testing.expectEqual(marker_root, stack_map.scratch_pointer_slots & marker_root);
+}
+
 test "optimizer loop moving safepoint publishes and rewrites recovery-only local" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -6925,10 +7331,17 @@ test "optimizer loop OSR side exits either guard in a multi-exit chain" {
     ).asNum());
 }
 
-fn makeIrreducibleLoopChunk(allocator: std.mem.Allocator) !bc.Chunk {
+fn makeIrreducibleLoopChunk(allocator: std.mem.Allocator, padding: usize) !bc.Chunk {
     var chunk = bc.Chunk.init(allocator);
     chunk.param_count = 1;
     chunk.local_count = 1;
+    const one = try chunk.addConst(Value.num(1));
+    for (0..padding) |_| {
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.load_const, one);
+        _ = try chunk.emit(.add, 0);
+        _ = try chunk.emit(.pop, 0);
+    }
     _ = try chunk.emit(.load_local, 0);
     const enter_second = try chunk.emit(.jump_if_false, 0);
 
@@ -6955,6 +7368,17 @@ fn makeIrreducibleLoopChunk(allocator: std.mem.Allocator) !bc.Chunk {
 test "optimizer loop OSR rejects an irreducible two-entry region" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var chunk = try makeIrreducibleLoopChunk(arena.allocator());
+    var chunk = try makeIrreducibleLoopChunk(arena.allocator(), 0);
+    try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
+}
+
+test "optimizer compaction preserves irreducible two-entry rejection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makeIrreducibleLoopChunk(arena.allocator(), 130);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expect(plan.graph.nodes.len > jit.numeric_scratch_capacity);
+    try std.testing.expectError(error.UnsupportedChunk, compactSelectedLoopPlan(&plan, std.testing.allocator, false));
     try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
 }
