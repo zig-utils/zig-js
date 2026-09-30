@@ -6942,6 +6942,8 @@ test "optimizer executes guarded uint32 bit and without callbacks" {
             return @backingInt(jit.NativeOperationStatus.value);
         }
     };
+    var coercive_object = Object{};
+    var bigint_object = Object{ .is_bigint = true };
     const cases = [_]struct {
         lhs: Value,
         rhs: Value,
@@ -6956,6 +6958,8 @@ test "optimizer executes guarded uint32 bit and without callbacks" {
         .{ .lhs = Value.num(std.math.inf(f64)), .rhs = Value.num(1), .expected = 0, .direct = false },
         .{ .lhs = Value.num(0x1_0000_0000), .rhs = Value.num(1), .expected = 0, .direct = false },
         .{ .lhs = Value.boolVal(true), .rhs = Value.num(1), .expected = 1, .direct = false },
+        .{ .lhs = Value.obj(&bigint_object), .rhs = Value.obj(&bigint_object), .expected = 1, .direct = false },
+        .{ .lhs = Value.obj(&coercive_object), .rhs = Value.num(1), .expected = 1, .direct = false },
     };
     for (cases) |case| {
         var slots = [_]u64{ case.lhs.rawBits(), case.rhs.rawBits() };
