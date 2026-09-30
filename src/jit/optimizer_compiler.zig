@@ -2846,6 +2846,95 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
+            .load_var => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                const first_input = try runtime.stageFrameInputs(
+                    graph,
+                    node,
+                    .effect,
+                    initialized,
+                    allocator,
+                    operations,
+                );
+                types[node.id] = if (required_numeric[node.id]) .number else .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
+                    .origin = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .to_numeric,
+            .neg,
+            .pos,
+            .not,
+            .typeof_op,
+            .inc,
+            .dec,
+            .bit_not,
+            .to_string,
+            .to_property_key,
+            .private_in,
+            => {
+                if (runtime_lowering == null or node.lhs >= initialized.len or !initialized[node.lhs])
+                    return error.UnsupportedChunk;
+                types[node.id] = if (node.kind == .not or node.kind == .private_in)
+                    .boolean
+                else if (node.kind == .pos or required_numeric[node.id])
+                    .number
+                else
+                    .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = @intCast(node.lhs),
+                    .immediate = node.origin,
+                    .origin = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .pow,
+            .bit_and,
+            .bit_or,
+            .bit_xor,
+            .shl,
+            .shr,
+            .ushr,
+            .in_op,
+            .instance_of,
+            => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                if (node.lhs >= initialized.len or node.rhs >= initialized.len or
+                    !initialized[node.lhs] or !initialized[node.rhs])
+                    return error.UnsupportedChunk;
+                const first_input = try runtime.stageBinaryInputs(
+                    allocator,
+                    operations,
+                    block,
+                    node.origin,
+                    @intCast(node.lhs),
+                    @intCast(node.rhs),
+                );
+                types[node.id] = if (node.kind == .in_op or node.kind == .instance_of)
+                    .boolean
+                else if (required_numeric[node.id])
+                    .number
+                else
+                    .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
+                    .origin = node.origin,
+                });
+                initialized[node.id] = true;
+            },
             .get_prop => {
                 if (runtime_lowering == null or node.lhs >= initialized.len or !initialized[node.lhs])
                     return error.UnsupportedChunk;
@@ -6627,6 +6716,137 @@ test "optimizer compacts function-wide SSA before loop OSR" {
         return error.TestUnexpectedResult;
     const marker_root = @as(u128, 1) << @intCast(marker_import.destination);
     try std.testing.expectEqual(marker_root, stack_map.scratch_pointer_slots & marker_root);
+}
+
+test "optimizer loop stages environment and coercive operations" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 3;
+    const global_name = try chunk.addName("Number");
+    const marker = try Value.strAlloc(arena.allocator(), "managed-bitwise-input");
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    const to_header = try chunk.emit(.jump, 0);
+    const header: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[to_header].a = header;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    const to_exit = try chunk.emit(.jump_if_false, 0);
+    _ = try chunk.emit(.load_var, global_name);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.bit_and, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, header);
+    const exit: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[to_exit].a = exit;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
+    var load_descriptor: ?jit.NativeOperationDescriptor = null;
+    var bit_descriptor: ?jit.NativeOperationDescriptor = null;
+    for (metadata.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.load_var)) load_descriptor = descriptor;
+        if (descriptor.bytecode_op == @backingInt(bc.Op.bit_and)) bit_descriptor = descriptor;
+    }
+    const load = load_descriptor orelse return error.TestUnexpectedResult;
+    const bit = bit_descriptor orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 0), load.input_count);
+    try std.testing.expectEqual(@as(u16, 2), bit.input_count);
+    const bit_map = compiled.stack_maps.?.forDeopt(bit.deopt_index) orelse
+        return error.TestUnexpectedResult;
+    const bit_roots = (@as(u128, 1) << @intCast(bit.first_input)) |
+        (@as(u128, 1) << @intCast(bit.first_input + 1));
+    try std.testing.expectEqual(bit_roots, bit_map.scratch_pointer_slots & bit_roots);
+
+    const Context = struct {
+        metadata: *const jit.NativeOperationMetadata,
+        marker_bits: u64,
+        load_calls: u32 = 0,
+        bit_calls: u32 = 0,
+        fail_bitwise: bool = false,
+
+        fn dispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
+            const self: *@This() = @ptrCast(@alignCast(frame.operation_context.?));
+            const operation_index: usize = @intCast(operation_id);
+            if (operation_index >= self.metadata.descriptors.len)
+                return @backingInt(jit.NativeOperationStatus.host_trap);
+            const descriptor = self.metadata.descriptors[operation_index];
+            if (descriptor.bytecode_op == @backingInt(bc.Op.load_var)) {
+                if (descriptor.input_count != 0 or
+                    !std.mem.eql(u8, self.metadata.nameFor(operation_index) orelse return @backingInt(jit.NativeOperationStatus.host_trap), "Number"))
+                    return @backingInt(jit.NativeOperationStatus.host_trap);
+                self.load_calls += 1;
+                frame.operation_value_bits = self.marker_bits;
+                return @backingInt(jit.NativeOperationStatus.value);
+            }
+            if (descriptor.bytecode_op != @backingInt(bc.Op.bit_and) or descriptor.input_count != 2)
+                return @backingInt(jit.NativeOperationStatus.host_trap);
+            const scratch = frame.scratch.?;
+            if (scratch[descriptor.first_input] != self.marker_bits or
+                scratch[descriptor.first_input + 1] != Value.num(1).rawBits())
+                return @backingInt(jit.NativeOperationStatus.host_trap);
+            self.bit_calls += 1;
+            frame.operation_value_bits = if (self.fail_bitwise) self.marker_bits else Value.num(1).rawBits();
+            return @backingInt(if (self.fail_bitwise)
+                jit.NativeOperationStatus.catchable_exception
+            else
+                jit.NativeOperationStatus.value);
+        }
+    };
+
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(header, 3, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    var slots = [_]u64{ Value.num(4).rawBits(), marker.rawBits(), Value.num(0).rawBits() };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var context = Context{ .metadata = metadata, .marker_bits = marker.rawBits() };
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+        .operation = Context.dispatch,
+        .operation_context = &context,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, exit), frame.exit_ip);
+    try std.testing.expectEqual(@as(u32, 4), context.load_calls);
+    try std.testing.expectEqual(@as(u32, 4), context.bit_calls);
+    const point = compiled.deopt.?.points[frame.deopt_index];
+    const recovered_marker = compiled.deopt.?.values[point.first_value + 1].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(marker.rawBits(), recovered_marker);
+
+    slots[2] = Value.num(0).rawBits();
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    context.load_calls = 0;
+    context.bit_calls = 0;
+    context.fail_bitwise = true;
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.throw, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, bit.deopt_index), frame.deopt_index);
+    try std.testing.expectEqual(@as(u32, 1), context.load_calls);
+    try std.testing.expectEqual(@as(u32, 1), context.bit_calls);
 }
 
 test "optimizer loop moving safepoint publishes and rewrites recovery-only local" {
