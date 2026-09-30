@@ -158,6 +158,11 @@ pub const Assembler = struct {
         try self.emit32(0xf940_0000 | (@as(u32, scaled) << 10) | (@as(u32, xn) << 5) | xt);
     }
 
+    /// `ldar xt, [xn]`, acquiring a 64-bit atomically-published value.
+    pub fn loadAcquire64(self: *Assembler, xt: u5, xn: u5) error{NoSpace}!void {
+        try self.emit32(0xc8df_fc00 | (@as(u32, xn) << 5) | xt);
+    }
+
     /// `str xt, [xn, #byte_offset]`, using AArch64's unsigned scaled form.
     pub fn store64(self: *Assembler, xt: u5, xn: u5, byte_offset: u15) error{ NoSpace, InvalidOffset }!void {
         if ((byte_offset & 7) != 0) return error.InvalidOffset;
@@ -422,12 +427,14 @@ test "AArch64 numeric tier instruction encodings" {
 }
 
 test "AArch64 release-store encoding" {
-    var storage: [8]u8 = undefined;
+    var storage: [12]u8 = undefined;
     var assembler = Assembler.init(&storage);
+    try assembler.loadAcquire64(8, 15);
+    try std.testing.expectEqual(@as(u32, 0xc8df_fde8), std.mem.readInt(u32, assembler.bytes()[0..4], .little));
     try assembler.storeRelease64(9, 17);
-    try std.testing.expectEqual(@as(u32, 0xc89f_fe29), std.mem.readInt(u32, assembler.bytes()[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0xc89f_fe29), std.mem.readInt(u32, assembler.bytes()[4..8], .little));
     try assembler.storeRelease8(10, 16);
-    try std.testing.expectEqual(@as(u32, 0x089f_fe0a), std.mem.readInt(u32, assembler.bytes()[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 0x089f_fe0a), std.mem.readInt(u32, assembler.bytes()[8..12], .little));
 }
 
 test "AArch64 guarded unsigned remainder encodings" {

@@ -16,6 +16,8 @@ const Shape = @import("../shape.zig").Shape;
 const Object = @import("../value.zig").Object;
 const ObjectStorageState = @import("../value.zig").ObjectStorageState;
 const ObjectElementsState = @import("../value.zig").ObjectElementsState;
+const strcell = @import("../strcell.zig");
+const StringCell = strcell.StringCell;
 const moving_safepoint_backedge_interval: u32 = 32;
 
 pub const OperationKind = enum {
@@ -4205,7 +4207,7 @@ fn emitDirectDenseArrayRead(
     return direct;
 }
 
-fn emitDirectDenseArrayLengthRead(
+fn emitDirectStringOrDenseArrayLengthRead(
     assembler: *aarch64.Assembler,
     program: *const Program,
     operation: Operation,
@@ -4218,6 +4220,30 @@ fn emitDirectDenseArrayLengthRead(
     if (!std.mem.eql(u8, name, "length")) return null;
 
     var direct = DirectRuntimeAccess{};
+    // Primitive String length is an immutable UTF-16-unit count cached in the
+    // atomically-published StringCell state. Values beyond that cache's exact
+    // range keep the canonical representation-aware runtime fallback.
+    try assembler.load64(9, 14, try slotOffset(descriptor.first_input));
+    try assembler.movImmediate64(10, Value.boxed_kind_mask);
+    try assembler.andRegister64(11, 9, 10);
+    try assembler.movImmediate64(10, Value.string_kind_bits);
+    try assembler.compareRegister64(11, 10);
+    const not_string = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.movImmediate64(10, Value.boxed_payload_mask);
+    try assembler.andRegister64(9, 9, 10);
+    try assembler.addImmediate64(9, 9, @intCast(@offsetOf(StringCell, "hash")));
+    try assembler.loadAcquire64(16, 9);
+    try assembler.movImmediate64(10, strcell.utf16_length_mask);
+    try assembler.andRegister64(16, 16, 10);
+    try assembler.movImmediate64(10, strcell.utf16_length_unknown);
+    try assembler.compareRegister64(16, 10);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.convertUnsigned64ToFloat64(0, 16);
+    try assembler.moveRegisterFromFloat64(17, 0);
+    try assembler.store64(17, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    try assembler.patchConditionBranch(not_string, assembler.position());
+
     // Array length is protected by the element lock in shared realms. The
     // common dense-array guard rejects whenever parallel inline caches are on,
     // before loading either the list base or length; bytecode then performs the
@@ -4509,7 +4535,7 @@ fn emitRuntimeOperation(
     const numeric_result = descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0;
     if (numeric_result) {
         var direct = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
-            (try emitDirectDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
+            (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
             return error.UnsupportedChunk;
         try direct.patchCompletions(assembler, assembler.position());
@@ -4537,7 +4563,7 @@ fn emitRuntimeOperation(
 
     const direct_runtime_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
-        (try emitDirectDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
+        (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayWrite(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayAppend(assembler, operation, descriptor)) orelse
@@ -6716,6 +6742,122 @@ test "optimizer compacts function-wide SSA before loop OSR" {
         return error.TestUnexpectedResult;
     const marker_root = @as(u128, 1) << @intCast(marker_import.destination);
     try std.testing.expectEqual(marker_root, stack_map.scratch_pointer_slots & marker_root);
+}
+
+test "optimizer loop executes primitive string length without callbacks" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 4;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    const length = try chunk.addName("length");
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 3);
+    _ = try chunk.emit(.pop, 0);
+    const to_header = try chunk.emit(.jump, 0);
+    const header: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[to_header].a = header;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.lt, 0);
+    const to_exit = try chunk.emit(.jump_if_false, 0);
+    _ = try chunk.emit(.load_local, 3);
+    _ = try chunk.emit(.load_local, 0);
+    const length_ip = try chunk.emit(.get_prop, length);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 3);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, header);
+    const exit: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[to_exit].a = exit;
+    _ = try chunk.emit(.load_local, 3);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
+    var length_operation: ?jit.NativeOperationDescriptor = null;
+    for (metadata.descriptors) |descriptor| {
+        if (descriptor.origin == length_ip) length_operation = descriptor;
+    }
+    const descriptor = length_operation orelse return error.TestUnexpectedResult;
+    try std.testing.expect(descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0);
+
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(header, 4, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    const text = try Value.strAlloc(arena.allocator(), "a\xf0\x9f\x92\xa9b");
+    var slots = [_]u64{
+        text.rawBits(),
+        Value.num(3).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(0).rawBits(),
+    };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, exit), frame.exit_ip);
+    const point = compiled.deopt.?.points[frame.deopt_index];
+    const recovered_total = compiled.deopt.?.values[point.first_value + 3].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 12), Value.fromRawBits(recovered_total).asNum());
+
+    var array = Object{ .is_array = true };
+    try array.appendElement(arena.allocator(), Value.num(1));
+    try array.appendElement(arena.allocator(), Value.num(2));
+    try array.appendElement(arena.allocator(), Value.num(3));
+    slots = .{
+        Value.obj(&array).rawBits(),
+        Value.num(2).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(0).rawBits(),
+    };
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, exit), frame.exit_ip);
+    const array_point = compiled.deopt.?.points[frame.deopt_index];
+    const array_total = compiled.deopt.?.values[array_point.first_value + 3].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 6), Value.fromRawBits(array_total).asNum());
+
+    const uncached = try Value.strAlloc(arena.allocator(), "oversized-fallback");
+    const cell = @constCast(uncached.asStringCell());
+    @atomicStore(
+        u64,
+        &cell.hash,
+        (cell.hashState() & ~strcell.utf16_length_mask) | strcell.utf16_length_unknown,
+        .monotonic,
+    );
+    slots = .{
+        uncached.rawBits(),
+        Value.num(1).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(0).rawBits(),
+    };
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, length_ip), frame.exit_ip);
 }
 
 test "optimizer loop stages environment and coercive operations" {

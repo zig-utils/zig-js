@@ -7067,6 +7067,7 @@ pub const Value = struct {
     pub const boxed_kind_mask: u64 = box_mask | (@as(u64, 0b111) << tag_shift);
     pub const number_box_mask: u64 = box_mask;
     pub const object_kind_bits: u64 = box_mask | (@as(u64, tag_object) << tag_shift);
+    pub const string_kind_bits: u64 = box_mask | (@as(u64, tag_string) << tag_shift);
     pub const boxed_payload_mask: u64 = payload_mask;
 
     pub const Kind = enum { undefined, null, boolean, number, string, object };
