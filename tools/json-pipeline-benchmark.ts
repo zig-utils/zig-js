@@ -97,12 +97,13 @@ function runSample(
   workload: Workload,
   pairSample: number,
   order: number,
+  mode = "single",
 ): Sample {
   const argv = [
     "env",
     "LC_ALL=C",
     binary,
-    "single",
+    mode,
     workload.name,
     String(workload.jobs),
     "1",
@@ -117,7 +118,7 @@ function runSample(
   const lines = completed.stdout.split("\n").filter((line) => line.trim());
   requireValue(lines.length === 1, `expected one benchmark row, got ${lines.length}`);
   const row = parseRow(lines[0]);
-  requireValue(row.mode === "single", `${workload.name}: mode drift`);
+  requireValue(row.mode === mode, `${workload.name}: mode drift`);
   requireValue(row.workload === workload.name, `${workload.name}: workload drift`);
   requireValue(row.lanes === 1, `${workload.name}: lane drift`);
   requireValue(row.jobs === workload.jobs, `${workload.name}: job-count drift`);
@@ -151,6 +152,24 @@ export function collect(
         : [jsc, zigJs];
       binaries.forEach((binary, order) =>
         rows.push(runSample(binary, workload, pair, order))
+      );
+    }
+  });
+  return rows;
+}
+
+export function collectTierResidency(
+  zigJs: string,
+  samples: number,
+): Sample[] {
+  const rows: Sample[] = [];
+  WORKLOADS.slice(0, 2).forEach((workload, workloadIndex) => {
+    for (let pair = 0; pair < samples; pair += 1) {
+      const modes = (workloadIndex + pair) % 2 === 0
+        ? ["single", "single_no_jit"]
+        : ["single_no_jit", "single"];
+      modes.forEach((mode, order) =>
+        rows.push(runSample(zigJs, workload, pair, order, mode))
       );
     }
   });
@@ -199,6 +218,48 @@ export function validate(rows: Sample[], samples: number): void {
   }
 }
 
+export function validateTierResidency(rows: Sample[], samples: number): void {
+  const workloads = WORKLOADS.slice(0, 2);
+  requireValue(
+    rows.length === workloads.length * samples * 2,
+    `expected ${workloads.length * samples * 2} tier rows, got ${rows.length}`,
+  );
+  for (const workload of workloads) {
+    const group = rows.filter((row) => row.workload === workload.name);
+    for (const mode of ["single", "single_no_jit"]) {
+      const modeRows = group.filter((row) => row.mode === mode);
+      requireValue(
+        modeRows.length === samples,
+        `${workload.name}/${mode}: expected ${samples} rows`,
+      );
+      requireValue(
+        JSON.stringify(modeRows.map((row) => row.pair_sample).sort((a, b) => a - b)) ===
+          JSON.stringify(Array.from({ length: samples }, (_, index) => index)),
+        `${workload.name}/${mode}: sample-index drift`,
+      );
+      requireValue(
+        median(modeRows.map((row) => row.elapsed_ns)) >= MINIMUM_MEDIAN_NS,
+        `${workload.name}/${mode}: median is below the 50 ms timing floor`,
+      );
+    }
+    requireValue(
+      group.every((row) => row.checksum === workload.checksum),
+      `${workload.name}: tier checksum drift`,
+    );
+    for (let pair = 0; pair < samples; pair += 1) {
+      const pairRows = group.filter((row) => row.pair_sample === pair);
+      requireValue(
+        pairRows.length === 2 && pairRows[0].order === 0 && pairRows[1].order === 1,
+        `${workload.name}: tier pair ${pair} order drift`,
+      );
+      requireValue(
+        pairRows[0].mode !== pairRows[1].mode,
+        `${workload.name}: tier pair ${pair} did not compare both modes`,
+      );
+    }
+  }
+}
+
 function summarize(rows: Sample[]): any[] {
   return WORKLOADS.map((workload) => {
     const zig = rows.filter(
@@ -219,6 +280,29 @@ function summarize(rows: Sample[]): any[] {
       jsc_median_ns: jscMedian,
       jsc_rsd: relativeStddev(jsc),
       jsc_throughput_over_zig_js: zigMedian / jscMedian,
+    };
+  });
+}
+
+function summarizeTierResidency(rows: Sample[]): any[] {
+  return WORKLOADS.slice(0, 2).map((workload) => {
+    const jit = rows.filter(
+        (row) => row.workload === workload.name && row.mode === "single",
+      ).map((row) => row.elapsed_ns),
+      vm = rows.filter(
+        (row) => row.workload === workload.name && row.mode === "single_no_jit",
+      ).map((row) => row.elapsed_ns),
+      jitMedian = median(jit),
+      vmMedian = median(vm);
+    return {
+      workload: workload.name,
+      jobs: workload.jobs,
+      checksum: workload.checksum,
+      jit_median_ns: jitMedian,
+      jit_rsd: relativeStddev(jit),
+      required_vm_median_ns: vmMedian,
+      required_vm_rsd: relativeStddev(vm),
+      jit_over_required_vm: jitMedian / vmMedian,
     };
   });
 }
@@ -260,6 +344,47 @@ function render(artifact: any, rawPath: string): string {
     "- The zig-js runner is ReleaseFast with the real precise collector checkout recorded above. The JSC runner links the system JavaScriptCore framework.",
     "- The collector rejects identity, job-count, checksum, sample-index, pair-order, and 50 ms median-floor drift before writing either artifact.",
     "- Host scheduling and frequency are not controlled, so RSD is retained and the matrix remains diagnostic.",
+    "",
+    `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
+    "",
+  );
+  return lines.join("\n");
+}
+
+function renderTierResidency(artifact: any, rawPath: string): string {
+  const lines = [
+    `# Frozen JSON JIT residency — ${artifact.metadata.date}`,
+    "",
+    "> Focused JIT-versus-required-VM diagnostic for issue #1017.",
+    "> Lower time is better; a JIT/VM ratio at or below 1.0 clears the residency throughput gate.",
+    "",
+    "## Provenance",
+    "",
+    "| item | value |",
+    "| --- | --- |",
+  ];
+  Object.keys(artifact.metadata).forEach((key) =>
+    lines.push(`| ${key} | ${String(artifact.metadata[key]).replace(/\|/g, "\\|")} |`)
+  );
+  lines.push(
+    "",
+    "## Result",
+    "",
+    "| workload | jobs | JIT median | JIT RSD | required VM median | VM RSD | JIT / VM | checksum |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  artifact.summary.forEach((row: any) => lines.push(
+    `| \`${row.workload}\` | ${row.jobs} | ${(row.jit_median_ns / 1e6).toFixed(3)} ms | ${(row.jit_rsd * 100).toFixed(2)}% | ${(row.required_vm_median_ns / 1e6).toFixed(3)} ms | ${(row.required_vm_rsd * 100).toFixed(2)}% | ${row.jit_over_required_vm.toFixed(3)}x | ${row.checksum} |`,
+  ));
+  lines.push(
+    "",
+    "## Method",
+    "",
+    `- ${artifact.metadata.samples} fresh-process, order-balanced pairs per row; no sample was discarded.`,
+    "- Both modes use the same ReleaseFast binary, real precise collector, workload bytes, warmup, jobs, and timed invocation.",
+    "- `single` enables the shipping native tiers. `single_no_jit` disables JIT and requires bytecode execution.",
+    "- The collector rejects mode, identity, checksum, sample-index, pair-order, and 50 ms median-floor drift.",
+    "- Host scheduling and frequency are not controlled, so RSD is retained and the result remains diagnostic.",
     "",
     `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
     "",
@@ -312,7 +437,20 @@ export function selfTest(): void {
   expectFailure(() => validate(short, 3), "timing floor");
   const report = render({ metadata: { date: "fixture", samples: 3 }, summary: summarize(rows) }, "raw.json");
   requireValue(report.includes("representative_json_variant"), "report omitted variant");
-  console.log("OK JSON pipeline benchmark: matrix, checksum, order, timing, and report gates verified");
+  const tierRows = rows.filter((row) =>
+    row.workload === WORKLOADS[0].name || row.workload === WORKLOADS[1].name
+  ).map((row) => ({
+    ...row,
+    engine: "zig-js",
+    mode: row.engine === "zig-js" ? "single" : "single_no_jit",
+  }));
+  validateTierResidency(tierRows, 3);
+  const tierReport = renderTierResidency(
+    { metadata: { date: "fixture", samples: 3 }, summary: summarizeTierResidency(tierRows) },
+    "tier-raw.json",
+  );
+  requireValue(tierReport.includes("JIT / VM"), "tier report omitted ratio");
+  console.log("OK JSON pipeline benchmark: JSC/tier matrices, checksums, order, timing, and reports verified");
 }
 
 function optionValue(args: string[], name: string): string {
@@ -321,29 +459,7 @@ function optionValue(args: string[], name: string): string {
   return args[index + 1];
 }
 
-function main(): void {
-  const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === "--self-test") {
-    selfTest();
-    return;
-  }
-  requireValue(
-    args.length >= 2,
-    "usage: json-pipeline-benchmark.ts ZIG_JS_RUNNER JSC_RUNNER --zig-js-revision REV --zig PATH --zig-gc-repository PATH --zig-regex-repository PATH --raw-out PATH --markdown-out PATH [--samples N]",
-  );
-  const zigJs = args[0],
-    jsc = args[1],
-    revision = optionValue(args, "--zig-js-revision"),
-    zig = optionValue(args, "--zig"),
-    gcRepository = optionValue(args, "--zig-gc-repository"),
-    regexRepository = optionValue(args, "--zig-regex-repository"),
-    rawOut = optionValue(args, "--raw-out"),
-    markdownOut = optionValue(args, "--markdown-out"),
-    samplesIndex = args.indexOf("--samples"),
-    samples = samplesIndex >= 0 ? Number(args[samplesIndex + 1]) : 7;
-  requireValue(fileExists(zigJs) && fileExists(jsc), "benchmark runner does not exist");
-  requireValue(/^[0-9a-f]{40}$/.test(revision), "zig-js revision must be a full commit id");
-  requireValue(Number.isInteger(samples) && samples > 0, "samples must be a positive integer");
+function requireCleanTrackedRepository(): void {
   const trackedStatus = run([
     "git",
     "-C",
@@ -360,35 +476,80 @@ function main(): void {
     !trackedStatus.stdout.trim(),
     "refusing evidence collection from a tracked-dirty repository",
   );
-  const rows = collect(zigJs, jsc, samples);
+}
+
+function main(): void {
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--self-test") {
+    selfTest();
+    return;
+  }
+  const tierResidency = args[0] === "--tier-residency",
+    runnerIndex = tierResidency ? 1 : 0;
+  requireValue(
+    args.length >= runnerIndex + (tierResidency ? 1 : 2),
+    "usage: json-pipeline-benchmark.ts [--tier-residency] ZIG_JS_RUNNER [JSC_RUNNER] --zig-js-revision REV --zig PATH --zig-gc-repository PATH --zig-regex-repository PATH --raw-out PATH --markdown-out PATH [--samples N]",
+  );
+  const zigJs = args[runnerIndex],
+    jsc = tierResidency ? null : args[runnerIndex + 1],
+    revision = optionValue(args, "--zig-js-revision"),
+    zig = optionValue(args, "--zig"),
+    gcRepository = optionValue(args, "--zig-gc-repository"),
+    regexRepository = optionValue(args, "--zig-regex-repository"),
+    rawOut = optionValue(args, "--raw-out"),
+    markdownOut = optionValue(args, "--markdown-out"),
+    samplesIndex = args.indexOf("--samples"),
+    samples = samplesIndex >= 0 ? Number(args[samplesIndex + 1]) : 7;
+  requireValue(fileExists(zigJs) && (jsc === null || fileExists(jsc)), "benchmark runner does not exist");
+  requireValue(/^[0-9a-f]{40}$/.test(revision), "zig-js revision must be a full commit id");
+  requireValue(Number.isInteger(samples) && samples > 0, "samples must be a positive integer");
+  requireCleanTrackedRepository();
+  const metadata: any = {
+    date: commandOutput(["date", "+%F"]),
+    host: `${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}; ${commandOutput(["sysctl", "-n", "hw.memsize"])} bytes`,
+    os: `macOS ${commandOutput(["sw_vers", "-productVersion"])} (${commandOutput(["sw_vers", "-buildVersion"])})`,
+    power: commandOutput(["pmset", "-g", "batt"], "unavailable").split(/\s+/).join(" "),
+    zig_version: commandOutput([zig, "version"]),
+    collector_revision: repositoryRevision(ROOT),
+    zig_js_binary_revision: revision,
+    zig_gc_revision: repositoryRevision(gcRepository),
+    zig_regex_revision: repositoryRevision(regexRepository),
+    workload_source: "bench/representative_comparison.js",
+    workload_source_sha256: sha256File(`${ROOT}/bench/representative_comparison.js`),
+    zig_js_binary_sha256: sha256File(zigJs),
+    optimize: "ReleaseFast",
+    allocator: "real precise collector; GC enabled",
+    timed_boundary: "warmed persistent context; one exact invocation",
+    samples,
+    minimum_median_ns: MINIMUM_MEDIAN_NS,
+    sample_order: "fresh-process alternating pairs, offset by workload",
+    host_class: "diagnostic",
+  };
+  if (tierResidency) {
+    const rows = collectTierResidency(zigJs, samples);
+    validateTierResidency(rows, samples);
+    const artifact = {
+      schema_version: 1,
+      kind: "focused_json_tier_residency",
+      metadata,
+      workloads: WORKLOADS.slice(0, 2),
+      summary: summarizeTierResidency(rows),
+      samples: rows,
+    };
+    writeText(rawOut, JSON.stringify(artifact, null, 2) + "\n");
+    writeText(markdownOut, renderTierResidency(artifact, rawOut));
+    process.stdout.write(renderTierResidency(artifact, rawOut));
+    return;
+  }
+  const rows = collect(zigJs, jsc!, samples);
   validate(rows, samples);
   const framework = "/System/Library/Frameworks/JavaScriptCore.framework/Resources/Info.plist";
+  metadata.jsc_binary_sha256 = sha256File(jsc!);
+  metadata.javascriptcore = `system framework ${commandOutput(["plutil", "-extract", "CFBundleVersion", "raw", framework])}`;
   const artifact = {
     schema_version: 1,
     kind: "focused_json_jsc_comparison",
-    metadata: {
-      date: commandOutput(["date", "+%F"]),
-      host: `${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}; ${commandOutput(["sysctl", "-n", "hw.memsize"])} bytes`,
-      os: `macOS ${commandOutput(["sw_vers", "-productVersion"])} (${commandOutput(["sw_vers", "-buildVersion"])})`,
-      power: commandOutput(["pmset", "-g", "batt"], "unavailable").split(/\s+/).join(" "),
-      zig_version: commandOutput([zig, "version"]),
-      collector_revision: repositoryRevision(ROOT),
-      zig_js_binary_revision: revision,
-      zig_gc_revision: repositoryRevision(gcRepository),
-      zig_regex_revision: repositoryRevision(regexRepository),
-      workload_source: "bench/representative_comparison.js",
-      workload_source_sha256: sha256File(`${ROOT}/bench/representative_comparison.js`),
-      zig_js_binary_sha256: sha256File(zigJs),
-      jsc_binary_sha256: sha256File(jsc),
-      javascriptcore: `system framework ${commandOutput(["plutil", "-extract", "CFBundleVersion", "raw", framework])}`,
-      optimize: "ReleaseFast",
-      allocator: "real precise collector; GC enabled",
-      timed_boundary: "warmed persistent context; one exact invocation",
-      samples,
-      minimum_median_ns: MINIMUM_MEDIAN_NS,
-      sample_order: "fresh-process alternating pairs, offset by workload",
-      host_class: "diagnostic",
-    },
+    metadata,
     workloads: WORKLOADS,
     summary: summarize(rows),
     samples: rows,
