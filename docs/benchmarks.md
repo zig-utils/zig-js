@@ -109,6 +109,36 @@ These use the default **arena allocator, with runtime GC off**. They are not
 ReleaseFast, warmed-context or JSC throughput scores, and their timings do not
 enter the representative matrix or generated README benchmark scorecard.
 
+## JSON native-loop and JSC diagnostics
+
+The October 1 [dated report](.data/json-jit-pipeline-2026-10-01.md) follows the
+production, GC-enabled JSON rows through two exact-parent native-loop changes,
+a same-binary JIT/required-VM check, and a direct system-JSC matrix. All runners
+are ReleaseFast, use the exact workload bytes recorded in the artifacts, and
+preserve frozen checksums.
+
+[#1017](https://github.com/zig-utils/zig-js/issues/1017) removes primitive
+String-length guard churn from optimizer regions. Retired instructions fall to
+`0.9326x`/`0.9328x` on the base/variant while four controls remain within
+-0.05% to +0.03%. [#1018](https://github.com/zig-utils/zig-js/issues/1018)
+executes the guarded Number `bit_and` path directly; the same rows fall another
+`0.9904x`/`0.9947x`, with controls within -0.01% to +0.10%. Each linked
+exact-parent report preserves seven alternating pairs and its raw schema-4 JSON.
+
+The [tier-residency comparison](.data/json-jit-residency-2026-10-01.md)
+([raw](.data/json-jit-residency-2026-10-01.json)) measures the exact final binary
+against itself. JIT/required-VM medians are `0.990x` and `0.992x` on the two
+frozen rows; the base VM side has 11.25% RSD, so this remains a diagnostic gate,
+not a broad native-tier speed claim.
+
+The [direct-JSC comparison](.data/json-jit-pipeline-jsc-2026-10-01.md)
+([84 raw samples](.data/json-jit-pipeline-jsc-2026-10-01.json)) clears a 50 ms
+median floor in both engines and retains RSD per row. System JSC remains
+`4.05x`/`4.04x` faster on the representative pair. The depth-4096 and
+shallow-4096 structure controls expose larger `10.47x`/`9.22x` gaps; measured
+follow-up is tracked in [#1019](https://github.com/zig-utils/zig-js/issues/1019).
+No result in this section is a universal engine score or a JSON parity claim.
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)

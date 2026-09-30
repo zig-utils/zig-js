@@ -87,6 +87,15 @@ work, not production/JSC throughput:
 | long strings with a sparse escape | 51.7% fewer; unescaped control -0.08% | [report](docs/.data/json-parse-cpu-work-2026-09-29.md) · [raw samples](docs/.data/json-parse-cpu-work-2026-09-29.json) |
 | arrays of short integers | 27.5% fewer; fractional control +0.41% | [report](docs/.data/json-parse-cpu-work-2026-09-29.md) · [raw samples](docs/.data/json-parse-cpu-work-2026-09-29.json) |
 
+The later production JSON/JIT pass uses ReleaseFast, the real precise
+collector, exact binaries and seven order-balanced pairs:
+
+| scope | result | evidence |
+| --- | ---: | --- |
+| native-loop exact-parent A/B | String-length rows retire 6.74%/6.72% fewer instructions; guarded bit-and removes another 0.96%/0.53%; controls stay within ±0.11% | [dated report](docs/.data/json-jit-pipeline-2026-10-01.md) · [#1017 raw base](docs/.data/exact-parent-jit-string-length-json-2026-10-01.json) · [#1018 raw base](docs/.data/exact-parent-jit-bit-and-json-2026-10-01.json) |
+| JIT versus required VM | `0.990x` / `0.992x` elapsed on the frozen base/variant, exact checksum | [report](docs/.data/json-jit-residency-2026-10-01.md) · [28 raw samples](docs/.data/json-jit-residency-2026-10-01.json) |
+| current system-JSC diagnostic | JSC is `4.05x` / `4.04x` faster on the frozen base/variant; no parity claim | [report](docs/.data/json-jit-pipeline-jsc-2026-10-01.md) · [84 raw samples](docs/.data/json-jit-pipeline-jsc-2026-10-01.json) |
+
 Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use
