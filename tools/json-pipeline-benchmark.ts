@@ -344,11 +344,22 @@ function main(): void {
   requireValue(fileExists(zigJs) && fileExists(jsc), "benchmark runner does not exist");
   requireValue(/^[0-9a-f]{40}$/.test(revision), "zig-js revision must be a full commit id");
   requireValue(Number.isInteger(samples) && samples > 0, "samples must be a positive integer");
-  const trackedStatus = commandOutput(
-    ["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"],
-    "unknown",
+  const trackedStatus = run([
+    "git",
+    "-C",
+    ROOT,
+    "status",
+    "--porcelain",
+    "--untracked-files=no",
+  ]);
+  requireValue(
+    trackedStatus.exitCode === 0,
+    trackedStatus.stderr || "cannot inspect repository status",
   );
-  requireValue(!trackedStatus, "refusing evidence collection from a tracked-dirty repository");
+  requireValue(
+    !trackedStatus.stdout.trim(),
+    "refusing evidence collection from a tracked-dirty repository",
+  );
   const rows = collect(zigJs, jsc, samples);
   validate(rows, samples);
   const framework = "/System/Library/Frameworks/JavaScriptCore.framework/Resources/Info.plist";
