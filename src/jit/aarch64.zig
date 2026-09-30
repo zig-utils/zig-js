@@ -107,6 +107,10 @@ pub const Assembler = struct {
         try self.emit32(0x8a00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
 
+    pub fn andRegister32(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
+        try self.emit32(0x0a00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
+    }
+
     pub fn multiply64(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
         try self.emit32(0x9b00_7c00 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
@@ -224,6 +228,10 @@ pub const Assembler = struct {
 
     pub fn convertUnsigned32ToFloat64(self: *Assembler, fd: u5, rn: u5) error{NoSpace}!void {
         try self.emit32(0x1e63_0000 | (@as(u32, rn) << 5) | fd);
+    }
+
+    pub fn convertSigned32ToFloat64(self: *Assembler, fd: u5, rn: u5) error{NoSpace}!void {
+        try self.emit32(0x1e62_0000 | (@as(u32, rn) << 5) | fd);
     }
 
     pub fn convertFloat64ToUnsigned64(self: *Assembler, rd: u5, fn_: u5) error{NoSpace}!void {
@@ -472,7 +480,7 @@ test "AArch64 guarded unsigned remainder encodings" {
 }
 
 test "AArch64 guarded unsigned 64-bit arithmetic encodings" {
-    var storage: [28]u8 = undefined;
+    var storage: [36]u8 = undefined;
     var assembler = Assembler.init(&storage);
     try assembler.subtractRegister64(9, 10, 11);
     try assembler.multiply64(12, 13, 14);
@@ -480,6 +488,8 @@ test "AArch64 guarded unsigned 64-bit arithmetic encodings" {
     try assembler.multiplySubtract64(18, 19, 20, 21);
     try assembler.convertUnsigned64ToFloat64(2, 22);
     try assembler.convertFloat64ToUnsigned64(23, 3);
+    try assembler.andRegister32(9, 10, 11);
+    try assembler.convertSigned32ToFloat64(2, 9);
     try assembler.ret();
 
     const expected = [_]u32{
@@ -489,6 +499,8 @@ test "AArch64 guarded unsigned 64-bit arithmetic encodings" {
         0x9b14_d672,
         0x9e63_02c2,
         0x9e79_0077,
+        0x0a0b_0149,
+        0x1e62_0122,
         0xd65f_03c0,
     };
     for (expected, 0..) |instruction, index| {

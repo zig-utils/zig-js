@@ -4258,6 +4258,48 @@ fn emitDirectStringOrDenseArrayLengthRead(
     return direct;
 }
 
+fn emitExactUnsigned32Operand(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+    input: u16,
+    value_register: u5,
+    masked_register: u5,
+    float_register: u5,
+) !void {
+    try assembler.load64(value_register, 14, try slotOffset(input));
+    try assembler.movImmediate64(11, Value.number_box_mask);
+    try assembler.andRegister64(masked_register, value_register, 11);
+    try assembler.compareRegister64(masked_register, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.moveFloatFromRegister64(float_register, value_register);
+    try assembler.convertFloat64ToUnsigned32(value_register, float_register);
+    try assembler.convertUnsigned32ToFloat64(2, value_register);
+    try assembler.compareFloat64(float_register, 2);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+}
+
+fn emitDirectUnsigned32BitAnd(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.bit_and) or descriptor.input_count != 2)
+        return null;
+
+    var direct = DirectRuntimeAccess{};
+    // The round-trip guards admit exactly represented uint32 operands (and
+    // -0, whose ToInt32 result is +0). Every fractional, negative, non-finite,
+    // oversized, BigInt, or coercive operand retains the canonical callback.
+    try emitExactUnsigned32Operand(assembler, &direct, descriptor.first_input, 9, 16, 0);
+    try emitExactUnsigned32Operand(assembler, &direct, descriptor.first_input + 1, 10, 16, 1);
+    try assembler.andRegister32(9, 9, 10);
+    try assembler.convertSigned32ToFloat64(0, 9);
+    try assembler.moveRegisterFromFloat64(17, 0);
+    try assembler.store64(17, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
+}
+
 fn emitDenseArrayWriteBarrier(
     assembler: *aarch64.Assembler,
     direct: *DirectRuntimeAccess,
@@ -4537,6 +4579,7 @@ fn emitRuntimeOperation(
         var direct = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
+            (try emitDirectUnsigned32BitAnd(assembler, operation, descriptor)) orelse
             return error.UnsupportedChunk;
         try direct.patchCompletions(assembler, assembler.position());
         try assembler.load64(9, 14, try slotOffset(operation.destination));
@@ -4565,6 +4608,7 @@ fn emitRuntimeOperation(
         (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
         (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
+        (try emitDirectUnsigned32BitAnd(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayWrite(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayAppend(assembler, operation, descriptor)) orelse
         try emitDirectDenseArrayPush(assembler, returns, operation, descriptor);
@@ -6858,6 +6902,82 @@ test "optimizer loop executes primitive string length without callbacks" {
     steps = 0;
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
     try std.testing.expectEqual(@as(usize, length_ip), frame.exit_ip);
+}
+
+test "optimizer executes guarded uint32 bit and without callbacks" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    const bit_and_ip = try chunk.emit(.bit_and, 0);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), metadata.descriptors.len);
+    const descriptor = metadata.descriptors[0];
+    try std.testing.expectEqual(bit_and_ip, descriptor.origin);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.bit_and)), descriptor.bytecode_op);
+
+    const Context = struct {
+        descriptor: jit.NativeOperationDescriptor,
+        lhs: u64,
+        rhs: u64,
+        result: u64,
+        calls: u32 = 0,
+
+        fn dispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
+            const self: *@This() = @ptrCast(@alignCast(frame.operation_context.?));
+            if (operation_id != 0 or
+                frame.scratch.?[self.descriptor.first_input] != self.lhs or
+                frame.scratch.?[self.descriptor.first_input + 1] != self.rhs)
+                return @backingInt(jit.NativeOperationStatus.host_trap);
+            self.calls += 1;
+            frame.operation_value_bits = self.result;
+            return @backingInt(jit.NativeOperationStatus.value);
+        }
+    };
+    const cases = [_]struct {
+        lhs: Value,
+        rhs: Value,
+        expected: f64,
+        direct: bool,
+    }{
+        .{ .lhs = Value.num(0xffff_ffff), .rhs = Value.num(0x8000_0001), .expected = -2_147_483_647, .direct = true },
+        .{ .lhs = Value.num(-0.0), .rhs = Value.num(0xffff_ffff), .expected = 0, .direct = true },
+        .{ .lhs = Value.num(-1), .rhs = Value.num(1), .expected = 1, .direct = false },
+        .{ .lhs = Value.num(3.5), .rhs = Value.num(1), .expected = 1, .direct = false },
+        .{ .lhs = Value.num(std.math.nan(f64)), .rhs = Value.num(1), .expected = 0, .direct = false },
+        .{ .lhs = Value.num(std.math.inf(f64)), .rhs = Value.num(1), .expected = 0, .direct = false },
+        .{ .lhs = Value.num(0x1_0000_0000), .rhs = Value.num(1), .expected = 0, .direct = false },
+        .{ .lhs = Value.boolVal(true), .rhs = Value.num(1), .expected = 1, .direct = false },
+    };
+    for (cases) |case| {
+        var slots = [_]u64{ case.lhs.rawBits(), case.rhs.rawBits() };
+        var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+        var steps: u64 = 0;
+        var context = Context{
+            .descriptor = descriptor,
+            .lhs = slots[0],
+            .rhs = slots[1],
+            .result = Value.num(case.expected).rawBits(),
+        };
+        var frame = jit.NativeFrame{
+            .slots = &slots,
+            .scratch = &scratch,
+            .steps = &steps,
+            .operation = Context.dispatch,
+            .operation_context = &context,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+        try std.testing.expectEqual(case.expected, Value.fromRawBits(frame.result_bits).asNum());
+        try std.testing.expectEqual(@as(u32, if (case.direct) 0 else 1), context.calls);
+    }
 }
 
 test "optimizer loop stages environment and coercive operations" {
