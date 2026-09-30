@@ -6,6 +6,8 @@
 const std = @import("std");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
+const shape_mod = @import("shape.zig");
+const Shape = shape_mod.Shape;
 const strcell = @import("strcell.zig");
 const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
@@ -4210,6 +4212,60 @@ const JsonParser = struct {
         }
     }
 
+    fn inlineShapeMatches(p: *JsonParser, prepared: value.PreparedInlineLiteralShape, keys: []const []const u8) bool {
+        if (prepared.slot_count != keys.len) return false;
+        var cursor: ?*Shape = prepared.final_shape;
+        var remaining = keys.len;
+        while (remaining > 0) {
+            const operation = cursor orelse return false;
+            remaining -= 1;
+            if (operation.name == null or !std.mem.eql(u8, operation.name.?, keys[remaining])) return false;
+            cursor = operation.parent;
+        }
+        return cursor == p.interp.root_shape;
+    }
+
+    fn cachedInlineShape(p: *JsonParser, keys: []const []const u8) ?value.PreparedInlineLiteralShape {
+        const cache = p.interp.json_parse_inline_shape_cache orelse return null;
+        for (cache.entries) |entry| {
+            const prepared = entry orelse continue;
+            if (p.inlineShapeMatches(prepared, keys)) return prepared;
+        }
+        return null;
+    }
+
+    fn rememberInlineShape(p: *JsonParser, prepared: value.PreparedInlineLiteralShape) std.mem.Allocator.Error!void {
+        const cache = p.interp.json_parse_inline_shape_cache orelse cache: {
+            const cache = try p.interp.arena.create(interpreter.JsonParseInlineShapeCache);
+            cache.* = .{};
+            p.interp.json_parse_inline_shape_cache = cache;
+            break :cache cache;
+        };
+        for (cache.entries) |entry|
+            if (entry != null and entry.?.final_shape == prepared.final_shape) return;
+        const index: usize = cache.next;
+        cache.entries[index] = prepared;
+        cache.next = @intCast((index + 1) % cache.entries.len);
+    }
+
+    fn finishBufferedObject(
+        p: *JsonParser,
+        object: *value.Object,
+        keys: []const []const u8,
+        values: []const Value,
+    ) std.mem.Allocator.Error!void {
+        std.debug.assert(keys.len == values.len);
+        if (keys.len == 0) return;
+        if (p.cachedInlineShape(keys)) |prepared| {
+            if (object.initializePreparedInlineLiteralShape(prepared, values)) return;
+        }
+        for (keys, values) |key, child|
+            try object.setOwnUnpublished(p.interp.arena, p.interp.root_shape, key, child);
+        const final_shape = object.shape orelse return;
+        if (value.Object.prepareInlineLiteralShape(p.interp.root_shape, final_shape, keys.len)) |prepared|
+            try p.rememberInlineShape(prepared);
+    }
+
     fn parseObject(p: *JsonParser) JErr!JsonParsed {
         p.i += 1; // {
         const result = try p.interp.newUnpublishedObject();
@@ -4220,6 +4276,10 @@ const JsonParser = struct {
             return p.parsed(result, null, .{ .entries = entries });
         }
         var after_comma = false;
+        var buffered_keys: [value.Object.inline_slot_capacity][]const u8 = undefined;
+        var buffered_values: [value.Object.inline_slot_capacity]Value = undefined;
+        var buffered_len: usize = 0;
+        var buffering = true;
         while (true) {
             p.skipWs();
             if (p.i >= p.s.len or p.s[p.i] != '"') {
@@ -4241,10 +4301,20 @@ const JsonParser = struct {
             // attrs). Not [[Set]] — so "__proto__" becomes a normal own property
             // and duplicate keys overwrite without invoking inherited setters.
             // The result and every container reachable through it remain
-            // private until the complete parse succeeds. The Shape transition
-            // and GC barrier still run, but no peer can require this Object's
-            // property mutex during construction.
-            try result.asObj().setOwnUnpublished(p.interp.arena, p.interp.root_shape, storage_key, child.value);
+            // private until the complete parse succeeds. Exact prepared shapes
+            // retain every GC barrier; misses replay the ordinary transitions,
+            // and neither path needs the unpublished Object's property mutex.
+            if (buffering and buffered_len < buffered_keys.len) {
+                buffered_keys[buffered_len] = storage_key;
+                buffered_values[buffered_len] = child.value;
+                buffered_len += 1;
+            } else {
+                if (buffering) {
+                    try p.finishBufferedObject(result.asObj(), buffered_keys[0..buffered_len], buffered_values[0..buffered_len]);
+                    buffering = false;
+                }
+                try result.asObj().setOwnUnpublished(p.interp.arena, p.interp.root_shape, storage_key, child.value);
+            }
             if (p.track_records) try entries.putWithContext(
                 p.interp.arena,
                 storage_key,
@@ -4260,6 +4330,8 @@ const JsonParser = struct {
             }
             if (p.s[p.i] == '}') {
                 p.i += 1;
+                if (buffering)
+                    try p.finishBufferedObject(result.asObj(), buffered_keys[0..buffered_len], buffered_values[0..buffered_len]);
                 return p.parsed(result, null, .{ .entries = entries });
             }
             return p.fail(.expected_object_close);
@@ -4323,6 +4395,56 @@ test "JSON parser publishes private object fields without property locks" {
     try std.testing.expectEqual(@as(f64, 2), result.getOwn("nested").?.asObj().getOwn("b").?.asNum());
     try std.testing.expectEqual(@as(f64, 4), result.getOwn("__proto__").?.asNum());
     try std.testing.expectEqual(@as(f64, 5), result.getOwn("\x00\x00\x00key").?.asNum());
+}
+
+test "JSON parser reuses exact inline shapes and preserves fallback semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var env: interpreter.Environment = .{ .arena = allocator, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = allocator, .env = &env, .root_shape = root_shape };
+
+    const Parse = struct {
+        fn object(interp_: *Interpreter, source: []const u8) !*value.Object {
+            var parser = JsonParser{ .s = source, .i = 0, .interp = interp_ };
+            const parsed = try parser.parseValue();
+            try std.testing.expectEqual(source.len, parser.i);
+            return parsed.value.asObj();
+        }
+    };
+
+    const warm = try Parse.object(&machine, "{\"alpha\":1,\"beta\":2,\"gamma\":3}");
+    shape_mod.resetShapeStats();
+    errdefer shape_mod.disableShapeStats();
+    const hot = try Parse.object(&machine, "{\"alpha\":4,\"beta\":5,\"gamma\":6}");
+    const hot_stats = shape_mod.shapeStats();
+    shape_mod.disableShapeStats();
+    try std.testing.expectEqual(@as(u64, 0), hot_stats.transition_requests);
+    try std.testing.expectEqual(warm.shape, hot.shape);
+    try std.testing.expectEqual(@as(f64, 4), hot.getOwn("alpha").?.asNum());
+    try std.testing.expectEqual(@as(f64, 6), hot.getOwn("gamma").?.asNum());
+
+    const reordered = try Parse.object(&machine, "{\"gamma\":7,\"beta\":8,\"alpha\":9}");
+    try std.testing.expectEqual(@as(f64, 7), reordered.getOwn("gamma").?.asNum());
+    try std.testing.expectEqual(@as(f64, 9), reordered.getOwn("alpha").?.asNum());
+
+    const duplicate = try Parse.object(&machine, "{\"alpha\":1,\"alpha\":2,\"beta\":3}");
+    try std.testing.expectEqual(@as(f64, 2), duplicate.getOwn("alpha").?.asNum());
+    try std.testing.expectEqual(@as(f64, 3), duplicate.getOwn("beta").?.asNum());
+
+    const indexed = try Parse.object(&machine, "{\"0\":10,\"alpha\":11}");
+    try std.testing.expectEqual(@as(f64, 10), indexed.getOwn("0").?.asNum());
+    try std.testing.expectEqual(@as(f64, 11), indexed.getOwn("alpha").?.asNum());
+
+    const wide = try Parse.object(&machine, "{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}");
+    try std.testing.expectEqual(@as(f64, 1), wide.getOwn("a").?.asNum());
+    try std.testing.expectEqual(@as(f64, 5), wide.getOwn("e").?.asNum());
+
+    _ = try Parse.object(&machine, "{\"\\u0000key\":12,\"tail\":13}");
+    const encoded = try Parse.object(&machine, "{\"\\u0000key\":14,\"tail\":15}");
+    try std.testing.expectEqual(@as(f64, 14), encoded.getOwn("\x00\x00\x00key").?.asNum());
+    try std.testing.expectEqual(@as(f64, 15), encoded.getOwn("tail").?.asNum());
 }
 
 test "JSON parser appends private array elements without element locks" {

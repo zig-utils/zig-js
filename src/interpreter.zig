@@ -3390,6 +3390,11 @@ fn SecureIdentityMapUnmanaged(comptime MapValue: type) type {
     };
 }
 
+pub const JsonParseInlineShapeCache = struct {
+    entries: [4]?value.PreparedInlineLiteralShape = @splat(null),
+    next: u8 = 0,
+};
+
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     /// Context-owned freeable backing for invocation-local indexes whose keys
@@ -4086,6 +4091,14 @@ pub const Interpreter = struct {
     /// and Bun code relies on that. Allocated on first use and declared here,
     /// byte-aligned, for the layout reason `stack_floor` above documents.
     array_join_active: ?*ArrayJoinActive align(1) = null,
+
+    /// Bounded invocation-local cache of exact small-object shape sequences
+    /// prepared by JSON.parse. Entries point into this realm's immutable Shape
+    /// tree and are byte-verified before reuse; a fresh Interpreter starts
+    /// empty, so no cache state crosses realms or concurrent workers. Keep only
+    /// the lazy pointer in the common Interpreter layout: shifting the existing
+    /// hot fields measurably regresses unrelated JSON.parse reviver workloads.
+    json_parse_inline_shape_cache: ?*JsonParseInlineShapeCache align(1) = null,
 
     /// Bytes in the explicit Promise/next-tick root frontier at a precise
     /// safepoint. Nursery scheduling uses this to amortize a root scan against
