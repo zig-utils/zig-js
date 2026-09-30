@@ -6149,6 +6149,80 @@ test "optimizer compiler executes multiple loop iterations through OSR" {
     }
 }
 
+test "optimizer loop OSR imports managed constants from the exact VM frame" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 3;
+    const marker = try Value.strAlloc(arena.allocator(), "managed-constant-marker");
+    const marker_index = try chunk.addConst(marker);
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    _ = try chunk.emit(.load_const, marker_index);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 7);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 17);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 7);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var found_managed_constant = false;
+    for (plan.graph.nodes) |node| {
+        if (node.kind == .interpreter_value and node.origin == 0) found_managed_constant = true;
+    }
+    try std.testing.expect(found_managed_constant);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expect(!compiled.entry_enabled);
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(7, 3, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    const entry = osr.entries[entry_index];
+    const marker_import = osr.imports[entry.first_import + 2];
+    try std.testing.expectEqual(jit.OsrImportSource.frame_slot, marker_import.source);
+    try std.testing.expectEqual(@as(u16, 2), marker_import.source_index);
+
+    var slots = [_]u64{ Value.num(4).rawBits(), Value.num(0).rawBits(), marker.rawBits() };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    try std.testing.expectEqual(marker.rawBits(), scratch[marker_import.destination]);
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 17), frame.exit_ip);
+    const point = compiled.deopt.?.points[frame.deopt_index];
+    const recovered_marker = compiled.deopt.?.values[point.first_value + 2].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(marker.rawBits(), recovered_marker);
+    const stack_map = compiled.stack_maps.?.forDeopt(frame.deopt_index) orelse
+        return error.TestUnexpectedResult;
+    const marker_root = @as(u128, 1) << @intCast(marker_import.destination);
+    try std.testing.expectEqual(marker_root, stack_map.scratch_pointer_slots & marker_root);
+}
+
 test "optimizer loop moving safepoint publishes and rewrites recovery-only local" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

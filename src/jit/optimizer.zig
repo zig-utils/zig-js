@@ -102,9 +102,8 @@ pub const ValueKind = enum {
     /// which is why it carries an effect frame state and an exceptional target
     /// rather than being treated as a pure leaf.
     load_var,
-    /// A value produced by an interpreter-owned operation the graph does not
-    /// model — `this`, `new.target`, regex literals, and the rest of the
-    /// terminal-frame-state set.
+    /// A value produced by exact bytecode but deliberately not embedded in the
+    /// graph — `this`, `new.target`, regex literals, and managed constants.
     ///
     /// Those operations used to bump the operand-stack depth without writing
     /// the slot, so the next consumer read an undefined `ValueId` and wired it
@@ -1078,8 +1077,21 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .load_const => {
                 if (inst.a >= chunk.consts.items.len) return error.InvalidControlFlow;
                 const constant: RuntimeValue = chunk.consts.items[inst.a];
-                if (constant.isObject() or constant.isString()) return error.UnsupportedChunk;
-                stack[depth] = try builder.internLeaf(0, @intCast(origin), .constant, constant.rawBits());
+                // A compiled artifact can outlive the bytecode chunk that owns
+                // this traced constant. Keep managed values opaque instead of
+                // embedding an untraced pointer. Whole-entry lowering refuses
+                // the node, while loop OSR can import its exact live value from
+                // the VM frame after bytecode has materialized it.
+                stack[depth] = if (constant.isObject() or constant.isString())
+                    try builder.appendNode(.{
+                        .id = undefined,
+                        .block = @intCast(block_id),
+                        .origin = @intCast(origin),
+                        .kind = .interpreter_value,
+                        .may_have_effect = true,
+                    })
+                else
+                    try builder.internLeaf(0, @intCast(origin), .constant, constant.rawBits());
                 depth += 1;
             },
             .load_undefined => {
