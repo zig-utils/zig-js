@@ -139,6 +139,16 @@ shallow-4096 structure controls expose larger `10.47x`/`9.22x` gaps; measured
 follow-up is tracked in [#1019](https://github.com/zig-utils/zig-js/issues/1019).
 No result in this section is a universal engine score or a JSON parity claim.
 
+The October 2 [same-window triplet report](.data/json-jit-pipeline-jsc-gap-reduction-2026-10-02.md)
+([126 raw samples](.data/json-jit-pipeline-jsc-gap-reduction-2026-10-02.json))
+is preserved as **rejected acceptance evidence** for #1019. It interleaves the
+pre-#1019 baseline, candidate, and system JSC in all six runner orders. The
+representative row narrows from `4.00x` to `3.81x`, but the depth-4096 control
+widens from `10.38x` to `11.43x` and records 41.42% candidate RSD. The shallow
+control narrows from `9.06x` to `7.10x` with 39.98% candidate RSD. No sample was
+discarded. Those unstable candidate-only tails and the deep-control regression
+must be resolved before #1019 can claim a direct-JSC gap reduction.
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)
