@@ -157,6 +157,23 @@ Zig build and rose to 853.280 ms at 60.46% measured-boundary occupancy. No
 sample was discarded; the resulting 49.20% candidate RSD makes this control
 diagnostic-only and excludes it from #1019 acceptance evidence.
 
+The clean October 2 direct exact-parent batch isolates the reusable frame-cache
+change (`d165a68d` → `b617e7cf`) with seven order-balanced pairs per row. Both
+structure rows reduce stable retired-instruction work: depth-4096 to `0.9988x`
+and shallow-4096 to `0.9994x`. The four controls stay between `0.9972x` and
+`1.0002x`; every checksum is exact and no sample is discarded. Wall time remains
+diagnostic—the depth parent has 9.60% RSD—so these rows support the bounded CPU-
+work claim only, not a broad elapsed-time speedup.
+
+| exact-parent row | candidate / parent wall | candidate / parent instructions | evidence |
+| --- | ---: | ---: | --- |
+| base | `0.9862x` | `0.9995x` | [report](.data/exact-parent-json-stringify-frame-reuse-clean-base-2026-10-02.md) · [raw](.data/exact-parent-json-stringify-frame-reuse-clean-base-2026-10-02.json) |
+| variant | `0.9966x` | `0.9999x` | [report](.data/exact-parent-json-stringify-frame-reuse-clean-variant-2026-10-02.md) · [raw](.data/exact-parent-json-stringify-frame-reuse-clean-variant-2026-10-02.json) |
+| reviver/source | `0.9914x` | `0.9972x` | [report](.data/exact-parent-json-stringify-frame-reuse-clean-reviver-2026-10-02.md) · [raw](.data/exact-parent-json-stringify-frame-reuse-clean-reviver-2026-10-02.json) |
+| escaped strings | `1.0121x` | `1.0002x` | [report](.data/exact-parent-json-stringify-frame-reuse-clean-escaped-2026-10-02.md) · [raw](.data/exact-parent-json-stringify-frame-reuse-clean-escaped-2026-10-02.json) |
+| depth 4096 | `1.0158x` | `0.9988x` | [report](.data/exact-parent-json-stringify-frame-reuse-clean-depth-4096-2026-10-02.md) · [raw](.data/exact-parent-json-stringify-frame-reuse-clean-depth-4096-2026-10-02.json) |
+| shallow 4096 | `1.0003x` | `0.9994x` | [report](.data/exact-parent-json-stringify-frame-reuse-clean-shallow-4096-2026-10-02.md) · [raw](.data/exact-parent-json-stringify-frame-reuse-clean-shallow-4096-2026-10-02.json) |
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)
