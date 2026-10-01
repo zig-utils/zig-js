@@ -158,6 +158,13 @@ escaped-string control reaches 52.03%/42.49%/30.10%. No sample was discarded;
 that bimodal same-window distribution is too unstable to establish the claimed
 gap reduction.
 
+[#1021](https://github.com/zig-utils/zig-js/issues/1021) makes that failure
+observable during collection. The JSON/JSC collector now shares the exact-
+parent collector's fail-closed process classifier, brackets every runner
+invocation with process snapshots, and refuses Zig builds, test binaries,
+command-bearing Bun processes, and macOS `ReportCrash` work before writing an
+artifact. Bare idle Bun runtimes remain allowed.
+
 The October 2 [frame-reuse base control](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.md)
 ([raw samples](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.json))
 is likewise preserved as **rejected exact-parent evidence**. Six candidate

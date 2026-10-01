@@ -11,6 +11,8 @@ import {
   parseRow,
   repositoryRevision,
 } from "./benchmark-comparison";
+import { competingEvidenceProcesses } from "./evidence-processes";
+// Inventory-visible module edge: tools/evidence-processes.ts.
 
 declare const __filename: string;
 
@@ -95,6 +97,18 @@ function relativeStddev(values: number[]): number {
   ) / mean;
 }
 
+export function requireNoCompetingEvidenceProcess(
+  phase: string,
+  listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], ""),
+  selfPid = process.pid,
+): void {
+  const competitors = competingEvidenceProcesses(listing, selfPid);
+  requireValue(
+    competitors.length === 0,
+    `competing build/test process detected ${phase}:\n${competitors.join("\n")}`,
+  );
+}
+
 function runSample(
   binary: string,
   workload: Workload,
@@ -102,6 +116,7 @@ function runSample(
   order: number,
   mode = "single",
 ): Sample {
+  requireNoCompetingEvidenceProcess("before benchmark invocation");
   const argv = [
     "env",
     "LC_ALL=C",
@@ -113,6 +128,7 @@ function runSample(
   ];
   console.error(`+ ${argv.join(" ")}`);
   const completed = run(argv);
+  requireNoCompetingEvidenceProcess("after benchmark invocation");
   if (completed.stderr) process.stderr.write(completed.stderr);
   requireValue(
     completed.exitCode === 0,
@@ -455,7 +471,7 @@ function render(artifact: any, rawPath: string): string {
     "- Both runners evaluate the same frozen `bench/representative_comparison.js` bytes and time the same invocation after their built-in reduced-size warmup.",
     "- The zig-js runner is ReleaseFast with the real precise collector checkout recorded above. The JSC runner links the system JavaScriptCore framework.",
     "- The collector rejects identity, job-count, checksum, sample-index, pair-order, and 50 ms median-floor drift before writing either artifact.",
-    "- Host scheduling and frequency are not controlled, so RSD is retained and the matrix remains diagnostic.",
+    "- Every invocation is bracketed by fail-closed competing-process snapshots; host scheduling and frequency are otherwise not controlled, so RSD is retained and the matrix remains diagnostic.",
     "",
     `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
     "",
@@ -497,7 +513,7 @@ function renderGapReduction(artifact: any, rawPath: string): string {
     "- The six possible runner orders rotate across workloads and samples, so each appears equally often over the complete matrix.",
     "- Both zig-js runners are ReleaseFast with the same real precise collector and zig-regex revisions. JSC links the system framework.",
     "- The collector rejects variant/engine identity, checksum, sample-index, triplet-order, and 50 ms median-floor drift before writing either artifact.",
-    "- Host scheduling and frequency are not controlled, so every RSD remains visible and the result remains diagnostic.",
+    "- Every invocation is bracketed by fail-closed competing-process snapshots; host scheduling and frequency are otherwise not controlled, so every RSD remains visible and the result remains diagnostic.",
     "",
     `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
     "",
@@ -538,7 +554,7 @@ function renderTierResidency(artifact: any, rawPath: string): string {
     "- Both modes use the same ReleaseFast binary, real precise collector, workload bytes, warmup, jobs, and timed invocation.",
     "- `single` enables the shipping native tiers. `single_no_jit` disables JIT and requires bytecode execution.",
     "- The collector rejects mode, identity, checksum, sample-index, pair-order, and 50 ms median-floor drift.",
-    "- Host scheduling and frequency are not controlled, so RSD is retained and the result remains diagnostic.",
+    "- Every invocation is bracketed by fail-closed competing-process snapshots; host scheduling and frequency are otherwise not controlled, so RSD is retained and the result remains diagnostic.",
     "",
     `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
     "",
@@ -636,7 +652,27 @@ export function selfTest(): void {
     "tier-raw.json",
   );
   requireValue(tierReport.includes("JIT / VM"), "tier report omitted ratio");
-  console.log("OK JSON pipeline benchmark: JSC/tier/gap matrices, checksums, order, timing, and reports verified");
+  const processFixture = [
+    "100 1 /Applications/Host/app",
+    "110 100 /Applications/Host/codex",
+    "120 110 /tool/home-tool run json-pipeline-benchmark",
+    "121 120 /repo/bench-comparison-zig-js single row 1 1",
+    "200 100 /opt/zig build test",
+    "210 100 /System/Library/CoreServices/ReportCrash",
+    "220 100 /opt/bun test suite",
+    "230 100 /repo/pantry/.bin/bun tools/dev.js",
+    "231 100 /repo/pantry/.bin/bun",
+  ].join("\n");
+  expectFailure(
+    () => requireNoCompetingEvidenceProcess("before fixture", processFixture, 120),
+    "competing build/test process detected before fixture",
+  );
+  const cleanFixture = processFixture.split("\n").filter((line) =>
+    !/^(200|210|220|230) /.test(line)
+  ).join("\n");
+  requireNoCompetingEvidenceProcess("before clean fixture", cleanFixture, 120);
+  requireNoCompetingEvidenceProcess("after clean fixture", cleanFixture, 120);
+  console.log("OK JSON pipeline benchmark: JSC/tier/gap matrices, checksums, order, timing, reports, and competing-job gates verified");
 }
 
 function optionValue(args: string[], name: string): string {
