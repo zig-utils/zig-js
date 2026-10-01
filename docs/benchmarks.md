@@ -149,6 +149,14 @@ control narrows from `9.06x` to `7.10x` with 39.98% candidate RSD. No sample was
 discarded. Those unstable candidate-only tails and the deep-control regression
 must be resolved before #1019 can claim a direct-JSC gap reduction.
 
+The October 2 [frame-reuse base control](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.md)
+([raw samples](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.json))
+is likewise preserved as **rejected exact-parent evidence**. Six candidate
+samples measured 320.822–344.676 ms, while the seventh overlapped an external
+Zig build and rose to 853.280 ms at 60.46% measured-boundary occupancy. No
+sample was discarded; the resulting 49.20% candidate RSD makes this control
+diagnostic-only and excludes it from #1019 acceptance evidence.
+
 ## Cold context lifecycle evidence
 
 The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)
