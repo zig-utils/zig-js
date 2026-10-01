@@ -2225,7 +2225,7 @@ pub fn build(b: *std.Build) void {
     // only orchestrates runs, validates checksums, and renders raw/report data.
     const build_feedback_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/build-feedback.ts", "--self-test" });
     const benchmark_harness_self_tests = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-harness-self-tests.ts", "--self-test" });
-    benchmark_harness_self_tests.setName("benchmark harness self-tests (18 validators, one Home compile)");
+    benchmark_harness_self_tests.setName("benchmark harness self-tests (19 validators, one Home compile)");
     const optimizer_release_inventory_check = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/optimizer-release-inventory.ts" });
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
     comparison_harness_test_step.dependOn(&benchmark_harness_self_tests.step);

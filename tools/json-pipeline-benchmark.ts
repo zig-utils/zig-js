@@ -33,6 +33,9 @@ type Sample = {
   checksum: number;
 };
 
+type GapVariant = "baseline" | "candidate" | "JavaScriptCore";
+type GapSample = Sample & { variant: GapVariant };
+
 export const WORKLOADS: Workload[] = [
   {
     name: "representative_json",
@@ -158,6 +161,41 @@ export function collect(
   return rows;
 }
 
+const GAP_ORDERS: GapVariant[][] = [
+  ["baseline", "candidate", "JavaScriptCore"],
+  ["baseline", "JavaScriptCore", "candidate"],
+  ["candidate", "baseline", "JavaScriptCore"],
+  ["candidate", "JavaScriptCore", "baseline"],
+  ["JavaScriptCore", "baseline", "candidate"],
+  ["JavaScriptCore", "candidate", "baseline"],
+];
+
+export function collectGapReduction(
+  candidate: string,
+  baseline: string,
+  jsc: string,
+  samples: number,
+): GapSample[] {
+  const binaries: Record<GapVariant, string> = {
+    baseline,
+    candidate,
+    JavaScriptCore: jsc,
+  };
+  const rows: GapSample[] = [];
+  WORKLOADS.forEach((workload, workloadIndex) => {
+    for (let pair = 0; pair < samples; pair += 1) {
+      const order = GAP_ORDERS[(workloadIndex * samples + pair) % GAP_ORDERS.length];
+      order.forEach((variant, orderIndex) => {
+        const row = runSample(binaries[variant], workload, pair, orderIndex);
+        const expectedEngine = variant === "JavaScriptCore" ? "JavaScriptCore" : "zig-js";
+        requireValue(row.engine === expectedEngine, `${workload.name}/${variant}: engine identity drift`);
+        rows.push({ ...row, variant });
+      });
+    }
+  });
+  return rows;
+}
+
 export function collectTierResidency(
   zigJs: string,
   samples: number,
@@ -213,6 +251,53 @@ export function validate(rows: Sample[], samples: number): void {
       requireValue(
         pairRows[0].engine !== pairRows[1].engine,
         `${workload.name}: pair ${pair} did not compare both engines`,
+      );
+    }
+  }
+}
+
+export function validateGapReduction(rows: GapSample[], samples: number): void {
+  requireValue(samples > 0, "sample count must be positive");
+  requireValue(
+    rows.length === WORKLOADS.length * samples * 3,
+    `expected ${WORKLOADS.length * samples * 3} gap rows, got ${rows.length}`,
+  );
+  for (const workload of WORKLOADS) {
+    const group = rows.filter((row) => row.workload === workload.name);
+    for (const variant of ["baseline", "candidate", "JavaScriptCore"] as GapVariant[]) {
+      const variantRows = group.filter((row) => row.variant === variant);
+      requireValue(
+        variantRows.length === samples,
+        `${workload.name}/${variant}: expected ${samples} rows`,
+      );
+      requireValue(
+        JSON.stringify(variantRows.map((row) => row.pair_sample).sort((a, b) => a - b)) ===
+          JSON.stringify(Array.from({ length: samples }, (_, index) => index)),
+        `${workload.name}/${variant}: sample-index drift`,
+      );
+      requireValue(
+        median(variantRows.map((row) => row.elapsed_ns)) >= MINIMUM_MEDIAN_NS,
+        `${workload.name}/${variant}: median is below the 50 ms timing floor`,
+      );
+      const expectedEngine = variant === "JavaScriptCore" ? "JavaScriptCore" : "zig-js";
+      requireValue(
+        variantRows.every((row) => row.engine === expectedEngine),
+        `${workload.name}/${variant}: engine identity drift`,
+      );
+    }
+    requireValue(
+      group.every((row) => row.checksum === workload.checksum),
+      `${workload.name}: gap-reduction checksum drift`,
+    );
+    for (let triplet = 0; triplet < samples; triplet += 1) {
+      const tripletRows = group.filter((row) => row.pair_sample === triplet);
+      requireValue(
+        tripletRows.length === 3 && tripletRows.every((row, index) => row.order === index),
+        `${workload.name}: triplet ${triplet} order drift`,
+      );
+      requireValue(
+        new Set(tripletRows.map((row) => row.variant)).size === 3,
+        `${workload.name}: triplet ${triplet} did not compare all variants`,
       );
     }
   }
@@ -284,6 +369,33 @@ function summarize(rows: Sample[]): any[] {
   });
 }
 
+function summarizeGapReduction(rows: GapSample[]): any[] {
+  return WORKLOADS.map((workload) => {
+    const values = (variant: GapVariant) => rows.filter(
+      (row) => row.workload === workload.name && row.variant === variant,
+    ).map((row) => row.elapsed_ns);
+    const baseline = values("baseline"), candidate = values("candidate"), jsc = values("JavaScriptCore"),
+      baselineMedian = median(baseline), candidateMedian = median(candidate), jscMedian = median(jsc),
+      candidateOverBaseline = candidateMedian / baselineMedian;
+    return {
+      workload: workload.name,
+      role: workload.role,
+      jobs: workload.jobs,
+      checksum: workload.checksum,
+      baseline_median_ns: baselineMedian,
+      baseline_rsd: relativeStddev(baseline),
+      candidate_median_ns: candidateMedian,
+      candidate_rsd: relativeStddev(candidate),
+      candidate_over_baseline: candidateOverBaseline,
+      jsc_median_ns: jscMedian,
+      jsc_rsd: relativeStddev(jsc),
+      baseline_jsc_gap: baselineMedian / jscMedian,
+      candidate_jsc_gap: candidateMedian / jscMedian,
+      gap_reduction: 1 - candidateOverBaseline,
+    };
+  });
+}
+
 function summarizeTierResidency(rows: Sample[]): any[] {
   return WORKLOADS.slice(0, 2).map((workload) => {
     const jit = rows.filter(
@@ -344,6 +456,48 @@ function render(artifact: any, rawPath: string): string {
     "- The zig-js runner is ReleaseFast with the real precise collector checkout recorded above. The JSC runner links the system JavaScriptCore framework.",
     "- The collector rejects identity, job-count, checksum, sample-index, pair-order, and 50 ms median-floor drift before writing either artifact.",
     "- Host scheduling and frequency are not controlled, so RSD is retained and the matrix remains diagnostic.",
+    "",
+    `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
+    "",
+  );
+  return lines.join("\n");
+}
+
+function renderGapReduction(artifact: any, rawPath: string): string {
+  const lines = [
+    `# Frozen JSON JSC gap reduction — ${artifact.metadata.date}`,
+    "",
+    "> Same-window baseline/candidate/JSC diagnostic for issues #1019 and #473, not a universal engine score.",
+    "> Lower time is better; gap reduction is computed only from the order-balanced triplets below.",
+    "",
+    "## Provenance",
+    "",
+    "| item | value |",
+    "| --- | --- |",
+  ];
+  Object.keys(artifact.metadata).forEach((key) =>
+    lines.push(`| ${key} | ${String(artifact.metadata[key]).replace(/\|/g, "\\|")} |`)
+  );
+  lines.push(
+    "",
+    "## Result",
+    "",
+    "| workload | role | jobs | baseline median | baseline RSD | candidate median | candidate RSD | candidate / baseline | JSC median | JSC RSD | baseline gap | candidate gap | gap reduction | checksum |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  artifact.summary.forEach((row: any) => lines.push(
+    `| \`${row.workload}\` | ${row.role} | ${row.jobs} | ${(row.baseline_median_ns / 1e6).toFixed(3)} ms | ${(row.baseline_rsd * 100).toFixed(2)}% | ${(row.candidate_median_ns / 1e6).toFixed(3)} ms | ${(row.candidate_rsd * 100).toFixed(2)}% | ${row.candidate_over_baseline.toFixed(3)}x | ${(row.jsc_median_ns / 1e6).toFixed(3)} ms | ${(row.jsc_rsd * 100).toFixed(2)}% | ${row.baseline_jsc_gap.toFixed(2)}x | ${row.candidate_jsc_gap.toFixed(2)}x | ${(row.gap_reduction * 100).toFixed(1)}% | ${row.checksum} |`,
+  ));
+  lines.push(
+    "",
+    "## Method",
+    "",
+    `- ${artifact.metadata.samples} fresh-process, order-balanced triplets per row; no sample was discarded.`,
+    "- Baseline, candidate, and JSC evaluate the same frozen workload bytes with identical jobs, warmup, timed boundary, and checksum.",
+    "- The six possible runner orders rotate across workloads and samples, so each appears equally often over the complete matrix.",
+    "- Both zig-js runners are ReleaseFast with the same real precise collector and zig-regex revisions. JSC links the system framework.",
+    "- The collector rejects variant/engine identity, checksum, sample-index, triplet-order, and 50 ms median-floor drift before writing either artifact.",
+    "- Host scheduling and frequency are not controlled, so every RSD remains visible and the result remains diagnostic.",
     "",
     `Raw evidence: [${rawPath.split("/").pop()}](${rawPath.split("/").pop()})`,
     "",
@@ -415,6 +569,28 @@ function syntheticRows(samples: number): Sample[] {
   return rows;
 }
 
+function syntheticGapRows(samples: number): GapSample[] {
+  const rows: GapSample[] = [];
+  WORKLOADS.forEach((workload, workloadIndex) => {
+    for (let triplet = 0; triplet < samples; triplet += 1) {
+      const order = GAP_ORDERS[(workloadIndex * samples + triplet) % GAP_ORDERS.length];
+      order.forEach((variant, orderIndex) => rows.push({
+        pair_sample: triplet,
+        order: orderIndex,
+        variant,
+        engine: variant === "JavaScriptCore" ? "JavaScriptCore" : "zig-js",
+        mode: "single",
+        workload: workload.name,
+        lanes: 1,
+        jobs: workload.jobs,
+        elapsed_ns: (variant === "baseline" ? 75_000_000 : variant === "candidate" ? 65_000_000 : 55_000_000) + workloadIndex * 1_000_000 + triplet,
+        checksum: workload.checksum,
+      }));
+    }
+  });
+  return rows;
+}
+
 function expectFailure(action: () => void, pattern: string): void {
   try {
     action();
@@ -437,6 +613,16 @@ export function selfTest(): void {
   expectFailure(() => validate(short, 3), "timing floor");
   const report = render({ metadata: { date: "fixture", samples: 3 }, summary: summarize(rows) }, "raw.json");
   requireValue(report.includes("representative_json_variant"), "report omitted variant");
+  const gapRows = syntheticGapRows(3);
+  validateGapReduction(gapRows, 3);
+  const missingGapVariant = gapRows.map((row) => ({ ...row }));
+  missingGapVariant[0].variant = "candidate";
+  expectFailure(() => validateGapReduction(missingGapVariant, 3), "expected 3 rows");
+  const gapReport = renderGapReduction(
+    { metadata: { date: "fixture", samples: 3 }, summary: summarizeGapReduction(gapRows) },
+    "gap-raw.json",
+  );
+  requireValue(gapReport.includes("baseline gap") && gapReport.includes("candidate gap"), "gap report omitted comparison columns");
   const tierRows = rows.filter((row) =>
     row.workload === WORKLOADS[0].name || row.workload === WORKLOADS[1].name
   ).map((row) => ({
@@ -450,7 +636,7 @@ export function selfTest(): void {
     "tier-raw.json",
   );
   requireValue(tierReport.includes("JIT / VM"), "tier report omitted ratio");
-  console.log("OK JSON pipeline benchmark: JSC/tier matrices, checksums, order, timing, and reports verified");
+  console.log("OK JSON pipeline benchmark: JSC/tier/gap matrices, checksums, order, timing, and reports verified");
 }
 
 function optionValue(args: string[], name: string): string {
@@ -485,14 +671,18 @@ function main(): void {
     return;
   }
   const tierResidency = args[0] === "--tier-residency",
-    runnerIndex = tierResidency ? 1 : 0;
+    gapReduction = args[0] === "--gap-reduction",
+    runnerIndex = tierResidency || gapReduction ? 1 : 0,
+    runnerCount = tierResidency ? 1 : gapReduction ? 3 : 2;
   requireValue(
-    args.length >= runnerIndex + (tierResidency ? 1 : 2),
-    "usage: json-pipeline-benchmark.ts [--tier-residency] ZIG_JS_RUNNER [JSC_RUNNER] --zig-js-revision REV --zig PATH --zig-gc-repository PATH --zig-regex-repository PATH --raw-out PATH --markdown-out PATH [--samples N]",
+    args.length >= runnerIndex + runnerCount,
+    "usage: json-pipeline-benchmark.ts [--tier-residency ZIG_JS_RUNNER | --gap-reduction CANDIDATE_RUNNER BASELINE_RUNNER JSC_RUNNER | ZIG_JS_RUNNER JSC_RUNNER] --zig-js-revision REV [--baseline-revision REV] --zig PATH --zig-gc-repository PATH --zig-regex-repository PATH --raw-out PATH --markdown-out PATH [--samples N]",
   );
   const zigJs = args[runnerIndex],
-    jsc = tierResidency ? null : args[runnerIndex + 1],
+    baseline = gapReduction ? args[runnerIndex + 1] : null,
+    jsc = tierResidency ? null : args[runnerIndex + (gapReduction ? 2 : 1)],
     revision = optionValue(args, "--zig-js-revision"),
+    baselineRevision = gapReduction ? optionValue(args, "--baseline-revision") : null,
     zig = optionValue(args, "--zig"),
     gcRepository = optionValue(args, "--zig-gc-repository"),
     regexRepository = optionValue(args, "--zig-regex-repository"),
@@ -500,8 +690,9 @@ function main(): void {
     markdownOut = optionValue(args, "--markdown-out"),
     samplesIndex = args.indexOf("--samples"),
     samples = samplesIndex >= 0 ? Number(args[samplesIndex + 1]) : 7;
-  requireValue(fileExists(zigJs) && (jsc === null || fileExists(jsc)), "benchmark runner does not exist");
+  requireValue(fileExists(zigJs) && (baseline === null || fileExists(baseline)) && (jsc === null || fileExists(jsc)), "benchmark runner does not exist");
   requireValue(/^[0-9a-f]{40}$/.test(revision), "zig-js revision must be a full commit id");
+  requireValue(baselineRevision === null || (/^[0-9a-f]{40}$/.test(baselineRevision) && baselineRevision !== revision), "baseline revision must be a distinct full commit id");
   requireValue(Number.isInteger(samples) && samples > 0, "samples must be a positive integer");
   requireCleanTrackedRepository();
   const metadata: any = {
@@ -539,6 +730,27 @@ function main(): void {
     writeText(rawOut, JSON.stringify(artifact, null, 2) + "\n");
     writeText(markdownOut, renderTierResidency(artifact, rawOut));
     process.stdout.write(renderTierResidency(artifact, rawOut));
+    return;
+  }
+  if (gapReduction) {
+    const rows = collectGapReduction(zigJs, baseline!, jsc!, samples);
+    validateGapReduction(rows, samples);
+    metadata.baseline_zig_js_binary_revision = baselineRevision;
+    metadata.baseline_zig_js_binary_sha256 = sha256File(baseline!);
+    metadata.jsc_binary_sha256 = sha256File(jsc!);
+    const framework = "/System/Library/Frameworks/JavaScriptCore.framework/Resources/Info.plist";
+    metadata.javascriptcore = `system framework ${commandOutput(["plutil", "-extract", "CFBundleVersion", "raw", framework])}`;
+    const artifact = {
+      schema_version: 1,
+      kind: "focused_json_jsc_gap_reduction",
+      metadata,
+      workloads: WORKLOADS,
+      summary: summarizeGapReduction(rows),
+      samples: rows,
+    };
+    writeText(rawOut, JSON.stringify(artifact, null, 2) + "\n");
+    writeText(markdownOut, renderGapReduction(artifact, rawOut));
+    process.stdout.write(renderGapReduction(artifact, rawOut));
     return;
   }
   const rows = collect(zigJs, jsc!, samples);

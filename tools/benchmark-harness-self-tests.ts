@@ -17,13 +17,15 @@ import { selfTest as independentObjectChurnProfile } from "./independent-object-
 import { selfTest as sharedObjectChurnAb } from "./shared-object-churn-ab";
 import { selfTest as independentSuiteCollector } from "./independent-suite-collector";
 import { selfTest as independentSuiteRecognizer } from "./independent-suite-recognizer";
+import { selfTest as jsonPipelineBenchmark } from "./json-pipeline-benchmark";
 // Inventory-visible module edges: tools/benchmark-comparison.ts, tools/benchmark-publication.ts,
 // tools/test_representative_matrix.ts, tools/representative-benchmark.ts,
 // tools/representative-tier-attribution.ts, tools/instrumentation-overhead.ts, tools/build-feedback.ts,
 // tools/performance-attribution.ts, tools/exact-parent-regression.ts, tools/algorithmic-growth.ts,
 // tools/gc-generation-benchmark.ts, tools/wasm-simd-benchmark.ts, tools/wasm-threads-benchmark.ts,
 // tools/object-churn-gc-profile.ts, tools/independent-object-churn-profile.ts,
-// tools/shared-object-churn-ab.ts, tools/independent-suite-collector.ts, and tools/independent-suite-recognizer.ts.
+// tools/shared-object-churn-ab.ts, tools/independent-suite-collector.ts,
+// tools/independent-suite-recognizer.ts, and tools/json-pipeline-benchmark.ts.
 
 type SelfTest = { name: string; run: () => void };
 
@@ -49,6 +51,7 @@ export const benchmarkHarnessSelfTests: SelfTest[] = [
   { name: "shared-object-churn-ab", run: sharedObjectChurnAb },
   { name: "independent-suite-collector", run: independentSuiteCollector },
   { name: "independent-suite-recognizer", run: independentSuiteRecognizer },
+  { name: "json-pipeline-benchmark", run: jsonPipelineBenchmark },
 ];
 
 function requireValue(condition: boolean, message: string): void {
@@ -56,7 +59,7 @@ function requireValue(condition: boolean, message: string): void {
 }
 
 export function selfTest(): void {
-  requireValue(benchmarkHarnessSelfTests.length === 18, "benchmark harness self-test inventory width drift");
+  requireValue(benchmarkHarnessSelfTests.length === 19, "benchmark harness self-test inventory width drift");
   const names = benchmarkHarnessSelfTests.map((test) => test.name);
   requireValue(names.every((name, index) => name.length > 0 && names.indexOf(name) === index), "benchmark harness self-test names must be nonempty and unique");
 
