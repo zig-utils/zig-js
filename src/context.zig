@@ -14126,6 +14126,113 @@ test "JSON stringify deep cycle membership preserves forced execution tiers" {
     try std.testing.expect(Value.fromRawBits(results[0]).asBool());
 }
 
+test "JSON stringify explicit frames preserve deep and shared structures" {
+    const source =
+        \\function stringifyFrameWitness() {
+        \\  "use strict";
+        \\  var depth = 4096;
+        \\  var object = { leaf: 7 };
+        \\  var array = 7;
+        \\  for (var i = 0; i < depth; i++) {
+        \\    object = { next: object };
+        \\    array = [array];
+        \\  }
+        \\  var objectText = JSON.stringify(object);
+        \\  var arrayText = JSON.stringify(array);
+        \\  var shared = { value: 3 };
+        \\  var siblings = [];
+        \\  for (var i = 0; i < depth; i++) siblings.push(shared);
+        \\  var siblingText = JSON.stringify(siblings);
+        \\  return objectText.length === depth * 9 + 10 &&
+        \\    objectText.indexOf('{"leaf":7}') >= 0 &&
+        \\    arrayText.length === depth * 2 + 1 &&
+        \\    siblingText.length === depth * 11 + (depth - 1) + 2 &&
+        \\    siblingText.indexOf('{"value":3},{"value":3}') >= 0;
+        \\}
+        \\stringifyFrameWitness();
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        results[index] = (try ctx.evaluate(source)).rawBits();
+    }
+    try std.testing.expectEqual(results[0], results[1]);
+    try std.testing.expect(Value.fromRawBits(results[0]).asBool());
+}
+
+test "JSON stringify explicit frames preserve observable ordering and rollback" {
+    try std.testing.expect((try evalIn(
+        \\(function () {
+        \\  var proxyTrace = [];
+        \\  var proxy = new Proxy({ a: 1, b: 2 }, {
+        \\    get: function (target, key, receiver) {
+        \\      proxyTrace.push("get:" + key);
+        \\      return Reflect.get(target, key, receiver);
+        \\    },
+        \\    ownKeys: function (target) {
+        \\      proxyTrace.push("ownKeys");
+        \\      return Reflect.ownKeys(target);
+        \\    },
+        \\    getOwnPropertyDescriptor: function (target, key) {
+        \\      proxyTrace.push("desc:" + key);
+        \\      return Reflect.getOwnPropertyDescriptor(target, key);
+        \\    }
+        \\  });
+        \\  var proxyText = JSON.stringify(proxy, function (key, value) {
+        \\    proxyTrace.push("replace:" + key);
+        \\    return value;
+        \\  });
+        \\  var proxyOk = proxyText === '{"a":1,"b":2}' &&
+        \\    proxyTrace.join(",") === "get:toJSON,replace:,ownKeys,desc:a,desc:b,get:a,replace:a,get:b,replace:b";
+        \\  var callbackTrace = [];
+        \\  var wrapped = { toJSON: function (key) {
+        \\    callbackTrace.push("toJSON:" + key);
+        \\    return { keep: 1, drop: 2 };
+        \\  } };
+        \\  var callbackText = JSON.stringify({ wrapped: wrapped }, function (key, value) {
+        \\    callbackTrace.push("replace:" + key);
+        \\    return key === "drop" ? undefined : value;
+        \\  }, 2);
+        \\  var callbackOk = callbackText === '{\n  "wrapped": {\n    "keep": 1\n  }\n}' &&
+        \\    callbackTrace.join(",") === "replace:,toJSON:wrapped,replace:wrapped,replace:keep,replace:drop";
+        \\  var mutation = { first: 1, second: 2 };
+        \\  Object.defineProperty(mutation, "first", {
+        \\    enumerable: true,
+        \\    get: function () { mutation.second = 9; return 1; }
+        \\  });
+        \\  var mutationOk = JSON.stringify(mutation) === '{"first":1,"second":9}';
+        \\  var rollbackOk = JSON.stringify({ before: undefined, keep: 1, after: function () {} }, null, 2) === '{\n  "keep": 1\n}' &&
+        \\    JSON.stringify([undefined, function () {}, Symbol("x")]) === "[null,null,null]";
+        \\  var rawOk = JSON.stringify({ raw: JSON.rawJSON("17") }) === '{"raw":17}' &&
+        \\    JSON.stringify([JSON.rawJSON("true")]) === '[true]';
+        \\  var shared = { value: 4 };
+        \\  var aliasOk = JSON.stringify([shared, shared]) === '[{"value":4},{"value":4}]';
+        \\  shared.self = shared;
+        \\  var cycleOk = false;
+        \\  try { JSON.stringify(shared); } catch (error) { cycleOk = error instanceof TypeError; }
+        \\  var bigintOk = false;
+        \\  try { JSON.stringify({ value: 1n }); } catch (error) { bigintOk = error instanceof TypeError; }
+        \\  var abruptTrace = [];
+        \\  var marker = { marker: true };
+        \\  var abrupt = {};
+        \\  Object.defineProperty(abrupt, "a", { enumerable: true, get: function () { abruptTrace.push("a"); return 1; } });
+        \\  Object.defineProperty(abrupt, "b", { enumerable: true, get: function () { abruptTrace.push("b"); throw marker; } });
+        \\  Object.defineProperty(abrupt, "c", { enumerable: true, get: function () { abruptTrace.push("c"); return 3; } });
+        \\  var abruptOk = false;
+        \\  try { JSON.stringify(abrupt); } catch (error) { abruptOk = error === marker; }
+        \\  abruptOk = abruptOk && abruptTrace.join(",") === "a,b";
+        \\  return proxyOk && callbackOk && mutationOk && rollbackOk && rawOk && aliasOk && cycleOk && bigintOk && abruptOk;
+        \\})()
+    )).asBool());
+}
+
 test "JSON parse private arrays isolate shared no-GIL callers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

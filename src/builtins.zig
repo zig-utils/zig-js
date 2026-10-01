@@ -2950,6 +2950,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     var st = Stringifier{
         .self = self,
         .cycle_allocator = temporary_allocator,
+        .frame_allocator = temporary_allocator,
         .output_allocator = temporary_allocator,
         .key_snapshot_allocator = if (key_snapshot_arena) |*arena| arena.allocator() else null,
     };
@@ -3072,10 +3073,11 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 }
 
 /// Carries the `JSON.stringify` options (replacer / allowlist / indent gap)
-/// and the cycle-detection stack across the recursive serialization.
+/// and the invocation-local stacks used by its iterative serialization.
 const Stringifier = struct {
     self: *Interpreter,
     cycle_allocator: std.mem.Allocator,
+    frame_allocator: std.mem.Allocator,
     output_allocator: std.mem.Allocator,
     /// Present only when the active precise heap exposes reclaimable temporary
     /// backing. Arena-only contexts retain their established allocation path.
@@ -3086,62 +3088,236 @@ const Stringifier = struct {
     indent: std.ArrayListUnmanaged(u8) = .empty,
     active: JsonActiveStack = .{},
 
+    const PreparedDisposition = enum {
+        omitted,
+        complete,
+        descended,
+    };
+
+    const ArrayFrame = struct {
+        holder: Value,
+        root_mark: usize,
+        identity: value.RuntimeObjectIdentity,
+        outer_indent: usize,
+        len: usize,
+        next_index: usize = 0,
+        direct_ordinary: bool,
+    };
+
+    const ObjectFrame = struct {
+        holder: Value,
+        root_mark: usize,
+        identity: value.RuntimeObjectIdentity,
+        outer_indent: usize,
+        stable_keys: ?[]const value.Object.StableOwnDataKey,
+        keys: []const []const u8,
+        next_index: usize = 0,
+        count: usize = 0,
+        direct_ordinary: bool,
+
+        fn len(frame: *const ObjectFrame) usize {
+            return if (frame.stable_keys) |keys| keys.len else frame.keys.len;
+        }
+    };
+
+    const Frame = union(enum) {
+        array: ArrayFrame,
+        object: ObjectFrame,
+    };
+
     /// SerializeJSONProperty: write `holder[key]` (after toJSON + replacer +
     /// wrapper unwrapping) into `buf`. Returns false when the value is omitted.
     fn serialize(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, key: []const u8) HostError!bool {
-        return st.serializeProperty(buf, holder, key, null, null);
+        return st.serializeIterative(buf, null, holder, key, null, null);
     }
 
-    fn serializeProperty(
+    fn serializeRoot(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), root: Value) HostError!bool {
+        return st.serializeIterative(buf, root, Value.undef(), "", null, null);
+    }
+
+    /// Run SerializeJSONProperty as a heap-bounded state machine. Each active
+    /// container owns one precise-GC root and one logical depth increment until
+    /// its closing delimiter is emitted. Callback order and live property reads
+    /// stay synchronous; only ordinary array/object continuation moves off the
+    /// native stack.
+    fn serializeIterative(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
+        initial: ?Value,
         holder: Value,
         key: []const u8,
         ordinary_object: ?*value.Object,
         stable_key: ?value.Object.StableOwnDataKey,
     ) HostError!bool {
         const self = st.self;
-        // Count each nested serialize toward the call-depth limit so a replacer
-        // that fabricates ever-deeper values (`(k,v)=>[v]`) — non-circular, so the
-        // cycle check never fires — throws a catchable RangeError instead of
-        // overflowing the native stack.
-        self.depth += 1;
-        defer self.depth -= 1;
-        try self.stackGuard();
+        const depth_mark = self.depth;
+        const roots_mark = self.gc_temp_roots.items.len;
+        defer self.depth = depth_mark;
+        defer self.restoreTempRoots(roots_mark);
 
-        // SerializeJSONProperty performs a live Get after the key list has been
-        // snapshotted. For a direct ordinary object, a current own data
-        // descriptor is that exact result; accessors and misses must still take
-        // the generic path so getter calls and inherited replacements remain
-        // observable. namedOwnPropertySnapshot keeps the value/descriptor read
-        // in one property-lock transaction for shared no-GIL realms.
+        var frames: std.ArrayListUnmanaged(Frame) = .empty;
+        defer frames.deinit(st.frame_allocator);
+        const has_precise_roots = self.gc != null;
+
+        self.depth += 1;
+        try self.stackGuard();
+        const first_disposition = if (initial) |loaded|
+            try st.prepareLoaded(buf, &frames, loaded, holder, key)
+        else
+            try st.prepareProperty(buf, &frames, holder, key, ordinary_object, stable_key);
+        switch (first_disposition) {
+            .omitted => {
+                self.depth -= 1;
+                return false;
+            },
+            .complete => {
+                self.depth -= 1;
+                return true;
+            },
+            .descended => {},
+        }
+
+        while (frames.items.len != 0) {
+            const frame_index = frames.items.len - 1;
+            switch (frames.items[frame_index]) {
+                .array => |*frame| {
+                    // Stay in one frame while siblings complete immediately.
+                    // Only a real descendant returns to the outer dispatcher;
+                    // its append may have invalidated this frame pointer.
+                    const array_len = frame.len;
+                    const root_mark = frame.root_mark;
+                    const holder_fallback = frame.holder;
+                    const direct_ordinary = frame.direct_ordinary;
+                    var index = frame.next_index;
+                    var descended = false;
+                    while (index < array_len) : (index += 1) {
+                        const rooted_holder = if (has_precise_roots)
+                            self.gc_temp_roots.items[root_mark]
+                        else
+                            holder_fallback;
+                        if (index != 0) try buf.append(st.output_allocator, ',');
+                        try st.newlineIndent(buf);
+                        var key_storage: [32]u8 = undefined;
+                        const element_key = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch unreachable;
+
+                        self.depth += 1;
+                        try self.stackGuard();
+                        const disposition = try st.prepareArrayElement(
+                            buf,
+                            &frames,
+                            rooted_holder,
+                            element_key,
+                            index,
+                            direct_ordinary,
+                        );
+                        switch (disposition) {
+                            .omitted => {
+                                self.depth -= 1;
+                                try buf.appendSlice(st.output_allocator, "null");
+                            },
+                            .complete => self.depth -= 1,
+                            .descended => {
+                                frames.items[frame_index].array.next_index = index + 1;
+                                descended = true;
+                                break;
+                            },
+                        }
+                    }
+                    if (!descended) try st.finishTopFrame(buf, &frames);
+                },
+                .object => |*frame| {
+                    object_entries: while (true) {
+                        if (frame.next_index == frame.len()) {
+                            try st.finishTopFrame(buf, &frames);
+                            break :object_entries;
+                        }
+
+                        const snapshot = if (frame.stable_keys) |stable_keys|
+                            stable_keys[frame.next_index]
+                        else
+                            null;
+                        const entry_key = if (snapshot) |stable| stable.name else frame.keys[frame.next_index];
+                        frame.next_index += 1;
+                        if (jsonHiddenKey(entry_key)) continue :object_entries;
+
+                        // Publish neither punctuation nor a property name when
+                        // the prepared value is omitted. Descendants write into
+                        // the authoritative output after this rollback mark.
+                        const mark = buf.items.len;
+                        if (frame.count != 0) try buf.append(st.output_allocator, ',');
+                        try st.newlineIndent(buf);
+                        try writeJsonString(st.output_allocator, buf, value.decodeStringKey(entry_key));
+                        try buf.append(st.output_allocator, ':');
+                        if (st.gap.len != 0) try buf.append(st.output_allocator, ' ');
+
+                        const rooted_holder = if (has_precise_roots)
+                            self.gc_temp_roots.items[frame.root_mark]
+                        else
+                            frame.holder;
+                        const direct_object: ?*value.Object = if (frame.direct_ordinary) rooted_holder.asObj() else null;
+                        self.depth += 1;
+                        try self.stackGuard();
+                        const disposition = try st.prepareProperty(
+                            buf,
+                            &frames,
+                            rooted_holder,
+                            entry_key,
+                            direct_object,
+                            snapshot,
+                        );
+                        if (disposition == .omitted) {
+                            self.depth -= 1;
+                            buf.shrinkRetainingCapacity(mark);
+                            continue :object_entries;
+                        }
+
+                        // The child may already have grown/reallocated the
+                        // stack, so update the parent through its stable index.
+                        frames.items[frame_index].object.count += 1;
+                        switch (disposition) {
+                            .omitted => unreachable,
+                            .complete => self.depth -= 1,
+                            .descended => break :object_entries,
+                        }
+                    }
+                },
+            }
+        }
+        return true;
+    }
+
+    /// Perform the observable live Get for one snapshotted object key, then
+    /// prepare and, when necessary, descend into the resulting value.
+    fn prepareProperty(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        frames: *std.ArrayListUnmanaged(Frame),
+        holder: Value,
+        key: []const u8,
+        ordinary_object: ?*value.Object,
+        stable_key: ?value.Object.StableOwnDataKey,
+    ) HostError!PreparedDisposition {
+        const self = st.self;
         if (stable_key) |snapshot| {
             const object = ordinary_object orelse unreachable;
             if (object.valueAtStableOwnDataKey(snapshot)) |loaded|
-                return st.serializeLoaded(buf, loaded, holder, key);
+                return st.prepareLoaded(buf, frames, loaded, holder, key);
         }
         if (ordinary_object) |object| switch (object.namedOwnPropertySnapshot(key)) {
-            .data => |own| return st.serializeLoaded(buf, own.value, holder, key),
+            .data => |own| return st.prepareLoaded(buf, frames, own.value, holder, key),
             .accessor, .absent => {},
         };
-        return st.serializeLoaded(buf, try self.getProperty(holder, key), holder, key);
+        return st.prepareLoaded(buf, frames, try self.getProperty(holder, key), holder, key);
     }
 
-    fn serializeRoot(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), root: Value) HostError!bool {
-        const self = st.self;
-        self.depth += 1;
-        defer self.depth -= 1;
-        try self.stackGuard();
-        return st.serializeLoaded(buf, root, Value.undef(), "");
-    }
-
-    fn serializeLoaded(
+    fn prepareLoaded(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
+        frames: *std.ArrayListUnmanaged(Frame),
         initial: Value,
         holder: Value,
         key: []const u8,
-    ) HostError!bool {
+    ) HostError!PreparedDisposition {
         const self = st.self;
         const a = self.arena;
         const output_allocator = st.output_allocator;
@@ -3157,7 +3333,7 @@ const Stringifier = struct {
         if (v.isObject() and v.asObj().behavior.is_raw_json) {
             const raw = try (v.asObj().getOwn("rawJSON") orelse Value.str("")).asWtf8(a);
             try buf.appendSlice(output_allocator, raw);
-            return true;
+            return .complete;
         }
         // SerializeJSONProperty: a [[NumberData]] wrapper → ToNumber, a
         // [[StringData]] wrapper → ToString (both run overridden valueOf/toString),
@@ -3180,7 +3356,7 @@ const Stringifier = struct {
         if (v.isObject() and v.asObj().is_bigint)
             return self.throwError("TypeError", "JSON.stringify cannot serialize BigInt.");
         switch (v.kind()) {
-            .undefined => return false,
+            .undefined => return .omitted,
             .null => try buf.appendSlice(output_allocator, "null"),
             .boolean => try buf.appendSlice(output_allocator, if (v.asBool()) "true" else "false"),
             .number => {
@@ -3190,20 +3366,281 @@ const Stringifier = struct {
             .string => try writeJsonValueString(output_allocator, buf, v),
             .object => {
                 const o = v.asObj();
-                if (o.isCallableObject() or o.is_symbol) return false; // functions/symbols omitted
-                // ECMA-262 SerializeJSONObject/SerializeJSONArray steps 1–2
-                // and 11: reject only an object already on the active ancestor
-                // path, then remove it on return. A global visited set would
-                // incorrectly reject legal repeated sibling references.
-                const identity = value.RuntimeObjectIdentity.init(o);
-                if (try st.active.enter(self, a, st.cycle_allocator, identity))
-                    return self.throwError("TypeError", "JSON.stringify cannot serialize cyclic structures.");
-                defer st.active.leave(identity);
-                const shape = try st.jsonShape(o);
-                if (shape.is_array) try st.serializeArray(buf, Value.obj(o), shape) else try st.serializeObject(buf, Value.obj(o), shape);
+                if (o.isCallableObject() or o.is_symbol) return .omitted;
+                return if (try st.pushContainer(buf, frames, v)) .descended else .complete;
             },
         }
+        return .complete;
+    }
+
+    /// Enter one container and either publish a continuation frame or emit an
+    /// empty/primitive container immediately. Callback-free ordinary leaves
+    /// remain native-stack rooted, as the old recursive walk did; every path
+    /// that can invoke user code or suspend in a continuation first publishes a
+    /// precise root.
+    noinline fn pushContainer(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        frames: *std.ArrayListUnmanaged(Frame),
+        container: Value,
+    ) HostError!bool {
+        const self = st.self;
+        const a = self.arena;
+        const object = container.asObj();
+        const identity = value.RuntimeObjectIdentity.init(object);
+        // Check the active path before any tentative output so an ancestor
+        // cycle still wins over a later allocation failure. Primitive-only
+        // leaves cannot contain a descendant cycle, so they need no matching
+        // push/pop after this exact membership check.
+        if (st.active.contains(identity))
+            return self.throwError("TypeError", "JSON.stringify cannot serialize cyclic structures.");
+
+        // A direct primitive leaf neither invokes JavaScript nor reaches a
+        // moving safepoint. Allocation-failure collection conservatively scans
+        // this native Value, so avoid publishing a temporary precise root only
+        // to remove it before returning. A failed tentative pass rolls its bytes
+        // back and enters the fully rooted continuation path below.
+        var direct_shape: ?*value.Object = null;
+        var direct_snapshots: ?[]const value.Object.StableOwnDataKey = null;
+        if (st.replacer_fn == null and !self.lock_microtasks) {
+            const initial_shape = try st.jsonShape(object);
+            direct_shape = initial_shape;
+            if (initial_shape.is_array) {
+                const direct_ordinary = jsonDirectOrdinaryArray(object, initial_shape);
+                if (direct_ordinary and
+                    try st.serializeDirectPrimitiveArray(buf, container, initial_shape.arrayLength()))
+                {
+                    return false;
+                }
+            } else if (st.allow == null and jsonDirectOrdinaryObject(object, initial_shape)) {
+                const key_allocator = st.key_snapshot_allocator orelse a;
+                direct_snapshots = try object.stableOwnDataKeysSnapshot(key_allocator);
+                if (direct_snapshots) |snapshots| {
+                    if (try st.serializeDirectPrimitiveObject(buf, container, snapshots)) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        try st.active.appendAbsent(self, a, st.cycle_allocator, identity);
+
+        const root_mark = try self.pushTempRoot(container);
+        const holder = self.tempRoot(root_mark, container);
+        // The callback-free preflight cannot reach a moving safepoint, so its
+        // resolved shape remains valid across precise-root publication.
+        const shape = direct_shape orelse try st.jsonShape(holder.asObj());
+        if (shape.is_array) {
+            const direct_ordinary = jsonDirectOrdinaryArray(holder.asObj(), shape);
+            // SerializeJSONArray reads length once via LengthOfArrayLike for a
+            // Proxy. Later index reads remain live through the rooted holder.
+            const proxy_holder = holder.asObj().proxyHandler() != null or holder.asObj().proxy_revoked;
+            const len: usize = if (proxy_holder)
+                interpreter.toLen(try self.toNumberV(try self.getProperty(holder, "length")))
+            else
+                shape.arrayLength();
+            if (len == 0) {
+                try buf.appendSlice(st.output_allocator, "[]");
+                st.active.leave(identity);
+                self.restoreTempRoots(root_mark);
+                return false;
+            }
+            const outer = st.indent.items.len;
+            try st.indent.appendSlice(a, st.gap);
+            try buf.append(st.output_allocator, '[');
+            try frames.append(st.frame_allocator, .{ .array = .{
+                .holder = holder,
+                .root_mark = root_mark,
+                .identity = identity,
+                .outer_indent = outer,
+                .len = len,
+                .direct_ordinary = direct_ordinary,
+            } });
+            return true;
+        }
+
+        const key_allocator = st.key_snapshot_allocator orelse a;
+        const direct_ordinary = jsonDirectOrdinaryObject(holder.asObj(), shape);
+        const stable_keys: ?[]const value.Object.StableOwnDataKey = if (direct_snapshots) |snapshots|
+            snapshots
+        else if (st.allow == null and direct_ordinary)
+            try holder.asObj().stableOwnDataKeysSnapshot(key_allocator)
+        else
+            null;
+        const keys = if (stable_keys == null)
+            if (st.allow) |allow| allow else try st.jsonEnumerableObjectKeys(holder.asObj(), shape, key_allocator)
+        else
+            &.{};
+        const outer = st.indent.items.len;
+        try st.indent.appendSlice(a, st.gap);
+        try buf.append(st.output_allocator, '{');
+        const key_count = if (stable_keys) |snapshots| snapshots.len else keys.len;
+        if (key_count == 0) {
+            st.indent.shrinkRetainingCapacity(outer);
+            try buf.append(st.output_allocator, '}');
+            st.active.leave(identity);
+            self.restoreTempRoots(root_mark);
+            return false;
+        }
+        try frames.append(st.frame_allocator, .{ .object = .{
+            .holder = holder,
+            .root_mark = root_mark,
+            .identity = identity,
+            .outer_indent = outer,
+            .stable_keys = stable_keys,
+            .keys = keys,
+            .direct_ordinary = direct_ordinary,
+        } });
         return true;
+    }
+
+    /// Complete a direct ordinary array without publishing a continuation frame
+    /// when every live dense element is already primitive. No user code can run
+    /// on this path. A hole, accessor, shape drift, or nested object rolls the
+    /// tentative bytes back and asks the general frame machine to reread live
+    /// state in specification order.
+    fn serializeDirectPrimitiveArray(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        holder: Value,
+        len: usize,
+    ) HostError!bool {
+        const self = st.self;
+        const output_mark = buf.items.len;
+        const outer = st.indent.items.len;
+        if (len == 0) {
+            try buf.appendSlice(st.output_allocator, "[]");
+            return true;
+        }
+        try st.indent.appendSlice(self.arena, st.gap);
+        try buf.append(st.output_allocator, '[');
+        var index: usize = 0;
+        while (index < len) : (index += 1) {
+            var key_storage: [32]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch unreachable;
+            try self.checkRestricted(holder.asObj());
+            const loaded = holder.asObj().denseElementWithoutAccessor(key, index) orelse {
+                st.indent.shrinkRetainingCapacity(outer);
+                buf.shrinkRetainingCapacity(output_mark);
+                return false;
+            };
+            const loaded_kind = loaded.kind();
+            if (loaded_kind == .object) {
+                st.indent.shrinkRetainingCapacity(outer);
+                buf.shrinkRetainingCapacity(output_mark);
+                return false;
+            }
+            if (index != 0) try buf.append(st.output_allocator, ',');
+            try st.newlineIndent(buf);
+            self.depth += 1;
+            try self.stackGuard();
+            const included = try st.serializeDirectPrimitiveValue(buf, loaded, loaded_kind);
+            self.depth -= 1;
+            if (!included) try buf.appendSlice(st.output_allocator, "null");
+        }
+        st.indent.shrinkRetainingCapacity(outer);
+        try st.newlineIndent(buf);
+        try buf.append(st.output_allocator, ']');
+        return true;
+    }
+
+    /// The object counterpart of serializeDirectPrimitiveArray. Stable own-data
+    /// keys make the tentative pass callback-free; any representation change or
+    /// object value falls back before observable work has run.
+    fn serializeDirectPrimitiveObject(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        holder: Value,
+        snapshots: []const value.Object.StableOwnDataKey,
+    ) HostError!bool {
+        const self = st.self;
+        const output_mark = buf.items.len;
+        const outer = st.indent.items.len;
+        var count: usize = 0;
+        try st.indent.appendSlice(self.arena, st.gap);
+        try buf.append(st.output_allocator, '{');
+        for (snapshots) |snapshot| {
+            if (jsonHiddenKey(snapshot.name)) continue;
+            const loaded = holder.asObj().valueAtStableOwnDataKey(snapshot) orelse {
+                st.indent.shrinkRetainingCapacity(outer);
+                buf.shrinkRetainingCapacity(output_mark);
+                return false;
+            };
+            const loaded_kind = loaded.kind();
+            if (loaded_kind == .object) {
+                st.indent.shrinkRetainingCapacity(outer);
+                buf.shrinkRetainingCapacity(output_mark);
+                return false;
+            }
+            const member_mark = buf.items.len;
+            if (count != 0) try buf.append(st.output_allocator, ',');
+            try st.newlineIndent(buf);
+            try writeJsonString(st.output_allocator, buf, value.decodeStringKey(snapshot.name));
+            try buf.append(st.output_allocator, ':');
+            if (st.gap.len != 0) try buf.append(st.output_allocator, ' ');
+            self.depth += 1;
+            try self.stackGuard();
+            const included = try st.serializeDirectPrimitiveValue(buf, loaded, loaded_kind);
+            self.depth -= 1;
+            if (included) count += 1 else buf.shrinkRetainingCapacity(member_mark);
+        }
+        st.indent.shrinkRetainingCapacity(outer);
+        if (count != 0) try st.newlineIndent(buf);
+        try buf.append(st.output_allocator, '}');
+        return true;
+    }
+
+    /// Emit a value already proven not to be an Object. The direct container
+    /// paths have no replacer, so SerializeJSONProperty has no callback,
+    /// wrapper, RawJSON, symbol, callable, or BigInt work left to perform.
+    inline fn serializeDirectPrimitiveValue(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        primitive: Value,
+        kind: Value.Kind,
+    ) HostError!bool {
+        switch (kind) {
+            .undefined => return false,
+            .null => try buf.appendSlice(st.output_allocator, "null"),
+            .boolean => try buf.appendSlice(st.output_allocator, if (primitive.asBool()) "true" else "false"),
+            .number => {
+                const number = primitive.asNum();
+                try buf.appendSlice(
+                    st.output_allocator,
+                    if (std.math.isNan(number) or std.math.isInf(number)) "null" else try value.numberToString(st.self.arena, number),
+                );
+            },
+            .string => try writeJsonValueString(st.output_allocator, buf, primitive),
+            .object => unreachable,
+        }
+        return true;
+    }
+
+    fn finishTopFrame(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        frames: *std.ArrayListUnmanaged(Frame),
+    ) HostError!void {
+        const self = st.self;
+        const frame = frames.items[frames.items.len - 1];
+        switch (frame) {
+            .array => |array| {
+                st.indent.shrinkRetainingCapacity(array.outer_indent);
+                try st.newlineIndent(buf);
+                try buf.append(st.output_allocator, ']');
+                st.active.leave(array.identity);
+                self.restoreTempRoots(array.root_mark);
+            },
+            .object => |object| {
+                st.indent.shrinkRetainingCapacity(object.outer_indent);
+                if (object.count != 0) try st.newlineIndent(buf);
+                try buf.append(st.output_allocator, '}');
+                st.active.leave(object.identity);
+                self.restoreTempRoots(object.root_mark);
+            },
+        }
+        _ = frames.pop();
+        self.depth -= 1;
     }
 
     fn jsonShape(st: *Stringifier, o: *value.Object) HostError!*value.Object {
@@ -3217,120 +3654,26 @@ const Stringifier = struct {
         return shape;
     }
 
-    fn serializeArray(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, shape: *value.Object) HostError!void {
-        const a = st.self.arena;
-        const output_allocator = st.output_allocator;
-        // SerializeJSONArray reads the length via LengthOfArrayLike (Get) — for a
-        // Proxy that runs the "length" trap (and propagates an abrupt completion).
-        const len: usize = if (holder.isObject() and (holder.asObj().proxyHandler() != null or holder.asObj().proxy_revoked))
-            interpreter.toLen(try st.self.toNumberV(try st.self.getProperty(holder, "length")))
-        else
-            shape.arrayLength();
-        if (len == 0) {
-            try buf.appendSlice(output_allocator, "[]");
-            return;
-        }
-        const outer = st.indent.items.len;
-        try st.indent.appendSlice(a, st.gap);
-        try buf.append(output_allocator, '[');
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            if (i != 0) try buf.append(output_allocator, ',');
-            try st.newlineIndent(buf);
-            // SerializeJSONProperty consumes the decimal index synchronously;
-            // toJSON/replacer callbacks materialize their own JS String before
-            // user code runs. Keep this transient spelling off Context backing.
-            var key_storage: [32]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_storage, "{d}", .{i}) catch unreachable;
-            if (!try st.serializeArrayElement(buf, holder, shape, key, i)) try buf.appendSlice(output_allocator, "null");
-        }
-        st.indent.shrinkRetainingCapacity(outer);
-        try st.newlineIndent(buf);
-        try buf.append(output_allocator, ']');
-    }
-
-    fn serializeArrayElement(
+    fn prepareArrayElement(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
+        frames: *std.ArrayListUnmanaged(Frame),
         holder: Value,
-        shape: *value.Object,
         key: []const u8,
         index: usize,
-    ) HostError!bool {
-        if (holder.isObject() and jsonDirectOrdinaryArray(holder.asObj(), shape)) {
-            try st.self.checkRestricted(shape);
+        direct_ordinary: bool,
+    ) HostError!PreparedDisposition {
+        const self = st.self;
+        if (direct_ordinary) {
+            const object = holder.asObj();
+            try self.checkRestricted(object);
             // Read each element immediately before its callbacks: an earlier
             // toJSON/replacer may mutate a later index. Accessors and holes fall
             // through to full [[Get]] for getter/prototype observability.
-            if (shape.denseElementWithoutAccessor(key, index)) |loaded|
-                return st.serializeLoaded(buf, loaded, holder, key);
+            if (object.denseElementWithoutAccessor(key, index)) |loaded|
+                return st.prepareLoaded(buf, frames, loaded, holder, key);
         }
-        return st.serialize(buf, holder, key);
-    }
-
-    fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value, shape: *value.Object) HostError!void {
-        const self = st.self;
-        const a = self.arena;
-        const output_allocator = st.output_allocator;
-        // OrdinaryOwnPropertyKeys snapshots are invocation-local. In a precise
-        // realm, collect their intermediate vectors in the invocation's scoped
-        // arena; retaining them in `self.arena` made repeated stringify calls
-        // grow Context backing until teardown.
-        const key_allocator = st.key_snapshot_allocator orelse a;
-        const ordinary_object: ?*value.Object = if (jsonDirectOrdinaryObject(v.asObj(), shape)) shape else null;
-        const stable_keys = if (st.allow == null and ordinary_object != null)
-            try ordinary_object.?.stableOwnDataKeysSnapshot(key_allocator)
-        else
-            null;
-        const keys = if (stable_keys == null)
-            if (st.allow) |al| al else try st.jsonEnumerableObjectKeys(v.asObj(), shape, key_allocator)
-        else
-            &.{};
-        const outer = st.indent.items.len;
-        try st.indent.appendSlice(a, st.gap);
-        var count: usize = 0;
-        try buf.append(output_allocator, '{');
-        if (stable_keys) |snapshots| {
-            for (snapshots) |snapshot|
-                try st.serializeObjectEntry(buf, v, snapshot.name, ordinary_object, snapshot, &count);
-        } else {
-            for (keys) |k|
-                try st.serializeObjectEntry(buf, v, k, ordinary_object, null, &count);
-        }
-        st.indent.shrinkRetainingCapacity(outer);
-        if (count != 0) {
-            try st.newlineIndent(buf);
-        }
-        try buf.append(output_allocator, '}');
-    }
-
-    fn serializeObjectEntry(
-        st: *Stringifier,
-        buf: *std.ArrayListUnmanaged(u8),
-        holder: Value,
-        k: []const u8,
-        ordinary_object: ?*value.Object,
-        stable_key: ?value.Object.StableOwnDataKey,
-        count: *usize,
-    ) HostError!void {
-        const output_allocator = st.output_allocator;
-        if (jsonHiddenKey(k)) return;
-        // Serialize directly into the authoritative output. A temporary
-        // member buffer recopies a successful descendant suffix at every
-        // ancestor, making a depth-n chain quadratic in output bytes. The
-        // mark retains exact omission semantics without publishing a comma
-        // or key when SerializeJSONProperty returns undefined.
-        const mark = buf.items.len;
-        if (count.* != 0) try buf.append(output_allocator, ',');
-        try st.newlineIndent(buf);
-        try writeJsonString(output_allocator, buf, value.decodeStringKey(k));
-        try buf.append(output_allocator, ':');
-        if (st.gap.len != 0) try buf.append(output_allocator, ' ');
-        if (!try st.serializeProperty(buf, holder, k, ordinary_object, stable_key)) {
-            buf.shrinkRetainingCapacity(mark);
-            return;
-        }
-        count.* += 1;
+        return st.prepareProperty(buf, frames, holder, key, null, null);
     }
 
     fn jsonEnumerableObjectKeys(
@@ -3423,20 +3766,41 @@ const JsonActiveStack = struct {
         index_allocator: std.mem.Allocator,
         identity: value.RuntimeObjectIdentity,
     ) HostError!bool {
+        if (active.contains(identity)) return true;
+        try active.appendAbsent(machine, stack_allocator, index_allocator, identity);
+        return false;
+    }
+
+    fn contains(active: *const @This(), identity: value.RuntimeObjectIdentity) bool {
+        if (active.indexed) {
+            return active.index.containsContext(identity, active.context.?);
+        }
+        for (active.items.items) |ancestor| if (ancestor.eql(identity)) return true;
+        return false;
+    }
+
+    /// Append an identity whose absence was just established by `contains`.
+    /// Splitting the operations lets callback-free primitive leaves prove cycle
+    /// freedom without publishing a path entry they cannot recurse beneath.
+    fn appendAbsent(
+        active: *@This(),
+        machine: *Interpreter,
+        stack_allocator: std.mem.Allocator,
+        index_allocator: std.mem.Allocator,
+        identity: value.RuntimeObjectIdentity,
+    ) HostError!void {
         if (active.indexed) {
             const context = active.context.?;
-            if (active.index.containsContext(identity, context)) return true;
             try active.items.ensureUnusedCapacity(stack_allocator, 1);
             try active.index.ensureUnusedCapacityContext(index_allocator, 1, context);
             active.items.appendAssumeCapacity(identity);
             active.index.putAssumeCapacityContext(identity, {}, context);
-            return false;
+            return;
         }
 
-        for (active.items.items) |ancestor| if (ancestor.eql(identity)) return true;
         if (active.items.items.len < json_cycle_index_threshold) {
             try active.items.append(stack_allocator, identity);
-            return false;
+            return;
         }
 
         // Promotion indexes the already-validated active path plus the new
@@ -3452,7 +3816,6 @@ const JsonActiveStack = struct {
         // the exact ordered path remains the sole authority and can be retried.
         active.context = context;
         active.indexed = true;
-        return false;
     }
 
     fn leave(active: *@This(), identity: value.RuntimeObjectIdentity) void {
