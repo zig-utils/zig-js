@@ -14240,7 +14240,20 @@ test "JSON stringify explicit frames preserve observable ordering and rollback" 
         \\  var abruptOk = false;
         \\  try { JSON.stringify(abrupt); } catch (error) { abruptOk = error === marker; }
         \\  abruptOk = abruptOk && abruptTrace.join(",") === "a,b";
-        \\  return proxyOk && callbackOk && mutationOk && rollbackOk && rawOk && nestedOk && cacheOk && aliasOk && cycleOk && bigintOk && abruptOk;
+        \\  var reentrant = { leaf: 7 };
+        \\  var reentrantOuter = { trigger: 1 };
+        \\  for (var reentrantDepth = 0; reentrantDepth < 32; reentrantDepth++) {
+        \\    reentrant = { next: reentrant };
+        \\    reentrantOuter = { next: reentrantOuter };
+        \\  }
+        \\  var reentrantText = "";
+        \\  var reentrantOuterText = JSON.stringify(reentrantOuter, function (key, value) {
+        \\    if (key === "trigger") reentrantText = JSON.stringify(reentrant);
+        \\    return value;
+        \\  });
+        \\  var reentrantOk = reentrantOuterText.indexOf('"trigger":1') >= 0 &&
+        \\    reentrantText.indexOf('"leaf":7') >= 0;
+        \\  return proxyOk && callbackOk && mutationOk && rollbackOk && rawOk && nestedOk && cacheOk && aliasOk && cycleOk && bigintOk && abruptOk && reentrantOk;
         \\})()
     )).asBool());
 }
@@ -14346,6 +14359,8 @@ test "JSON stringify key snapshots isolate shared no-GIL callers" {
         \\jsonShared[Symbol('ignored')] = 10;
         \\function stringifyLane(seed) {
         \\  if ($vm.useThreadGIL() !== false) throw 99;
+        \\  var deep = {leaf: seed};
+        \\  for (var depth = 0; depth < 32; depth++) deep = {next: deep};
         \\  for (var i = 0; i < 64; i++) {
         \\    var local = {lane: seed, iteration: i, stale: 0};
         \\    delete local.stale;
@@ -14353,6 +14368,7 @@ test "JSON stringify key snapshots isolate shared no-GIL callers" {
         \\    Object.defineProperty(local, 'hidden', {value: 11});
         \\    var expected = '{"lane":' + seed + ',"iteration":' + i + ',"shared":{"stable":7,"nested":{"left":1,"right":2},"computed":9}}';
         \\    if (JSON.stringify(local) !== expected) throw 98;
+        \\    if (JSON.stringify(deep).indexOf('"leaf":' + seed) < 0) throw 97;
         \\  }
         \\  return seed * 1000 + 64;
         \\}

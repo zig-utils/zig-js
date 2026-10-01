@@ -3104,34 +3104,7 @@ const Stringifier = struct {
         keys: []const value.Object.StableOwnDataKey,
     };
 
-    const ArrayFrame = struct {
-        holder: Value,
-        identity: value.RuntimeObjectIdentity,
-        outer_indent: usize,
-        len: usize,
-        next_index: usize = 0,
-        direct_ordinary: bool,
-    };
-
-    const ObjectFrame = struct {
-        holder: Value,
-        identity: value.RuntimeObjectIdentity,
-        outer_indent: usize,
-        stable_keys: ?[]const value.Object.StableOwnDataKey,
-        keys: []const []const u8,
-        next_index: usize = 0,
-        count: usize = 0,
-        direct_ordinary: bool,
-
-        fn len(frame: *const ObjectFrame) usize {
-            return if (frame.stable_keys) |keys| keys.len else frame.keys.len;
-        }
-    };
-
-    const Frame = union(enum) {
-        array: ArrayFrame,
-        object: ObjectFrame,
-    };
+    const Frame = interpreter.JsonStringifyFrame;
 
     const inline_frame_capacity = 8;
 
@@ -3143,39 +3116,80 @@ const Stringifier = struct {
         inline_frames: [inline_frame_capacity]Frame = undefined,
         inline_len: usize = 0,
         heap_frames: std.ArrayListUnmanaged(Frame) = .empty,
+        cache: ?*interpreter.JsonStringifyFrameCache = null,
         spilled: bool = false,
 
         fn deinit(stack: *@This(), allocator: std.mem.Allocator) void {
-            stack.heap_frames.deinit(allocator);
+            if (stack.cache) |cache| {
+                cache.frames.items.len = 0;
+                cache.leased = false;
+            } else {
+                stack.heap_frames.deinit(allocator);
+            }
         }
 
         inline fn len(stack: *const @This()) usize {
-            return if (stack.spilled) stack.heap_frames.items.len else stack.inline_len;
+            return if (!stack.spilled)
+                stack.inline_len
+            else if (stack.cache) |cache|
+                cache.frames.items.len
+            else
+                stack.heap_frames.items.len;
         }
 
         inline fn at(stack: *@This(), index: usize) *Frame {
             std.debug.assert(index < stack.len());
-            return if (stack.spilled) &stack.heap_frames.items[index] else &stack.inline_frames[index];
+            if (!stack.spilled) return &stack.inline_frames[index];
+            return if (stack.cache) |cache|
+                &cache.frames.items[index]
+            else
+                &stack.heap_frames.items[index];
         }
 
-        fn append(stack: *@This(), allocator: std.mem.Allocator, frame: Frame) std.mem.Allocator.Error!void {
+        fn append(stack: *@This(), self: *Interpreter, allocator: std.mem.Allocator, frame: Frame) std.mem.Allocator.Error!void {
             if (!stack.spilled and stack.inline_len < stack.inline_frames.len) {
                 stack.inline_frames[stack.inline_len] = frame;
                 stack.inline_len += 1;
                 return;
             }
             if (!stack.spilled) {
-                try stack.heap_frames.ensureTotalCapacityPrecise(allocator, stack.inline_frames.len * 2);
-                stack.heap_frames.appendSliceAssumeCapacity(stack.inline_frames[0..stack.inline_len]);
+                if (self.scratch_allocator) |cache_allocator| {
+                    const cache = self.json_stringify_frame_cache orelse cache: {
+                        const fresh = try cache_allocator.create(interpreter.JsonStringifyFrameCache);
+                        fresh.* = .{ .allocator = cache_allocator };
+                        self.json_stringify_frame_cache = fresh;
+                        break :cache fresh;
+                    };
+                    if (!cache.leased) {
+                        cache.leased = true;
+                        cache.frames.items.len = 0;
+                        stack.cache = cache;
+                    }
+                }
+                if (stack.cache) |cache| {
+                    try cache.frames.ensureTotalCapacityPrecise(cache.allocator, stack.inline_frames.len * 2);
+                    cache.frames.appendSliceAssumeCapacity(stack.inline_frames[0..stack.inline_len]);
+                } else {
+                    try stack.heap_frames.ensureTotalCapacityPrecise(allocator, stack.inline_frames.len * 2);
+                    stack.heap_frames.appendSliceAssumeCapacity(stack.inline_frames[0..stack.inline_len]);
+                }
                 stack.spilled = true;
             }
-            try stack.heap_frames.append(allocator, frame);
+            if (stack.cache) |cache|
+                try cache.frames.append(cache.allocator, frame)
+            else
+                try stack.heap_frames.append(allocator, frame);
         }
 
         inline fn removeLast(stack: *@This()) void {
             if (stack.spilled) {
-                std.debug.assert(stack.heap_frames.items.len != 0);
-                stack.heap_frames.items.len -= 1;
+                if (stack.cache) |cache| {
+                    std.debug.assert(cache.frames.items.len != 0);
+                    cache.frames.items.len -= 1;
+                } else {
+                    std.debug.assert(stack.heap_frames.items.len != 0);
+                    stack.heap_frames.items.len -= 1;
+                }
                 return;
             }
             std.debug.assert(stack.inline_len != 0);
@@ -3551,7 +3565,7 @@ const Stringifier = struct {
             const outer = st.indent.items.len;
             try st.indent.appendSlice(a, st.gap);
             try buf.append(st.output_allocator, '[');
-            try frames.append(st.frame_allocator, .{ .array = .{
+            try frames.append(self, st.frame_allocator, .{ .array = .{
                 .holder = holder,
                 .identity = identity,
                 .outer_indent = outer,
@@ -3584,7 +3598,7 @@ const Stringifier = struct {
             self.restoreTempRoots(root_mark);
             return false;
         }
-        try frames.append(st.frame_allocator, .{ .object = .{
+        try frames.append(self, st.frame_allocator, .{ .object = .{
             .holder = holder,
             .identity = identity,
             .outer_indent = outer,

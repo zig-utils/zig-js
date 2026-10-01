@@ -3395,6 +3395,52 @@ pub const JsonParseInlineShapeCache = struct {
     next: u8 = 0,
 };
 
+/// Continuation state retained only for the lifetime of one Interpreter. A
+/// top-level evaluation can call JSON.stringify thousands of times; keeping
+/// the largest freeable frame buffer avoids rebuilding and copying the same
+/// geometric ArrayList on every call. `leased` makes a reentrant stringify use
+/// its own fallback buffer, so callbacks cannot alias the outer traversal.
+pub const JsonStringifyArrayFrame = struct {
+    holder: Value,
+    identity: value.RuntimeObjectIdentity,
+    outer_indent: usize,
+    len: usize,
+    next_index: usize = 0,
+    direct_ordinary: bool,
+};
+
+pub const JsonStringifyObjectFrame = struct {
+    holder: Value,
+    identity: value.RuntimeObjectIdentity,
+    outer_indent: usize,
+    stable_keys: ?[]const value.Object.StableOwnDataKey,
+    keys: []const []const u8,
+    next_index: usize = 0,
+    count: usize = 0,
+    direct_ordinary: bool,
+
+    pub fn len(frame: *const @This()) usize {
+        return if (frame.stable_keys) |keys| keys.len else frame.keys.len;
+    }
+};
+
+pub const JsonStringifyFrame = union(enum) {
+    array: JsonStringifyArrayFrame,
+    object: JsonStringifyObjectFrame,
+};
+
+pub const JsonStringifyFrameCache = struct {
+    allocator: std.mem.Allocator,
+    frames: std.ArrayListUnmanaged(JsonStringifyFrame) = .empty,
+    leased: bool = false,
+
+    fn deinit(cache: *@This()) void {
+        std.debug.assert(!cache.leased);
+        cache.frames.deinit(cache.allocator);
+        cache.allocator.destroy(cache);
+    }
+};
+
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     /// Context-owned freeable backing for invocation-local indexes whose keys
@@ -4099,6 +4145,12 @@ pub const Interpreter = struct {
     /// the lazy pointer in the common Interpreter layout: shifting the existing
     /// hot fields measurably regresses unrelated JSON.parse reviver workloads.
     json_parse_inline_shape_cache: ?*JsonParseInlineShapeCache align(1) = null,
+
+    /// Lazily allocated, invocation-local JSON.stringify continuation backing.
+    /// It is byte-aligned and last for the same hot-layout reason as the parse
+    /// cache above. Every concurrent no-GIL evaluator owns a distinct
+    /// Interpreter; reentrant calls are isolated by the cache lease.
+    json_stringify_frame_cache: ?*JsonStringifyFrameCache align(1) = null,
 
     /// Bytes in the explicit Promise/next-tick root frontier at a precise
     /// safepoint. Nursery scheduling uses this to amortize a root scan against
@@ -12551,6 +12603,10 @@ pub const Interpreter = struct {
             programs.deinit();
             allocator.destroy(programs);
             self.regex_programs = null;
+        }
+        if (self.json_stringify_frame_cache) |cache| {
+            cache.deinit();
+            self.json_stringify_frame_cache = null;
         }
     }
 
