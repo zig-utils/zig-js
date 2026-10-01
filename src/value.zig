@@ -6264,6 +6264,18 @@ pub const Object = struct {
         slot: u32,
     };
 
+    /// Whether this object can reuse an insertion-ordered stable-key snapshot
+    /// previously built for `expected_shape`. Shape transitions are immutable,
+    /// but accessor/attribute/delete-order metadata belongs to each Object and
+    /// must be rejected under the same property lock as a fresh snapshot.
+    pub fn hasStableOwnDataKeysShape(self: *const Object, expected_shape: *Shape) bool {
+        const properties_locked = self.lockPropertySnapshot();
+        defer self.unlockPropertySnapshot(properties_locked);
+        if (self.accessorsMap() != null or self.attrsMap() != null or self.keyOrder() != null) return false;
+        const shape = self.shape orelse return false;
+        return shape == expected_shape and shape.depth == shape.count and shape.live_count == shape.count;
+    }
+
     /// Snapshot the simple ordinary-own-key case without rebuilding a name
     /// index. A null result asks the caller to use full OrdinaryOwnPropertyKeys:
     /// accessors, descriptor attributes, delete/re-add history, and canonical

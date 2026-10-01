@@ -14212,6 +14212,18 @@ test "JSON stringify explicit frames preserve observable ordering and rollback" 
         \\    JSON.stringify([undefined, function () {}, Symbol("x")]) === "[null,null,null]";
         \\  var rawOk = JSON.stringify({ raw: JSON.rawJSON("17") }) === '{"raw":17}' &&
         \\    JSON.stringify([JSON.rawJSON("true")]) === '[true]';
+        \\  var nestedOk = JSON.stringify({ name: "row-0", values: [0, 1, 2], meta: { active: true, lane: 0 } }) ===
+        \\    '{"name":"row-0","values":[0,1,2],"meta":{"active":true,"lane":0}}' &&
+        \\    JSON.stringify({ meta: { lane: 0, active: true }, values: [0, 1, 2], name: "row-0" }) ===
+        \\    '{"meta":{"lane":0,"active":true},"values":[0,1,2],"name":"row-0"}';
+        \\  var cachedA = { a: 1, b: 2 };
+        \\  var cachedB = { a: 3, b: 4 };
+        \\  var cachedC = { a: 5, b: 6 };
+        \\  var cacheTrace = [];
+        \\  Object.defineProperty(cachedB, "a", { enumerable: false });
+        \\  Object.defineProperty(cachedC, "a", { enumerable: true, get: function () { cacheTrace.push("a"); return 5; } });
+        \\  var cacheOk = JSON.stringify([cachedA, cachedB, cachedC]) ===
+        \\    '[{"a":1,"b":2},{"b":4},{"a":5,"b":6}]' && cacheTrace.join(",") === "a";
         \\  var shared = { value: 4 };
         \\  var aliasOk = JSON.stringify([shared, shared]) === '[{"value":4},{"value":4}]';
         \\  shared.self = shared;
@@ -14228,7 +14240,7 @@ test "JSON stringify explicit frames preserve observable ordering and rollback" 
         \\  var abruptOk = false;
         \\  try { JSON.stringify(abrupt); } catch (error) { abruptOk = error === marker; }
         \\  abruptOk = abruptOk && abruptTrace.join(",") === "a,b";
-        \\  return proxyOk && callbackOk && mutationOk && rollbackOk && rawOk && aliasOk && cycleOk && bigintOk && abruptOk;
+        \\  return proxyOk && callbackOk && mutationOk && rollbackOk && rawOk && nestedOk && cacheOk && aliasOk && cycleOk && bigintOk && abruptOk;
         \\})()
     )).asBool());
 }

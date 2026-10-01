@@ -3087,6 +3087,8 @@ const Stringifier = struct {
     gap: []const u8 = "",
     indent: std.ArrayListUnmanaged(u8) = .empty,
     active: JsonActiveStack = .{},
+    stable_key_cache: [stable_key_cache_capacity]?StableKeyCacheEntry = @splat(null),
+    stable_key_cache_next: u8 = 0,
 
     const PreparedDisposition = enum {
         omitted,
@@ -3094,9 +3096,16 @@ const Stringifier = struct {
         descended,
     };
 
+    const direct_object_value_limit = 8;
+    const stable_key_cache_capacity = 4;
+
+    const StableKeyCacheEntry = struct {
+        shape: *Shape,
+        keys: []const value.Object.StableOwnDataKey,
+    };
+
     const ArrayFrame = struct {
         holder: Value,
-        root_mark: usize,
         identity: value.RuntimeObjectIdentity,
         outer_indent: usize,
         len: usize,
@@ -3106,7 +3115,6 @@ const Stringifier = struct {
 
     const ObjectFrame = struct {
         holder: Value,
-        root_mark: usize,
         identity: value.RuntimeObjectIdentity,
         outer_indent: usize,
         stable_keys: ?[]const value.Object.StableOwnDataKey,
@@ -3123,6 +3131,56 @@ const Stringifier = struct {
     const Frame = union(enum) {
         array: ArrayFrame,
         object: ObjectFrame,
+    };
+
+    const inline_frame_capacity = 8;
+
+    /// Keep ordinary JSON nesting allocation-free, then spill exactly once for
+    /// deep inputs. Pointers returned by `at` remain valid until `append`, just
+    /// like ArrayList pointers; the dispatcher already reacquires its parent by
+    /// stable index after every descendant append.
+    const FrameStack = struct {
+        inline_frames: [inline_frame_capacity]Frame = undefined,
+        inline_len: usize = 0,
+        heap_frames: std.ArrayListUnmanaged(Frame) = .empty,
+        spilled: bool = false,
+
+        fn deinit(stack: *@This(), allocator: std.mem.Allocator) void {
+            stack.heap_frames.deinit(allocator);
+        }
+
+        inline fn len(stack: *const @This()) usize {
+            return if (stack.spilled) stack.heap_frames.items.len else stack.inline_len;
+        }
+
+        inline fn at(stack: *@This(), index: usize) *Frame {
+            std.debug.assert(index < stack.len());
+            return if (stack.spilled) &stack.heap_frames.items[index] else &stack.inline_frames[index];
+        }
+
+        fn append(stack: *@This(), allocator: std.mem.Allocator, frame: Frame) std.mem.Allocator.Error!void {
+            if (!stack.spilled and stack.inline_len < stack.inline_frames.len) {
+                stack.inline_frames[stack.inline_len] = frame;
+                stack.inline_len += 1;
+                return;
+            }
+            if (!stack.spilled) {
+                try stack.heap_frames.ensureTotalCapacityPrecise(allocator, stack.inline_frames.len * 2);
+                stack.heap_frames.appendSliceAssumeCapacity(stack.inline_frames[0..stack.inline_len]);
+                stack.spilled = true;
+            }
+            try stack.heap_frames.append(allocator, frame);
+        }
+
+        inline fn removeLast(stack: *@This()) void {
+            if (stack.spilled) {
+                std.debug.assert(stack.heap_frames.items.len != 0);
+                stack.heap_frames.items.len -= 1;
+                return;
+            }
+            std.debug.assert(stack.inline_len != 0);
+            stack.inline_len -= 1;
+        }
     };
 
     /// SerializeJSONProperty: write `holder[key]` (after toJSON + replacer +
@@ -3155,7 +3213,7 @@ const Stringifier = struct {
         defer self.depth = depth_mark;
         defer self.restoreTempRoots(roots_mark);
 
-        var frames: std.ArrayListUnmanaged(Frame) = .empty;
+        var frames: FrameStack = .{};
         defer frames.deinit(st.frame_allocator);
         const has_precise_roots = self.gc != null;
 
@@ -3177,22 +3235,21 @@ const Stringifier = struct {
             .descended => {},
         }
 
-        while (frames.items.len != 0) {
-            const frame_index = frames.items.len - 1;
-            switch (frames.items[frame_index]) {
+        while (frames.len() != 0) {
+            const frame_index = frames.len() - 1;
+            switch (frames.at(frame_index).*) {
                 .array => |*frame| {
                     // Stay in one frame while siblings complete immediately.
                     // Only a real descendant returns to the outer dispatcher;
                     // its append may have invalidated this frame pointer.
                     const array_len = frame.len;
-                    const root_mark = frame.root_mark;
                     const holder_fallback = frame.holder;
                     const direct_ordinary = frame.direct_ordinary;
                     var index = frame.next_index;
                     var descended = false;
                     while (index < array_len) : (index += 1) {
                         const rooted_holder = if (has_precise_roots)
-                            self.gc_temp_roots.items[root_mark]
+                            self.gc_temp_roots.items[roots_mark + frame_index]
                         else
                             holder_fallback;
                         if (index != 0) try buf.append(st.output_allocator, ',');
@@ -3217,18 +3274,18 @@ const Stringifier = struct {
                             },
                             .complete => self.depth -= 1,
                             .descended => {
-                                frames.items[frame_index].array.next_index = index + 1;
+                                frames.at(frame_index).array.next_index = index + 1;
                                 descended = true;
                                 break;
                             },
                         }
                     }
-                    if (!descended) try st.finishTopFrame(buf, &frames);
+                    if (!descended) try st.finishTopFrame(buf, &frames, roots_mark);
                 },
                 .object => |*frame| {
                     object_entries: while (true) {
                         if (frame.next_index == frame.len()) {
-                            try st.finishTopFrame(buf, &frames);
+                            try st.finishTopFrame(buf, &frames, roots_mark);
                             break :object_entries;
                         }
 
@@ -3251,7 +3308,7 @@ const Stringifier = struct {
                         if (st.gap.len != 0) try buf.append(st.output_allocator, ' ');
 
                         const rooted_holder = if (has_precise_roots)
-                            self.gc_temp_roots.items[frame.root_mark]
+                            self.gc_temp_roots.items[roots_mark + frame_index]
                         else
                             frame.holder;
                         const direct_object: ?*value.Object = if (frame.direct_ordinary) rooted_holder.asObj() else null;
@@ -3273,7 +3330,7 @@ const Stringifier = struct {
 
                         // The child may already have grown/reallocated the
                         // stack, so update the parent through its stable index.
-                        frames.items[frame_index].object.count += 1;
+                        frames.at(frame_index).object.count += 1;
                         switch (disposition) {
                             .omitted => unreachable,
                             .complete => self.depth -= 1,
@@ -3291,7 +3348,7 @@ const Stringifier = struct {
     fn prepareProperty(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
-        frames: *std.ArrayListUnmanaged(Frame),
+        frames: *FrameStack,
         holder: Value,
         key: []const u8,
         ordinary_object: ?*value.Object,
@@ -3313,7 +3370,7 @@ const Stringifier = struct {
     fn prepareLoaded(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
-        frames: *std.ArrayListUnmanaged(Frame),
+        frames: *FrameStack,
         initial: Value,
         holder: Value,
         key: []const u8,
@@ -3373,6 +3430,28 @@ const Stringifier = struct {
         return .complete;
     }
 
+    /// Reuse immutable key/slot order for objects that publish the same Shape.
+    /// The Object still validates its own accessor, attribute, and historical
+    /// key-order metadata before every hit, so this cache changes allocation
+    /// and shape-walk cost only—not the per-object snapshot decision.
+    fn stableOwnDataKeys(
+        st: *Stringifier,
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!?[]const value.Object.StableOwnDataKey {
+        for (st.stable_key_cache) |cached| if (cached) |entry| {
+            if (object.hasStableOwnDataKeysShape(entry.shape)) return entry.keys;
+        };
+
+        const keys = try object.stableOwnDataKeysSnapshot(allocator);
+        if (keys) |snapshot| if (snapshot.len != 0) {
+            const slot: usize = st.stable_key_cache_next;
+            st.stable_key_cache[slot] = .{ .shape = snapshot[0].shape, .keys = snapshot };
+            st.stable_key_cache_next = @intCast((slot + 1) % stable_key_cache_capacity);
+        };
+        return keys;
+    }
+
     /// Enter one container and either publish a continuation frame or emit an
     /// empty/primitive container immediately. Callback-free ordinary leaves
     /// remain native-stack rooted, as the old recursive walk did; every path
@@ -3381,7 +3460,7 @@ const Stringifier = struct {
     noinline fn pushContainer(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
-        frames: *std.ArrayListUnmanaged(Frame),
+        frames: *FrameStack,
         container: Value,
     ) HostError!bool {
         const self = st.self;
@@ -3402,21 +3481,45 @@ const Stringifier = struct {
         // back and enters the fully rooted continuation path below.
         var direct_shape: ?*value.Object = null;
         var direct_snapshots: ?[]const value.Object.StableOwnDataKey = null;
+        var direct_values: [direct_object_value_limit]Value = undefined;
         if (st.replacer_fn == null and !self.lock_microtasks) {
             const initial_shape = try st.jsonShape(object);
             direct_shape = initial_shape;
             if (initial_shape.is_array) {
                 const direct_ordinary = jsonDirectOrdinaryArray(object, initial_shape);
+                const array_len = initial_shape.arrayLength();
+                const direct_child_parent: ?value.RuntimeObjectIdentity = if (array_len > 1) identity else null;
                 if (direct_ordinary and
-                    try st.serializeDirectPrimitiveArray(buf, container, initial_shape.arrayLength()))
+                    try st.serializeDirectPrimitiveArray(buf, container, array_len, direct_child_parent))
                 {
                     return false;
                 }
             } else if (st.allow == null and jsonDirectOrdinaryObject(object, initial_shape)) {
                 const key_allocator = st.key_snapshot_allocator orelse a;
-                direct_snapshots = try object.stableOwnDataKeysSnapshot(key_allocator);
+                direct_snapshots = try st.stableOwnDataKeys(object, key_allocator);
                 if (direct_snapshots) |snapshots| {
-                    if (try st.serializeDirectPrimitiveObject(buf, container, snapshots)) {
+                    // Small ordinary objects dominate mixed JSON records. Read
+                    // their stable values before output so a nested member
+                    // selects the frame path without emitting and rolling back
+                    // every preceding primitive member. A primitive-only leaf
+                    // reuses the captured Values and remains one observable
+                    // read per key.
+                    const preloaded: ?[]const Value = if (snapshots.len > 1 and snapshots.len <= direct_values.len) preload: {
+                        for (snapshots, 0..) |snapshot, index| {
+                            if (jsonHiddenKey(snapshot.name)) {
+                                direct_values[index] = Value.undef();
+                                continue;
+                            }
+                            const loaded = object.valueAtStableOwnDataKey(snapshot) orelse break :preload null;
+                            if (loaded.isObject()) break :preload null;
+                            direct_values[index] = loaded;
+                        }
+                        break :preload direct_values[0..snapshots.len];
+                    } else null;
+                    const direct_child_parent: ?value.RuntimeObjectIdentity = if (snapshots.len > 1) identity else null;
+                    if ((preloaded != null or direct_child_parent != null) and
+                        try st.serializeDirectPrimitiveObject(buf, container, snapshots, preloaded, direct_child_parent))
+                    {
                         return false;
                     }
                 }
@@ -3450,7 +3553,6 @@ const Stringifier = struct {
             try buf.append(st.output_allocator, '[');
             try frames.append(st.frame_allocator, .{ .array = .{
                 .holder = holder,
-                .root_mark = root_mark,
                 .identity = identity,
                 .outer_indent = outer,
                 .len = len,
@@ -3464,7 +3566,7 @@ const Stringifier = struct {
         const stable_keys: ?[]const value.Object.StableOwnDataKey = if (direct_snapshots) |snapshots|
             snapshots
         else if (st.allow == null and direct_ordinary)
-            try holder.asObj().stableOwnDataKeysSnapshot(key_allocator)
+            try st.stableOwnDataKeys(holder.asObj(), key_allocator)
         else
             null;
         const keys = if (stable_keys == null)
@@ -3484,7 +3586,6 @@ const Stringifier = struct {
         }
         try frames.append(st.frame_allocator, .{ .object = .{
             .holder = holder,
-            .root_mark = root_mark,
             .identity = identity,
             .outer_indent = outer,
             .stable_keys = stable_keys,
@@ -3504,6 +3605,7 @@ const Stringifier = struct {
         buf: *std.ArrayListUnmanaged(u8),
         holder: Value,
         len: usize,
+        direct_child_parent: ?value.RuntimeObjectIdentity,
     ) HostError!bool {
         const self = st.self;
         const output_mark = buf.items.len;
@@ -3525,15 +3627,21 @@ const Stringifier = struct {
                 return false;
             };
             const loaded_kind = loaded.kind();
-            if (loaded_kind == .object) {
-                st.indent.shrinkRetainingCapacity(outer);
-                buf.shrinkRetainingCapacity(output_mark);
-                return false;
-            }
             if (index != 0) try buf.append(st.output_allocator, ',');
             try st.newlineIndent(buf);
             self.depth += 1;
             try self.stackGuard();
+            if (loaded_kind == .object) {
+                const serialized = direct_child_parent != null and
+                    try st.serializeDirectChildContainer(buf, loaded, direct_child_parent.?);
+                self.depth -= 1;
+                if (!serialized) {
+                    st.indent.shrinkRetainingCapacity(outer);
+                    buf.shrinkRetainingCapacity(output_mark);
+                    return false;
+                }
+                continue;
+            }
             const included = try st.serializeDirectPrimitiveValue(buf, loaded, loaded_kind);
             self.depth -= 1;
             if (!included) try buf.appendSlice(st.output_allocator, "null");
@@ -3552,6 +3660,8 @@ const Stringifier = struct {
         buf: *std.ArrayListUnmanaged(u8),
         holder: Value,
         snapshots: []const value.Object.StableOwnDataKey,
+        preloaded: ?[]const Value,
+        direct_child_parent: ?value.RuntimeObjectIdentity,
     ) HostError!bool {
         const self = st.self;
         const output_mark = buf.items.len;
@@ -3559,19 +3669,17 @@ const Stringifier = struct {
         var count: usize = 0;
         try st.indent.appendSlice(self.arena, st.gap);
         try buf.append(st.output_allocator, '{');
-        for (snapshots) |snapshot| {
+        for (snapshots, 0..) |snapshot, index| {
             if (jsonHiddenKey(snapshot.name)) continue;
-            const loaded = holder.asObj().valueAtStableOwnDataKey(snapshot) orelse {
-                st.indent.shrinkRetainingCapacity(outer);
-                buf.shrinkRetainingCapacity(output_mark);
-                return false;
-            };
+            const loaded = if (preloaded) |values|
+                values[index]
+            else
+                holder.asObj().valueAtStableOwnDataKey(snapshot) orelse {
+                    st.indent.shrinkRetainingCapacity(outer);
+                    buf.shrinkRetainingCapacity(output_mark);
+                    return false;
+                };
             const loaded_kind = loaded.kind();
-            if (loaded_kind == .object) {
-                st.indent.shrinkRetainingCapacity(outer);
-                buf.shrinkRetainingCapacity(output_mark);
-                return false;
-            }
             const member_mark = buf.items.len;
             if (count != 0) try buf.append(st.output_allocator, ',');
             try st.newlineIndent(buf);
@@ -3580,6 +3688,18 @@ const Stringifier = struct {
             if (st.gap.len != 0) try buf.append(st.output_allocator, ' ');
             self.depth += 1;
             try self.stackGuard();
+            if (loaded_kind == .object) {
+                const serialized = direct_child_parent != null and
+                    try st.serializeDirectChildContainer(buf, loaded, direct_child_parent.?);
+                self.depth -= 1;
+                if (!serialized) {
+                    st.indent.shrinkRetainingCapacity(outer);
+                    buf.shrinkRetainingCapacity(output_mark);
+                    return false;
+                }
+                count += 1;
+                continue;
+            }
             const included = try st.serializeDirectPrimitiveValue(buf, loaded, loaded_kind);
             self.depth -= 1;
             if (included) count += 1 else buf.shrinkRetainingCapacity(member_mark);
@@ -3587,6 +3707,66 @@ const Stringifier = struct {
         st.indent.shrinkRetainingCapacity(outer);
         if (count != 0) try st.newlineIndent(buf);
         try buf.append(st.output_allocator, '}');
+        return true;
+    }
+
+    /// Serialize one ordinary child container inside a direct parent without
+    /// publishing a continuation frame. The child's own descendants must all
+    /// be primitive: this bounded one-level bridge keeps deep traversal on the
+    /// explicit frame machine while avoiding its setup for common JSON records
+    /// and wide arrays of primitive leaf objects.
+    fn serializeDirectChildContainer(
+        st: *Stringifier,
+        buf: *std.ArrayListUnmanaged(u8),
+        child: Value,
+        parent_identity: value.RuntimeObjectIdentity,
+    ) HostError!bool {
+        const self = st.self;
+        const object = child.asObj();
+        if (object.isCallableObject() or object.is_symbol or object.is_bigint or
+            object.behavior.is_raw_json or object.boxedPrimitive() != null)
+        {
+            return false;
+        }
+
+        const identity = value.RuntimeObjectIdentity.init(object);
+        if (identity.eql(parent_identity) or st.active.contains(identity)) return false;
+        if (!try st.directToJsonLookupIsDataOnly(object)) return false;
+
+        const shape = try st.jsonShape(object);
+        if (shape.is_array) {
+            if (!jsonDirectOrdinaryArray(object, shape)) return false;
+            return st.serializeDirectPrimitiveArray(buf, child, shape.arrayLength(), null);
+        }
+        if (!jsonDirectOrdinaryObject(object, shape) or st.allow != null) return false;
+        const key_allocator = st.key_snapshot_allocator orelse self.arena;
+        const snapshots = try st.stableOwnDataKeys(object, key_allocator) orelse return false;
+        return st.serializeDirectPrimitiveObject(buf, child, snapshots, null, null);
+    }
+
+    /// Prove that Get(child, "toJSON") is a side-effect-free data lookup. A
+    /// callable value still requires the full SerializeJSONProperty path; an
+    /// accessor, Proxy, restricted host object, or unstable exotic prototype
+    /// declines before executing user code, so fallback performs the one
+    /// observable lookup required by ECMA-262.
+    fn directToJsonLookupIsDataOnly(st: *Stringifier, object: *value.Object) HostError!bool {
+        var current: ?*value.Object = object;
+        var guard: u32 = 0;
+        while (current) |candidate| : (current = candidate.protoAtomic()) {
+            guard += 1;
+            if (guard > 10000) return false;
+            if (candidate.proxyHandler() != null or candidate.proxy_revoked or
+                candidate.hostClassHooks() != null or candidate.moduleNs() != null)
+            {
+                return false;
+            }
+            try st.self.checkRestricted(candidate);
+            switch (candidate.namedOwnPropertySnapshot("toJSON")) {
+                .absent => {},
+                .accessor => return false,
+                .data => |property| return !(property.value.isObject() and property.value.asObj().isCallableObject()),
+            }
+        }
         return true;
     }
 
@@ -3619,27 +3799,28 @@ const Stringifier = struct {
     fn finishTopFrame(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
-        frames: *std.ArrayListUnmanaged(Frame),
+        frames: *FrameStack,
+        roots_mark: usize,
     ) HostError!void {
         const self = st.self;
-        const frame = frames.items[frames.items.len - 1];
-        switch (frame) {
-            .array => |array| {
+        const frame_index = frames.len() - 1;
+        switch (frames.at(frame_index).*) {
+            .array => |*array| {
                 st.indent.shrinkRetainingCapacity(array.outer_indent);
                 try st.newlineIndent(buf);
                 try buf.append(st.output_allocator, ']');
                 st.active.leave(array.identity);
-                self.restoreTempRoots(array.root_mark);
+                self.restoreTempRoots(roots_mark + frame_index);
             },
-            .object => |object| {
+            .object => |*object| {
                 st.indent.shrinkRetainingCapacity(object.outer_indent);
                 if (object.count != 0) try st.newlineIndent(buf);
                 try buf.append(st.output_allocator, '}');
                 st.active.leave(object.identity);
-                self.restoreTempRoots(object.root_mark);
+                self.restoreTempRoots(roots_mark + frame_index);
             },
         }
-        _ = frames.pop();
+        frames.removeLast();
         self.depth -= 1;
     }
 
@@ -3657,7 +3838,7 @@ const Stringifier = struct {
     fn prepareArrayElement(
         st: *Stringifier,
         buf: *std.ArrayListUnmanaged(u8),
-        frames: *std.ArrayListUnmanaged(Frame),
+        frames: *FrameStack,
         holder: Value,
         key: []const u8,
         index: usize,
