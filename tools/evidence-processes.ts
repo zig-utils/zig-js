@@ -31,6 +31,14 @@ function isCompetingBunCommand(command: string): boolean {
   return command.split(/\s+/).length > 1;
 }
 
+function isCompetingReportCrashCommand(command: string): boolean {
+  // macOS keeps an idle `ReportCrash agent` daemon resident. The daemon does
+  // no crash processing until a separate command is launched, so rejecting it
+  // would permanently disable evidence collection on an otherwise idle host.
+  const args = command.trim().split(/\s+/).slice(1);
+  return !(args.length === 1 && args[0] === "agent");
+}
+
 function relatedProcesses(rows: ProcessRow[], selfPid: number): Set<number> {
   const parents = new Map(rows.map((row) => [row.pid, row.parent])),
     related = new Set<number>(),
@@ -55,7 +63,7 @@ export function competingEvidenceProcesses(source: string, selfPid: number): str
     const [executable, basename] = processBasename(row.command);
     if (basename === "zig") return isCompetingZigCommand(row.command);
     if (basename === "bun") return isCompetingBunCommand(row.command);
-    if (basename === "ReportCrash") return true;
+    if (basename === "ReportCrash") return isCompetingReportCrashCommand(row.command);
     if (basename === "maker") return true;
     if (["home-url-final", "unit-test-parallel", "threads-test", "test262", "frontend-parse-benchmark"].includes(basename)) return true;
     return basename === "test" &&
