@@ -149,6 +149,15 @@ control narrows from `9.06x` to `7.10x` with 39.98% candidate RSD. No sample was
 discarded. Those unstable candidate-only tails and the deep-control regression
 must be resolved before #1019 can claim a direct-JSC gap reduction.
 
+A later October 2 [frame-reuse triplet](.data/json-jit-pipeline-jsc-gap-reduction-frame-reuse-2026-10-02.md)
+([126 raw samples](.data/json-jit-pipeline-jsc-gap-reduction-frame-reuse-2026-10-02.json))
+is also preserved as **rejected acceptance evidence**. Its medians narrow the
+depth gap from `10.52x` to `10.09x` and the shallow gap from `9.16x` to `8.90x`,
+but shallow baseline/candidate/JSC RSD is 30.01%/28.52%/41.56%, while the
+escaped-string control reaches 52.03%/42.49%/30.10%. No sample was discarded;
+that bimodal same-window distribution is too unstable to establish the claimed
+gap reduction.
+
 The October 2 [frame-reuse base control](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.md)
 ([raw samples](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.json))
 is likewise preserved as **rejected exact-parent evidence**. Six candidate
