@@ -1,0 +1,45 @@
+{
+  "schema_version": 43,
+  "matrix_id": "zig-js-representative-v43",
+  "status": "frozen",
+  "frozen_date": "2026-10-02",
+  "owner_issue": 1021,
+  "history_policy": "This version hash-inherits every V42 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, process classification, and diagnostic schema. It changes no scored row or execution hot path. It adds the JSON/JSC pipeline collector to the frozen integration boundary after that collector adopted the shared fail-closed process classifier. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, process policy, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v42",
+    "path": "docs/.data/representative-benchmark-matrix-v42.json",
+    "sha256": "166439e2fe5f4e91d5fe48f9eace3486e89b072e56508f99ca143b14fac1a8ad",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_inventory_diagnostics",
+      "memory_pressure_diagnostics",
+      "tier_attribution",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration",
+      "exact_parent_integration"
+    ]
+  },
+  "change": "Pins the JSON/JSC pipeline collector and its shared process classifier after every native invocation gained before/after competitor snapshots. Collection now fails closed on concurrent builds, tests, command-bearing Bun processes, and macOS ReportCrash work instead of publishing scheduler-contaminated evidence.",
+  "json_pipeline_integration": {
+    "path": "tools/json-pipeline-benchmark.ts",
+    "sha256": "2198c89dfb9e37d88cc04c1a7652aab7bb6e73ae0cb5db0edd133b2131e8fdc3",
+    "process_classifier": {
+      "path": "tools/evidence-processes.ts",
+      "sha256": "491a93d28506068e8b0f3595a13108439574564cb6b6eac148a1d8bc4af95339"
+    },
+    "publication_boundary": "Every JSON/JSC, tier-residency, and gap-reduction runner invocation is bracketed by the V42 shared fail-closed process classifier. A competing process aborts collection before either raw samples or a rendered report is written; the existing identity, checksum, order, sample-index, and median-floor gates remain unchanged."
+  }
+}

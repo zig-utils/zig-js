@@ -88,8 +88,10 @@ export function selfTest(): void {
   rejects("pressure diagnostic schema drift", value => { value.memory_pressure_diagnostics.result_schema_version = 2; }, "memory-pressure diagnostic contract drift");
   rejects("pressure diagnostic scoring drift", value => { value.memory_pressure_diagnostics.scored = true; }, "memory-pressure diagnostic contract drift");
   rejects("process classifier hash drift", value => { value.exact_parent_integration.process_classifier.sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.process_classifier.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
-  rejects("unsupported future matrix", value => { value.schema_version = 43; }, "unsupported representative matrix schema");
-  console.log("representative matrix structural tests: 80/80 passed");
+  rejects("JSON pipeline collector hash drift", value => { value.json_pipeline_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+  rejects("shared process classifier mirror drift", value => { value.json_pipeline_integration.process_classifier.sha256 = "0".repeat(64); }, "shared process classifier mirror drift");
+  rejects("unsupported future matrix", value => { value.schema_version = 44; }, "unsupported representative matrix schema");
+  console.log("representative matrix structural tests: 82/82 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();
