@@ -24,6 +24,13 @@ function isCompetingZigCommand(command: string): boolean {
   return subcommand !== "version" && subcommand !== "--version";
 }
 
+function isCompetingBunCommand(command: string): boolean {
+  // A bare Bun process can be an idle long-lived runtime owned by another
+  // project. Any command-bearing Bun process can wake, compile, or execute
+  // work during a sample, so evidence collection treats it conservatively.
+  return command.split(/\s+/).length > 1;
+}
+
 function relatedProcesses(rows: ProcessRow[], selfPid: number): Set<number> {
   const parents = new Map(rows.map((row) => [row.pid, row.parent])),
     related = new Set<number>(),
@@ -47,6 +54,8 @@ export function competingEvidenceProcesses(source: string, selfPid: number): str
     if (related.has(row.pid)) return false;
     const [executable, basename] = processBasename(row.command);
     if (basename === "zig") return isCompetingZigCommand(row.command);
+    if (basename === "bun") return isCompetingBunCommand(row.command);
+    if (basename === "ReportCrash") return true;
     if (basename === "maker") return true;
     if (["home-url-final", "unit-test-parallel", "threads-test", "test262", "frontend-parse-benchmark"].includes(basename)) return true;
     return basename === "test" &&

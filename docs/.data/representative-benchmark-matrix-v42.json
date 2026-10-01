@@ -1,0 +1,44 @@
+{
+  "schema_version": 42,
+  "matrix_id": "zig-js-representative-v42",
+  "status": "frozen",
+  "frozen_date": "2026-10-02",
+  "owner_issue": 1021,
+  "history_policy": "This version hash-inherits every V41 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, and diagnostic schema. It changes no scored row or execution hot path. It re-pins only the exact-parent collector and its shared process classifier after command-bearing Bun processes and macOS ReportCrash became fail-closed competitors. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, process policy, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v41",
+    "path": "docs/.data/representative-benchmark-matrix-v41.json",
+    "sha256": "8df673387a09d82a4845e9fe69435fe763ae5b756f5487344cf7c4d6f56c6e73",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_inventory_diagnostics",
+      "memory_pressure_diagnostics",
+      "tier_attribution",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration"
+    ]
+  },
+  "change": "Extends the shared fail-closed evidence-process policy to reject command-bearing Bun runtimes and macOS ReportCrash work. Bare idle Bun runtimes and bounded Zig version probes remain allowed. The exact-parent structural self-test pins both classifications without changing any benchmark workload, scored metric, timing boundary, checksum, or publication threshold.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "6fb4ee13e803519c2e04cf613aab7a2329e7b8868ac7456064e7c5e17f0d6426",
+    "process_classifier": {
+      "path": "tools/evidence-processes.ts",
+      "sha256": "491a93d28506068e8b0f3595a13108439574564cb6b6eac148a1d8bc4af95339"
+    },
+    "publication_boundary": "V42 preserves every V41 timing, efficiency, cleanliness, checksum, serial-child, occupancy, provenance, mixed-tier allocation-replay, and diagnostic-schema gate. Exact-parent collection additionally refuses command-bearing Bun runtimes and macOS ReportCrash work before and after each scored invocation; bare idle Bun runtimes remain outside the competitor set."
+  }
+}

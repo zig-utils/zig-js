@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v41.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v42.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 41, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 42, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,42 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 41),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 42),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 42) {
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v42 changes exact-parent process classification only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v42 must inherit completed panel inventory unchanged");
+    requireValue(child.instrumentation_overhead_integration === undefined, "v42 must inherit instrumentation_overhead_integration unchanged");
+    requireValue(child.tier_attribution === undefined && child.memory_pressure_diagnostics === undefined, "v42 must inherit diagnostic schemas unchanged");
+    const replacement = child.exact_parent_integration;
+    requireValue(
+      replacement && typeof replacement === "object" &&
+        same(Object.keys(replacement).sort(), ["path", "process_classifier", "publication_boundary", "sha256"]),
+      "v42 must replace only the exact-parent collector, process classifier, and publication boundary",
+    );
+    requireValue(
+      replacement.path === "tools/exact-parent-regression.ts" &&
+        replacement.process_classifier?.path === "tools/evidence-processes.ts",
+      "v42 process-classifier integration path drift",
+    );
+    const exactParent = { ...inherited.exact_parent_integration, ...replacement };
+    const merged = {
+      ...inherited,
+      ...child,
+      exact_parent_integration: exactParent,
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: { ...inherited.completed_metric_panels.efficiency_thermal, scored_integration: exactParent },
+      },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 41) {
     requireValue(
@@ -585,7 +614,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 41, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 42, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   if (manifest.schema_version >= 40) {
     const diagnostics = manifest.memory_inventory_diagnostics;
@@ -724,6 +753,13 @@ export function validate(manifest: any, root = ROOT): void {
     requireValue(efficiency.issue === 503 && efficiency.status === "integrated", `${version} efficiency panel identity drift`);
     requireValue(JSON.stringify(manifest.exact_parent_integration) === JSON.stringify(efficiency.scored_integration), `${version} exact-parent integration mirror drift`);
     validatePinnedFile(efficiency.scored_integration, `${version} exact-parent integration`, root);
+    if (manifest.schema_version >= 42) {
+      requireValue(
+        efficiency.scored_integration.process_classifier?.path === "tools/evidence-processes.ts",
+        "V42 exact-parent process classifier path drift",
+      );
+      validatePinnedFile(efficiency.scored_integration.process_classifier, "V42 exact-parent process classifier", root);
+    }
     if (manifest.schema_version >= 24) {
       const evidenceVersion = `V${manifest.schema_version}`;
       requireValue(efficiency.scored_integration.occupancy_scope === "declared_timed_boundary" && efficiency.scored_integration.minimum_cpu_occupancy === 0.6 && efficiency.scored_integration.complete_process_occupancy === "diagnostic_only", `${evidenceVersion} exact-parent occupancy policy drift`);
@@ -1046,7 +1082,7 @@ export function validate(manifest: any, root = ROOT): void {
     if (manifest.schema_version >= 33) {
       requireValue(
         attribution.artifact_schema_version === (manifest.schema_version >= 41 ? 15 : manifest.schema_version >= 40 ? 14 : 13),
-        `${manifest.schema_version >= 41 ? "V41" : manifest.schema_version >= 40 ? "V40" : "V33"} attribution artifact schema drift`,
+        `${manifest.schema_version >= 42 ? "V42" : manifest.schema_version >= 41 ? "V41" : manifest.schema_version >= 40 ? "V40" : "V33"} attribution artifact schema drift`,
       );
       requireValue(
         same(attribution.shape_counters || [], ["transition_requests", "transition_hits", "transition_misses", "transition_lock_yields"]),
