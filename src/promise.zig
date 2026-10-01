@@ -595,7 +595,9 @@ test "microtask transfer owns the closed suffix through allocation failure" {
     for ([_]bool{ false, true }) |nonempty| {
         var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
         const storage = try a.alloc(Microtask, 2 + @as(usize, @intFromBool(nonempty)));
-        var destination = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+        var destination_items = std.ArrayListUnmanaged(Microtask).fromOwnedSlice(storage);
+        destination_items.items.len = 0;
+        var destination = MicrotaskQueue{ .items = destination_items };
         defer destination.items.deinit(a);
         var source = MicrotaskQueue{};
         defer source.items.deinit(a);
@@ -648,7 +650,9 @@ test "microtask transferred settlement batch expands atomically with sibling rea
     defer source.items.deinit(a);
     try source.append(a, .{ .kind = .settlement_batch, .reaction = undefined, .argument = Value.undef(), .fulfilled = true, .payload = .{ .promise = &settled } });
     const storage = try a.alloc(Microtask, 1);
-    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var queue_items = std.ArrayListUnmanaged(Microtask).fromOwnedSlice(storage);
+    queue_items.items.len = 0;
+    var queue = MicrotaskQueue{ .items = queue_items };
     defer queue.items.deinit(a);
     var transfer = MicrotaskTransfer{};
     try queue.prepareTransfer(a, &transfer);
@@ -700,7 +704,7 @@ test "microtask transfer preparation and empty completion preserve reservation o
 test "microtask batch reservations survive OOM and nested restoration" {
     const storage = try std.testing.allocator.alloc(Microtask, 8);
     defer std.testing.allocator.free(storage);
-    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var queue = MicrotaskQueue{ .items = .initBuffer(storage) };
     var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     const a = unavailable.allocator();
     const Job = struct {
@@ -1840,7 +1844,7 @@ test "settlement batch expansion is OOM-atomic between sibling jobs" {
     var fixed_bytes: [@sizeOf(Microtask)]u8 align(@alignOf(Microtask)) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&fixed_bytes);
     const storage = try fixed.allocator().alloc(Microtask, 1);
-    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var queue = MicrotaskQueue{ .items = .initBuffer(storage) };
     var machine = Interpreter{
         .arena = fixed.allocator(),
         .env = undefined,
@@ -1893,7 +1897,7 @@ test "resolving capability reserves settlement publication before once-only comm
     var unavailable = std.heap.FixedBufferAllocator.init(&no_bytes);
     var preallocated_jobs: [1]Microtask = undefined;
     var root_blocked_queue = MicrotaskQueue{
-        .items = .{ .items = preallocated_jobs[0..0], .capacity = preallocated_jobs.len },
+        .items = .initBuffer(&preallocated_jobs),
     };
     var machine = Interpreter{
         .arena = unavailable.allocator(),
@@ -1917,8 +1921,8 @@ test "resolving capability reserves settlement publication before once-only comm
     var promise_roots: [2]*Promise = undefined;
     var value_roots: [2]Value = undefined;
     machine.microtasks = &blocked_queue;
-    machine.gc_temp_promise_roots = .{ .items = promise_roots[0..0], .capacity = promise_roots.len };
-    machine.gc_temp_roots = .{ .items = value_roots[0..0], .capacity = value_roots.len };
+    machine.gc_temp_promise_roots = .initBuffer(&promise_roots);
+    machine.gc_temp_roots = .initBuffer(&value_roots);
 
     try std.testing.expectError(error.OutOfMemory, resolveThunk(&machine, Value.undef(), &.{Value.num(885)}));
     try std.testing.expect(!state.promise_resolving_already.load(.acquire));
@@ -1928,7 +1932,7 @@ test "resolving capability reserves settlement publication before once-only comm
     var fixed_bytes: [@sizeOf(Microtask)]u8 align(@alignOf(Microtask)) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&fixed_bytes);
     const storage = try fixed.allocator().alloc(Microtask, 1);
-    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var queue = MicrotaskQueue{ .items = .initBuffer(storage) };
     machine.arena = fixed.allocator();
     machine.microtasks = &queue;
     _ = try resolveThunk(&machine, Value.undef(), &.{Value.num(885)});
@@ -2535,7 +2539,7 @@ test "Promise job thenable OOM after resolution preserves its committed adoption
 test "waitAsync prepared primitive completion commits without root or queue allocation" {
     var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     var storage: [2]Microtask = undefined;
-    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var queue = MicrotaskQueue{ .items = .initBuffer(&storage) };
     const pair = ReactionPair{
         .fulfill = .{ .handler = null, .detached = true },
         .reject = .{ .handler = null, .detached = true },
@@ -2574,7 +2578,7 @@ test "waitAsync prepared primitive completion commits without root or queue allo
     try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_promise_roots.items.len);
 
     var repeated_storage: [1]Microtask = undefined;
-    var repeated_queue = MicrotaskQueue{ .items = .{ .items = repeated_storage[0..0], .capacity = repeated_storage.len } };
+    var repeated_queue = MicrotaskQueue{ .items = .initBuffer(&repeated_storage) };
     completion = try PreparedSettlement.prepare(&machine, &repeated_queue);
     completion.fulfillPrimitive(&machine, &target, Value.str("timed-out"));
     try std.testing.expectEqualStrings("ok", target.value.asStr());

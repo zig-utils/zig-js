@@ -62420,7 +62420,8 @@ test "Promise job await preparation OOM consumes its owned rejection slot" {
         .fulfilled = true,
         .payload = .{ .promise = &target },
     };
-    var queue = promise.MicrotaskQueue{ .items = .{ .items = storage[0..1], .capacity = storage.len } };
+    var queue = promise.MicrotaskQueue{ .items = .initBuffer(&storage) };
+    queue.items.items.len = 1;
     var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var sentinel: u8 = 0;
     var machine = Interpreter{
@@ -62494,7 +62495,8 @@ test "shared-buffer waitAsync admission OOM preserves an existing native waiter"
     const object = try promise.newPromise(&machine);
     const other = try promise.newPromise(&machine);
     const list_storage = try ctx.arena().alloc(AsyncWaiterEntry, 1);
-    ctx.async_waiters = .{ .items = list_storage[0..0], .capacity = list_storage.len };
+    ctx.async_waiters = .fromOwnedSlice(list_storage);
+    ctx.async_waiters.items.len = 0;
     var first = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
     defer first.cancel(&machine);
     const admitted = try machine.enqueueAsyncWaiter(storage, 0, i32, 0, null, Value.obj(object), &first);
