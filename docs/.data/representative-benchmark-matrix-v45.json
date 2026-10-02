@@ -1,0 +1,51 @@
+{
+  "schema_version": 45,
+  "matrix_id": "zig-js-representative-v45",
+  "status": "frozen",
+  "frozen_date": "2026-10-02",
+  "owner_issue": 1022,
+  "history_policy": "This version hash-inherits every V44 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, process classification, and memory-pressure diagnostic. It changes no scored row or execution boundary. It versions the tier-attribution sidecar from schema 15 to 16 and the owned-memory inventory from schema 3 to 4 solely to publish exact JSON.stringify frame-cache overlap gauges. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, process policy, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v44",
+    "path": "docs/.data/representative-benchmark-matrix-v44.json",
+    "sha256": "1e1c0e329ddfca38d4ab676ddde77ee9b7a98a5c89a27e05c2aeebd370cbac59",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_pressure_diagnostics",
+      "exact_parent_integration",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration",
+      "json_pipeline_integration"
+    ]
+  },
+  "change": "Adds exact current/peak cache count, frame-capacity, owned-byte, capacity-growth, capacity-release, and released-frame-byte gauges for reusable JSON.stringify continuation storage. The gauges overlap Context backing and never enter accounted-owned-byte totals, scored timing, phase deltas, allocation replay, or publication acceptance.",
+  "memory_inventory_diagnostics": {
+    "owner_issue": 1022,
+    "snapshot_schema_version": 4,
+    "row_field": "memory",
+    "phases": [
+      "configuration",
+      "warmup",
+      "invocation"
+    ],
+    "scored": false,
+    "reconciliation": "JSON.stringify frame-cache current bytes are a named overlap within Context backing, peak/current cache and frame gauges are monotonic/coherent, zero current cache count requires zero current capacity and bytes, and the disjoint owned-byte subtotal remains unchanged",
+    "publication_boundary": "The cache gauges diagnose retained continuation working sets only. They do not enter elapsed-time scores, phase deltas, exact allocation replay signatures, performance ratios, stability decisions, or publication acceptance."
+  },
+  "tier_attribution": {
+    "artifact_schema_version": 16
+  }
+}

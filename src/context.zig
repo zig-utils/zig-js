@@ -779,6 +779,7 @@ pub const RuntimeAttributionProfiler = struct {
     pub const Snapshot = struct {
         allocation: AllocationSnapshot = .{},
         collector_auxiliary: AuxiliaryAllocationSnapshot = .{},
+        json_stringify_frame_cache: interp.JsonStringifyFrameCacheMemorySnapshot = .{},
         cell_slab_lock: CellSlabLockSnapshot = .{},
         minor_pauses: PauseSamples = .{},
         full_pauses: PauseSamples = .{},
@@ -815,6 +816,7 @@ pub const RuntimeAttributionProfiler = struct {
     collector_auxiliary_released_bytes: std.atomic.Value(u64) = .init(0),
     collector_auxiliary_current_bytes: std.atomic.Value(u64) = .init(0),
     collector_auxiliary_peak_bytes: std.atomic.Value(u64) = .init(0),
+    json_stringify_frame_cache: interp.JsonStringifyFrameCacheMemoryStats = .{},
     gc_cell_allocations: std.atomic.Value(u64) = .init(0),
     gc_cell_bytes: std.atomic.Value(u64) = .init(0),
     gc_cell_fresh_allocations: std.atomic.Value(u64) = .init(0),
@@ -1135,6 +1137,7 @@ pub const RuntimeAttributionProfiler = struct {
                 .current_bytes = self.collector_auxiliary_current_bytes.load(.acquire),
                 .peak_bytes = self.collector_auxiliary_peak_bytes.load(.acquire),
             },
+            .json_stringify_frame_cache = self.json_stringify_frame_cache.snapshot(),
             .cell_slab_lock = self.cellSlabLockSnapshot(),
         };
 
@@ -5975,6 +5978,10 @@ pub const Context = struct {
             .bytecode_admission_inventory = &self.bytecode_admission_inventory,
             .execution_tier_inventory = if (self.profile_execution_tiers) &self.execution_tier_inventory else null,
             .debug_registry_stats = if (self.runtime_attribution_profiler) |profile| &profile.debug_registry else null,
+            .json_stringify_frame_cache_memory_stats = if (self.runtime_attribution_profiler) |profile|
+                &profile.json_stringify_frame_cache
+            else
+                null,
             .bytecode_execution_mode = self.bytecode_execution_mode,
             .bytecode_binary_quickening = self.bytecode_binary_quickening,
             .debug_statement_locations = &self.debug_statement_locations,
@@ -6128,7 +6135,7 @@ pub const Context = struct {
     /// public heap budget and causal backing counters, but its distinct wrapper
     /// makes it part of the reconciled owned subtotal.
     pub const MemoryInventorySnapshot = struct {
-        pub const schema_version = 3;
+        pub const schema_version = 4;
 
         schema: u32 = schema_version,
         accounted_owned_bytes_complete: bool,
@@ -6136,6 +6143,15 @@ pub const Context = struct {
         owns_native_code: bool,
         context_backing_current_bytes: u64,
         context_backing_peak_bytes: u64,
+        json_stringify_frame_cache_current_caches: u64,
+        json_stringify_frame_cache_peak_caches: u64,
+        json_stringify_frame_cache_current_frame_capacity: u64,
+        json_stringify_frame_cache_peak_frame_capacity: u64,
+        json_stringify_frame_cache_current_bytes: u64,
+        json_stringify_frame_cache_peak_bytes: u64,
+        json_stringify_frame_cache_capacity_growths_total: u64,
+        json_stringify_frame_cache_capacity_releases_total: u64,
+        json_stringify_frame_cache_released_frame_bytes_total: u64,
         collector_auxiliary_current_bytes: u64,
         collector_auxiliary_peak_bytes: u64,
         external_control_current_bytes: u64,
@@ -6347,12 +6363,22 @@ pub const Context = struct {
 
         const owns_precise_heap = if (self.gc_state) |state| state.realms.owner == self else false;
         const heap = heap_memory.runtime;
+        const stringify_cache = runtime.json_stringify_frame_cache;
         return .{
             .accounted_owned_bytes_complete = true,
             .owns_precise_heap = owns_precise_heap,
             .owns_native_code = owns_native_code,
             .context_backing_current_bytes = allocation.backing_current_bytes,
             .context_backing_peak_bytes = allocation.backing_peak_bytes,
+            .json_stringify_frame_cache_current_caches = stringify_cache.current_caches,
+            .json_stringify_frame_cache_peak_caches = stringify_cache.peak_caches,
+            .json_stringify_frame_cache_current_frame_capacity = stringify_cache.current_frame_capacity,
+            .json_stringify_frame_cache_peak_frame_capacity = stringify_cache.peak_frame_capacity,
+            .json_stringify_frame_cache_current_bytes = stringify_cache.current_bytes,
+            .json_stringify_frame_cache_peak_bytes = stringify_cache.peak_bytes,
+            .json_stringify_frame_cache_capacity_growths_total = stringify_cache.capacity_growths_total,
+            .json_stringify_frame_cache_capacity_releases_total = stringify_cache.capacity_releases_total,
+            .json_stringify_frame_cache_released_frame_bytes_total = stringify_cache.released_frame_bytes_total,
             .collector_auxiliary_current_bytes = runtime.collector_auxiliary.current_bytes,
             .collector_auxiliary_peak_bytes = runtime.collector_auxiliary.peak_bytes,
             .external_control_current_bytes = external_control,
@@ -38662,7 +38688,12 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     });
     var arena_destroyed = false;
     defer if (!arena_destroyed) arena.destroy();
-    _ = try arena.evaluate("({ inventory: 42 })");
+    _ = try arena.evaluate(
+        \\var inventoryDeep = { leaf: 42 };
+        \\for (var inventoryDepth = 0; inventoryDepth < 64; inventoryDepth++)
+        \\  inventoryDeep = { next: inventoryDeep };
+        \\JSON.stringify(inventoryDeep);
+    );
     const arena_memory = arena.memoryInventorySnapshot().?;
     try std.testing.expectEqual(@as(u32, Context.MemoryInventorySnapshot.schema_version), arena_memory.schema);
     try std.testing.expect(arena_memory.accounted_owned_bytes_complete);
@@ -38671,6 +38702,15 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expect(arena_memory.gc_generation == null);
     try std.testing.expect(!arena_memory.collector_auxiliary_owned_but_untracked);
     try std.testing.expect(arena_memory.context_backing_current_bytes > 0);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.json_stringify_frame_cache_current_caches);
+    try std.testing.expectEqual(@as(u64, 1), arena_memory.json_stringify_frame_cache_peak_caches);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.json_stringify_frame_cache_current_frame_capacity);
+    try std.testing.expect(arena_memory.json_stringify_frame_cache_peak_frame_capacity > 0);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.json_stringify_frame_cache_current_bytes);
+    try std.testing.expect(arena_memory.json_stringify_frame_cache_peak_bytes > 0);
+    try std.testing.expect(arena_memory.json_stringify_frame_cache_capacity_growths_total > 0);
+    try std.testing.expect(arena_memory.json_stringify_frame_cache_capacity_releases_total > 0);
+    try std.testing.expect(arena_memory.json_stringify_frame_cache_released_frame_bytes_total > 0);
     try std.testing.expectEqual(
         @as(u64, @sizeOf(RuntimeAttributionProfiler)),
         arena_memory.external_control_current_bytes,

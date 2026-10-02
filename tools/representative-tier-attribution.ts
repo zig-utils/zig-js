@@ -310,6 +310,15 @@ const memoryNumberMetrics = [
   "schema",
   "context_backing_current_bytes",
   "context_backing_peak_bytes",
+  "json_stringify_frame_cache_current_caches",
+  "json_stringify_frame_cache_peak_caches",
+  "json_stringify_frame_cache_current_frame_capacity",
+  "json_stringify_frame_cache_peak_frame_capacity",
+  "json_stringify_frame_cache_current_bytes",
+  "json_stringify_frame_cache_peak_bytes",
+  "json_stringify_frame_cache_capacity_growths_total",
+  "json_stringify_frame_cache_capacity_releases_total",
+  "json_stringify_frame_cache_released_frame_bytes_total",
   "collector_auxiliary_current_bytes",
   "collector_auxiliary_peak_bytes",
   "external_control_current_bytes",
@@ -413,12 +422,21 @@ function validateMemoryInventory(memory: MemoryInventorySnapshot, workload: stri
   );
   requireValue(
     nonnegativeSafeIntegers(memory, memoryNumberMetrics) &&
-      memoryBooleanMetrics.every((name) => typeof memory[name] === "boolean") && memory.schema === 3,
+      memoryBooleanMetrics.every((name) => typeof memory[name] === "boolean") && memory.schema === 4,
     `memory inventory contains invalid values for ${workload}`,
   );
   requireValue(
     memory.accounted_owned_bytes_complete && !memory.collector_auxiliary_owned_but_untracked &&
       memory.context_backing_peak_bytes >= memory.context_backing_current_bytes &&
+      memory.json_stringify_frame_cache_peak_caches >= memory.json_stringify_frame_cache_current_caches &&
+      memory.json_stringify_frame_cache_peak_frame_capacity >=
+        memory.json_stringify_frame_cache_current_frame_capacity &&
+      memory.json_stringify_frame_cache_peak_bytes >= memory.json_stringify_frame_cache_current_bytes &&
+      memory.json_stringify_frame_cache_current_bytes <= memory.context_backing_current_bytes &&
+      memory.json_stringify_frame_cache_peak_bytes <= memory.context_backing_peak_bytes &&
+      (memory.json_stringify_frame_cache_current_caches !== 0 ||
+        (memory.json_stringify_frame_cache_current_frame_capacity === 0 &&
+          memory.json_stringify_frame_cache_current_bytes === 0)) &&
       memory.collector_auxiliary_peak_bytes >= memory.collector_auxiliary_current_bytes &&
       memory.external_control_current_bytes ===
         memory.profiler_control_bytes + memory.budget_control_bytes +
@@ -1412,7 +1430,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 15,
+    schema_version: 16,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -1440,7 +1458,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 15, "checkpoint schema is not version 15");
+  requireValue(raw?.schema_version === 16, "checkpoint schema is not version 16");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
@@ -1496,12 +1514,21 @@ function syntheticMemory(index: number): MemoryInventorySnapshot {
     backingBytes = 1000 + index,
     profilerBytes = 128;
   return {
-    schema: 3,
+    schema: 4,
     accounted_owned_bytes_complete: true,
     owns_precise_heap: true,
     owns_native_code: true,
     context_backing_current_bytes: backingBytes,
     context_backing_peak_bytes: backingBytes,
+    json_stringify_frame_cache_current_caches: 0,
+    json_stringify_frame_cache_peak_caches: 0,
+    json_stringify_frame_cache_current_frame_capacity: 0,
+    json_stringify_frame_cache_peak_frame_capacity: 0,
+    json_stringify_frame_cache_current_bytes: 0,
+    json_stringify_frame_cache_peak_bytes: 0,
+    json_stringify_frame_cache_capacity_growths_total: 0,
+    json_stringify_frame_cache_capacity_releases_total: 0,
+    json_stringify_frame_cache_released_frame_bytes_total: 0,
     collector_auxiliary_current_bytes: 0,
     collector_auxiliary_peak_bytes: 0,
     external_control_current_bytes: profilerBytes,
@@ -1725,6 +1752,9 @@ export function selfTest(): void {
   const incoherentMemory = JSON.parse(JSON.stringify(rows));
   incoherentMemory[0].memory.accounted_owned_current_bytes += 1;
   expectFailure(() => validate(incoherentMemory, manifest, true), "memory inventory does not reconcile");
+  const incoherentStringifyCache = JSON.parse(JSON.stringify(rows));
+  incoherentStringifyCache[0].memory.json_stringify_frame_cache_current_bytes = 1;
+  expectFailure(() => validate(incoherentStringifyCache, manifest, true), "memory inventory does not reconcile");
   const generationMemory = JSON.parse(JSON.stringify(rows));
   generationMemory[0].memory.gc_generation.old_bytes += 1;
   expectFailure(() => validate(generationMemory, manifest, true), "generation memory inventory does not reconcile");
