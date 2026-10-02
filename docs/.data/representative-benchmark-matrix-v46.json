@@ -1,0 +1,51 @@
+{
+  "schema_version": 46,
+  "matrix_id": "zig-js-representative-v46",
+  "status": "frozen",
+  "frozen_date": "2026-10-02",
+  "owner_issue": 1023,
+  "history_policy": "This version hash-inherits every V45 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, process classification, and memory-pressure diagnostic. It changes no scored row or execution boundary. It versions the tier-attribution sidecar from schema 16 to 17 and the owned-memory inventory from schema 4 to 5 solely to publish exact Array join active-receiver overlap gauges. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, process policy, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v45",
+    "path": "docs/.data/representative-benchmark-matrix-v45.json",
+    "sha256": "800699e369cdf7cccbcb87d58bcf299c7fdf41f108e1ba62db1bd2449aec8a15",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_pressure_diagnostics",
+      "exact_parent_integration",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration",
+      "json_pipeline_integration"
+    ]
+  },
+  "change": "Adds exact current/peak owner count, receiver count, fallback capacity, owned-byte, capacity-growth, capacity-release, and released-fallback-byte gauges for Array join active-receiver scratch. The gauges overlap Context backing and never enter accounted-owned-byte totals, scored timing, phase deltas, allocation replay, or publication acceptance.",
+  "memory_inventory_diagnostics": {
+    "owner_issue": 1023,
+    "snapshot_schema_version": 5,
+    "row_field": "memory",
+    "phases": [
+      "configuration",
+      "warmup",
+      "invocation"
+    ],
+    "scored": false,
+    "reconciliation": "Array join active-receiver current bytes are a named overlap within Context backing, peak/current owner, receiver, fallback-capacity, and byte gauges are monotonic/coherent, zero current owner count requires zero current receivers, fallback capacity, and bytes, and the disjoint owned-byte subtotal remains unchanged",
+    "publication_boundary": "The Array join active-receiver gauges diagnose retained cycle-detection working sets only. They do not enter elapsed-time scores, phase deltas, exact allocation replay signatures, performance ratios, stability decisions, or publication acceptance."
+  },
+  "tier_attribution": {
+    "artifact_schema_version": 17
+  }
+}

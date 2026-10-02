@@ -779,6 +779,7 @@ pub const RuntimeAttributionProfiler = struct {
     pub const Snapshot = struct {
         allocation: AllocationSnapshot = .{},
         collector_auxiliary: AuxiliaryAllocationSnapshot = .{},
+        array_join_active: interp.ArrayJoinActiveMemorySnapshot = .{},
         json_stringify_frame_cache: interp.JsonStringifyFrameCacheMemorySnapshot = .{},
         cell_slab_lock: CellSlabLockSnapshot = .{},
         minor_pauses: PauseSamples = .{},
@@ -816,6 +817,7 @@ pub const RuntimeAttributionProfiler = struct {
     collector_auxiliary_released_bytes: std.atomic.Value(u64) = .init(0),
     collector_auxiliary_current_bytes: std.atomic.Value(u64) = .init(0),
     collector_auxiliary_peak_bytes: std.atomic.Value(u64) = .init(0),
+    array_join_active: interp.ArrayJoinActiveMemoryStats = .{},
     json_stringify_frame_cache: interp.JsonStringifyFrameCacheMemoryStats = .{},
     gc_cell_allocations: std.atomic.Value(u64) = .init(0),
     gc_cell_bytes: std.atomic.Value(u64) = .init(0),
@@ -1137,6 +1139,7 @@ pub const RuntimeAttributionProfiler = struct {
                 .current_bytes = self.collector_auxiliary_current_bytes.load(.acquire),
                 .peak_bytes = self.collector_auxiliary_peak_bytes.load(.acquire),
             },
+            .array_join_active = self.array_join_active.snapshot(),
             .json_stringify_frame_cache = self.json_stringify_frame_cache.snapshot(),
             .cell_slab_lock = self.cellSlabLockSnapshot(),
         };
@@ -5978,6 +5981,10 @@ pub const Context = struct {
             .bytecode_admission_inventory = &self.bytecode_admission_inventory,
             .execution_tier_inventory = if (self.profile_execution_tiers) &self.execution_tier_inventory else null,
             .debug_registry_stats = if (self.runtime_attribution_profiler) |profile| &profile.debug_registry else null,
+            .array_join_active_memory_stats = if (self.runtime_attribution_profiler) |profile|
+                &profile.array_join_active
+            else
+                null,
             .json_stringify_frame_cache_memory_stats = if (self.runtime_attribution_profiler) |profile|
                 &profile.json_stringify_frame_cache
             else
@@ -6135,7 +6142,7 @@ pub const Context = struct {
     /// public heap budget and causal backing counters, but its distinct wrapper
     /// makes it part of the reconciled owned subtotal.
     pub const MemoryInventorySnapshot = struct {
-        pub const schema_version = 4;
+        pub const schema_version = 5;
 
         schema: u32 = schema_version,
         accounted_owned_bytes_complete: bool,
@@ -6143,6 +6150,17 @@ pub const Context = struct {
         owns_native_code: bool,
         context_backing_current_bytes: u64,
         context_backing_peak_bytes: u64,
+        array_join_active_current_owners: u64,
+        array_join_active_peak_owners: u64,
+        array_join_active_current_receivers: u64,
+        array_join_active_peak_receivers: u64,
+        array_join_active_current_fallback_capacity: u64,
+        array_join_active_peak_fallback_capacity: u64,
+        array_join_active_current_bytes: u64,
+        array_join_active_peak_bytes: u64,
+        array_join_active_capacity_growths_total: u64,
+        array_join_active_capacity_releases_total: u64,
+        array_join_active_released_fallback_bytes_total: u64,
         json_stringify_frame_cache_current_caches: u64,
         json_stringify_frame_cache_peak_caches: u64,
         json_stringify_frame_cache_current_frame_capacity: u64,
@@ -6363,6 +6381,7 @@ pub const Context = struct {
 
         const owns_precise_heap = if (self.gc_state) |state| state.realms.owner == self else false;
         const heap = heap_memory.runtime;
+        const join_active = runtime.array_join_active;
         const stringify_cache = runtime.json_stringify_frame_cache;
         return .{
             .accounted_owned_bytes_complete = true,
@@ -6370,6 +6389,17 @@ pub const Context = struct {
             .owns_native_code = owns_native_code,
             .context_backing_current_bytes = allocation.backing_current_bytes,
             .context_backing_peak_bytes = allocation.backing_peak_bytes,
+            .array_join_active_current_owners = join_active.current_owners,
+            .array_join_active_peak_owners = join_active.peak_owners,
+            .array_join_active_current_receivers = join_active.current_receivers,
+            .array_join_active_peak_receivers = join_active.peak_receivers,
+            .array_join_active_current_fallback_capacity = join_active.current_fallback_capacity,
+            .array_join_active_peak_fallback_capacity = join_active.peak_fallback_capacity,
+            .array_join_active_current_bytes = join_active.current_bytes,
+            .array_join_active_peak_bytes = join_active.peak_bytes,
+            .array_join_active_capacity_growths_total = join_active.capacity_growths_total,
+            .array_join_active_capacity_releases_total = join_active.capacity_releases_total,
+            .array_join_active_released_fallback_bytes_total = join_active.released_fallback_bytes_total,
             .json_stringify_frame_cache_current_caches = stringify_cache.current_caches,
             .json_stringify_frame_cache_peak_caches = stringify_cache.peak_caches,
             .json_stringify_frame_cache_current_frame_capacity = stringify_cache.current_frame_capacity,
@@ -38748,6 +38778,14 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
         \\for (var inventoryDepth = 0; inventoryDepth < 64; inventoryDepth++)
         \\  inventoryDeep = { next: inventoryDeep };
         \\JSON.stringify(inventoryDeep);
+        \\var inventoryJoin = []; var inventoryJoinCursor = inventoryJoin;
+        \\for (var inventoryJoinDepth = 0; inventoryJoinDepth < 40; inventoryJoinDepth++) {
+        \\  var inventoryJoinNext = [inventoryJoinDepth];
+        \\  inventoryJoinCursor.push(inventoryJoinNext);
+        \\  inventoryJoinCursor = inventoryJoinNext;
+        \\}
+        \\inventoryJoin.join(); inventoryJoin.toLocaleString(); inventoryJoin.join();
+        \\[1, 2].join('-');
     );
     const arena_memory = arena.memoryInventorySnapshot().?;
     try std.testing.expectEqual(@as(u32, Context.MemoryInventorySnapshot.schema_version), arena_memory.schema);
@@ -38757,6 +38795,17 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expect(arena_memory.gc_generation == null);
     try std.testing.expect(!arena_memory.collector_auxiliary_owned_but_untracked);
     try std.testing.expect(arena_memory.context_backing_current_bytes > 0);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.array_join_active_current_owners);
+    try std.testing.expectEqual(@as(u64, 1), arena_memory.array_join_active_peak_owners);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.array_join_active_current_receivers);
+    try std.testing.expect(arena_memory.array_join_active_peak_receivers > 8);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.array_join_active_current_fallback_capacity);
+    try std.testing.expect(arena_memory.array_join_active_peak_fallback_capacity > 0);
+    try std.testing.expectEqual(@as(u64, 0), arena_memory.array_join_active_current_bytes);
+    try std.testing.expect(arena_memory.array_join_active_peak_bytes > 0);
+    try std.testing.expect(arena_memory.array_join_active_capacity_growths_total > 0);
+    try std.testing.expect(arena_memory.array_join_active_capacity_releases_total > 0);
+    try std.testing.expect(arena_memory.array_join_active_released_fallback_bytes_total > 0);
     try std.testing.expectEqual(@as(u64, 0), arena_memory.json_stringify_frame_cache_current_caches);
     try std.testing.expectEqual(@as(u64, 1), arena_memory.json_stringify_frame_cache_peak_caches);
     try std.testing.expectEqual(@as(u64, 0), arena_memory.json_stringify_frame_cache_current_frame_capacity);
