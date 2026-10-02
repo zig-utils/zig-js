@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "issue": 1023,
+  "date": "2026-10-02",
+  "measurement": "deterministic production-path memory-inventory counters; no timing data",
+  "engine_commit": "c559c7cb",
+  "zig_gc_revision": "0285ef801dd221a4ae8e88b31a09ae31627657a3",
+  "configuration": {
+    "enable_jit": false,
+    "profile_execution_tiers": true,
+    "inline_receiver_capacity": 8,
+    "runtime_object_identity_bytes": 16,
+    "array_join_active_owner_bytes": 208
+  },
+  "before": {
+    "commit": "2723311b",
+    "owner_bytes": 32,
+    "shallow_retained_capacity": 9,
+    "shallow_retained_logical_bytes": 176,
+    "depth_40_retained_capacity": 44,
+    "depth_40_retained_logical_bytes": 736,
+    "cycle_after_unwind_retained_capacity": 44,
+    "throw_after_unwind_retained_capacity": 44,
+    "lifetime": "realm arena; temporary Interpreter teardown did not reclaim the owner or backing"
+  },
+  "after": [
+    {
+      "stage": "shallow",
+      "current_owners": 0,
+      "peak_owners": 1,
+      "current_receivers": 0,
+      "peak_receivers": 1,
+      "current_fallback_capacity": 0,
+      "peak_fallback_capacity": 0,
+      "current_bytes": 0,
+      "peak_bytes": 208,
+      "capacity_growths_total": 0,
+      "capacity_releases_total": 0,
+      "released_fallback_bytes_total": 0
+    },
+    {
+      "stage": "one_off_deep",
+      "current_owners": 0,
+      "peak_owners": 1,
+      "current_receivers": 0,
+      "peak_receivers": 41,
+      "current_fallback_capacity": 0,
+      "peak_fallback_capacity": 44,
+      "current_bytes": 0,
+      "peak_bytes": 912,
+      "capacity_growths_total": 3,
+      "capacity_releases_total": 1,
+      "released_fallback_bytes_total": 704
+    },
+    {
+      "stage": "repeated_deep_then_shallow",
+      "current_owners": 0,
+      "peak_owners": 1,
+      "current_receivers": 0,
+      "peak_receivers": 41,
+      "current_fallback_capacity": 0,
+      "peak_fallback_capacity": 44,
+      "current_bytes": 0,
+      "peak_bytes": 912,
+      "capacity_growths_total": 9,
+      "capacity_releases_total": 3,
+      "released_fallback_bytes_total": 2112
+    },
+    {
+      "stage": "cycle",
+      "current_owners": 0,
+      "peak_owners": 1,
+      "current_receivers": 0,
+      "peak_receivers": 41,
+      "current_fallback_capacity": 0,
+      "peak_fallback_capacity": 44,
+      "current_bytes": 0,
+      "peak_bytes": 912,
+      "capacity_growths_total": 9,
+      "capacity_releases_total": 3,
+      "released_fallback_bytes_total": 2112
+    },
+    {
+      "stage": "throw_then_retry",
+      "current_owners": 0,
+      "peak_owners": 1,
+      "current_receivers": 0,
+      "peak_receivers": 41,
+      "current_fallback_capacity": 0,
+      "peak_fallback_capacity": 44,
+      "current_bytes": 0,
+      "peak_bytes": 912,
+      "capacity_growths_total": 9,
+      "capacity_releases_total": 3,
+      "released_fallback_bytes_total": 2112
+    }
+  ],
+  "verification": {
+    "direct_owner_tests": "2 passed, 0 failed",
+    "memory_inventory_test": "2 passed, 0 failed",
+    "moving_gc_proxy_test": "2 passed, 0 failed",
+    "nogil_test": "2 passed, 0 failed",
+    "unsuppressed_tsan_test": "2 passed, 0 failed",
+    "test262_join": "23 passed, 0 failed; before/after failure sets identical",
+    "test262_to_locale_string": "12 passed, 0 failed; before/after failure sets identical",
+    "required_vm_agreement": "35 agree, 0 diverge"
+  }
+}

@@ -33031,7 +33031,9 @@ test "remaining array methods retain operands while moving" {
         .{ .name = "at coercion", .setup = "var input=[proxySubject],index={valueOf(){proxyMovingLoop(20000);return 0;}};", .expression = "input.at(index)===proxySubject" },
         .{ .name = "lastIndexOf coercion", .setup = "var input=[proxySubject],from={valueOf(){proxyMovingLoop(20000);return 0;}};", .expression = "input.lastIndexOf(proxySubject,from)===0" },
         .{ .name = "join get/separator", .setup = "var sep={toString(){return '-';}},input=[0,'b'];Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return 'a';}});", .expression = "input.join(sep)==='a-b'&&proxySubject.marker===37" },
+        .{ .name = "join proxy cycle", .setup = "var joinTarget=[1,0],joinProxy;joinProxy=new Proxy(joinTarget,{get(t,k,r){if(k==='1'){proxyMovingLoop(20000);return r;}return Reflect.get(t,k,r);}});", .expression = "Array.prototype.join.call(joinProxy,',')==='1,'&&proxySubject.marker===37" },
         .{ .name = "toLocaleString result", .setup = "var locales={held:proxySubject},options={held:proxySubject},input=[{toLocaleString(l,o){if(l!==locales||o!==options)throw new Error('forwarding');return {toString(){proxyMovingLoop(20000);return 'ok';}};}}];", .expression = "input.toLocaleString(locales,options)==='ok'&&locales.held===proxySubject&&options.held===proxySubject" },
+        .{ .name = "toLocaleString proxy cycle", .setup = "var localeTarget=[{toLocaleString(){return 'L';}},0],localeProxy;localeProxy=new Proxy(localeTarget,{get(t,k,r){if(k==='1'){proxyMovingLoop(20000);return r;}return Reflect.get(t,k,r);}});", .expression = "Array.prototype.toLocaleString.call(localeProxy)==='L,'&&proxySubject.marker===37" },
         .{ .name = "toString join getter", .setup = "var input=[proxySubject];Object.defineProperty(input,'join',{get(){proxyMovingLoop(20000);return function(){return this===input&&this[0]===proxySubject?'ok':'bad';}}});", .expression = "input.toString()==='ok'" },
     };
     for (cases) |case| {
@@ -38896,6 +38898,53 @@ test "memory inventory reconciles disjoint owned domains and exposes coverage" {
     try std.testing.expectEqual(@as(u64, 0), precise_teardown.owned_native_live_bytes);
     try std.testing.expectEqual(@as(u64, 0), precise_teardown.owned_native_retired_bytes);
     try std.testing.expectEqual(@as(u64, 0), precise_teardown.accounted_owned_current_bytes);
+}
+
+test "Array join receiver scratch isolates shared no-GIL interpreters" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function joinScratchLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  for (var round = 0; round < 12; round++) {
+        \\    var deep = [seed], cursor = deep;
+        \\    for (var depth = 0; depth < 24; depth++) {
+        \\      var next = [depth]; cursor.push(next); cursor = next;
+        \\    }
+        \\    if (deep.join(':').length === 0) throw new Error('empty deep join');
+        \\    var cycle = [seed]; cycle.push(cycle);
+        \\    if (cycle.join(',') !== String(seed) + ',') throw new Error('cycle');
+        \\    var locale = [{ toLocaleString() { return 'L'; } }]; locale.push(locale);
+        \\    if (locale.toLocaleString() !== 'L,') throw new Error('locale cycle');
+        \\  }
+        \\  return seed * 100 + 12;
+        \\}
+        \\var joinScratchThreads = [], joinScratchTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) joinScratchThreads.push(new Thread(joinScratchLane, lane));
+        \\for (var lane = 0; lane < 4; lane++) joinScratchTotal += joinScratchThreads[lane].join();
+        \\joinScratchTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 648), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    const memory = ctx.memoryInventorySnapshot().?;
+    try std.testing.expectEqual(@as(u64, 0), memory.array_join_active_current_owners);
+    try std.testing.expectEqual(@as(u64, 0), memory.array_join_active_current_receivers);
+    try std.testing.expectEqual(@as(u64, 0), memory.array_join_active_current_fallback_capacity);
+    try std.testing.expectEqual(@as(u64, 0), memory.array_join_active_current_bytes);
+    try std.testing.expect(memory.array_join_active_peak_owners > 0);
+    try std.testing.expect(memory.array_join_active_peak_receivers > 8);
+    try std.testing.expect(memory.array_join_active_peak_fallback_capacity > 0);
+    try std.testing.expect(memory.array_join_active_capacity_growths_total > 0);
+    try std.testing.expect(memory.array_join_active_capacity_releases_total > 0);
 }
 
 test "vm admission: strict named-property loops reach the optimizer" {
