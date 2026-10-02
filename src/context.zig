@@ -14193,6 +14193,46 @@ test "JSON stringify explicit frames preserve deep and shared structures" {
     try std.testing.expect(Value.fromRawBits(results[0]).asBool());
 }
 
+test "JSON stringify 50,000-level limits stay catchable across forced tiers" {
+    const source =
+        \\function stringifyLimitWitness() {
+        \\  "use strict";
+        \\  var object = { leaf: 7 };
+        \\  var array = 7;
+        \\  for (var depth = 0; depth < 50000; depth++) {
+        \\    object = { next: object };
+        \\    array = [array];
+        \\  }
+        \\  var objectRange = false;
+        \\  var arrayRange = false;
+        \\  try { JSON.stringify(object); } catch (error) { objectRange = error instanceof RangeError; }
+        \\  try { JSON.stringify(array); } catch (error) { arrayRange = error instanceof RangeError; }
+        \\  return objectRange && arrayRange;
+        \\}
+        \\stringifyLimitWitness();
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .profile_execution_tiers = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        results[index] = (try ctx.evaluate(source)).rawBits();
+        const memory = ctx.memoryInventorySnapshot().?;
+        try std.testing.expectEqual(@as(u64, 0), memory.json_stringify_frame_cache_current_caches);
+        try std.testing.expectEqual(@as(u64, 0), memory.json_stringify_frame_cache_current_frame_capacity);
+        try std.testing.expect(memory.json_stringify_frame_cache_peak_frame_capacity > 0);
+        try std.testing.expect(memory.json_stringify_frame_cache_capacity_releases_total > 0);
+    }
+    try std.testing.expectEqual(results[0], results[1]);
+    try std.testing.expect(Value.fromRawBits(results[0]).asBool());
+}
+
 test "JSON stringify explicit frames preserve observable ordering and rollback" {
     try std.testing.expect((try evalIn(
         \\(function () {
@@ -14372,6 +14412,7 @@ test "JSON stringify key snapshots isolate shared no-GIL callers" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
         .enable_jit = false,
+        .profile_execution_tiers = true,
         .enable_threads = true,
         .parallel_gc = true,
         .parallel_js = true,
@@ -14406,10 +14447,19 @@ test "JSON stringify key snapshots isolate shared no-GIL callers" {
     );
     try std.testing.expectEqual(@as(f64, 6256), result.asNum());
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    const memory = ctx.memoryInventorySnapshot().?;
+    try std.testing.expectEqual(@as(u64, 0), memory.json_stringify_frame_cache_current_caches);
+    try std.testing.expectEqual(@as(u64, 0), memory.json_stringify_frame_cache_current_frame_capacity);
+    try std.testing.expect(memory.json_stringify_frame_cache_peak_caches > 0);
+    try std.testing.expect(memory.json_stringify_frame_cache_peak_frame_capacity > 0);
+    try std.testing.expect(memory.json_stringify_frame_cache_capacity_releases_total > 0);
 }
 
 test "enable_gc: JSON stringify active index survives a callback collection request" {
-    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+    });
     defer ctx.destroy();
     const collections_before = ctx.gc.?.collections;
 
@@ -14430,6 +14480,11 @@ test "enable_gc: JSON stringify active index survives a callback collection requ
     );
     try std.testing.expect(result.asBool());
     try std.testing.expect(ctx.gc.?.collections > collections_before);
+    const memory = ctx.memoryInventorySnapshot().?;
+    try std.testing.expectEqual(@as(u64, 0), memory.json_stringify_frame_cache_current_caches);
+    try std.testing.expectEqual(@as(u64, 0), memory.json_stringify_frame_cache_current_frame_capacity);
+    try std.testing.expect(memory.json_stringify_frame_cache_peak_frame_capacity > 0);
+    try std.testing.expect(memory.json_stringify_frame_cache_capacity_releases_total > 0);
 
     // The callback's request is serviced at the evaluate-tail quiescent point.
     // A subsequent moving collection must retain the published output through
