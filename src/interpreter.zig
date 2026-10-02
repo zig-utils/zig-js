@@ -683,12 +683,344 @@ fn lithuanianUpper(self: *Interpreter, s: []const u8) EvalError![]const u8 {
 /// catchable JS `Error` objects raised via `error.Throw`.)
 pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 
-/// Receivers whose `Array.prototype.join`/`toLocaleString` is in progress, in
-/// entry order (#941). Nesting is bounded by the call-depth guard, so a linear
-/// scan per entry is what JavaScriptCore does here too.
-const ArrayJoinActive = struct {
-    items: std.ArrayListUnmanaged(value.RuntimeObjectIdentity) = .empty,
+pub const ArrayJoinActiveMemorySnapshot = struct {
+    current_owners: u64 = 0,
+    peak_owners: u64 = 0,
+    current_receivers: u64 = 0,
+    peak_receivers: u64 = 0,
+    current_fallback_capacity: u64 = 0,
+    peak_fallback_capacity: u64 = 0,
+    current_bytes: u64 = 0,
+    peak_bytes: u64 = 0,
+    capacity_growths_total: u64 = 0,
+    capacity_releases_total: u64 = 0,
+    released_fallback_bytes_total: u64 = 0,
 };
+
+/// Exact overlap accounting for freeable Array join active-receiver storage.
+/// The byte gauges overlap Context backing and therefore never enter its owned
+/// subtotal. Concurrent no-GIL interpreters publish through one coherent
+/// atomic snapshot without sharing the receiver stack itself.
+pub const ArrayJoinActiveMemoryStats = struct {
+    mutations_active: std.atomic.Value(u64) = .init(0),
+    mutation_epoch: std.atomic.Value(u64) = .init(0),
+    current_owners: std.atomic.Value(u64) = .init(0),
+    peak_owners: std.atomic.Value(u64) = .init(0),
+    current_receivers: std.atomic.Value(u64) = .init(0),
+    peak_receivers: std.atomic.Value(u64) = .init(0),
+    current_fallback_capacity: std.atomic.Value(u64) = .init(0),
+    peak_fallback_capacity: std.atomic.Value(u64) = .init(0),
+    current_bytes: std.atomic.Value(u64) = .init(0),
+    peak_bytes: std.atomic.Value(u64) = .init(0),
+    capacity_growths_total: std.atomic.Value(u64) = .init(0),
+    capacity_releases_total: std.atomic.Value(u64) = .init(0),
+    released_fallback_bytes_total: std.atomic.Value(u64) = .init(0),
+
+    fn beginMutation(stats: *@This()) void {
+        const previous = stats.mutations_active.fetchAdd(1, .acq_rel);
+        std.debug.assert(previous != std.math.maxInt(u64));
+    }
+
+    fn finishMutation(stats: *@This()) void {
+        _ = stats.mutation_epoch.fetchAdd(1, .release);
+        const previous = stats.mutations_active.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
+    }
+
+    fn recordPeak(target: *std.atomic.Value(u64), current: u64) void {
+        var peak = target.load(.monotonic);
+        while (current > peak) {
+            if (target.cmpxchgWeak(peak, current, .monotonic, .monotonic)) |observed| {
+                peak = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn fallbackBytes(capacity: usize) u64 {
+        return std.math.mul(
+            u64,
+            @intCast(capacity),
+            @sizeOf(value.RuntimeObjectIdentity),
+        ) catch @panic("Array join active-receiver byte overflow");
+    }
+
+    fn recordCreate(stats: *@This()) void {
+        stats.beginMutation();
+        defer stats.finishMutation();
+        const owners_before = stats.current_owners.fetchAdd(1, .monotonic);
+        const bytes_before = stats.current_bytes.fetchAdd(@sizeOf(ArrayJoinActive), .monotonic);
+        recordPeak(&stats.peak_owners, owners_before + 1);
+        recordPeak(&stats.peak_bytes, bytes_before + @sizeOf(ArrayJoinActive));
+    }
+
+    fn recordReceiverPush(stats: *@This()) void {
+        stats.beginMutation();
+        defer stats.finishMutation();
+        const receivers_before = stats.current_receivers.fetchAdd(1, .monotonic);
+        recordPeak(&stats.peak_receivers, receivers_before + 1);
+    }
+
+    fn recordReceiverPop(stats: *@This()) void {
+        stats.beginMutation();
+        defer stats.finishMutation();
+        const receivers_before = stats.current_receivers.fetchSub(1, .monotonic);
+        if (receivers_before == 0) @panic("Array join active-receiver accounting underflow");
+    }
+
+    fn recordCapacityChange(stats: *@This(), previous: usize, current: usize) void {
+        if (previous == current) return;
+        stats.beginMutation();
+        defer stats.finishMutation();
+        if (current > previous) {
+            const capacity_delta: u64 = @intCast(current - previous);
+            const byte_delta = fallbackBytes(current - previous);
+            _ = stats.capacity_growths_total.fetchAdd(1, .monotonic);
+            const capacity_before = stats.current_fallback_capacity.fetchAdd(capacity_delta, .monotonic);
+            const bytes_before = stats.current_bytes.fetchAdd(byte_delta, .monotonic);
+            recordPeak(&stats.peak_fallback_capacity, capacity_before + capacity_delta);
+            recordPeak(&stats.peak_bytes, bytes_before + byte_delta);
+        } else {
+            const capacity_delta: u64 = @intCast(previous - current);
+            const byte_delta = fallbackBytes(previous - current);
+            _ = stats.capacity_releases_total.fetchAdd(1, .monotonic);
+            _ = stats.released_fallback_bytes_total.fetchAdd(byte_delta, .monotonic);
+            const capacity_before = stats.current_fallback_capacity.fetchSub(capacity_delta, .monotonic);
+            const bytes_before = stats.current_bytes.fetchSub(byte_delta, .monotonic);
+            if (capacity_before < capacity_delta or bytes_before < byte_delta)
+                @panic("Array join active-receiver accounting underflow");
+        }
+    }
+
+    fn recordDestroy(stats: *@This(), capacity: usize) void {
+        stats.beginMutation();
+        defer stats.finishMutation();
+        const fallback_bytes = fallbackBytes(capacity);
+        const total_bytes = std.math.add(
+            u64,
+            fallback_bytes,
+            @sizeOf(ArrayJoinActive),
+        ) catch @panic("Array join active-receiver byte overflow");
+        const owners_before = stats.current_owners.fetchSub(1, .monotonic);
+        const capacity_before = stats.current_fallback_capacity.fetchSub(@intCast(capacity), .monotonic);
+        const bytes_before = stats.current_bytes.fetchSub(total_bytes, .monotonic);
+        if (owners_before == 0 or capacity_before < capacity or bytes_before < total_bytes)
+            @panic("Array join active-receiver accounting underflow");
+        if (capacity != 0) {
+            _ = stats.capacity_releases_total.fetchAdd(1, .monotonic);
+            _ = stats.released_fallback_bytes_total.fetchAdd(fallback_bytes, .monotonic);
+        }
+    }
+
+    fn trySnapshot(stats: *@This()) ?ArrayJoinActiveMemorySnapshot {
+        if (stats.mutations_active.load(.acquire) != 0) return null;
+        const before = stats.mutation_epoch.load(.acquire);
+        const result = ArrayJoinActiveMemorySnapshot{
+            .current_owners = stats.current_owners.load(.acquire),
+            .peak_owners = stats.peak_owners.load(.acquire),
+            .current_receivers = stats.current_receivers.load(.acquire),
+            .peak_receivers = stats.peak_receivers.load(.acquire),
+            .current_fallback_capacity = stats.current_fallback_capacity.load(.acquire),
+            .peak_fallback_capacity = stats.peak_fallback_capacity.load(.acquire),
+            .current_bytes = stats.current_bytes.load(.acquire),
+            .peak_bytes = stats.peak_bytes.load(.acquire),
+            .capacity_growths_total = stats.capacity_growths_total.load(.acquire),
+            .capacity_releases_total = stats.capacity_releases_total.load(.acquire),
+            .released_fallback_bytes_total = stats.released_fallback_bytes_total.load(.acquire),
+        };
+        if (stats.mutations_active.load(.acquire) != 0) return null;
+        if (stats.mutation_epoch.load(.acquire) != before) return null;
+        return result;
+    }
+
+    pub fn snapshot(stats: *@This()) ArrayJoinActiveMemorySnapshot {
+        var spins: usize = 0;
+        while (true) : (spins += 1) {
+            if (stats.trySnapshot()) |result| return result;
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+};
+
+/// Receivers whose `Array.prototype.join`/`toLocaleString` is in progress, in
+/// entry order (#941). The common shallow path stays inside this owner; deeper
+/// nesting uses freeable fallback backing. A two-observation working-set rule
+/// retains repeated comparable depth while releasing one-off high-water use.
+const ArrayJoinActive = struct {
+    const inline_capacity = 8;
+
+    allocator: std.mem.Allocator,
+    inline_receivers: [inline_capacity]value.RuntimeObjectIdentity = undefined,
+    inline_len: usize = 0,
+    fallback: std.ArrayListUnmanaged(value.RuntimeObjectIdentity) = .empty,
+    peak_receivers: usize = 0,
+    previous_peak_receivers: usize = 0,
+    memory_stats: ?*ArrayJoinActiveMemoryStats = null,
+
+    fn init(allocator: std.mem.Allocator, memory_stats: ?*ArrayJoinActiveMemoryStats) @This() {
+        if (memory_stats) |stats| stats.recordCreate();
+        return .{ .allocator = allocator, .memory_stats = memory_stats };
+    }
+
+    fn len(active: *const @This()) usize {
+        return active.inline_len + active.fallback.items.len;
+    }
+
+    fn contains(active: *const @This(), identity: value.RuntimeObjectIdentity) bool {
+        for (active.inline_receivers[0..active.inline_len]) |ancestor|
+            if (ancestor.eql(identity)) return true;
+        for (active.fallback.items) |ancestor|
+            if (ancestor.eql(identity)) return true;
+        return false;
+    }
+
+    fn enter(active: *@This(), identity: value.RuntimeObjectIdentity) std.mem.Allocator.Error!bool {
+        if (active.contains(identity)) return true;
+        if (active.inline_len != active.inline_receivers.len and active.fallback.items.len == 0) {
+            active.inline_receivers[active.inline_len] = identity;
+            active.inline_len += 1;
+        } else {
+            const previous_capacity = active.fallback.capacity;
+            try active.fallback.append(active.allocator, identity);
+            if (active.memory_stats) |stats|
+                stats.recordCapacityChange(previous_capacity, active.fallback.capacity);
+        }
+        if (active.memory_stats) |stats| stats.recordReceiverPush();
+        active.peak_receivers = @max(active.peak_receivers, active.len());
+        return false;
+    }
+
+    fn leave(active: *@This()) void {
+        std.debug.assert(active.len() != 0);
+        if (active.fallback.items.len != 0) {
+            active.fallback.items.len -= 1;
+        } else {
+            active.inline_len -= 1;
+        }
+        if (active.memory_stats) |stats| stats.recordReceiverPop();
+        if (active.len() == 0) active.finishInvocation();
+    }
+
+    fn releaseFallback(active: *@This()) void {
+        const previous_capacity = active.fallback.capacity;
+        active.fallback.deinit(active.allocator);
+        active.fallback = .empty;
+        if (active.memory_stats) |stats|
+            stats.recordCapacityChange(previous_capacity, 0);
+    }
+
+    fn finishInvocation(active: *@This()) void {
+        const peak_receivers = active.peak_receivers;
+        defer {
+            active.previous_peak_receivers = peak_receivers;
+            active.peak_receivers = 0;
+        }
+        const capacity = active.fallback.capacity;
+        if (capacity == 0) return;
+        const half_capacity = capacity / 2 + capacity % 2;
+        const previous_fallback_peak = active.previous_peak_receivers -| inline_capacity;
+        const fallback_peak = peak_receivers -| inline_capacity;
+        if (previous_fallback_peak < half_capacity or fallback_peak < half_capacity)
+            active.releaseFallback();
+    }
+
+    fn deinit(active: *@This()) void {
+        std.debug.assert(active.len() == 0);
+        const capacity = active.fallback.capacity;
+        active.fallback.deinit(active.allocator);
+        if (active.memory_stats) |stats| stats.recordDestroy(capacity);
+        active.allocator.destroy(active);
+    }
+};
+
+test "Array join active receivers release one-off depth and reuse repeated depth" {
+    const Probe = struct {
+        fn identity(index: usize) value.RuntimeObjectIdentity {
+            return .{ .storage = .address, .value = @intCast(index + 1) };
+        }
+
+        fn invoke(active: *ArrayJoinActive, count: usize) !void {
+            for (0..count) |index|
+                try std.testing.expect(!try active.enter(identity(index)));
+            try std.testing.expect(try active.enter(identity(count - 1)));
+            for (0..count) |_| active.leave();
+        }
+    };
+
+    var stats = ArrayJoinActiveMemoryStats{};
+    const active = try std.testing.allocator.create(ArrayJoinActive);
+    active.* = .init(std.testing.allocator, &stats);
+    defer active.deinit();
+
+    try Probe.invoke(active, 1);
+    try std.testing.expectEqual(@as(usize, 0), active.fallback.capacity);
+
+    try Probe.invoke(active, 40);
+    const first_deep = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 0), first_deep.current_receivers);
+    try std.testing.expectEqual(@as(u64, 0), first_deep.current_fallback_capacity);
+    try std.testing.expect(first_deep.capacity_growths_total != 0);
+    try std.testing.expect(first_deep.capacity_releases_total != 0);
+
+    try Probe.invoke(active, 40);
+    const retained_capacity = active.fallback.capacity;
+    try std.testing.expect(retained_capacity >= 32);
+    const retained = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, @intCast(retained_capacity)), retained.current_fallback_capacity);
+    const growths_before_reuse = retained.capacity_growths_total;
+
+    try Probe.invoke(active, 40);
+    try std.testing.expectEqual(retained_capacity, active.fallback.capacity);
+    try std.testing.expectEqual(growths_before_reuse, stats.snapshot().capacity_growths_total);
+
+    try Probe.invoke(active, 1);
+    const released = stats.snapshot();
+    try std.testing.expectEqual(@as(usize, 0), active.fallback.capacity);
+    try std.testing.expectEqual(@as(u64, 0), released.current_receivers);
+    try std.testing.expectEqual(@as(u64, 0), released.current_fallback_capacity);
+    try std.testing.expectEqual(@as(u64, @sizeOf(ArrayJoinActive)), released.current_bytes);
+    try std.testing.expectEqual(@as(u64, 40), released.peak_receivers);
+    try std.testing.expect(released.released_fallback_bytes_total != 0);
+}
+
+test "Array join active receiver spill unwinds every allocation failure" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var stats = ArrayJoinActiveMemoryStats{};
+            const active = try allocator.create(ArrayJoinActive);
+            active.* = .init(allocator, &stats);
+            defer active.deinit();
+
+            var entered: usize = 0;
+            defer while (entered != 0) {
+                active.leave();
+                entered -= 1;
+            };
+            for (0..40) |index| {
+                const identity = value.RuntimeObjectIdentity{
+                    .storage = .managed,
+                    .value = @intCast(index + 1),
+                };
+                try std.testing.expect(!try active.enter(identity));
+                entered += 1;
+                try std.testing.expect(try active.enter(identity));
+            }
+            while (entered != 0) {
+                active.leave();
+                entered -= 1;
+            }
+
+            try std.testing.expect(!try active.enter(.{ .storage = .managed, .value = 99 }));
+            entered = 1;
+            active.leave();
+            entered = 0;
+            try std.testing.expectEqual(@as(u64, 0), stats.snapshot().current_receivers);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
 
 /// Context-owned source identity attached to a parsed statement. Protocol
 /// adapters keep their own script registry; the evaluator only needs a stable
@@ -4316,6 +4648,10 @@ pub const Interpreter = struct {
     /// and Bun code relies on that. Allocated on first use and declared here,
     /// byte-aligned, for the layout reason `stack_floor` above documents.
     array_join_active: ?*ArrayJoinActive align(1) = null,
+
+    /// Optional Context-owned overlap accounting for the active receiver owner
+    /// above and any freeable deep-nesting fallback backing it retains.
+    array_join_active_memory_stats: ?*ArrayJoinActiveMemoryStats align(1) = null,
 
     /// Bounded invocation-local cache of exact small-object shape sequences
     /// prepared by JSON.parse. Entries point into this realm's immutable Shape
@@ -12783,6 +13119,10 @@ pub const Interpreter = struct {
     }
 
     pub fn deinit(self: *Interpreter) void {
+        if (self.array_join_active) |active| {
+            active.deinit();
+            self.array_join_active = null;
+        }
         if (self.regex_programs) |programs| {
             const allocator = programs.allocator;
             programs.deinit();
@@ -22445,20 +22785,18 @@ pub const Interpreter = struct {
     fn enterArrayJoin(self: *Interpreter, receiver: *value.Object) EvalError!bool {
         const identity = value.RuntimeObjectIdentity.init(receiver);
         const active = self.array_join_active orelse blk: {
-            const created = try self.arena.create(ArrayJoinActive);
-            created.* = .{};
+            const allocator = self.scratch_allocator orelse self.arena;
+            const created = try allocator.create(ArrayJoinActive);
+            created.* = .init(allocator, self.array_join_active_memory_stats);
             self.array_join_active = created;
             break :blk created;
         };
-        for (active.items.items) |ancestor| if (ancestor.eql(identity)) return true;
-        // Appended only after the scan, so a failed append leaves no membership.
-        try active.items.append(self.arena, identity);
-        return false;
+        return active.enter(identity);
     }
 
     fn leaveArrayJoin(self: *Interpreter) void {
         const active = self.array_join_active orelse return;
-        _ = active.items.pop();
+        active.leave();
     }
 
     /// The [[BoundTargetFunction]] of a bound function exotic object, if it is one.
