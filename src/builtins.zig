@@ -5368,6 +5368,74 @@ test "JSON active cycle index promotes atomically and preserves path semantics" 
     try std.testing.expectEqual(@as(usize, 0), promoted.index.count());
 }
 
+test "JSON stringify frame spills propagate every allocation failure" {
+    const Probe = struct {
+        fn frame(identity: u64) Stringifier.Frame {
+            return .{ .array = .{
+                .holder = Value.undef(),
+                .identity = .{ .storage = .managed, .value = identity },
+                .outer_indent = 0,
+                .len = 1,
+                .direct_ordinary = true,
+            } };
+        }
+
+        fn fill(
+            stack: *Stringifier.FrameStack,
+            machine: *Interpreter,
+            allocator: std.mem.Allocator,
+            first_identity: u64,
+        ) !void {
+            for (0..Stringifier.inline_frame_capacity + 1) |index|
+                try stack.append(machine, allocator, frame(first_identity + index));
+        }
+
+        fn run(backing: std.mem.Allocator) !void {
+            var machine = Interpreter{
+                .arena = backing,
+                .env = undefined,
+                .root_shape = undefined,
+                .scratch_allocator = backing,
+            };
+            defer machine.deinit();
+
+            {
+                var outer: Stringifier.FrameStack = .{};
+                defer outer.deinit(backing);
+                try fill(&outer, &machine, backing, 1);
+                try std.testing.expect(outer.spilled);
+                const cache = outer.cache orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqual(Stringifier.inline_frame_capacity + 1, outer.len());
+                try std.testing.expect(cache.leased);
+
+                // A nested stringify cannot alias the leased outer cache. Its
+                // fallback growth must propagate OOM and unwind independently.
+                var inner: Stringifier.FrameStack = .{};
+                defer inner.deinit(backing);
+                try fill(&inner, &machine, backing, 100);
+                try std.testing.expect(inner.spilled);
+                try std.testing.expect(inner.cache == null);
+                try std.testing.expectEqual(Stringifier.inline_frame_capacity + 1, inner.len());
+                try std.testing.expectEqual(Stringifier.inline_frame_capacity + 1, outer.len());
+            }
+
+            const retained = machine.json_stringify_frame_cache orelse return error.TestUnexpectedResult;
+            try std.testing.expect(!retained.leased);
+            try std.testing.expectEqual(@as(usize, 0), retained.frames.items.len);
+
+            // The successful retry leases the retained allocation rather than
+            // publishing stale frames from the failed or completed traversal.
+            var retried: Stringifier.FrameStack = .{};
+            defer retried.deinit(backing);
+            try fill(&retried, &machine, backing, 200);
+            try std.testing.expectEqual(retained, retried.cache.?);
+            try std.testing.expectEqual(Stringifier.inline_frame_capacity + 1, retried.len());
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "JSON active identity index disperses default collisions exactly" {
     const target_mask: u64 = 1023;
     const collision_count = 32;
