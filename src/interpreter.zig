@@ -3429,14 +3429,193 @@ pub const JsonStringifyFrame = union(enum) {
     object: JsonStringifyObjectFrame,
 };
 
+pub const JsonStringifyFrameCacheMemorySnapshot = struct {
+    current_caches: u64 = 0,
+    peak_caches: u64 = 0,
+    current_frame_capacity: u64 = 0,
+    peak_frame_capacity: u64 = 0,
+    current_bytes: u64 = 0,
+    peak_bytes: u64 = 0,
+    capacity_growths_total: u64 = 0,
+    capacity_releases_total: u64 = 0,
+    released_frame_bytes_total: u64 = 0,
+};
+
+/// Exact overlap accounting for freeable JSON.stringify continuation caches.
+/// These bytes are already part of the Context allocator total; the separate
+/// gauges identify their retained working set without double-counting it.
+/// Writers can overlap across no-GIL interpreters, while the small seqlock
+/// publishes one coherent machine-readable snapshot at attribution boundaries.
+pub const JsonStringifyFrameCacheMemoryStats = struct {
+    mutations_active: std.atomic.Value(u64) = .init(0),
+    mutation_epoch: std.atomic.Value(u64) = .init(0),
+    current_caches: std.atomic.Value(u64) = .init(0),
+    peak_caches: std.atomic.Value(u64) = .init(0),
+    current_frame_capacity: std.atomic.Value(u64) = .init(0),
+    peak_frame_capacity: std.atomic.Value(u64) = .init(0),
+    current_bytes: std.atomic.Value(u64) = .init(0),
+    peak_bytes: std.atomic.Value(u64) = .init(0),
+    capacity_growths_total: std.atomic.Value(u64) = .init(0),
+    capacity_releases_total: std.atomic.Value(u64) = .init(0),
+    released_frame_bytes_total: std.atomic.Value(u64) = .init(0),
+
+    fn beginMutation(stats: *@This()) void {
+        const previous = stats.mutations_active.fetchAdd(1, .acq_rel);
+        std.debug.assert(previous != std.math.maxInt(u64));
+    }
+
+    fn finishMutation(stats: *@This()) void {
+        _ = stats.mutation_epoch.fetchAdd(1, .release);
+        const previous = stats.mutations_active.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
+    }
+
+    fn recordPeak(target: *std.atomic.Value(u64), current: u64) void {
+        var peak = target.load(.monotonic);
+        while (current > peak) {
+            if (target.cmpxchgWeak(peak, current, .monotonic, .monotonic)) |observed| {
+                peak = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn frameBytes(capacity: usize) u64 {
+        return std.math.mul(
+            u64,
+            @intCast(capacity),
+            @sizeOf(JsonStringifyFrame),
+        ) catch @panic("JSON stringify frame-cache byte overflow");
+    }
+
+    pub fn recordCreate(stats: *@This()) void {
+        stats.beginMutation();
+        defer stats.finishMutation();
+        const cache_previous = stats.current_caches.fetchAdd(1, .monotonic);
+        const bytes_previous = stats.current_bytes.fetchAdd(@sizeOf(JsonStringifyFrameCache), .monotonic);
+        recordPeak(&stats.peak_caches, cache_previous + 1);
+        recordPeak(&stats.peak_bytes, bytes_previous + @sizeOf(JsonStringifyFrameCache));
+    }
+
+    pub fn recordCapacityChange(stats: *@This(), previous: usize, current: usize) void {
+        if (previous == current) return;
+        stats.beginMutation();
+        defer stats.finishMutation();
+        if (current > previous) {
+            const frame_delta: u64 = @intCast(current - previous);
+            const byte_delta = frameBytes(current - previous);
+            _ = stats.capacity_growths_total.fetchAdd(1, .monotonic);
+            const frames_before = stats.current_frame_capacity.fetchAdd(frame_delta, .monotonic);
+            const bytes_before = stats.current_bytes.fetchAdd(byte_delta, .monotonic);
+            recordPeak(&stats.peak_frame_capacity, frames_before + frame_delta);
+            recordPeak(&stats.peak_bytes, bytes_before + byte_delta);
+        } else {
+            const frame_delta: u64 = @intCast(previous - current);
+            const byte_delta = frameBytes(previous - current);
+            _ = stats.capacity_releases_total.fetchAdd(1, .monotonic);
+            _ = stats.released_frame_bytes_total.fetchAdd(byte_delta, .monotonic);
+            const frames_before = stats.current_frame_capacity.fetchSub(frame_delta, .monotonic);
+            const bytes_before = stats.current_bytes.fetchSub(byte_delta, .monotonic);
+            if (frames_before < frame_delta or bytes_before < byte_delta)
+                @panic("JSON stringify frame-cache accounting underflow");
+        }
+    }
+
+    pub fn recordDestroy(stats: *@This(), capacity: usize) void {
+        stats.beginMutation();
+        defer stats.finishMutation();
+        const frame_bytes = frameBytes(capacity);
+        const total_bytes = std.math.add(
+            u64,
+            frame_bytes,
+            @sizeOf(JsonStringifyFrameCache),
+        ) catch @panic("JSON stringify frame-cache byte overflow");
+        const caches_before = stats.current_caches.fetchSub(1, .monotonic);
+        const frames_before = stats.current_frame_capacity.fetchSub(@intCast(capacity), .monotonic);
+        const bytes_before = stats.current_bytes.fetchSub(total_bytes, .monotonic);
+        if (caches_before == 0 or frames_before < capacity or bytes_before < total_bytes)
+            @panic("JSON stringify frame-cache accounting underflow");
+        if (capacity != 0) {
+            _ = stats.capacity_releases_total.fetchAdd(1, .monotonic);
+            _ = stats.released_frame_bytes_total.fetchAdd(frame_bytes, .monotonic);
+        }
+    }
+
+    fn trySnapshot(stats: *@This()) ?JsonStringifyFrameCacheMemorySnapshot {
+        if (stats.mutations_active.load(.acquire) != 0) return null;
+        const before = stats.mutation_epoch.load(.acquire);
+        const result = JsonStringifyFrameCacheMemorySnapshot{
+            .current_caches = stats.current_caches.load(.acquire),
+            .peak_caches = stats.peak_caches.load(.acquire),
+            .current_frame_capacity = stats.current_frame_capacity.load(.acquire),
+            .peak_frame_capacity = stats.peak_frame_capacity.load(.acquire),
+            .current_bytes = stats.current_bytes.load(.acquire),
+            .peak_bytes = stats.peak_bytes.load(.acquire),
+            .capacity_growths_total = stats.capacity_growths_total.load(.acquire),
+            .capacity_releases_total = stats.capacity_releases_total.load(.acquire),
+            .released_frame_bytes_total = stats.released_frame_bytes_total.load(.acquire),
+        };
+        if (stats.mutations_active.load(.acquire) != 0) return null;
+        if (stats.mutation_epoch.load(.acquire) != before) return null;
+        return result;
+    }
+
+    pub fn snapshot(stats: *@This()) JsonStringifyFrameCacheMemorySnapshot {
+        var spins: usize = 0;
+        while (true) : (spins += 1) {
+            if (stats.trySnapshot()) |result| return result;
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+};
+
 pub const JsonStringifyFrameCache = struct {
     allocator: std.mem.Allocator,
     frames: std.ArrayListUnmanaged(JsonStringifyFrame) = .empty,
     leased: bool = false,
+    previous_peak_frames: usize = 0,
+    memory_stats: ?*JsonStringifyFrameCacheMemoryStats = null,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        memory_stats: ?*JsonStringifyFrameCacheMemoryStats,
+    ) @This() {
+        if (memory_stats) |stats| stats.recordCreate();
+        return .{ .allocator = allocator, .memory_stats = memory_stats };
+    }
+
+    pub fn recordCapacityChange(cache: *@This(), previous: usize) void {
+        if (cache.memory_stats) |stats|
+            stats.recordCapacityChange(previous, cache.frames.capacity);
+    }
+
+    fn releaseFrames(cache: *@This()) void {
+        const previous = cache.frames.capacity;
+        cache.frames.deinit(cache.allocator);
+        cache.frames = .empty;
+        cache.recordCapacityChange(previous);
+    }
+
+    /// Retain a frame allocation only after two consecutive invocations use at
+    /// least half of its slots. This gives repeated deep traversals one stable
+    /// reusable buffer while a one-off high-water input, or the first shallow
+    /// call after it, releases oversized backing without an allocation.
+    pub fn finishInvocation(cache: *@This(), peak_frames: usize) void {
+        std.debug.assert(!cache.leased);
+        defer cache.previous_peak_frames = peak_frames;
+        const capacity = cache.frames.capacity;
+        if (capacity == 0) return;
+        const half_capacity = capacity / 2 + capacity % 2;
+        if (cache.previous_peak_frames < half_capacity or peak_frames < half_capacity)
+            cache.releaseFrames();
+    }
 
     fn deinit(cache: *@This()) void {
         std.debug.assert(!cache.leased);
+        const capacity = cache.frames.capacity;
         cache.frames.deinit(cache.allocator);
+        if (cache.memory_stats) |stats| stats.recordDestroy(capacity);
         cache.allocator.destroy(cache);
     }
 };
@@ -4151,6 +4330,12 @@ pub const Interpreter = struct {
     /// cache above. Every concurrent no-GIL evaluator owns a distinct
     /// Interpreter; reentrant calls are isolated by the cache lease.
     json_stringify_frame_cache: ?*JsonStringifyFrameCache align(1) = null,
+
+    /// Optional Context-owned overlap accounting for the cache above. The
+    /// pointed-to atomics outlive every registered Interpreter in that realm;
+    /// standalone unit interpreters leave it null and retain zero hot-path
+    /// profiling storage.
+    json_stringify_frame_cache_memory_stats: ?*JsonStringifyFrameCacheMemoryStats align(1) = null,
 
     /// Bytes in the explicit Promise/next-tick root frontier at a precise
     /// safepoint. Nursery scheduling uses this to amortize a root scan against

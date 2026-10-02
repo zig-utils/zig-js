@@ -3118,13 +3118,21 @@ const Stringifier = struct {
         heap_frames: std.ArrayListUnmanaged(Frame) = .empty,
         cache: ?*interpreter.JsonStringifyFrameCache = null,
         spilled: bool = false,
+        peak_len: usize = 0,
 
-        fn deinit(stack: *@This(), allocator: std.mem.Allocator) void {
+        fn deinit(stack: *@This(), self: *Interpreter, allocator: std.mem.Allocator) void {
             if (stack.cache) |cache| {
                 cache.frames.items.len = 0;
                 cache.leased = false;
+                cache.finishInvocation(stack.peak_len);
             } else {
                 stack.heap_frames.deinit(allocator);
+                // A shallow invocation never leases an existing cache. Still
+                // publish its working set so it can release backing retained by
+                // an earlier deep call. A reentrant fallback must not mutate the
+                // outer invocation's active lease or retention history.
+                if (self.json_stringify_frame_cache) |cache|
+                    if (!cache.leased) cache.finishInvocation(stack.peak_len);
             }
         }
 
@@ -3150,13 +3158,14 @@ const Stringifier = struct {
             if (!stack.spilled and stack.inline_len < stack.inline_frames.len) {
                 stack.inline_frames[stack.inline_len] = frame;
                 stack.inline_len += 1;
+                stack.peak_len = @max(stack.peak_len, stack.inline_len);
                 return;
             }
             if (!stack.spilled) {
                 if (self.scratch_allocator) |cache_allocator| {
                     const cache = self.json_stringify_frame_cache orelse cache: {
                         const fresh = try cache_allocator.create(interpreter.JsonStringifyFrameCache);
-                        fresh.* = .{ .allocator = cache_allocator };
+                        fresh.* = .init(cache_allocator, self.json_stringify_frame_cache_memory_stats);
                         self.json_stringify_frame_cache = fresh;
                         break :cache fresh;
                     };
@@ -3167,7 +3176,9 @@ const Stringifier = struct {
                     }
                 }
                 if (stack.cache) |cache| {
+                    const previous_capacity = cache.frames.capacity;
                     try cache.frames.ensureTotalCapacityPrecise(cache.allocator, stack.inline_frames.len * 2);
+                    cache.recordCapacityChange(previous_capacity);
                     cache.frames.appendSliceAssumeCapacity(stack.inline_frames[0..stack.inline_len]);
                 } else {
                     try stack.heap_frames.ensureTotalCapacityPrecise(allocator, stack.inline_frames.len * 2);
@@ -3175,10 +3186,14 @@ const Stringifier = struct {
                 }
                 stack.spilled = true;
             }
-            if (stack.cache) |cache|
-                try cache.frames.append(cache.allocator, frame)
-            else
+            if (stack.cache) |cache| {
+                const previous_capacity = cache.frames.capacity;
+                try cache.frames.append(cache.allocator, frame);
+                cache.recordCapacityChange(previous_capacity);
+            } else {
                 try stack.heap_frames.append(allocator, frame);
+            }
+            stack.peak_len = @max(stack.peak_len, stack.len());
         }
 
         inline fn removeLast(stack: *@This()) void {
@@ -3228,7 +3243,7 @@ const Stringifier = struct {
         defer self.restoreTempRoots(roots_mark);
 
         var frames: FrameStack = .{};
-        defer frames.deinit(st.frame_allocator);
+        defer frames.deinit(self, st.frame_allocator);
         const has_precise_roots = self.gc != null;
 
         self.depth += 1;
@@ -5401,7 +5416,7 @@ test "JSON stringify frame spills propagate every allocation failure" {
 
             {
                 var outer: Stringifier.FrameStack = .{};
-                defer outer.deinit(backing);
+                defer outer.deinit(&machine, backing);
                 try fill(&outer, &machine, backing, 1);
                 try std.testing.expect(outer.spilled);
                 const cache = outer.cache orelse return error.TestUnexpectedResult;
@@ -5411,7 +5426,7 @@ test "JSON stringify frame spills propagate every allocation failure" {
                 // A nested stringify cannot alias the leased outer cache. Its
                 // fallback growth must propagate OOM and unwind independently.
                 var inner: Stringifier.FrameStack = .{};
-                defer inner.deinit(backing);
+                defer inner.deinit(&machine, backing);
                 try fill(&inner, &machine, backing, 100);
                 try std.testing.expect(inner.spilled);
                 try std.testing.expect(inner.cache == null);
@@ -5422,18 +5437,114 @@ test "JSON stringify frame spills propagate every allocation failure" {
             const retained = machine.json_stringify_frame_cache orelse return error.TestUnexpectedResult;
             try std.testing.expect(!retained.leased);
             try std.testing.expectEqual(@as(usize, 0), retained.frames.items.len);
+            try std.testing.expectEqual(@as(usize, 0), retained.frames.capacity);
 
-            // The successful retry leases the retained allocation rather than
-            // publishing stale frames from the failed or completed traversal.
-            var retried: Stringifier.FrameStack = .{};
-            defer retried.deinit(backing);
-            try fill(&retried, &machine, backing, 200);
-            try std.testing.expectEqual(retained, retried.cache.?);
-            try std.testing.expectEqual(Stringifier.inline_frame_capacity + 1, retried.len());
+            // The second matching invocation confirms the working set and
+            // retains one clean allocation. A third invocation reuses it
+            // without changing capacity or publishing stale frames.
+            {
+                var retried: Stringifier.FrameStack = .{};
+                defer retried.deinit(&machine, backing);
+                try fill(&retried, &machine, backing, 200);
+                try std.testing.expectEqual(retained, retried.cache.?);
+                try std.testing.expectEqual(Stringifier.inline_frame_capacity + 1, retried.len());
+            }
+            const retained_capacity = retained.frames.capacity;
+            try std.testing.expect(retained_capacity >= Stringifier.inline_frame_capacity + 1);
+            {
+                var reused: Stringifier.FrameStack = .{};
+                defer reused.deinit(&machine, backing);
+                try fill(&reused, &machine, backing, 300);
+                try std.testing.expectEqual(retained, reused.cache.?);
+                try std.testing.expectEqual(retained_capacity, retained.frames.capacity);
+            }
+            try std.testing.expectEqual(retained_capacity, retained.frames.capacity);
         }
     };
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "JSON stringify frame cache accounts and bounds retained working sets" {
+    const Probe = struct {
+        fn frame(identity: u64) Stringifier.Frame {
+            return .{ .array = .{
+                .holder = Value.undef(),
+                .identity = .{ .storage = .managed, .value = identity },
+                .outer_indent = 0,
+                .len = 1,
+                .direct_ordinary = true,
+            } };
+        }
+
+        fn invoke(machine: *Interpreter, count: usize, first_identity: u64) !usize {
+            var stack: Stringifier.FrameStack = .{};
+            defer stack.deinit(machine, std.testing.allocator);
+            for (0..count) |index|
+                try stack.append(machine, std.testing.allocator, frame(first_identity + index));
+            return if (stack.cache) |cache| cache.frames.capacity else 0;
+        }
+    };
+
+    var stats: interpreter.JsonStringifyFrameCacheMemoryStats = .{};
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .scratch_allocator = std.testing.allocator,
+        .json_stringify_frame_cache_memory_stats = &stats,
+    };
+
+    const first_capacity = try Probe.invoke(&machine, 4096, 1);
+    const retained = machine.json_stringify_frame_cache orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_capacity >= 4096);
+    try std.testing.expectEqual(@as(usize, 0), retained.frames.capacity);
+    var snapshot = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), snapshot.current_caches);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.current_frame_capacity);
+    try std.testing.expectEqual(@as(u64, @sizeOf(interpreter.JsonStringifyFrameCache)), snapshot.current_bytes);
+    try std.testing.expectEqual(@as(u64, @intCast(first_capacity)), snapshot.peak_frame_capacity);
+    try std.testing.expectEqual(
+        @as(u64, @sizeOf(interpreter.JsonStringifyFrameCache)) +
+            @as(u64, @intCast(first_capacity * @sizeOf(interpreter.JsonStringifyFrame))),
+        snapshot.peak_bytes,
+    );
+
+    const second_capacity = try Probe.invoke(&machine, 4096, 10_000);
+    try std.testing.expectEqual(first_capacity, second_capacity);
+    try std.testing.expectEqual(first_capacity, retained.frames.capacity);
+    const confirmed = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, @intCast(first_capacity)), confirmed.current_frame_capacity);
+    const growths_after_confirmation = confirmed.capacity_growths_total;
+
+    const third_capacity = try Probe.invoke(&machine, 4096, 20_000);
+    try std.testing.expectEqual(first_capacity, third_capacity);
+    snapshot = stats.snapshot();
+    try std.testing.expectEqual(growths_after_confirmation, snapshot.capacity_growths_total);
+    try std.testing.expectEqual(@as(u64, @intCast(first_capacity)), snapshot.current_frame_capacity);
+
+    // One shallow invocation invalidates the retained high-water working set.
+    _ = try Probe.invoke(&machine, 1, 30_000);
+    snapshot = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 0), snapshot.current_frame_capacity);
+    try std.testing.expectEqual(@as(usize, 0), retained.frames.capacity);
+
+    // The 50,000-frame adversarial boundary is measured but not retained after
+    // a single observation. It changes no language depth limit or result.
+    const adversarial_capacity = try Probe.invoke(&machine, 50_000, 40_000);
+    try std.testing.expect(adversarial_capacity >= 50_000);
+    try std.testing.expectEqual(@as(usize, 0), retained.frames.capacity);
+    snapshot = stats.snapshot();
+    try std.testing.expect(snapshot.peak_frame_capacity >= @as(u64, @intCast(adversarial_capacity)));
+    try std.testing.expect(snapshot.capacity_releases_total >= 3);
+    try std.testing.expect(snapshot.released_frame_bytes_total >=
+        @as(u64, @intCast(adversarial_capacity * @sizeOf(interpreter.JsonStringifyFrame))));
+
+    machine.deinit();
+    snapshot = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 0), snapshot.current_caches);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.current_frame_capacity);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.current_bytes);
 }
 
 test "JSON active identity index disperses default collisions exactly" {
