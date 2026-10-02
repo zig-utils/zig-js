@@ -1,0 +1,169 @@
+{
+  "schema": "zig-js-json-stringify-frame-cache-retention-v1",
+  "issue": "https://github.com/zig-utils/zig-js/issues/1022",
+  "generated_at": "2026-10-02T14:38:04Z",
+  "measurement": {
+    "kind": "deterministic-production-frame-stack-capacity",
+    "timing_claim": false,
+    "description": "The private unit witness drives the production JSON.stringify FrameStack append and unwind path, then snapshots exact allocator capacity and cache accounting. No wall-clock or process-RSS value enters the result.",
+    "test": "JSON stringify frame cache accounts and bounds retained working sets"
+  },
+  "revisions": {
+    "baseline": "9453de45b6f66543b08f8c06904e29f37172362d",
+    "candidate": "3e3188657ff9e4b4204ecf2663175d9943230381",
+    "zig_gc": "0285ef801dd221a4ae8e88b31a09ae31627657a3",
+    "zig_regex": "fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b",
+    "test262": "4249661388e5d3f92a85186213da140a6481490f"
+  },
+  "toolchain": {
+    "zig": "0.17.0-dev.2163+89ff10d56",
+    "target": "arm64-macos",
+    "host": "Apple M2 Pro",
+    "macos": "26.3.1 (a) 25D771280a",
+    "optimization": "Debug"
+  },
+  "layout_bytes": {
+    "frame": 96,
+    "baseline_cache_metadata": 56,
+    "candidate_cache_metadata": 72
+  },
+  "baseline_after_single_invocation": [
+    {
+      "requested_active_frames": 4096,
+      "observed_capacity_frames": 5900,
+      "retained_capacity_frames": 5900,
+      "retained_frame_bytes": 566400,
+      "retained_total_bytes": 566456
+    },
+    {
+      "requested_active_frames": 50000,
+      "observed_capacity_frames": 67247,
+      "retained_capacity_frames": 67247,
+      "retained_frame_bytes": 6455712,
+      "retained_total_bytes": 6455768
+    }
+  ],
+  "candidate_sequence": [
+    {
+      "step": "first_4096",
+      "requested_active_frames": 4096,
+      "observed_capacity_frames": 5900,
+      "current_caches": 1,
+      "current_frame_capacity": 0,
+      "current_bytes": 72,
+      "peak_frame_capacity": 5900,
+      "peak_bytes": 566472,
+      "capacity_growths_total": 15,
+      "capacity_releases_total": 1,
+      "released_frame_bytes_total": 566400
+    },
+    {
+      "step": "second_4096_confirms_working_set",
+      "requested_active_frames": 4096,
+      "observed_capacity_frames": 5900,
+      "current_caches": 1,
+      "current_frame_capacity": 5900,
+      "current_bytes": 566472,
+      "peak_frame_capacity": 5900,
+      "peak_bytes": 566472,
+      "capacity_growths_total": 30,
+      "capacity_releases_total": 1,
+      "released_frame_bytes_total": 566400
+    },
+    {
+      "step": "third_4096_reuses_without_growth",
+      "requested_active_frames": 4096,
+      "observed_capacity_frames": 5900,
+      "current_caches": 1,
+      "current_frame_capacity": 5900,
+      "current_bytes": 566472,
+      "peak_frame_capacity": 5900,
+      "peak_bytes": 566472,
+      "capacity_growths_total": 30,
+      "capacity_releases_total": 1,
+      "released_frame_bytes_total": 566400
+    },
+    {
+      "step": "shallow_call_releases_retained_working_set",
+      "requested_active_frames": 1,
+      "current_caches": 1,
+      "current_frame_capacity": 0,
+      "current_bytes": 72,
+      "peak_frame_capacity": 5900,
+      "peak_bytes": 566472,
+      "capacity_growths_total": 30,
+      "capacity_releases_total": 2,
+      "released_frame_bytes_total": 1132800
+    },
+    {
+      "step": "one_off_50000",
+      "requested_active_frames": 50000,
+      "observed_capacity_frames": 67247,
+      "current_caches": 1,
+      "current_frame_capacity": 0,
+      "current_bytes": 72,
+      "peak_frame_capacity": 67247,
+      "peak_bytes": 6455784,
+      "capacity_growths_total": 51,
+      "capacity_releases_total": 3,
+      "released_frame_bytes_total": 7588512
+    },
+    {
+      "step": "interpreter_teardown",
+      "current_caches": 0,
+      "current_frame_capacity": 0,
+      "current_bytes": 0,
+      "peak_frame_capacity": 67247,
+      "peak_bytes": 6455784,
+      "capacity_growths_total": 51,
+      "capacity_releases_total": 3,
+      "released_frame_bytes_total": 7588512
+    }
+  ],
+  "qualification": {
+    "focused_builtins": {
+      "filter": "JSON stringify frame",
+      "passed": 3,
+      "failed": 0,
+      "covers": [
+        "exhaustive allocation failure",
+        "lease unwind and reentrancy",
+        "capacity accounting and teardown"
+      ]
+    },
+    "depth_50000": {
+      "test": "JSON stringify 50,000-level limits stay catchable across forced tiers",
+      "tree_walker": "pass",
+      "required_vm": "pass"
+    },
+    "moving_gc": {
+      "test": "enable_gc: JSON stringify active index survives a callback collection request",
+      "result": "pass"
+    },
+    "no_gil": {
+      "test": "JSON stringify key snapshots isolate shared no-GIL callers",
+      "ordinary": "pass",
+      "thread_sanitizer": "pass with zero reports"
+    },
+    "test262_json": {
+      "subtree": "test/built-ins/JSON",
+      "passed": 165,
+      "failed": 0
+    },
+    "forced_tier_witness": {
+      "subtree": "test/built-ins/JSON",
+      "agreed": 165,
+      "diverged": 0
+    }
+  },
+  "derived": {
+    "one_off_4096_retained_total_bytes_before": 566456,
+    "one_off_4096_retained_total_bytes_after": 72,
+    "one_off_4096_released_bytes": 566384,
+    "one_off_50000_retained_total_bytes_before": 6455768,
+    "one_off_50000_retained_total_bytes_after": 72,
+    "one_off_50000_released_bytes": 6455696,
+    "third_4096_added_capacity_growths": 0,
+    "post_teardown_current_bytes": 0
+  }
+}

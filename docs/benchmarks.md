@@ -38,6 +38,23 @@ repository option is required so publication records and checks that exact Git
 revision. Reports also preserve SHA-256 identities for both engine runners and
 the frozen workload source.
 
+## `JSON.stringify` retained-frame cache diagnostic
+
+Issue [#1022](https://github.com/zig-utils/zig-js/issues/1022) bounds the
+interpreter-local continuation cache used by iterative `JSON.stringify`.
+The [dated report](.data/json-stringify-frame-cache-retention-2026-10-02.md)
+and [raw counters](.data/json-stringify-frame-cache-retention-2026-10-02.json)
+use the production frame-stack path and exact allocator capacities; they make
+no timing, RSS, throughput, or JavaScriptCore claim.
+
+A one-off 4,096-frame traversal previously retained 566,456 bytes and a
+50,000-frame traversal retained 6,455,768 bytes until interpreter teardown.
+Both now return to the 72-byte live cache record after unwind, while a second
+comparable traversal confirms a reusable working set and a third performs zero
+additional capacity growth. A later shallow traversal releases that retained
+working set, and interpreter teardown returns the inventory's current cache
+bytes to zero.
+
 ## RegExp compiled-program retention diagnostic
 
 Issue [#989](https://github.com/zig-utils/zig-js/issues/989) is tracked by a
