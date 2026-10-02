@@ -2522,8 +2522,9 @@ fn evaluateQuickLeaf(
 }
 
 /// Read the exact own data slot proved by a warmed IC. Shared mode snapshots
-/// shape and value under the receiver lock; accessors, proxies, attributes,
-/// arrays, prototype hits, and shape misses retain ordinary [[Get]].
+/// shape and value under the receiver lock; accessors, proxies, arrays,
+/// prototype hits, and shape misses retain ordinary [[Get]]. Attribute
+/// overrides do not affect the value produced by [[Get]].
 fn quickOwnDataPropertyValue(
     chunk: *Chunk,
     instruction: usize,
@@ -2535,7 +2536,7 @@ fn quickOwnDataPropertyValue(
     if (parallel_sync) object.lockProperties();
     defer if (parallel_sync) object.unlockProperties();
     if (object.is_array or object.proxyHandler() != null or object.proxy_revoked or
-        object.accessorsMap() != null or object.attrsMap() != null)
+        object.accessorsMap() != null)
         return null;
     const slot = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
     return object.slotsItems()[slot];
@@ -4307,8 +4308,7 @@ fn nativeInheritedPropertyCacheValue(
     // then let the canonical lookup throw after the caller releases its locks.
     if (!quickPropertyAccessAllowed(holder)) return null;
     if (holder.is_array or holder.is_arguments or holder.is_symbol or holder.is_bigint or
-        holder.proxyHandler() != null or holder.proxy_revoked or holder.accessorsMap() != null or
-        holder.attrsMap() != null)
+        holder.proxyHandler() != null or holder.proxy_revoked or holder.accessorsMap() != null)
         return null;
     const holder_shape = holder.shape orelse return null;
     const cached = property_cache.lookupInherited(receiver_shape_token, @intFromPtr(holder_shape)) orelse return null;
@@ -4362,8 +4362,7 @@ fn nativeGetPropertyAtSite(
         if (parallel) object.lockProperties();
         defer if (parallel) object.unlockProperties();
         if (!object.is_array and !object.is_arguments and !object.is_symbol and !object.is_bigint and
-            object.proxyHandler() == null and !object.proxy_revoked and object.accessorsMap() == null and
-            object.attrsMap() == null)
+            object.proxyHandler() == null and !object.proxy_revoked and object.accessorsMap() == null)
         {
             if (nativePropertyCacheSlot(cache, object)) |slot| {
                 if (builtin.is_test) _ = optimizer_native_property_read_cache_hits.fetchAdd(1, .monotonic);
@@ -9112,9 +9111,9 @@ fn runChunk(
                 }
                 var result: Value = undefined;
                 fast: {
-                    // Inline cache: plain (non-array) objects with a shape and
-                    // no accessor/attribute overrides (those need the full
-                    // [[Get]] path: getters + the prototype walk).
+                    // Inline cache: ordinary non-array own data properties.
+                    // Accessors need full [[Get]], but descriptor attributes do
+                    // not affect the value read from a present own data slot.
                     if (obj.isObject()) {
                         const o = obj.asObj();
                         // Shape profiling is advisory, but the pointer itself is
@@ -9155,7 +9154,7 @@ fn runChunk(
                         }
                         if (parallel_sync and o.is_array) o.lockProperties();
                         defer if (parallel_sync and o.is_array) o.unlockProperties();
-                        if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
+                        if (!o.is_array and o.accessorsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 result = o.slotsItems()[sl];
@@ -16742,6 +16741,70 @@ test "vm: optimizer native diagnostics retain call and evaluation source" {
     try std.testing.expect(saw_new_call and saw_new_spread);
 }
 
+test "vm: optimizer caches attributed own data reads and yields to accessors" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\var attributedTarget = {};
+        \\Object.defineProperty(attributedTarget, "value", {
+        \\  value: 17, writable: false, enumerable: false, configurable: true
+        \\});
+        \\function readAttributed(o) {
+        \\  var total = 0; var i = 0;
+        \\  while (i < 20) { total = total + o.value; i = i + 1; }
+        \\  return total;
+        \\}
+        \\function attributedGetter() { return 23; }
+        \\readAttributed(attributedTarget); readAttributed(attributedTarget);
+        \\readAttributed(attributedTarget); readAttributed(attributedTarget);
+        \\readAttributed(attributedTarget); readAttributed(attributedTarget);
+        \\readAttributed(attributedTarget); readAttributed(attributedTarget);
+        \\readAttributed(attributedTarget); readAttributed(attributedTarget);
+        \\readAttributed(attributedTarget); readAttributed(attributedTarget)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+    });
+    const callbacks_before = optimizer_native_property_read_callbacks.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 340), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(callbacks_before, optimizer_native_property_read_callbacks.load(.monotonic));
+    const read_chunk = root.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    const artifact = read_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var cached_read = false;
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.bytecode_op != @backingInt(bc.Op.get_prop)) continue;
+        const cache = operations.propertyCacheFor(operation_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(cache.shape_tokens[0] != 0);
+        cached_read = true;
+    }
+    try std.testing.expect(cached_read);
+
+    const target = env.get("attributedTarget") orelse return error.TestUnexpectedResult;
+    const getter = env.get("attributedGetter") orelse return error.TestUnexpectedResult;
+    try target.asObj().setAccessor(allocator, "value", getter, null);
+    const read = env.get("readAttributed") orelse return error.TestUnexpectedResult;
+    const accessor_result = try callValue(&machine, read, &.{target}, Value.undef(), .none);
+    try std.testing.expectEqual(@as(f64, 460), accessor_result.asNum());
+}
+
 test "vm: optimizer native named read composes with a caught downstream call" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
@@ -17225,6 +17288,32 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
     try std.testing.expectEqual(before_object_value, optimizer_native_property_read_callbacks.load(.monotonic));
     try machine.setProp(objects[0].asObj(), "value", Value.num(10));
 
+    // Descriptor attributes do not participate in [[Get]]. Keep an inline own
+    // data read native even though the attributes allocate a cold sidecar.
+    const attributed = try machine.newObject();
+    try machine.setProp(attributed.asObj(), "value", Value.num(17));
+    try attributed.asObj().setAttr(allocator, "value", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
+    try std.testing.expectEqual(objects[0].asObj().shape, attributed.asObj().shape);
+    var attributed_slots = [_]Value{attributed};
+    const before_attributed = optimizer_native_property_read_callbacks.load(.monotonic);
+    const attributed_outcome = try tryRunManagedNative(&machine, &compiled, &attributed_slots, null);
+    try std.testing.expect(attributed_outcome == .complete);
+    try std.testing.expectEqual(@as(f64, 17), attributed_outcome.complete.asNum());
+    try std.testing.expectEqual(before_attributed, optimizer_native_property_read_callbacks.load(.monotonic));
+
+    // Replacing that property with an accessor does not need to change its
+    // Shape. The live accessor guard must therefore route to ordinary [[Get]].
+    try attributed.asObj().setAccessor(allocator, "value", null, null);
+    const before_accessor = optimizer_native_property_read_callbacks.load(.monotonic);
+    const accessor_outcome = try tryRunManagedNative(&machine, &compiled, &attributed_slots, null);
+    try std.testing.expect(accessor_outcome == .complete);
+    try std.testing.expect(accessor_outcome.complete.isUndefined());
+    try std.testing.expectEqual(before_accessor + 1, optimizer_native_property_read_callbacks.load(.monotonic));
+
     const old_parallel = bc.ic_seqlock_enabled.swap(true, .monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     const before_parallel_callback = optimizer_native_property_read_callbacks.load(.monotonic);
@@ -17310,6 +17399,51 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
         callbacks_before_invalidation,
         optimizer_native_property_read_callbacks.load(.monotonic),
     );
+}
+
+test "vm: optimizer reads attributed builtin namespace slots directly" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const json = env.get("JSON") orelse return error.TestUnexpectedResult;
+    const object = json.asObj();
+    const shape = object.shape orelse return error.TestUnexpectedResult;
+    const slot = shape.lookup("stringify") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(object.attrsMap() != null);
+    // Symbol.toStringTag is the fifth property, so JSON's first four cached
+    // methods have migrated from inline slots into the external slot list.
+    try std.testing.expect(object.slotsState() != null);
+    try std.testing.expect(object.cApiObjectOwner() == null);
+    try std.testing.expect(object.accessorsMap() == null);
+    try std.testing.expectEqual(@as(u64, 0), object.restrictionOwner());
+    try std.testing.expect(object.proxyHandler() == null and !object.proxy_revoked);
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("stringify");
+    _ = try chunk.emit(.load_local, 0);
+    const property_ip = try chunk.emit(.get_prop, name);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+    chunk.ics[property_ip].recordMode(shape, slot, false);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+
+    const callbacks_before = optimizer_native_property_read_callbacks.load(.monotonic);
+    var slots = [_]Value{json};
+    const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    try std.testing.expect(outcome == .complete);
+    try std.testing.expect(outcome.complete.isObject());
+    try std.testing.expect(outcome.complete.asObj().native != null);
+    try std.testing.expectEqual(callbacks_before, optimizer_native_property_read_callbacks.load(.monotonic));
 }
 
 test "vm: optimizer inherited property cache serves a one-hop prototype read" {

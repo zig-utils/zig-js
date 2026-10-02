@@ -14,6 +14,8 @@ const aarch64 = @import("aarch64.zig");
 const Value = @import("../value.zig").Value;
 const Shape = @import("../shape.zig").Shape;
 const Object = @import("../value.zig").Object;
+const ObjectColdState = @import("../value.zig").ObjectColdState;
+const ObjectSlotsState = @import("../value.zig").ObjectSlotsState;
 const ObjectStorageState = @import("../value.zig").ObjectStorageState;
 const ObjectElementsState = @import("../value.zig").ObjectElementsState;
 const strcell = @import("../strcell.zig");
@@ -3895,10 +3897,67 @@ fn emitZeroByteGuard(
     try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
 }
 
+fn objectColdByteOffset(comptime field: []const u8) !u12 {
+    return std.math.cast(u12, @offsetOf(ObjectColdState, field)) orelse error.UnsupportedChunk;
+}
+
+/// Attribute overrides do not affect [[Get]], so an own-data read may still use
+/// its shape/slot proof when the receiver's only cold named metadata is attrs.
+/// Every representation or behavior that can change the value remains a live
+/// guard. Shared realms take the runtime path before these unlocked snapshots.
+fn emitDirectReadableStorageGuards(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+) !void {
+    try assembler.load64(10, 9, try objectByteOffset("storage"));
+    const no_storage = try assembler.branchZero32Placeholder(10);
+
+    try assembler.load64(11, 10, try objectStorageByteOffset("c_api_object_owner"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(11), true);
+    try assembler.load64(10, 10, try objectStorageByteOffset("cold"));
+    const no_cold = try assembler.branchZero32Placeholder(10);
+
+    try assembler.load8(11, 10, try objectColdByteOffset("rare_tag"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(11), true);
+    try assembler.load64(11, 10, try objectColdByteOffset("accessors"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(11), true);
+    try assembler.load64(11, 10, try objectColdByteOffset("restricted_to"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(11), true);
+
+    const done = assembler.position();
+    try assembler.patchCompareBranch(no_storage, done);
+    try assembler.patchCompareBranch(no_cold, done);
+}
+
+fn emitDirectNamedPropertyValueLoad(
+    assembler: *aarch64.Assembler,
+    object_register: u5,
+    slot: u32,
+) !void {
+    std.debug.assert(slot < Object.inline_slot_capacity);
+    try assembler.load64(10, object_register, try objectByteOffset("storage"));
+    const inline_without_storage = try assembler.branchZero32Placeholder(10);
+    try assembler.load64(10, 10, try objectStorageByteOffset("slots"));
+    const inline_without_slots = try assembler.branchZero32Placeholder(10);
+    try assembler.load64(10, 10, try objectSlotsByteOffset("items"));
+    try assembler.load64(10, 10, @as(u15, @intCast(slot * @sizeOf(Value))));
+    const loaded = try assembler.branchPlaceholder();
+
+    const inline_path = assembler.position();
+    try assembler.patchCompareBranch(inline_without_storage, inline_path);
+    try assembler.patchCompareBranch(inline_without_slots, inline_path);
+    const inline_offset = @offsetOf(Object, "inline_slots") + @as(usize, @intCast(slot)) * @sizeOf(Value);
+    try assembler.load64(10, object_register, std.math.cast(u15, inline_offset) orelse return error.UnsupportedChunk);
+    try assembler.patchBranch(loaded, assembler.position());
+}
+
+const DirectNamedPropertyAccess = enum { read, write };
+
 fn emitDirectPropertyGuards(
     assembler: *aarch64.Assembler,
     direct: *DirectRuntimeAccess,
     descriptor: jit.NativeOperationDescriptor,
+    comptime access: DirectNamedPropertyAccess,
 ) !void {
     try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
     try assembler.load8(10, 10, 0);
@@ -3913,12 +3972,15 @@ fn emitDirectPropertyGuards(
     try assembler.movImmediate64(10, Value.boxed_payload_mask);
     try assembler.andRegister64(9, 9, 10);
 
-    // Thread.restrict installs cold state through storage without changing the
-    // shape. This live guard also routes restricted receivers to the runtime
-    // ownership check, even for an artifact compiled before the claim.
-    try assembler.load64(10, 9, try objectByteOffset("storage"));
-    try assembler.compareImmediate64(10, 0);
-    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    if (access == .read) {
+        try emitDirectReadableStorageGuards(assembler, direct);
+    } else {
+        // Writes must consult attributes (writable) as well as accessors, so
+        // retain the strict storage-free proof used before attrs-only reads.
+        try assembler.load64(10, 9, try objectByteOffset("storage"));
+        try assembler.compareImmediate64(10, 0);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    }
     try assembler.load16(10, 9, try objectByteOffset("behavior"));
     try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
     try emitZeroByteGuard(assembler, direct, "is_symbol");
@@ -3953,14 +4015,13 @@ fn emitDirectNamedPropertyRead(
     if (usable_entries == 0 and !inherited_usable) return null;
 
     var direct = DirectRuntimeAccess{};
-    try emitDirectPropertyGuards(assembler, &direct, descriptor);
+    try emitDirectPropertyGuards(assembler, &direct, descriptor, .read);
     for (cache.shape_tokens, cache.slots) |shape_token, slot| {
         if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
         try assembler.movImmediate64(10, shape_token);
         try assembler.compareRegister64(11, 10);
         const next_shape = try assembler.branchConditionPlaceholder(.ne);
-        const value_offset = @offsetOf(Object, "inline_slots") + @as(usize, @intCast(slot)) * @sizeOf(Value);
-        try assembler.load64(10, 9, std.math.cast(u15, value_offset) orelse return error.UnsupportedChunk);
+        try emitDirectNamedPropertyValueLoad(assembler, 9, slot);
         try assembler.store64(10, 14, try slotOffset(operation.destination));
         try direct.addCompletion(try assembler.branchPlaceholder());
         try assembler.patchConditionBranch(next_shape, assembler.position());
@@ -3976,9 +4037,7 @@ fn emitDirectNamedPropertyRead(
         try assembler.load64(9, 9, try objectByteOffset("proto"));
         try assembler.compareImmediate64(9, 0);
         try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
-        try assembler.load64(10, 9, try objectByteOffset("storage"));
-        try assembler.compareImmediate64(10, 0);
-        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+        try emitDirectReadableStorageGuards(assembler, &direct);
         try assembler.load16(10, 9, try objectByteOffset("behavior"));
         try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
         try emitZeroByteGuard(assembler, &direct, "is_symbol");
@@ -3993,9 +4052,7 @@ fn emitDirectNamedPropertyRead(
         try assembler.movImmediate64(10, cache.inherited_holder_shape_token);
         try assembler.compareRegister64(11, 10);
         try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
-        const value_offset = @offsetOf(Object, "inline_slots") +
-            @as(usize, @intCast(cache.inherited_slot)) * @sizeOf(Value);
-        try assembler.load64(10, 9, std.math.cast(u15, value_offset) orelse return error.UnsupportedChunk);
+        try emitDirectNamedPropertyValueLoad(assembler, 9, cache.inherited_slot);
         try assembler.store64(10, 14, try slotOffset(operation.destination));
         try direct.addCompletion(try assembler.branchPlaceholder());
     }
@@ -4020,7 +4077,7 @@ fn emitDirectNamedPropertyWrite(
     if (usable_entries == 0) return null;
 
     var direct = DirectRuntimeAccess{};
-    try emitDirectPropertyGuards(assembler, &direct, descriptor);
+    try emitDirectPropertyGuards(assembler, &direct, descriptor, .write);
     for (cache.shape_tokens, cache.slots) |shape_token, slot| {
         if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
         try assembler.movImmediate64(10, shape_token);
@@ -4098,6 +4155,13 @@ fn denseListWordOffset(comptime field: []const u8) usize {
 
 fn objectStorageByteOffset(comptime field: []const u8) !u15 {
     return std.math.cast(u15, @offsetOf(ObjectStorageState, field)) orelse error.UnsupportedChunk;
+}
+
+fn objectSlotsByteOffset(comptime field: []const u8) !u15 {
+    return std.math.cast(
+        u15,
+        @offsetOf(ObjectSlotsState, "list") + denseListWordOffset(field),
+    ) orelse error.UnsupportedChunk;
 }
 
 fn objectElementsByteOffset(comptime field: []const u8) !u15 {
