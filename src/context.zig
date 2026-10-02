@@ -6097,6 +6097,7 @@ pub const Context = struct {
     pub const TierAttributionSnapshot = struct {
         execution: interp.ExecutionTierSnapshot,
         quick_binary: interp.QuickBinarySnapshot,
+        runtime_operations: interp.RuntimeOperationSnapshot,
         timing: interp.TierTimingSnapshot,
         admissions: interp.BytecodeAdmissionSnapshot,
         baseline_publications: u64,
@@ -6293,6 +6294,7 @@ pub const Context = struct {
         return .{
             .execution = self.execution_tier_inventory.snapshot(),
             .quick_binary = self.execution_tier_inventory.quickBinarySnapshot(),
+            .runtime_operations = self.execution_tier_inventory.runtimeOperationSnapshot(),
             .timing = self.execution_tier_inventory.timingSnapshot(),
             .admissions = self.bytecode_admission_inventory.snapshot(),
             .baseline_publications = owner.baselinePublications(),

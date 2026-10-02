@@ -68,6 +68,12 @@ fn recordDeoptimization(vm: *Interpreter, started_ns: i96) void {
         inventory.recordDeoptimization(tierTimingElapsed(started_ns));
 }
 
+fn recordRuntimeOperation(vm: *Interpreter, encoded_op: u16) void {
+    const raw = std.math.cast(u8, encoded_op) orelse return;
+    if (vm.execution_tier_inventory) |inventory|
+        inventory.recordRuntimeOperation(@fromBackingInt(@intCast(raw)));
+}
+
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
     if (func.is_strict) return this_val;
@@ -4142,7 +4148,7 @@ fn nativeArrayPushGrow(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) 
     const inputs: []const Value = @ptrCast(frame.scratch.?[first .. first + count]);
     if (!Interpreter.isIntrinsicArrayPush(inputs[0]))
         return @backingInt(jit.NativeOperationStatus.host_trap);
-    vm.recordExecutionTier(.runtime_operation_calls);
+    recordRuntimeOperation(vm, descriptor.bytecode_op);
     if (builtin.is_test) {
         _ = optimizer_native_array_narrow_callbacks.fetchAdd(1, .monotonic);
         if (inputs[1].isObject()) if (inputs[1].asObj().elementsState()) |elements| {
@@ -6280,7 +6286,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (vm.native_legacy_direct_depth != 0 and
         !nativeOperationCanElideLegacyFrame(vm, metadata, operation_id, descriptor, inputs))
         return @backingInt(jit.NativeOperationStatus.invalidated);
-    vm.recordExecutionTier(.runtime_operation_calls);
+    recordRuntimeOperation(vm, descriptor.bytecode_op);
     if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericValue(Value.fromRawBits(inputs[0])));
     if ((descriptor.bytecode_op == @backingInt(bc.Op.neg) or
@@ -7056,6 +7062,9 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     );
     try std.testing.expectEqual(Value.num(42).rawBits(), frame.operation_value_bits);
     try std.testing.expectEqual(@as(u64, 1), inventory.snapshot().count(.runtime_operation_calls));
+    const operation_snapshot = inventory.runtimeOperationSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), operation_snapshot.count(.to_numeric));
+    try std.testing.expectEqual(@as(u64, 0), operation_snapshot.count(.load_var));
     try std.testing.expectEqual(
         @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 1),

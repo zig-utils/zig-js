@@ -544,6 +544,16 @@ fn printTierAttributionRow(
         const metric: js.QuickBinaryMetric = @fromBackingInt(@intCast(field_value));
         try writer.print("\"{s}\":{d}", .{ name, snapshot.quick_binary.count(metric) });
     }
+    try writer.writeAll("},\"runtime_operations\":{");
+    var operation_index: usize = 0;
+    inline for (comptime std.meta.tags(js.bytecode.Op)) |op| {
+        const count = snapshot.runtime_operations.count(op);
+        if (count != 0) {
+            if (operation_index != 0) try writer.writeByte(',');
+            try writer.print("\"{s}\":{d}", .{ @tagName(op), count });
+            operation_index += 1;
+        }
+    }
     try writer.writeAll("},\"timing\":{");
     inline for (comptime std.meta.fieldNames(@TypeOf(snapshot.timing)), 0..) |name, index| {
         if (index != 0) try writer.writeByte(',');

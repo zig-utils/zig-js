@@ -3184,6 +3184,19 @@ pub const ExecutionTierSnapshot = struct {
     }
 };
 
+pub const runtime_operation_kind_count = @as(usize, std.math.maxInt(u8)) + 1;
+
+/// Per-bytecode attribution for optimized code that crosses the narrow native
+/// runtime-operation ABI. Only profiled contexts install this inventory, so
+/// ordinary execution retains the existing null-check-only cost.
+pub const RuntimeOperationSnapshot = struct {
+    counts: [runtime_operation_kind_count]u64,
+
+    pub fn count(self: *const RuntimeOperationSnapshot, op: bc.Op) u64 {
+        return self.counts[@backingInt(op)];
+    }
+};
+
 pub const QuickBinaryMetric = enum(u8) {
     number_hits,
     number_misses,
@@ -3225,6 +3238,7 @@ pub const TierTimingSnapshot = struct {
 pub const ExecutionTierInventory = struct {
     counts: [execution_tier_metric_count]std.atomic.Value(u64) = @splat(.init(0)),
     quick_binary: [quick_binary_metric_count]std.atomic.Value(u64) = @splat(.init(0)),
+    runtime_operations: [runtime_operation_kind_count]std.atomic.Value(u64) = @splat(.init(0)),
     timing: AtomicTierTiming = .{},
 
     const AtomicTierTiming = struct {
@@ -3264,6 +3278,11 @@ pub const ExecutionTierInventory = struct {
 
     pub fn recordQuickBinaryMany(self: *ExecutionTierInventory, metric: QuickBinaryMetric, count: u64) void {
         _ = self.quick_binary[@backingInt(metric)].fetchAdd(count, .monotonic);
+    }
+
+    pub fn recordRuntimeOperation(self: *ExecutionTierInventory, op: bc.Op) void {
+        self.record(.runtime_operation_calls);
+        _ = self.runtime_operations[@backingInt(op)].fetchAdd(1, .monotonic);
     }
 
     pub fn recordBaselineTierUp(self: *ExecutionTierInventory, elapsed_ns: u64, succeeded: bool) void {
@@ -3308,6 +3327,12 @@ pub const ExecutionTierInventory = struct {
     pub fn quickBinarySnapshot(self: *const ExecutionTierInventory) QuickBinarySnapshot {
         var result: QuickBinarySnapshot = undefined;
         for (&self.quick_binary, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
+        return result;
+    }
+
+    pub fn runtimeOperationSnapshot(self: *const ExecutionTierInventory) RuntimeOperationSnapshot {
+        var result: RuntimeOperationSnapshot = undefined;
+        for (&self.runtime_operations, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
         return result;
     }
 
