@@ -74,6 +74,18 @@ pub const AwaitingActivationOrRejectionLink = extern union {
     rejection_next: ?*Promise,
 };
 
+/// HostPromiseRejectionTracker state is published only while holding the
+/// Promise state lock (and the realm lock when a host queue is involved).
+/// Keeping its four flags in one byte preserves that transaction while keeping
+/// the Promise payload inside the collector's 224-byte payload budget.
+pub const RejectionTrackerState = packed struct(u8) {
+    is_handled: bool = false,
+    queued: bool = false,
+    notified: bool = false,
+    handled_notified: bool = false,
+    _padding: u4 = 0,
+};
+
 pub const Promise = struct {
     lock: std.atomic.Mutex = .unlocked,
     /// Immutable after construction. Concurrent-marker and parallel-mutator
@@ -100,10 +112,7 @@ pub const Promise = struct {
     reactions: std.ArrayListUnmanaged(ReactionPair) = .empty,
     /// HostPromiseRejectionTracker state. A rejection is queued only when no
     /// reaction has handled this promise; the host checkpoint consumes it once.
-    is_handled: bool = false,
-    rejection_queued: bool = false,
-    rejection_notified: bool = false,
-    rejection_handled_notified: bool = false,
+    rejection_tracker: RejectionTrackerState = .{},
     /// Selects the rejection-link arm above. Queue mutation and traversal are
     /// serialized by the owning realm lock; a Promise can enter the handled
     /// queue only after it has left the unhandled queue.
@@ -287,7 +296,7 @@ pub fn linkAwaitingAsyncActivation(p: *Promise, activation: *anyopaque) void {
     p.lockState();
     defer p.unlockState();
     if (p.state != .pending) return;
-    std.debug.assert(p.is_handled);
+    std.debug.assert(p.rejection_tracker.is_handled);
     std.debug.assert(!p.rejection_linked.load(.acquire));
     gc_mod.barrierCellFrom(p, activation);
     p.awaiting_activation_or_rejection_link.awaiting_async_activation = activation;
@@ -1239,9 +1248,9 @@ const LockedSettlement = struct {
         p.state = state;
         gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
         p.value = v;
-        if (state == .rejected and !p.is_handled and !p.rejection_queued and !p.rejection_notified) {
+        if (state == .rejected and !p.rejection_tracker.is_handled and !p.rejection_tracker.queued and !p.rejection_tracker.notified) {
             if (unhandled_queue) |rejections| {
-                p.rejection_queued = true;
+                p.rejection_tracker.queued = true;
                 rejections.append(p);
                 gc_mod.barrierCell(p);
             }
@@ -1700,7 +1709,7 @@ fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, reac
             p.unlockState();
             return err;
         };
-        p.is_handled = true;
+        p.rejection_tracker.is_handled = true;
         p.unlockState();
         return;
     }
@@ -1721,14 +1730,14 @@ fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, reac
             return err;
         };
     }
-    if (!p.is_handled and p.state == .rejected and p.rejection_notified and !p.rejection_handled_notified) {
+    if (!p.rejection_tracker.is_handled and p.state == .rejected and p.rejection_tracker.notified and !p.rejection_tracker.handled_notified) {
         if (handled_queue) |queue| {
-            p.rejection_handled_notified = true;
+            p.rejection_tracker.handled_notified = true;
             queue.append(p);
             gc_mod.barrierCell(p);
         }
     }
-    p.is_handled = true;
+    p.rejection_tracker.is_handled = true;
     const snap = .{ .state = p.state, .value = p.value };
     if (self.microtasks) |queue| {
         const reaction = if (snap.state == .fulfilled) react_f else react_r;
@@ -1762,13 +1771,13 @@ test "rejection tracker publication is allocation-free and state exact" {
     try std.testing.expect(!reject_oom.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), reject_oom.alloc_index);
     try std.testing.expectEqual(State.rejected, rejected.state);
-    try std.testing.expect(rejected.rejection_queued);
+    try std.testing.expect(rejected.rejection_tracker.queued);
     try std.testing.expectEqual(@as(usize, 1), unhandled.pendingLen());
     const notification = takeUnhandledRejection(&machine).?;
     try std.testing.expectEqual(@as(f64, 884), notification.reason.asNum());
     try std.testing.expect(notification.promise.isUndefined());
-    try std.testing.expect(!rejected.rejection_queued);
-    try std.testing.expect(rejected.rejection_notified);
+    try std.testing.expect(!rejected.rejection_tracker.queued);
+    try std.testing.expect(rejected.rejection_tracker.notified);
     try std.testing.expect(unhandled.isEmpty());
 
     // Repeated settlement and a Promise handled before rejection also remain
@@ -1778,11 +1787,11 @@ test "rejection tracker publication is allocation-free and state exact" {
     machine.unhandled_rejections = &unused_queue;
     try settle(&machine, &rejected, .rejected, Value.num(885));
     try std.testing.expectEqual(@as(f64, 884), rejected.value.asNum());
-    var prehandled = Promise{ .is_handled = true };
+    var prehandled = Promise{ .rejection_tracker = .{ .is_handled = true } };
     try settle(&machine, &prehandled, .rejected, Value.num(886));
     try std.testing.expectEqual(State.rejected, prehandled.state);
     try std.testing.expectEqual(@as(f64, 886), prehandled.value.asNum());
-    try std.testing.expect(!prehandled.rejection_queued);
+    try std.testing.expect(!prehandled.rejection_tracker.queued);
     try std.testing.expect(unused_queue.isEmpty());
     try std.testing.expect(!no_queue_allocation.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), no_queue_allocation.alloc_index);
@@ -1793,8 +1802,8 @@ test "rejection tracker publication is allocation-free and state exact" {
     try performThenReactions(&machine, &rejected, reaction, reaction);
     try std.testing.expect(!handled_oom.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), handled_oom.alloc_index);
-    try std.testing.expect(rejected.is_handled);
-    try std.testing.expect(rejected.rejection_handled_notified);
+    try std.testing.expect(rejected.rejection_tracker.is_handled);
+    try std.testing.expect(rejected.rejection_tracker.handled_notified);
     try std.testing.expectEqual(@as(usize, 1), handled.pendingLen());
     try std.testing.expect(takeHandledRejection(&machine).?.isUndefined());
     try std.testing.expect(handled.isEmpty());
@@ -1973,19 +1982,19 @@ test "settled then reserves its job before handled tracker publication" {
         .microtasks = &queue,
         .handled_rejections = &handled,
     };
-    var p = Promise{ .state = .rejected, .value = Value.num(885), .rejection_notified = true };
+    var p = Promise{ .state = .rejected, .value = Value.num(885), .rejection_tracker = .{ .notified = true } };
     const reaction = Reaction{ .handler = null, .detached = true };
 
     try std.testing.expectError(error.OutOfMemory, performThenReactions(&machine, &p, reaction, reaction));
-    try std.testing.expect(!p.is_handled);
-    try std.testing.expect(!p.rejection_handled_notified);
+    try std.testing.expect(!p.rejection_tracker.is_handled);
+    try std.testing.expect(!p.rejection_tracker.handled_notified);
     try std.testing.expect(handled.isEmpty());
     try std.testing.expect(queue.isEmpty());
 
     machine.arena = a;
     try performThenReactions(&machine, &p, reaction, reaction);
-    try std.testing.expect(p.is_handled);
-    try std.testing.expect(p.rejection_handled_notified);
+    try std.testing.expect(p.rejection_tracker.is_handled);
+    try std.testing.expect(p.rejection_tracker.handled_notified);
     try std.testing.expectEqual(@as(usize, 1), handled.pendingLen());
     try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
     try std.testing.expect(takeHandledRejection(&machine).?.isUndefined());
@@ -2063,12 +2072,12 @@ pub fn takeUnhandledRejection(self: *Interpreter) ?RejectionNotification {
     defer self.unlockRealm();
     while (queue.pop()) |rejected| {
         rejected.lockState();
-        rejected.rejection_queued = false;
-        if (rejected.is_handled or rejected.rejection_notified or rejected.state != .rejected) {
+        rejected.rejection_tracker.queued = false;
+        if (rejected.rejection_tracker.is_handled or rejected.rejection_tracker.notified or rejected.state != .rejected) {
             rejected.unlockState();
             continue;
         }
-        rejected.rejection_notified = true;
+        rejected.rejection_tracker.notified = true;
         const notification = RejectionNotification{
             .reason = rejected.value,
             .promise = if (rejected.wrapper) |wrapper| Value.obj(wrapper) else Value.undef(),

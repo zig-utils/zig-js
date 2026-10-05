@@ -63029,7 +63029,7 @@ test "Promise job await dequeue reserves before observing its callback" {
 }
 
 test "Promise job await preparation OOM consumes its owned rejection slot" {
-    var target = promise.Promise{ .is_handled = true };
+    var target = promise.Promise{ .rejection_tracker = .{ .is_handled = true } };
     var storage: [2]promise.Microtask = undefined;
     storage[0] = .{
         .kind = .thenable,

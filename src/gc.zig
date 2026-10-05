@@ -5013,9 +5013,12 @@ test "Object fits the 128-byte GC slab and cold sidecar fits 256 bytes" {
 
 test "Promise fits the 256-byte GC slab" {
     // The rejection successor shares the mutually-exclusive awaiting slot and
-    // fulfill/reject reactions share one paired list, preserving the exact
-    // allocation class while making both publication paths transactional.
-    try std.testing.expect(@sizeOf(promise.Promise) <= 256);
+    // fulfill/reject reactions share one paired list. Rejection-tracker flags
+    // share one lock-protected byte so the 32-byte collector header plus this
+    // payload preserves the exact allocation class while both publication
+    // paths remain transactional.
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(promise.RejectionTrackerState));
+    try std.testing.expect(@sizeOf(promise.Promise) <= 224);
     try std.testing.expectEqual(@as(usize, 256), Heap.cellAllocationBytes(promise.Promise));
 }
 

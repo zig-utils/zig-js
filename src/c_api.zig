@@ -11387,7 +11387,7 @@ fn privateAsymmetricInput(matcher: PrivateAsymmetricMatcher, other: Value) ?Valu
     const target = promise.promiseOf(other) orelse return null;
     target.lockState();
     defer target.unlockState();
-    target.is_handled = true;
+    target.rejection_tracker.is_handled = true;
     return switch (target.state) {
         .fulfilled => if (matcher.promise_mode == .resolves) target.value else null,
         .rejected => if (matcher.promise_mode == .rejects) target.value else null,
@@ -15769,7 +15769,7 @@ export fn JSC__JSModuleLoader__evaluate(
     const result = internal_promise.value;
     // This boundary synchronously consumes a rejected import into its explicit
     // exception out-channel, so it is not an unhandled host rejection.
-    if (state == .rejected) internal_promise.is_handled = true;
+    if (state == .rejected) internal_promise.rejection_tracker.is_handled = true;
     internal_promise.unlockState();
     return switch (state) {
         .fulfilled => privateEncodeModuleLoaderValue(context, result),
