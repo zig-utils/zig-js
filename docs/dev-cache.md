@@ -35,13 +35,15 @@ zig build test-concurrency -Dtest-filter='atomic increments'
 ```
 
 They use the same target, optimization mode, ThreadSanitizer option, external
-dependencies, and production source modules as `zig build test`, but do not
-link the unrelated C-API/corpus tests. `test-jit` is a low-level root.
-The VM/concurrency steps are small semantic executables because importing the
-production interpreter through `zig test` recursively discovers the entire
-inline integration suite; their filter is a runtime selector, so distinct VM or
-concurrency filters reuse one linked artifact. Run `zig build test` once after a
-batch as the authoritative full-suite gate.
+dependencies, and production source modules as `zig build test`. Importing the
+production JIT through `zig test` recursively discovers the inline integration
+suite: a clean October 6, 2026 build with Zig `0.17.0-dev.2163+89ff10d56`
+linked 2,283 tests. `test-jit` applies the runtime filter `jit` by default and
+executed 132 of them (131 passed, one platform skip); `-Dtest-filter` replaces
+that default for narrower probes. The VM/concurrency steps are small semantic
+executables for the same reason. Runtime selection lets distinct filters reuse
+one linked artifact. Run `zig build test-parallel` after a batch as the
+authoritative full-suite gate.
 
 ## Measured focused-build bound
 

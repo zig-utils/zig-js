@@ -1505,10 +1505,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     focused_jit_tests.root_module.addOptions("private_abi_options", private_abi_options);
+    focused_jit_tests.root_module.addOptions("wasm_test_options", wasm_test_options);
     const run_focused_jit_tests = b.addRunArtifact(focused_jit_tests);
-    if (test_filter) |filter| {
-        run_focused_jit_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
-    }
+    // Imported production modules bring their transitive test declarations
+    // into the linked artifact. Execute only JIT-owned namespaces by default;
+    // an explicit filter remains authoritative for narrower probes.
+    run_focused_jit_tests.setEnvironmentVariable("UNIT_TEST_FILTER", test_filter orelse "jit");
     const focused_jit_step = b.step("test-jit", "Run focused production baseline-JIT tests");
     focused_jit_step.dependOn(&run_focused_jit_tests.step);
 
