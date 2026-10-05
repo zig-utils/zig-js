@@ -27100,6 +27100,130 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
     try std.testing.expectEqual(build_artifact, build_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
 }
 
+test "optimizer stable native builtin calls survive a moving GC checkpoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+
+    const source =
+        \\globalThis.optimizerJsonDiscard = [];
+        \\for (var dead = 0; dead < 4096; dead = dead + 1)
+        \\  optimizerJsonDiscard.push({ dead: dead, child: { value: dead + 1 } });
+        \\function optimizerJsonMoving(n, held) {
+        \\  var cursor = 0;
+        \\  var total = 0;
+        \\  while (cursor < n) {
+        \\    var encoded = JSON.stringify(held);
+        \\    var decoded = JSON.parse(encoded);
+        \\    total = total + decoded.marker;
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\function optimizerIdentityMoving(n, held) {
+        \\  var cursor = 0;
+        \\  while (cursor < n) {
+        \\    Object.is(held, held);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return held.marker;
+        \\}
+        \\globalThis.optimizerJsonWitness = { marker: 17, payload: "stable" };
+        \\for (var warm = 0; warm < 12; warm = warm + 1) {
+        \\  optimizerJsonMoving(4, optimizerJsonWitness);
+        \\  optimizerIdentityMoving(4, optimizerJsonWitness);
+        \\}
+        \\optimizerJsonDiscard = null;
+    ;
+
+    const native_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .profile_execution_tiers = true,
+    });
+    defer native_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    _ = try native_ctx.evaluate(source);
+    _ = try bytecode_ctx.evaluate(source);
+    const function_object = native_ctx.global_object.getOwn("optimizerJsonMoving").?.asObj();
+    const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
+    const chunk = function.chunk.?;
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var linked_calls: usize = 0;
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.bytecode_op != @backingInt(bc.Op.call_with_this)) continue;
+        try std.testing.expect(operations.callLinkFor(operation_id).?.nativeTarget() != 0);
+        linked_calls += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), linked_calls);
+    const identity_object = native_ctx.global_object.getOwn("optimizerIdentityMoving").?.asObj();
+    const identity_function: *interp.Function = @ptrCast(@alignCast(identity_object.jsFunction().?));
+    const identity_chunk = identity_function.chunk.?;
+    const identity_artifact = identity_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const identity_operations = identity_artifact.native_operations orelse
+        return error.TestUnexpectedResult;
+    var identity_linked_calls: usize = 0;
+    for (identity_operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.bytecode_op != @backingInt(bc.Op.call_with_this)) continue;
+        try std.testing.expect(identity_operations.callLinkFor(operation_id).?.nativeTarget() != 0);
+        identity_linked_calls += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), identity_linked_calls);
+
+    const handle = try native_ctx.protectValue(native_ctx.global_object.getOwn("optimizerJsonWitness").?);
+    defer std.debug.assert(native_ctx.unprotectValue(handle));
+    native_ctx.collectGarbage();
+    bytecode_ctx.collectGarbage();
+    const witness_before = @intFromPtr(handle.get().asObj());
+    const compactions_before = native_ctx.gc_moving_safepoint_compactions.load(.monotonic);
+    const callbacks_before = native_ctx.tierAttributionSnapshot().runtime_operations.count(.call_with_this);
+    const hits_before = vm.optimizerNativeBuiltinCallHitsForTesting();
+    const osr_before = vm.optimizerOsrEntriesForTesting();
+
+    try std.testing.expect(native_ctx.requestGarbageCompaction());
+    const native_identity = try native_ctx.evaluate(
+        "optimizerIdentityMoving(20000, optimizerJsonWitness)",
+    );
+    const bytecode_identity = try bytecode_ctx.evaluate(
+        "optimizerIdentityMoving(20000, optimizerJsonWitness)",
+    );
+    try std.testing.expectEqual(bytecode_identity.rawBits(), native_identity.rawBits());
+    try std.testing.expectEqual(@as(f64, 17), native_identity.asNum());
+    try std.testing.expectEqual(
+        compactions_before + 1,
+        native_ctx.gc_moving_safepoint_compactions.load(.monotonic),
+    );
+    try std.testing.expect(!native_ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(witness_before != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 17), handle.get().asObj().getOwn("marker").?.asNum());
+    try std.testing.expectEqual(identity_artifact, identity_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
+
+    const native_result = try native_ctx.evaluate(
+        "optimizerJsonMoving(2000, optimizerJsonWitness)",
+    );
+    const bytecode_result = try bytecode_ctx.evaluate(
+        "optimizerJsonMoving(2000, optimizerJsonWitness)",
+    );
+    try std.testing.expectEqual(bytecode_result.rawBits(), native_result.rawBits());
+    try std.testing.expectEqual(@as(f64, 34_000), native_result.asNum());
+    try std.testing.expectEqual(
+        callbacks_before,
+        native_ctx.tierAttributionSnapshot().runtime_operations.count(.call_with_this),
+    );
+    try std.testing.expect(vm.optimizerNativeBuiltinCallHitsForTesting() > hits_before);
+    try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before);
+    try std.testing.expectEqual(artifact, chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
+}
+
 test "GC compaction rewrites public Zig protected handles" {
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,

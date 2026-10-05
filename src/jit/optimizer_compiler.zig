@@ -3858,6 +3858,8 @@ const DirectRuntimeAccess = struct {
     fallback_count: usize = 0,
     completions: [4]usize = undefined,
     completion_count: usize = 0,
+    statuses: [2]usize = undefined,
+    status_count: usize = 0,
 
     fn addFallback(self: *DirectRuntimeAccess, branch: usize, compare: bool) !void {
         if (self.fallback_count >= self.fallbacks.len) return error.UnsupportedChunk;
@@ -3878,6 +3880,17 @@ const DirectRuntimeAccess = struct {
         if (self.completion_count >= self.completions.len) return error.UnsupportedChunk;
         self.completions[self.completion_count] = branch;
         self.completion_count += 1;
+    }
+
+    fn addStatus(self: *DirectRuntimeAccess, branch: usize) !void {
+        if (self.status_count >= self.statuses.len) return error.UnsupportedChunk;
+        self.statuses[self.status_count] = branch;
+        self.status_count += 1;
+    }
+
+    fn patchStatuses(self: DirectRuntimeAccess, assembler: *aarch64.Assembler, status: usize) !void {
+        for (self.statuses[0..self.status_count]) |branch|
+            try assembler.patchBranch(branch, status);
     }
 
     fn patchCompletions(self: DirectRuntimeAccess, assembler: *aarch64.Assembler, completion: usize) !void {
@@ -4714,6 +4727,51 @@ fn emitDirectDenseArrayPush(
     return direct;
 }
 
+fn emitDirectNativeBuiltinCall(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.call_with_this) or descriptor.input_count < 2)
+        return null;
+    const link_offset = std.math.add(
+        usize,
+        std.math.mul(usize, operation.immediate, @sizeOf(jit.NativeCallLink)) catch
+            return error.UnsupportedChunk,
+        @offsetOf(jit.NativeCallLink, "native_target"),
+    ) catch return error.UnsupportedChunk;
+
+    var direct = DirectRuntimeAccess{};
+    try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
+    try assembler.load8(10, 10, 0);
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+    try assembler.load64(17, 12, frameOffset("call_links"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(17), true);
+    try assembler.movImmediate64(10, link_offset);
+    try assembler.addRegister64(17, 17, 10);
+    try assembler.loadAcquire64(10, 17);
+    try direct.addFallback(try assembler.branchZero32Placeholder(10), true);
+    try assembler.load64(17, 12, frameOffset("native_builtin_call"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(17), true);
+
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.moveRegister64(0, 12);
+    try assembler.movImmediate32(1, @intCast(operation.immediate));
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+
+    try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.fallback));
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try direct.addStatus(try assembler.branchPlaceholder());
+    return direct;
+}
+
 fn emitRuntimeOperation(
     assembler: *aarch64.Assembler,
     returns: *aarch64.ReturnBranches,
@@ -4764,17 +4822,30 @@ fn emitRuntimeOperation(
         std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
     );
 
-    const direct_runtime_access = (try emitDirectGlobalBindingRead(assembler, program, operation, descriptor)) orelse
+    var direct_runtime_access = (try emitDirectGlobalBindingRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
         (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
         (try emitDirectUnsigned32BitAnd(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayWrite(assembler, operation, descriptor)) orelse
-        (try emitDirectDenseArrayAppend(assembler, operation, descriptor)) orelse
-        try emitDirectDenseArrayPush(assembler, returns, operation, descriptor);
+        try emitDirectDenseArrayAppend(assembler, operation, descriptor);
+    var secondary_runtime_access: ?DirectRuntimeAccess = null;
+    if (direct_runtime_access == null) {
+        direct_runtime_access = try emitDirectDenseArrayPush(assembler, returns, operation, descriptor);
+        if (direct_runtime_access != null) {
+            const secondary_position = assembler.position();
+            try direct_runtime_access.?.patchFallbacks(assembler, secondary_position);
+            secondary_runtime_access = try emitDirectNativeBuiltinCall(assembler, operation, descriptor);
+        } else {
+            direct_runtime_access = try emitDirectNativeBuiltinCall(assembler, operation, descriptor);
+        }
+    }
     const callback_position = assembler.position();
-    if (direct_runtime_access) |direct| try direct.patchFallbacks(assembler, callback_position);
+    if (secondary_runtime_access) |direct|
+        try direct.patchFallbacks(assembler, callback_position)
+    else if (direct_runtime_access) |direct|
+        try direct.patchFallbacks(assembler, callback_position);
 
     try assembler.load64(17, 12, frameOffset("operation"));
     try assembler.compareImmediate64(17, 0);
@@ -4790,6 +4861,10 @@ fn emitRuntimeOperation(
     try assembler.popPair(15, 16);
     try assembler.popPair(13, 14);
     try assembler.popPair(8, 12);
+
+    const status_position = assembler.position();
+    if (secondary_runtime_access) |direct| try direct.patchStatuses(assembler, status_position);
+    if (direct_runtime_access) |direct| try direct.patchStatuses(assembler, status_position);
 
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.value));
     const non_value = try assembler.branchConditionPlaceholder(.ne);
@@ -4828,6 +4903,7 @@ fn emitRuntimeOperation(
     const completion_position = assembler.position();
     try assembler.patchBranch(done, completion_position);
     if (direct_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
+    if (secondary_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
 }
 
 fn emitStepIncrement(assembler: *aarch64.Assembler, steps: u12) !void {
@@ -6054,6 +6130,34 @@ test "optimizer lowering publishes an executable explicit-this call" {
     try std.testing.expectEqual(roots, map.scratch_pointer_slots & roots);
 }
 
+test "optimizer native builtin links address the full descriptor table" {
+    var code: [512]u8 = undefined;
+    var assembler = aarch64.Assembler.init(&code);
+    const high_operation_id: u64 = jit.numeric_scratch_capacity - 1;
+    try std.testing.expect(
+        high_operation_id * @as(u64, @sizeOf(jit.NativeCallLink)) +
+            @as(u64, @offsetOf(jit.NativeCallLink, "native_target")) > std.math.maxInt(u12),
+    );
+    const direct = try emitDirectNativeBuiltinCall(
+        &assembler,
+        .{
+            .kind = .runtime_operation,
+            .destination = 0,
+            .block = 0,
+            .immediate = high_operation_id,
+        },
+        .{
+            .bytecode_op = @backingInt(bc.Op.call_with_this),
+            .first_input = 0,
+            .input_count = 2,
+            .deopt_index = 0,
+            .step_delta = 1,
+            .origin = 0,
+        },
+    );
+    try std.testing.expect(direct != null);
+}
+
 test "optimizer lowering publishes executable invocation forms" {
     const Case = struct {
         op: bc.Op,
@@ -6951,6 +7055,8 @@ test "optimizer compacts function-wide SSA before loop OSR" {
 
 test "optimizer loop executes primitive string length without callbacks" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());

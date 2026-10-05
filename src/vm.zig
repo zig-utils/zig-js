@@ -1330,6 +1330,7 @@ var optimizer_native_array_growth_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_array_narrow_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_call_link_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_call_link_publications: std.atomic.Value(u64) = .init(0);
+var optimizer_native_builtin_call_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -1356,6 +1357,11 @@ pub fn optimizerNativePropertyStatsForTesting() OptimizerNativePropertyStats {
 pub fn optimizerNativeEnvironmentLoadCallbacksForTesting() u64 {
     std.debug.assert(builtin.is_test);
     return optimizer_native_environment_load_callbacks.load(.monotonic);
+}
+
+pub fn optimizerNativeBuiltinCallHitsForTesting() u64 {
+    std.debug.assert(builtin.is_test);
+    return optimizer_native_builtin_call_hits.load(.monotonic);
 }
 
 pub const OptimizerNativeIndexStats = struct {
@@ -6085,6 +6091,38 @@ fn tryLinkedNativeCall(
     return result;
 }
 
+fn directNativeFunction(callee: Value) ?value.NativeFn {
+    if (!callee.isObject()) return null;
+    const object = callee.asObj();
+    // These branches precede `obj.native` in [[Call]]. A link may bypass only
+    // an object for which the canonical dispatcher would select the native
+    // function immediately.
+    if (object.proxyHandler() != null or object.proxy_revoked or object.boundFunction() != null or
+        object.errorCtor() != null or object.hostClassHooks() != null)
+        return null;
+    return object.native;
+}
+
+fn updateNativeBuiltinCallLink(
+    vm: *Interpreter,
+    maybe_link: ?*jit.NativeCallLink,
+    callee: Value,
+) void {
+    const link = maybe_link orelse return;
+    // Shared-realm property publication uses a different synchronization
+    // model. Refuse both warming and consumption rather than reading mutable
+    // callable state without its owning lock.
+    if (bc.ic_seqlock_enabled.load(.monotonic)) return;
+    if (directNativeFunction(callee)) |native| {
+        if (link.publishNative(@intFromPtr(native))) {
+            if (builtin.is_test) _ = optimizer_native_call_link_publications.fetchAdd(1, .monotonic);
+            if (vm.jit_owner) |owner| owner.recordCallLinkPublication();
+        }
+    } else if (link.resetNative()) {
+        if (vm.jit_owner) |owner| owner.recordCallLinkReset();
+    }
+}
+
 fn nativeDirectNamedReadIsData(
     cache: ?*const jit.NativePropertyCache,
     object_value: Value,
@@ -6551,9 +6589,10 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             callEvalSpreadValue(vm, values[0], values[1], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this_spread) and values.len == 3)
             callSpreadValue(vm, values[0], values[2], values[1], nativeCallSite(metadata, operation_id))
-        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and values.len >= 2)
-            callValue(vm, values[0], values[2..], values[1], nativeCallSite(metadata, operation_id))
-        else if (descriptor.bytecode_op == @backingInt(bc.Op.new_call) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and values.len >= 2) result: {
+            updateNativeBuiltinCallLink(vm, metadata.callLinkFor(operation_id), values[0]);
+            break :result callValue(vm, values[0], values[2..], values[1], nativeCallSite(metadata, operation_id));
+        } else if (descriptor.bytecode_op == @backingInt(bc.Op.new_call) and values.len >= 1)
             constructAtSite(vm, values[0], values[1..], nativeEvaluationSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.new_spread) and values.len == 2)
             constructSpreadValueAtSite(vm, values[0], values[1], nativeEvaluationSite(metadata, operation_id))
@@ -6575,6 +6614,42 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         return finishNativeOperation(frame, vm, operation_id, result);
     }
     return @backingInt(jit.NativeOperationStatus.host_trap);
+}
+
+fn nativeBuiltinCall(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
+    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
+        return @backingInt(jit.NativeOperationStatus.fallback)));
+    const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse
+        return @backingInt(jit.NativeOperationStatus.fallback)));
+    if (operation_id >= metadata.descriptors.len or frame.scratch == null or
+        bc.ic_seqlock_enabled.load(.monotonic) or vm.native_legacy_direct_depth != 0)
+        return @backingInt(jit.NativeOperationStatus.fallback);
+    const descriptor = metadata.descriptors[operation_id];
+    if (frame.operation_detail != operation_id or frame.exit_ip != descriptor.origin or
+        frame.deopt_index != descriptor.deopt_index or descriptor.step_delta == 0 or
+        descriptor.bytecode_op != @backingInt(bc.Op.call_with_this) or descriptor.input_count < 2 or
+        (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
+            descriptor.exceptional_target >= metadata.exceptional_targets.len))
+        return @backingInt(jit.NativeOperationStatus.fallback);
+    const first: usize = descriptor.first_input;
+    const count: usize = descriptor.input_count;
+    if (first > jit.numeric_scratch_capacity or count > jit.numeric_scratch_capacity - first)
+        return @backingInt(jit.NativeOperationStatus.fallback);
+    const values: []const Value = @ptrCast(frame.scratch.?[first .. first + count]);
+    const link = metadata.callLinkFor(operation_id) orelse
+        return @backingInt(jit.NativeOperationStatus.fallback);
+    const linked_target = link.nativeTarget();
+    const native = directNativeFunction(values[0]) orelse
+        return @backingInt(jit.NativeOperationStatus.fallback);
+    if (linked_target == 0 or linked_target != @intFromPtr(native))
+        return @backingInt(jit.NativeOperationStatus.fallback);
+    if (builtin.is_test) _ = optimizer_native_builtin_call_hits.fetchAdd(1, .monotonic);
+    return finishNativeOperation(
+        frame,
+        vm,
+        operation_id,
+        vm.callNativeObject(values[0].asObj(), native, values[2..], values[1]),
+    );
 }
 
 fn nativeMovingSafepoint(frame: *jit.NativeFrame) callconv(.c) void {
@@ -7495,6 +7570,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .steps = &vm.steps,
         .runtime_context = vm,
         .global_binding_caches = if (native.native_operations) |metadata| metadata.global_binding_caches.ptr else null,
+        .call_links = if (native.native_operations) |metadata| metadata.call_links.ptr else null,
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
         .operation_context = if (native.native_operations) |metadata| @constCast(metadata) else null,
         .checkpoint = nativeCheckpoint,
@@ -7503,6 +7579,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .property_write_barrier = nativePropertyWriteBarrier,
         .array_append_guard = nativeArrayAppendGuard,
         .array_push_grow = nativeArrayPushGrow,
+        .native_builtin_call = nativeBuiltinCall,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= vm.step_budget) vm.step_budget - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
@@ -7578,6 +7655,7 @@ fn tryRunOsrNative(
         .steps = &vm.steps,
         .runtime_context = vm,
         .global_binding_caches = if (native.native_operations) |operations| operations.global_binding_caches.ptr else null,
+        .call_links = if (native.native_operations) |operations| operations.call_links.ptr else null,
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
         .operation_context = if (native.native_operations) |operations| @constCast(operations) else null,
         .checkpoint = nativeCheckpoint,
@@ -7586,6 +7664,7 @@ fn tryRunOsrNative(
         .property_write_barrier = nativePropertyWriteBarrier,
         .array_append_guard = nativeArrayAppendGuard,
         .array_push_grow = nativeArrayPushGrow,
+        .native_builtin_call = nativeBuiltinCall,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= vm.step_budget) vm.step_budget - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
@@ -16237,6 +16316,238 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     // stale-target half of the same telemetry, and a spurious reset would both
     // cost the direct-call path and forge writer/writer evidence.
     try std.testing.expectEqual(@as(u64, 0), owner.optimizerCallLinkResets());
+}
+
+test "vm: optimizer native builtin link preserves receiver arguments steps and catch" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const State = struct {
+        calls: u64 = 0,
+        last_this: u64 = 0,
+        first: f64 = 0,
+        second: f64 = 0,
+        throw_now: bool = false,
+    };
+    const Native = struct {
+        fn call(raw: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const active = machine.active_native orelse
+                return machine.throwError("TypeError", "missing active native");
+            const state: *State = @ptrCast(@alignCast(active.private_data orelse
+                return machine.throwError("TypeError", "missing native state")));
+            if (args.len != 2 or !this_value.isObject() or !args[0].isNumber() or !args[1].isNumber())
+                return machine.throwError("TypeError", "bad native call order");
+            state.calls += 1;
+            state.last_this = this_value.rawBits();
+            state.first = args[0].asNum();
+            state.second = args[1].asNum();
+            if (state.throw_now) return machine.throwError("RangeError", "native boom");
+            const base = this_value.asObj().getOwn("base") orelse
+                return machine.throwError("TypeError", "missing receiver base");
+            return Value.num(base.asNum() * 100 + state.first * 10 + state.second);
+        }
+    };
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var inventory = interp.ExecutionTierInventory{};
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    var state = State{};
+    const native = try gc_mod.allocObj(allocator);
+    native.* = .{ .native = Native.call, .private_data = &state };
+    const holder = try machine.newObject();
+    try machine.setProp(holder.asObj(), "base", Value.num(7));
+    try machine.setProp(holder.asObj(), "m", Value.obj(native));
+    try env.put("holder", holder);
+
+    const source =
+        \\function invoke(o, a, b) { try { return o.m(a, b); } catch (e) { return e.name + ":" + e.message; } }
+        \\invoke(holder, 0, 2); invoke(holder, 1, 2); invoke(holder, 2, 2); invoke(holder, 3, 2);
+        \\invoke(holder, 4, 2); invoke(holder, 5, 2); invoke(holder, 6, 2); invoke(holder, 7, 2);
+        \\invoke(holder, 8, 2); invoke(holder, 9, 2); invoke(holder, 10, 2); invoke(holder, 11, 2)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    try std.testing.expectEqual(@as(f64, 812), (try run(&machine, root, null)).asNum());
+    const invoke = env.get("invoke") orelse return error.TestUnexpectedResult;
+    const invoke_chunk = root.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    const artifact = invoke_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var linked_operation: ?usize = null;
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this)) linked_operation = operation_id;
+    }
+    const operation_id = linked_operation orelse return error.TestUnexpectedResult;
+    try std.testing.expect(operations.callLinkFor(operation_id).?.nativeTarget() != 0);
+
+    const warm_start = machine.steps;
+    try std.testing.expectEqual(
+        @as(f64, 734),
+        (try callValue(&machine, invoke, &.{ holder, Value.num(3), Value.num(4) }, Value.undef(), .none)).asNum(),
+    );
+    const warm_steps = machine.steps - warm_start;
+    const callbacks_after_warm = inventory.runtimeOperationSnapshot().count(.call_with_this);
+    const hits_after_warm = optimizer_native_builtin_call_hits.load(.monotonic);
+    const direct_start = machine.steps;
+    try std.testing.expectEqual(
+        @as(f64, 734),
+        (try callValue(&machine, invoke, &.{ holder, Value.num(3), Value.num(4) }, Value.undef(), .none)).asNum(),
+    );
+    try std.testing.expectEqual(warm_steps, machine.steps - direct_start);
+    try std.testing.expectEqual(callbacks_after_warm, inventory.runtimeOperationSnapshot().count(.call_with_this));
+    try std.testing.expect(optimizer_native_builtin_call_hits.load(.monotonic) > hits_after_warm);
+    try std.testing.expectEqual(holder.rawBits(), state.last_this);
+    try std.testing.expectEqual(@as(f64, 3), state.first);
+    try std.testing.expectEqual(@as(f64, 4), state.second);
+
+    state.throw_now = true;
+    const calls_before_throw = state.calls;
+    const callbacks_before_throw = inventory.runtimeOperationSnapshot().count(.call_with_this);
+    const hits_before_throw = optimizer_native_builtin_call_hits.load(.monotonic);
+    try std.testing.expectEqualStrings(
+        "RangeError:native boom",
+        (try callValue(&machine, invoke, &.{ holder, Value.num(5), Value.num(6) }, Value.undef(), .none)).asStr(),
+    );
+    try std.testing.expectEqual(calls_before_throw + 1, state.calls);
+    try std.testing.expectEqual(callbacks_before_throw, inventory.runtimeOperationSnapshot().count(.call_with_this));
+    try std.testing.expectEqual(hits_before_throw + 1, optimizer_native_builtin_call_hits.load(.monotonic));
+}
+
+test "vm: optimizer native builtin link yields once to proxy and accessor semantics" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const State = struct { calls: u64 = 0 };
+    const Native = struct {
+        fn call(raw: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const active = machine.active_native orelse
+                return machine.throwError("TypeError", "missing active native");
+            const state: *State = @ptrCast(@alignCast(active.private_data orelse
+                return machine.throwError("TypeError", "missing native state")));
+            if (args.len != 2 or !this_value.isObject())
+                return machine.throwError("TypeError", "bad native call");
+            state.calls += 1;
+            const base = this_value.asObj().getOwn("base") orelse
+                return machine.throwError("TypeError", "missing receiver base");
+            return Value.num(base.asNum() * 100 + args[0].asNum() * 10 + args[1].asNum());
+        }
+    };
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var inventory = interp.ExecutionTierInventory{};
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    var state = State{};
+    const native = try gc_mod.allocObj(allocator);
+    native.* = .{ .native = Native.call, .private_data = &state };
+    const holder = try machine.newObject();
+    try machine.setProp(holder.asObj(), "base", Value.num(7));
+    try machine.setProp(holder.asObj(), "m", Value.obj(native));
+    try env.put("holder", holder);
+    try env.put("nativeTarget", Value.obj(native));
+
+    const source =
+        \\var proxyCalls = 0; var getterCalls = 0;
+        \\function invoke(o, a, b) { return o.m(a, b); }
+        \\function trap(target, receiver, args) { proxyCalls = proxyCalls + 1; return Reflect.apply(target, receiver, args) + 1000; }
+        \\invoke(holder, 0, 2); invoke(holder, 1, 2); invoke(holder, 2, 2); invoke(holder, 3, 2);
+        \\invoke(holder, 4, 2); invoke(holder, 5, 2); invoke(holder, 6, 2); invoke(holder, 7, 2);
+        \\invoke(holder, 8, 2); invoke(holder, 9, 2); invoke(holder, 10, 2); invoke(holder, 11, 2);
+        \\holder.m = new Proxy(nativeTarget, { apply: trap });
+        \\var proxyResult = invoke(holder, 5, 6);
+        \\Object.defineProperty(holder, "m", { configurable: true, get: function () { getterCalls = getterCalls + 1; return nativeTarget; } });
+        \\var accessorResult = invoke(holder, 1, 2);
+        \\[proxyResult, proxyCalls, accessorResult, getterCalls].join(",")
+    ;
+    const callbacks_before = inventory.runtimeOperationSnapshot().count(.call_with_this);
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    try std.testing.expectEqualStrings("1756,1,712,1", (try run(&machine, root, null)).asStr());
+    try std.testing.expectEqual(@as(u64, 14), state.calls);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.call_with_this) > callbacks_before);
+    try std.testing.expect(owner.optimizerCallLinkPublications() >= 2);
+    try std.testing.expect(owner.optimizerCallLinkResets() >= 1);
+}
+
+test "vm: optimizer native builtin link stays cold in shared mode" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(true, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const Native = struct {
+        fn call(_: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            return args[0];
+        }
+    };
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var inventory = interp.ExecutionTierInventory{};
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    const native = try gc_mod.allocObj(allocator);
+    native.* = .{ .native = Native.call };
+    const holder = try machine.newObject();
+    try machine.setProp(holder.asObj(), "m", Value.obj(native));
+    try env.put("holder", holder);
+    const source =
+        \\function invokeShared(o, x) { return o.m(x); }
+        \\invokeShared(holder, 0); invokeShared(holder, 1); invokeShared(holder, 2); invokeShared(holder, 3);
+        \\invokeShared(holder, 4); invokeShared(holder, 5); invokeShared(holder, 6); invokeShared(holder, 7);
+        \\invokeShared(holder, 8); invokeShared(holder, 9); invokeShared(holder, 10); invokeShared(holder, 11)
+    ;
+    const hits_before = optimizer_native_builtin_call_hits.load(.monotonic);
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    try std.testing.expectEqual(@as(f64, 11), (try run(&machine, root, null)).asNum());
+    const artifact = root.fns.items[0].chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.bytecode_op != @backingInt(bc.Op.call_with_this)) continue;
+        try std.testing.expectEqual(@as(usize, 0), operations.callLinkFor(operation_id).?.nativeTarget());
+    }
+    try std.testing.expectEqual(hits_before, optimizer_native_builtin_call_hits.load(.monotonic));
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.call_with_this) > 0);
 }
 
 test "vm: optimizer native tail call replaces the current activation" {

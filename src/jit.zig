@@ -348,6 +348,10 @@ pub const NativeOperationStatus = enum(u32) {
     host_trap,
     out_of_memory,
     invalidated,
+    /// A narrow speculative callback rejected its live inputs before any
+    /// observable effect. Generated code may retry through the canonical
+    /// runtime-operation callback; no other status permits re-execution.
+    fallback,
 };
 
 /// Architecture-neutral description selected by `operation_id`. Operand
@@ -440,17 +444,21 @@ pub const NativeCallLink = struct {
     callee_identity: std.atomic.Value(usize) = .init(0),
     target_generation: std.atomic.Value(u64) = .init(0),
     target_artifact: std.atomic.Value(usize) = .init(0),
+    /// Stable Zig-native function address for a direct builtin call. The live
+    /// callable object remains in optimizer scratch and is revalidated by the
+    /// narrow callback, so this link never retains a movable GC pointer.
+    native_target: std.atomic.Value(usize) = .init(0),
 
     pub fn lookup(self: *const NativeCallLink, callee_identity: usize) ?Snapshot {
         if (callee_identity == 0) return null;
-        const before = self.version.load(.acquire);
+        const before = self.version.load(.seq_cst);
         if (before & 1 != 0) return null;
         const snapshot = Snapshot{
-            .callee_identity = self.callee_identity.load(.monotonic),
-            .target_generation = self.target_generation.load(.monotonic),
-            .target_artifact = self.target_artifact.load(.monotonic),
+            .callee_identity = self.callee_identity.load(.seq_cst),
+            .target_generation = self.target_generation.load(.seq_cst),
+            .target_artifact = self.target_artifact.load(.seq_cst),
         };
-        const after = self.version.load(.acquire);
+        const after = self.version.load(.seq_cst);
         if (before != after or after & 1 != 0 or snapshot.callee_identity != callee_identity or
             snapshot.target_artifact == 0) return null;
         return snapshot;
@@ -470,19 +478,32 @@ pub const NativeCallLink = struct {
         return self.replace(0, 0, 0);
     }
 
+    pub fn nativeTarget(self: *const NativeCallLink) usize {
+        return self.native_target.load(.acquire);
+    }
+
+    pub fn publishNative(self: *NativeCallLink, target: usize) bool {
+        if (target == 0) return false;
+        return self.native_target.swap(target, .acq_rel) != target;
+    }
+
+    pub fn resetNative(self: *NativeCallLink) bool {
+        return self.native_target.swap(0, .acq_rel) != 0;
+    }
+
     fn replace(
         self: *NativeCallLink,
         callee_identity: usize,
         target_generation: u64,
         target_artifact: usize,
     ) bool {
-        const stable = self.version.load(.acquire);
-        if (stable & 1 != 0 or self.version.cmpxchgStrong(stable, stable +% 1, .acq_rel, .acquire) != null)
+        const stable = self.version.load(.seq_cst);
+        if (stable & 1 != 0 or self.version.cmpxchgStrong(stable, stable +% 1, .seq_cst, .seq_cst) != null)
             return false;
-        self.callee_identity.store(callee_identity, .monotonic);
-        self.target_generation.store(target_generation, .monotonic);
-        self.target_artifact.store(target_artifact, .monotonic);
-        self.version.store(stable +% 2, .release);
+        self.callee_identity.store(callee_identity, .seq_cst);
+        self.target_generation.store(target_generation, .seq_cst);
+        self.target_artifact.store(target_artifact, .seq_cst);
+        self.version.store(stable +% 2, .seq_cst);
         return true;
     }
 };
@@ -706,6 +727,9 @@ pub const NativeFrame = extern struct {
     /// Artifact-owned root-global proofs, one per operation descriptor. Entries
     /// contain no managed pointers and are published after canonical lookup.
     global_binding_caches: ?[*]NativeGlobalBindingCache = null,
+    /// Artifact-owned call links. Native entries retain only immutable code
+    /// addresses; the movable callee object always comes from rooted scratch.
+    call_links: ?[*]NativeCallLink = null,
     /// Returns zero to continue or a non-zero `ExitStatus` value to leave
     /// native code after servicing budget, termination, GIL, and GC work.
     checkpoint: ?*const fn (*NativeFrame) callconv(.c) u32 = null,
@@ -749,6 +773,9 @@ pub const NativeFrame = extern struct {
     /// Allocation-capable intrinsic-push boundary. Inputs remain in the exact
     /// operation scratch range and therefore stay rooted across growth/GC.
     array_push_grow: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) u32 = null,
+    /// Exact Zig-native [[Call]] trampoline used after a stable call link is
+    /// published. It may return `.fallback` only before invoking the callee.
+    native_builtin_call: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) u32 = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
@@ -2435,7 +2462,8 @@ test "optimizer call-link writer writer and reader reset stay coherent" {
         link: *NativeCallLink,
         start: std.atomic.Value(bool) = .init(false),
         done: std.atomic.Value(u32) = .init(0),
-        failed: std.atomic.Value(bool) = .init(false),
+        tuple_failed: std.atomic.Value(bool) = .init(false),
+        native_failed: std.atomic.Value(bool) = .init(false),
 
         fn awaitStart(shared: *@This()) void {
             while (!shared.start.load(.acquire)) std.atomic.spinLoopHint();
@@ -2461,34 +2489,50 @@ test "optimizer call-link writer writer and reader reset stay coherent" {
 
         fn read(shared: *@This()) void {
             shared.awaitStart();
-            while (shared.done.load(.acquire) != 3) {
+            while (shared.done.load(.acquire) != 5) {
                 if (shared.link.lookup(1)) |snapshot| {
                     if (snapshot.target_generation != 11 or snapshot.target_artifact != 111)
-                        shared.failed.store(true, .release);
+                        shared.tuple_failed.store(true, .release);
                 }
                 if (shared.link.lookup(2)) |snapshot| {
                     if (snapshot.target_generation != 22 or snapshot.target_artifact != 222)
-                        shared.failed.store(true, .release);
+                        shared.tuple_failed.store(true, .release);
                 }
+                const native_target = shared.link.nativeTarget();
+                if (native_target != 0 and native_target != 333 and native_target != 444)
+                    shared.native_failed.store(true, .release);
             }
+        }
+
+        fn publishNative(shared: *@This(), target: usize) void {
+            shared.awaitStart();
+            for (0..20_000) |_| _ = shared.link.publishNative(target);
+            _ = shared.done.fetchAdd(1, .release);
         }
     };
     var shared = Shared{ .link = &link };
     var first = try std.Thread.spawn(.{}, Shared.publish, .{ &shared, @as(usize, 1) });
     var second = try std.Thread.spawn(.{}, Shared.publish, .{ &shared, @as(usize, 2) });
     var resetter = try std.Thread.spawn(.{}, Shared.reset, .{&shared});
+    var first_native = try std.Thread.spawn(.{}, Shared.publishNative, .{ &shared, @as(usize, 333) });
+    var second_native = try std.Thread.spawn(.{}, Shared.publishNative, .{ &shared, @as(usize, 444) });
     var reader = try std.Thread.spawn(.{}, Shared.read, .{&shared});
     shared.start.store(true, .release);
     first.join();
     second.join();
     resetter.join();
+    first_native.join();
+    second_native.join();
     reader.join();
 
-    try std.testing.expect(!shared.failed.load(.acquire));
+    try std.testing.expect(!shared.tuple_failed.load(.acquire));
+    try std.testing.expect(!shared.native_failed.load(.acquire));
     while (!link.publish(1, 11, 111)) std.atomic.spinLoopHint();
     const snapshot = link.lookup(1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 11), snapshot.target_generation);
     try std.testing.expectEqual(@as(usize, 111), snapshot.target_artifact);
+    const native_target = link.nativeTarget();
+    try std.testing.expect(native_target == 333 or native_target == 444);
 }
 
 test "native operation ABI preserves value exception and trap outcomes" {

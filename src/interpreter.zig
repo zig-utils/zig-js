@@ -10202,32 +10202,46 @@ pub const Interpreter = struct {
             }
         };
         if (obj.native) |nf| {
-            try self.stackGuard();
-            self.depth += 1;
-            defer self.depth -= 1;
-            // Expose the callee object to the native (it isn't a parameter), so
-            // closures-over-data like Promise resolve/reject can find their slot.
-            const saved_native = self.active_native;
-            self.active_native = obj;
-            defer self.active_native = saved_native;
-            if (obj.hostCallback() != null) self.recordExecutionTier(.host_callbacks);
-            // A plain [[Call]] has new.target = undefined; without this reset a
-            // native that guards construction (e.g. `Symbol`, `BigInt`) called from
-            // inside a constructor would see the enclosing ctor's new.target and
-            // wrongly reject the call as `new Symbol()`. A DIRECT eval is the sole
-            // exception: it runs its code in the caller's context, so `new.target`
-            // inside `eval(...)` inherits the caller's (an indirect eval still gets
-            // undefined via the general reset).
-            const saved_nt = self.new_target;
-            if (!self.direct_eval_call) self.new_target = Value.undef();
-            defer self.new_target = saved_nt;
-            return nf(@ptrCast(self), this_val, args);
+            return self.callNativeObject(obj, nf, args, this_val);
         }
         if (obj.jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             return self.callFunction(func, args, this_val);
         }
         return self.throwNotAFunction(callee, site);
+    }
+
+    /// Invoke the already-selected Zig-native [[Call]] branch. Optimizer call
+    /// links reuse this boundary after revalidating the live callable object,
+    /// so both paths preserve stack limits, active-native data, host accounting,
+    /// and the direct-eval/new.target exception exactly.
+    pub fn callNativeObject(
+        self: *Interpreter,
+        obj: *value.Object,
+        nf: value.NativeFn,
+        args: []const Value,
+        this_val: Value,
+    ) EvalError!Value {
+        try self.stackGuard();
+        self.depth += 1;
+        defer self.depth -= 1;
+        // Expose the callee object to the native (it isn't a parameter), so
+        // closures-over-data like Promise resolve/reject can find their slot.
+        const saved_native = self.active_native;
+        self.active_native = obj;
+        defer self.active_native = saved_native;
+        if (obj.hostCallback() != null) self.recordExecutionTier(.host_callbacks);
+        // A plain [[Call]] has new.target = undefined; without this reset a
+        // native that guards construction (e.g. `Symbol`, `BigInt`) called from
+        // inside a constructor would see the enclosing ctor's new.target and
+        // wrongly reject the call as `new Symbol()`. A DIRECT eval is the sole
+        // exception: it runs its code in the caller's context, so `new.target`
+        // inside `eval(...)` inherits the caller's (an indirect eval still gets
+        // undefined via the general reset).
+        const saved_nt = self.new_target;
+        if (!self.direct_eval_call) self.new_target = Value.undef();
+        defer self.new_target = saved_nt;
+        return nf(@ptrCast(self), this_val, args);
     }
 
     /// The TypeError for calling a non-callable value. JavaScriptCore names the
