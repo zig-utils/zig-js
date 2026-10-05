@@ -4322,14 +4322,29 @@ fn nativeInheritedPropertyCacheValue(
 /// resolution honoring `Symbol.unscopables`, so a name the compiler resolved to
 /// the global scope still observes an intervening `with` the same way.
 ///
-/// This deliberately does not consult `quick_global_bindings`. That cache is
-/// keyed by bytecode instruction and is only recorded on the non-parallel path,
-/// and a native reader that hit it would be observing a binding snapshot no
-/// optimizer guard covers. Correct resolution first; a cache the optimizer
-/// actually owns is separate work.
+/// This deliberately does not consult `quick_global_bindings`. The first
+/// optimizer callback resolves canonically, then may publish its own guarded,
+/// pointer-free root-global proof for later executions of the same artifact.
 fn nativeLoadVar(vm: *Interpreter, name: []const u8) EvalError!Value {
     if (builtin.is_test) _ = optimizer_native_environment_load_callbacks.fetchAdd(1, .monotonic);
     return (try vm.resolveBindingValue(name, false)).value;
+}
+
+fn publishNativeGlobalBinding(cache: *jit.NativeGlobalBindingCache, vm: *Interpreter, name: []const u8) void {
+    if (bc.ic_seqlock_enabled.load(.monotonic) or cache.environment_token.load(.acquire) != 0) return;
+    const resolved = resolveQuickGlobalBinding(vm, name, false) orelse return;
+    const object_cache = switch (resolved) {
+        .object => |candidate| candidate,
+        .environment => return,
+    };
+    if (object_cache.env.gc_managed or object_cache.env.parent != null or
+        object_cache.env.realm_global != object_cache.object or
+        object_cache.slot < value.Object.inline_slot_capacity)
+        return;
+    const slot: usize = @intCast(object_cache.slot);
+    if (slot >= object_cache.object.slotsItems().len or object_cache.object.slotsState() == null) return;
+    const byte_offset = std.math.mul(u64, object_cache.slot, @sizeOf(Value)) catch return;
+    _ = cache.publish(@intFromPtr(object_cache.env), @intFromPtr(object_cache.shape), byte_offset);
 }
 
 fn nativeGetProperty(
@@ -6333,7 +6348,11 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (descriptor.bytecode_op == @backingInt(bc.Op.load_var) and inputs.len == 0) {
         const name = metadata.nameFor(operation_id) orelse
             return @backingInt(jit.NativeOperationStatus.host_trap);
-        return finishNativeOperation(frame, vm, operation_id, nativeLoadVar(vm, name));
+        const loaded = nativeLoadVar(vm, name) catch |err|
+            return finishNativeOperation(frame, vm, operation_id, err);
+        if (metadata.globalBindingCacheFor(operation_id)) |cache|
+            publishNativeGlobalBinding(@constCast(cache), vm, name);
+        return finishNativeOperation(frame, vm, operation_id, loaded);
     }
     if (descriptor.bytecode_op == @backingInt(bc.Op.get_prop) and inputs.len == 1) {
         if (builtin.is_test) _ = optimizer_native_property_read_callbacks.fetchAdd(1, .monotonic);
@@ -7475,6 +7494,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .scratch = scratch[0..].ptr,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .global_binding_caches = if (native.native_operations) |metadata| metadata.global_binding_caches.ptr else null,
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
         .operation_context = if (native.native_operations) |metadata| @constCast(metadata) else null,
         .checkpoint = nativeCheckpoint,
@@ -7557,6 +7577,7 @@ fn tryRunOsrNative(
         .scratch = &scratch,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .global_binding_caches = if (native.native_operations) |operations| operations.global_binding_caches.ptr else null,
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
         .operation_context = if (native.native_operations) |operations| @constCast(operations) else null,
         .checkpoint = nativeCheckpoint,
@@ -16927,18 +16948,37 @@ test "vm: optimizer executes a global environment load natively" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
+    const global = try gc_mod.allocObj(allocator);
+    global.* = .{};
+    env.realm_global = global;
+    try env.put("globalThis", Value.obj(global));
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .global_object = global,
+        .jit_owner = &owner,
+    });
     const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     const first = try run(&machine, root, null);
     try std.testing.expectEqualStrings("function", first.asStr());
-    const first_steps = machine.steps;
 
     const hot_chunk = root.fns.items[0].chunk.?;
     const artifact = hot_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    // The artifact may be installed on the final loop iteration. Run it once
+    // after publication so the canonical resolver can publish its proof.
+    const hot = env.get("hot") orelse return error.TestUnexpectedResult;
+    const warmup_start = machine.steps;
+    try std.testing.expectEqualStrings(
+        "function",
+        (try callValue(&machine, hot, &.{}, Value.undef(), .none)).asStr(),
+    );
+    const warmup_steps = machine.steps - warmup_start;
     var saw_environment_load = false;
     for (operations.descriptors, 0..) |descriptor, operation_id| {
         if (descriptor.step_delta == 0) continue;
@@ -16947,19 +16987,83 @@ test "vm: optimizer executes a global environment load natively" {
         // metadata rather than a scratch value.
         try std.testing.expectEqual(@as(u16, 0), descriptor.input_count);
         try std.testing.expectEqualStrings("Number", operations.nameFor(operation_id).?);
+        const cache = operations.globalBindingCacheFor(operation_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@intFromPtr(&env), cache.environment_token.load(.acquire));
+        try std.testing.expect(cache.shape_token != 0);
         saw_environment_load = true;
     }
     try std.testing.expect(saw_environment_load);
     try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
     try std.testing.expect(optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before);
+    const loads_after_warmup = optimizer_native_environment_load_callbacks.load(.monotonic);
     try std.testing.expect(hot_chunk.optimizer_tier.compileCount() >= 1);
     try std.testing.expect(hot_chunk.optimizer_tier.compileCount() <= 4);
 
-    // Native-on and native-off agree on both the value and the exact step cost.
-    const second_start = machine.steps;
-    const second = try run(&machine, root, null);
+    // Invoke the already-instantiated function again: rerunning the root chunk
+    // would correctly reject its duplicate global lexical declaration.
+    const direct_start = machine.steps;
+    const second = try callValue(&machine, hot, &.{}, Value.undef(), .none);
     try std.testing.expectEqualStrings("function", second.asStr());
-    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expectEqual(warmup_steps, machine.steps - direct_start);
+    try std.testing.expectEqual(
+        loads_after_warmup,
+        optimizer_native_environment_load_callbacks.load(.monotonic),
+    );
+}
+
+test "vm: optimizer global binding cache stays cold in shared mode" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(true, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function hotShared() { return typeof Number.parseFloat; }
+        \\let last = "";
+        \\for (let i = 0; i < 12; ++i) last = hotShared();
+        \\last
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const global = try gc_mod.allocObj(allocator);
+    global.* = .{};
+    env.realm_global = global;
+    try env.put("globalThis", Value.obj(global));
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .global_object = global,
+        .jit_owner = &owner,
+    });
+
+    try std.testing.expectEqualStrings("function", (try run(&machine, root, null)).asStr());
+    const hot_chunk = root.fns.items[0].chunk.?;
+    const artifact = hot_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    const hot = env.get("hotShared") orelse return error.TestUnexpectedResult;
+    const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
+    try std.testing.expectEqualStrings(
+        "function",
+        (try callValue(&machine, hot, &.{}, Value.undef(), .none)).asStr(),
+    );
+    try std.testing.expect(
+        optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before,
+    );
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.bytecode_op != @backingInt(bc.Op.load_var)) continue;
+        const cache = operations.globalBindingCacheFor(operation_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 0), cache.environment_token.load(.acquire));
+    }
 }
 
 test "vm: optimizer environment load observes a rebound global" {
@@ -16975,6 +17079,7 @@ test "vm: optimizer environment load observes a rebound global" {
     const source =
         \\var target = 1;
         \\function readTarget() { return target + 1; }
+        \\function replacementTarget() { return 99; }
         \\for (let i = 0; i < 12; ++i) readTarget();
         \\target = 41;
         \\readTarget()
@@ -16987,11 +17092,61 @@ test "vm: optimizer environment load observes a rebound global" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
+    const global = try gc_mod.allocObj(allocator);
+    global.* = .{};
+    env.realm_global = global;
+    try env.put("globalThis", Value.obj(global));
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .global_object = global,
+        .jit_owner = &owner,
+    });
     const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
     try std.testing.expect(optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before);
+    const read_target = env.get("readTarget") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try callValue(&machine, read_target, &.{}, Value.undef(), .none)).asNum(),
+    );
+    const loads_after_warmup = optimizer_native_environment_load_callbacks.load(.monotonic);
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try callValue(&machine, read_target, &.{}, Value.undef(), .none)).asNum(),
+    );
+    try std.testing.expectEqual(
+        loads_after_warmup,
+        optimizer_native_environment_load_callbacks.load(.monotonic),
+    );
+
+    // Any shape mutation invalidates the exact slot proof, even when the
+    // cached property's value itself did not change.
+    try machine.setProp(global, "unrelated", Value.num(7));
+    const loads_before_shape_miss = optimizer_native_environment_load_callbacks.load(.monotonic);
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try callValue(&machine, read_target, &.{}, Value.undef(), .none)).asNum(),
+    );
+    try std.testing.expect(
+        optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before_shape_miss,
+    );
+
+    // Replacing the data property with an accessor must execute user code via
+    // the canonical resolver; the published data-slot proof is never reused.
+    const replacement = env.get("replacementTarget") orelse return error.TestUnexpectedResult;
+    try global.setAccessor(allocator, "target", replacement, null);
+    const loads_before_accessor = optimizer_native_environment_load_callbacks.load(.monotonic);
+    try std.testing.expectEqual(
+        @as(f64, 100),
+        (try callValue(&machine, read_target, &.{}, Value.undef(), .none)).asNum(),
+    );
+    try std.testing.expect(
+        optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before_accessor,
+    );
     const read_chunk = root.fns.items[0].chunk.?;
     try std.testing.expect(read_chunk.optimizer_tier.compileCount() >= 1);
 }

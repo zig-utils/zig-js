@@ -403,6 +403,27 @@ pub const NativePropertyCache = extern struct {
     }
 };
 
+/// Pointer-free proof published by the first canonical root-global lookup in
+/// one artifact. `environment_token` is the release-published validity word;
+/// generated readers acquire it before consuming the immutable shape/offset.
+pub const NativeGlobalBindingCache = struct {
+    const publishing_token: usize = 1;
+
+    environment_token: std.atomic.Value(usize) = .init(0),
+    shape_token: usize = 0,
+    slot_byte_offset: u64 = 0,
+
+    pub fn publish(self: *@This(), environment_token: usize, shape_token: usize, slot_byte_offset: u64) bool {
+        if (environment_token <= publishing_token or shape_token == 0) return false;
+        if (self.environment_token.cmpxchgStrong(0, publishing_token, .acquire, .monotonic) != null)
+            return false;
+        self.shape_token = shape_token;
+        self.slot_byte_offset = slot_byte_offset;
+        self.environment_token.store(environment_token, .release);
+        return true;
+    }
+};
+
 /// One coherently published advisory optimizer call target. Each field is
 /// atomic because readers and competing runtime linkers may access the same
 /// operation concurrently; the version bracket makes the tuple indivisible.
@@ -485,6 +506,7 @@ pub const NativeOperationMetadata = struct {
     descriptors: []NativeOperationDescriptor,
     exceptional_targets: []NativeExceptionalTarget,
     operation_names: []?[]const u8,
+    global_binding_caches: []NativeGlobalBindingCache,
     property_caches: []NativePropertyCache,
     /// Parser source copied into the published artifact. These parallel arrays
     /// are immutable after publication and consulted only by a throw path.
@@ -552,6 +574,9 @@ pub const NativeOperationMetadata = struct {
         errdefer allocator.free(owned_descriptors);
         const owned_targets = try allocator.dupe(NativeExceptionalTarget, exceptional_targets);
         errdefer allocator.free(owned_targets);
+        const owned_global_binding_caches = try allocator.alloc(NativeGlobalBindingCache, descriptors.len);
+        errdefer allocator.free(owned_global_binding_caches);
+        for (owned_global_binding_caches) |*cache| cache.* = .{};
         const owned_property_caches = try allocator.dupe(NativePropertyCache, property_caches);
         errdefer allocator.free(owned_property_caches);
         const owned_call_links = try allocator.alloc(NativeCallLink, descriptors.len);
@@ -576,6 +601,7 @@ pub const NativeOperationMetadata = struct {
             .descriptors = owned_descriptors,
             .exceptional_targets = owned_targets,
             .operation_names = owned_names,
+            .global_binding_caches = owned_global_binding_caches,
             .property_caches = owned_property_caches,
             .call_sites = owned_call_sites,
             .evaluation_sites = owned_evaluation_sites,
@@ -616,6 +642,12 @@ pub const NativeOperationMetadata = struct {
         return &self.property_caches[operation_id];
     }
 
+    pub fn globalBindingCacheFor(self: *const NativeOperationMetadata, operation_id: usize) ?*const NativeGlobalBindingCache {
+        if (self.global_binding_caches.len != self.descriptors.len or operation_id >= self.global_binding_caches.len)
+            return null;
+        return &self.global_binding_caches[operation_id];
+    }
+
     pub fn callSiteFor(self: *const NativeOperationMetadata, operation_id: usize) ?diagnostic_site.CallSiteSpan {
         if (self.call_sites.len != self.descriptors.len or operation_id >= self.call_sites.len)
             return null;
@@ -637,6 +669,7 @@ pub const NativeOperationMetadata = struct {
         const allocator = self.allocator;
         allocator.free(self.descriptors);
         allocator.free(self.exceptional_targets);
+        if (self.global_binding_caches.len != 0) allocator.free(self.global_binding_caches);
         if (self.property_caches.len != 0) allocator.free(self.property_caches);
         if (self.call_links.len != 0) allocator.free(self.call_links);
         for (self.operation_names) |name| if (name) |bytes| allocator.free(bytes);
@@ -670,6 +703,9 @@ pub const NativeFrame = extern struct {
     /// and on every exit.
     steps: ?*u64 = null,
     runtime_context: ?*anyopaque = null,
+    /// Artifact-owned root-global proofs, one per operation descriptor. Entries
+    /// contain no managed pointers and are published after canonical lookup.
+    global_binding_caches: ?[*]NativeGlobalBindingCache = null,
     /// Returns zero to continue or a non-zero `ExitStatus` value to leave
     /// native code after servicing budget, termination, GIL, and GC work.
     checkpoint: ?*const fn (*NativeFrame) callconv(.c) u32 = null,

@@ -18,6 +18,8 @@ const ObjectColdState = @import("../value.zig").ObjectColdState;
 const ObjectSlotsState = @import("../value.zig").ObjectSlotsState;
 const ObjectStorageState = @import("../value.zig").ObjectStorageState;
 const ObjectElementsState = @import("../value.zig").ObjectElementsState;
+const Interpreter = @import("../interpreter.zig").Interpreter;
+const Environment = @import("../interpreter.zig").Environment;
 const strcell = @import("../strcell.zig");
 const StringCell = strcell.StringCell;
 const moving_safepoint_backedge_interval: u32 = 32;
@@ -3888,6 +3890,18 @@ fn objectByteOffset(comptime field: []const u8) !u12 {
     return std.math.cast(u12, @offsetOf(Object, field)) orelse error.UnsupportedChunk;
 }
 
+fn interpreterByteOffset(comptime field: []const u8) !u15 {
+    return std.math.cast(u15, @offsetOf(Interpreter, field)) orelse error.UnsupportedChunk;
+}
+
+fn environmentByteOffset(comptime field: []const u8) !u15 {
+    return std.math.cast(u15, @offsetOf(Environment, field)) orelse error.UnsupportedChunk;
+}
+
+fn globalBindingCacheByteOffset(comptime field: []const u8) !u15 {
+    return std.math.cast(u15, @offsetOf(jit.NativeGlobalBindingCache, field)) orelse error.UnsupportedChunk;
+}
+
 fn emitZeroByteGuard(
     assembler: *aarch64.Assembler,
     direct: *DirectRuntimeAccess,
@@ -3951,6 +3965,40 @@ fn emitDirectNamedPropertyValueLoad(
     try assembler.patchBranch(loaded, assembler.position());
 }
 
+fn emitDirectDynamicExternalPropertyValueLoad(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+    object_register: u5,
+    cache_register: u5,
+) !void {
+    try assembler.load64(10, object_register, try objectByteOffset("storage"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(10), true);
+    try assembler.load64(10, 10, try objectStorageByteOffset("slots"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(10), true);
+    try assembler.load64(10, 10, try objectSlotsByteOffset("items"));
+    try assembler.load64(11, cache_register, try globalBindingCacheByteOffset("slot_byte_offset"));
+    try assembler.addRegister64(10, 10, 11);
+    try assembler.load64(10, 10, 0);
+}
+
+fn emitDirectOrdinaryObjectReadGuards(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+) !void {
+    try emitDirectReadableStorageGuards(assembler, direct);
+    try assembler.load16(10, 9, try objectByteOffset("behavior"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+    try emitZeroByteGuard(assembler, direct, "is_symbol");
+    try emitZeroByteGuard(assembler, direct, "is_bigint");
+    try emitZeroByteGuard(assembler, direct, "is_array");
+    try emitZeroByteGuard(assembler, direct, "is_arguments");
+    try emitZeroByteGuard(assembler, direct, "proxy_revoked");
+    try assembler.load64(10, 9, try objectByteOffset("private_data"));
+    try assembler.compareImmediate64(10, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.load64(11, 9, try objectByteOffset("shape"));
+}
+
 const DirectNamedPropertyAccess = enum { read, write };
 
 fn emitDirectPropertyGuards(
@@ -3973,7 +4021,8 @@ fn emitDirectPropertyGuards(
     try assembler.andRegister64(9, 9, 10);
 
     if (access == .read) {
-        try emitDirectReadableStorageGuards(assembler, direct);
+        try emitDirectOrdinaryObjectReadGuards(assembler, direct);
+        return;
     } else {
         // Writes must consult attributes (writable) as well as accessors, so
         // retain the strict storage-free proof used before attrs-only reads.
@@ -3992,6 +4041,52 @@ fn emitDirectPropertyGuards(
     try assembler.compareImmediate64(10, 0);
     try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
     try assembler.load64(11, 9, try objectByteOffset("shape"));
+}
+
+fn emitDirectGlobalBindingRead(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    _ = program;
+    if (descriptor.bytecode_op != @backingInt(bc.Op.load_var) or descriptor.input_count != 0) return null;
+    const cache_offset = std.math.mul(usize, operation.immediate, @sizeOf(jit.NativeGlobalBindingCache)) catch
+        return error.UnsupportedChunk;
+
+    var direct = DirectRuntimeAccess{};
+    // Shared-realm execution never warms this cache and must not consume an
+    // isolated observation after the Context changes mode.
+    try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
+    try assembler.load8(10, 10, 0);
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+
+    try assembler.load64(17, 12, frameOffset("global_binding_caches"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(17), true);
+    try assembler.addImmediate64(17, 17, std.math.cast(u12, cache_offset) orelse return error.UnsupportedChunk);
+    try assembler.loadAcquire64(11, 17);
+    try direct.addFallback(try assembler.branchZero32Placeholder(11), true);
+
+    try assembler.load64(9, 12, frameOffset("runtime_context"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(9), true);
+    try assembler.load64(10, 9, try interpreterByteOffset("env"));
+    try assembler.compareRegister64(10, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+
+    try assembler.load64(9, 9, try interpreterByteOffset("global_object"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(9), true);
+    try assembler.load64(10, 11, try environmentByteOffset("realm_global"));
+    try assembler.compareRegister64(9, 10);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+
+    try emitDirectOrdinaryObjectReadGuards(assembler, &direct);
+    try assembler.load64(10, 17, try globalBindingCacheByteOffset("shape_token"));
+    try assembler.compareRegister64(11, 10);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try emitDirectDynamicExternalPropertyValueLoad(assembler, &direct, 9, 17);
+    try assembler.store64(10, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
 }
 
 fn emitDirectNamedPropertyRead(
@@ -4640,7 +4735,8 @@ fn emitRuntimeOperation(
     try assembler.store64(9, 12, frameOffset("operation_detail"));
     const numeric_result = descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0;
     if (numeric_result) {
-        var direct = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+        var direct = (try emitDirectGlobalBindingRead(assembler, program, operation, descriptor)) orelse
+            (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
             (try emitDirectUnsigned32BitAnd(assembler, operation, descriptor)) orelse
@@ -4668,7 +4764,8 @@ fn emitRuntimeOperation(
         std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
     );
 
-    const direct_runtime_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+    const direct_runtime_access = (try emitDirectGlobalBindingRead(assembler, program, operation, descriptor)) orelse
+        (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
         (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
