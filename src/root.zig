@@ -50,6 +50,10 @@ pub const RuntimeThreadSchedulerPriority = @import("runtime_threads.zig").Priori
 pub const RuntimeThreadSchedulerPrioritySnapshot = @import("runtime_threads.zig").PrioritySnapshot;
 pub const RuntimeInternalWorkKind = @import("runtime_threads.zig").InternalWorkKind;
 pub const RuntimeInternalWorkSnapshot = @import("runtime_threads.zig").InternalWorkSnapshot;
+pub const RuntimeScratchKind = @import("runtime_threads.zig").ScratchKind;
+pub const RuntimeScratchDomainSnapshot = @import("runtime_threads.zig").ScratchDomainSnapshot;
+pub const RuntimeScratchSnapshot = @import("runtime_threads.zig").ScratchSnapshot;
+pub const RuntimeScratchLimits = @import("runtime_threads.zig").ScratchLimits;
 pub const RuntimeThreadSchedulerPolicy = @import("runtime_threads.zig").SchedulerPolicy;
 pub const RuntimeThreadSchedulerSnapshot = @import("runtime_threads.zig").SchedulerSnapshot;
 pub const RuntimeThreadSnapshot = @import("runtime_threads.zig").Snapshot;
@@ -58,6 +62,7 @@ pub const RuntimeThreadSchedulerLimits = @import("runtime_threads.zig").Schedule
 pub const runtimeThreadSnapshot = @import("runtime_threads.zig").snapshot;
 pub const setRuntimeThreadLimits = @import("runtime_threads.zig").setLimits;
 pub const setRuntimeThreadSchedulerLimits = @import("runtime_threads.zig").setSchedulerLimits;
+pub const setRuntimeScratchLimits = @import("runtime_threads.zig").setScratchLimits;
 /// Revision-pinned private consumer ABI pieces. These are deliberately
 /// separate from the stable engine `Value` representation and public C API.
 pub const private_abi = @import("private_abi.zig");

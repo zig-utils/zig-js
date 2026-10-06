@@ -35,6 +35,18 @@ pub const InternalWorkKind = enum {
 
 pub const internal_work_kind_count = std.meta.fieldNames(InternalWorkKind).len;
 
+/// Temporary runtime allocation domains that may overlap across independent
+/// Contexts and host threads. Long-lived heap cells, decoded Wasm modules, and
+/// published native artifacts retain their existing owners and never enter
+/// this budget.
+pub const ScratchKind = enum {
+    gc_auxiliary,
+    native_compilation,
+    wasm_compilation,
+};
+
+pub const scratch_kind_count = std.meta.fieldNames(ScratchKind).len;
+
 const priority_schedule = [_]Priority{
     .safety,
     .safety,
@@ -125,6 +137,32 @@ const WorkCounters = struct {
 };
 
 var work_counters: [internal_work_kind_count]WorkCounters = @splat(.{});
+
+const ScratchCounters = struct {
+    requests: std.atomic.Value(u64) = .init(0),
+    requested_bytes: std.atomic.Value(u64) = .init(0),
+    admissions: std.atomic.Value(u64) = .init(0),
+    admitted_bytes: std.atomic.Value(u64) = .init(0),
+    policy_rejections: std.atomic.Value(u64) = .init(0),
+    rejected_bytes: std.atomic.Value(u64) = .init(0),
+    allocator_failures: std.atomic.Value(u64) = .init(0),
+    rollback_bytes: std.atomic.Value(u64) = .init(0),
+    releases: std.atomic.Value(u64) = .init(0),
+    released_bytes: std.atomic.Value(u64) = .init(0),
+    current_bytes: std.atomic.Value(u64) = .init(0),
+    peak_bytes: std.atomic.Value(u64) = .init(0),
+    max_bytes: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
+};
+
+const ScratchCoordinator = struct {
+    admission_lock: std.atomic.Mutex = .unlocked,
+    max_total_bytes: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
+    current_bytes: std.atomic.Value(u64) = .init(0),
+    peak_bytes: std.atomic.Value(u64) = .init(0),
+};
+
+var scratch_counters: [scratch_kind_count]ScratchCounters = @splat(.{});
+var scratch_coordinator: ScratchCoordinator = .{};
 
 const PriorityCounters = struct {
     waiters: std.atomic.Value(u64) = .init(0),
@@ -224,6 +262,44 @@ pub const InternalWorkSnapshot = struct {
     last_grant_ticket: u64,
 };
 
+pub const ScratchDomainSnapshot = struct {
+    requests: u64,
+    requested_bytes: u64,
+    admissions: u64,
+    admitted_bytes: u64,
+    policy_rejections: u64,
+    rejected_bytes: u64,
+    allocator_failures: u64,
+    rollback_bytes: u64,
+    releases: u64,
+    released_bytes: u64,
+    current_bytes: u64,
+    peak_bytes: u64,
+    max_bytes: u64,
+};
+
+pub const ScratchSnapshot = struct {
+    max_total_bytes: u64,
+    current_bytes: u64,
+    peak_bytes: u64,
+    domains: [scratch_kind_count]ScratchDomainSnapshot,
+
+    pub fn domain(self: *const ScratchSnapshot, kind: ScratchKind) ScratchDomainSnapshot {
+        return self.domains[@backingInt(kind)];
+    }
+
+    pub fn domainCurrentTotal(self: *const ScratchSnapshot) u64 {
+        var total: u64 = 0;
+        for (self.domains) |domain_state| total += domain_state.current_bytes;
+        return total;
+    }
+};
+
+pub const ScratchLimits = struct {
+    max_total_bytes: u64 = std.math.maxInt(u64),
+    max_domain_bytes: [scratch_kind_count]u64 = @splat(std.math.maxInt(u64)),
+};
+
 pub const SchedulerSnapshot = struct {
     policy: SchedulerPolicy,
     host_logical_cpus: u64,
@@ -247,11 +323,12 @@ pub const SchedulerSnapshot = struct {
 };
 
 pub const Snapshot = struct {
-    schema_version: u32 = 7,
+    schema_version: u32 = 8,
     generation: u64,
     scheduler: SchedulerSnapshot,
     resources: [kind_count]ResourceSnapshot,
     internal_work: [internal_work_kind_count]InternalWorkSnapshot,
+    scratch: ScratchSnapshot,
 
     pub fn resource(self: *const Snapshot, kind: Kind) ResourceSnapshot {
         return self.resources[@backingInt(kind)];
@@ -302,6 +379,171 @@ fn recordPeak(value: *std.atomic.Value(u64), candidate: u64) void {
         } else break;
     }
 }
+
+fn lockScratchAdmission() void {
+    while (!scratch_coordinator.admission_lock.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn scratchState(kind: ScratchKind) *ScratchCounters {
+    return &scratch_counters[@backingInt(kind)];
+}
+
+fn tryReserveScratch(kind: ScratchKind, bytes: usize) bool {
+    const amount = std.math.cast(u64, bytes) orelse return false;
+    lockScratchAdmission();
+    defer scratch_coordinator.admission_lock.unlock();
+    beginMutation();
+    defer finishMutation();
+
+    const state = scratchState(kind);
+    _ = state.requests.fetchAdd(1, .monotonic);
+    _ = state.requested_bytes.fetchAdd(amount, .monotonic);
+    const domain_current = state.current_bytes.load(.monotonic);
+    const total_current = scratch_coordinator.current_bytes.load(.monotonic);
+    const domain_max = state.max_bytes.load(.monotonic);
+    const total_max = scratch_coordinator.max_total_bytes.load(.monotonic);
+    if (domain_current > domain_max or amount > domain_max - domain_current or
+        total_current > total_max or amount > total_max - total_current)
+    {
+        _ = state.policy_rejections.fetchAdd(1, .monotonic);
+        _ = state.rejected_bytes.fetchAdd(amount, .monotonic);
+        return false;
+    }
+
+    _ = state.admissions.fetchAdd(1, .monotonic);
+    _ = state.admitted_bytes.fetchAdd(amount, .monotonic);
+    const domain_after = state.current_bytes.fetchAdd(amount, .monotonic) + amount;
+    const total_after = scratch_coordinator.current_bytes.fetchAdd(amount, .monotonic) + amount;
+    recordPeak(&state.peak_bytes, domain_after);
+    recordPeak(&scratch_coordinator.peak_bytes, total_after);
+    return true;
+}
+
+fn rollbackScratch(kind: ScratchKind, bytes: usize) void {
+    const amount: u64 = @intCast(bytes);
+    lockScratchAdmission();
+    defer scratch_coordinator.admission_lock.unlock();
+    beginMutation();
+    defer finishMutation();
+    const state = scratchState(kind);
+    const domain_before = state.current_bytes.fetchSub(amount, .monotonic);
+    const total_before = scratch_coordinator.current_bytes.fetchSub(amount, .monotonic);
+    std.debug.assert(domain_before >= amount and total_before >= amount);
+    _ = state.allocator_failures.fetchAdd(1, .monotonic);
+    _ = state.rollback_bytes.fetchAdd(amount, .monotonic);
+}
+
+fn releaseScratch(kind: ScratchKind, bytes: usize) void {
+    const amount: u64 = @intCast(bytes);
+    lockScratchAdmission();
+    defer scratch_coordinator.admission_lock.unlock();
+    beginMutation();
+    defer finishMutation();
+    const state = scratchState(kind);
+    const domain_before = state.current_bytes.fetchSub(amount, .monotonic);
+    const total_before = scratch_coordinator.current_bytes.fetchSub(amount, .monotonic);
+    std.debug.assert(domain_before >= amount and total_before >= amount);
+    _ = state.releases.fetchAdd(1, .monotonic);
+    _ = state.released_bytes.fetchAdd(amount, .monotonic);
+}
+
+/// Allocator wrapper for one temporary runtime domain. The wrapper itself is
+/// caller-owned and must stay at a stable address until every returned byte is
+/// freed. `deinit` asserts the exact zero-balance lifetime contract.
+pub const ScratchAllocator = struct {
+    inner: std.mem.Allocator,
+    kind: ScratchKind,
+    owned_bytes: std.atomic.Value(u64) = .init(0),
+
+    pub fn init(kind: ScratchKind, inner: std.mem.Allocator) ScratchAllocator {
+        return .{ .inner = inner, .kind = kind };
+    }
+
+    pub fn allocator(self: *ScratchAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    pub fn currentBytes(self: *const ScratchAllocator) u64 {
+        return self.owned_bytes.load(.acquire);
+    }
+
+    pub fn deinit(self: *ScratchAllocator) void {
+        std.debug.assert(self.currentBytes() == 0);
+    }
+
+    fn admit(self: *ScratchAllocator, bytes: usize) bool {
+        if (!tryReserveScratch(self.kind, bytes)) return false;
+        _ = self.owned_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        return true;
+    }
+
+    fn rollback(self: *ScratchAllocator, bytes: usize) void {
+        const amount: u64 = @intCast(bytes);
+        const before = self.owned_bytes.fetchSub(amount, .monotonic);
+        std.debug.assert(before >= amount);
+        rollbackScratch(self.kind, bytes);
+    }
+
+    fn release(self: *ScratchAllocator, bytes: usize) void {
+        const amount: u64 = @intCast(bytes);
+        const before = self.owned_bytes.fetchSub(amount, .monotonic);
+        std.debug.assert(before >= amount);
+        releaseScratch(self.kind, bytes);
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ScratchAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.admit(len)) return null;
+        return self.inner.rawAlloc(len, alignment, ret_addr) orelse {
+            self.rollback(len);
+            return null;
+        };
+    }
+
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ScratchAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > mem.len) {
+            const growth = new_len - mem.len;
+            if (!self.admit(growth)) return false;
+            if (!self.inner.rawResize(mem, alignment, new_len, ret_addr)) {
+                self.rollback(growth);
+                return false;
+            }
+        } else {
+            if (!self.inner.rawResize(mem, alignment, new_len, ret_addr)) return false;
+            if (new_len < mem.len) self.release(mem.len - new_len);
+        }
+        return true;
+    }
+
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ScratchAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > mem.len) {
+            const growth = new_len - mem.len;
+            if (!self.admit(growth)) return null;
+            return self.inner.rawRemap(mem, alignment, new_len, ret_addr) orelse {
+                self.rollback(growth);
+                return null;
+            };
+        }
+        const result = self.inner.rawRemap(mem, alignment, new_len, ret_addr) orelse return null;
+        if (new_len < mem.len) self.release(mem.len - new_len);
+        return result;
+    }
+
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ScratchAllocator = @ptrCast(@alignCast(ctx));
+        self.inner.rawFree(mem, alignment, ret_addr);
+        self.release(mem.len);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+};
 
 fn workState(kind: InternalWorkKind) *WorkCounters {
     return &work_counters[@backingInt(kind)];
@@ -854,6 +1096,35 @@ fn loadInternalWork(state: *const WorkCounters) InternalWorkSnapshot {
     };
 }
 
+fn loadScratchDomain(state: *const ScratchCounters) ScratchDomainSnapshot {
+    return .{
+        .requests = state.requests.load(.acquire),
+        .requested_bytes = state.requested_bytes.load(.acquire),
+        .admissions = state.admissions.load(.acquire),
+        .admitted_bytes = state.admitted_bytes.load(.acquire),
+        .policy_rejections = state.policy_rejections.load(.acquire),
+        .rejected_bytes = state.rejected_bytes.load(.acquire),
+        .allocator_failures = state.allocator_failures.load(.acquire),
+        .rollback_bytes = state.rollback_bytes.load(.acquire),
+        .releases = state.releases.load(.acquire),
+        .released_bytes = state.released_bytes.load(.acquire),
+        .current_bytes = state.current_bytes.load(.acquire),
+        .peak_bytes = state.peak_bytes.load(.acquire),
+        .max_bytes = state.max_bytes.load(.acquire),
+    };
+}
+
+fn loadScratch() ScratchSnapshot {
+    var result = ScratchSnapshot{
+        .max_total_bytes = scratch_coordinator.max_total_bytes.load(.acquire),
+        .current_bytes = scratch_coordinator.current_bytes.load(.acquire),
+        .peak_bytes = scratch_coordinator.peak_bytes.load(.acquire),
+        .domains = undefined,
+    };
+    for (&scratch_counters, 0..) |*state, index| result.domains[index] = loadScratchDomain(state);
+    return result;
+}
+
 /// Coherent process-wide resource and runnable-slot state. Readers retry only
 /// across short atomic mutation sections; JavaScript execution never holds a
 /// telemetry or coordinator lock.
@@ -870,6 +1141,7 @@ pub fn snapshot() Snapshot {
             .scheduler = loadScheduler(),
             .resources = undefined,
             .internal_work = undefined,
+            .scratch = loadScratch(),
         };
         for (&counters, 0..) |*state, index| result.resources[index] = loadResource(state);
         for (&work_counters, 0..) |*state, index| result.internal_work[index] = loadInternalWork(state);
@@ -923,6 +1195,25 @@ pub fn setSchedulerLimits(limits: SchedulerLimits) SchedulerLimits {
     }
     finishMutation();
     dispatchSlotsLocked(io);
+    return previous;
+}
+
+/// Atomically replace process-wide temporary-memory limits. Existing storage
+/// remains valid when a limit is lowered below current use; subsequent growth
+/// fails closed until releases bring both its domain and total below policy.
+pub fn setScratchLimits(limits: ScratchLimits) ScratchLimits {
+    lockScratchAdmission();
+    defer scratch_coordinator.admission_lock.unlock();
+    beginMutation();
+    defer finishMutation();
+    var previous = ScratchLimits{
+        .max_total_bytes = scratch_coordinator.max_total_bytes.load(.monotonic),
+    };
+    for (&scratch_counters, 0..) |*state, index| {
+        previous.max_domain_bytes[index] = state.max_bytes.load(.monotonic);
+        state.max_bytes.store(limits.max_domain_bytes[index], .monotonic);
+    }
+    scratch_coordinator.max_total_bytes.store(limits.max_total_bytes, .monotonic);
     return previous;
 }
 
@@ -1101,7 +1392,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(u32, 7), snapshot().schema_version);
+    try std.testing.expectEqual(@as(u32, 8), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
     var release = std.atomic.Value(bool).init(false);
@@ -1146,6 +1437,127 @@ test "runtime blocking scopes account nested and concurrent transitions once" {
     try std.testing.expectEqual(before.runnable, after.runnable);
     try std.testing.expectEqual(before.blocked, after.blocked);
     try std.testing.expectEqual(after.live, after.runnable + after.blocked);
+}
+
+test "runtime scratch allocator enforces domain and total limits with exact rollback" {
+    const previous = setScratchLimits(.{
+        .max_total_bytes = 40,
+        .max_domain_bytes = .{ 40, 32, 40 },
+    });
+    defer _ = setScratchLimits(previous);
+    const before = snapshot();
+
+    var native = ScratchAllocator.init(.native_compilation, std.testing.allocator);
+    defer native.deinit();
+    const native_allocator = native.allocator();
+    var first = try native_allocator.alloc(u8, 24);
+    var first_live = true;
+    defer if (first_live) native_allocator.free(first);
+    first = try native_allocator.realloc(first, 32);
+    try std.testing.expectError(error.OutOfMemory, native_allocator.realloc(first, 33));
+
+    var wasm = ScratchAllocator.init(.wasm_compilation, std.testing.allocator);
+    defer wasm.deinit();
+    const wasm_allocator = wasm.allocator();
+    try std.testing.expectError(error.OutOfMemory, wasm_allocator.alloc(u8, 9));
+    const second = try wasm_allocator.alloc(u8, 8);
+    wasm_allocator.free(second);
+
+    const live = snapshot();
+    try std.testing.expectEqual(@as(u32, 8), live.schema_version);
+    try std.testing.expectEqual(before.scratch.current_bytes + 32, live.scratch.current_bytes);
+    try std.testing.expectEqual(live.scratch.current_bytes, live.scratch.domainCurrentTotal());
+    const native_before = before.scratch.domain(.native_compilation);
+    const native_live = live.scratch.domain(.native_compilation);
+    try std.testing.expectEqual(native_before.current_bytes + 32, native_live.current_bytes);
+    // `Allocator.realloc` tries remap and then allocate-copy-free, so a policy
+    // rejection records both independently denied growth attempts.
+    try std.testing.expectEqual(native_before.policy_rejections + 2, native_live.policy_rejections);
+    try std.testing.expectEqual(native_before.rejected_bytes + 34, native_live.rejected_bytes);
+    const wasm_before = before.scratch.domain(.wasm_compilation);
+    const wasm_live = live.scratch.domain(.wasm_compilation);
+    try std.testing.expectEqual(wasm_before.policy_rejections + 1, wasm_live.policy_rejections);
+    try std.testing.expectEqual(wasm_before.rejected_bytes + 9, wasm_live.rejected_bytes);
+
+    native_allocator.free(first);
+    first_live = false;
+    const after = snapshot();
+    try std.testing.expectEqual(before.scratch.current_bytes, after.scratch.current_bytes);
+    try std.testing.expectEqual(after.scratch.current_bytes, after.scratch.domainCurrentTotal());
+    try std.testing.expectEqual(native_before.current_bytes, after.scratch.domain(.native_compilation).current_bytes);
+    try std.testing.expectEqual(wasm_before.current_bytes, after.scratch.domain(.wasm_compilation).current_bytes);
+}
+
+test "runtime scratch allocator rolls back an admitted backing failure" {
+    const previous = setScratchLimits(.{});
+    defer _ = setScratchLimits(previous);
+    const before = snapshot().scratch.domain(.gc_auxiliary);
+    var storage: [8]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var scratch = ScratchAllocator.init(.gc_auxiliary, fixed.allocator());
+    defer scratch.deinit();
+    try std.testing.expectError(error.OutOfMemory, scratch.allocator().alloc(u8, 16));
+    const after = snapshot().scratch.domain(.gc_auxiliary);
+    try std.testing.expectEqual(before.current_bytes, after.current_bytes);
+    try std.testing.expectEqual(before.admissions + 1, after.admissions);
+    try std.testing.expectEqual(before.allocator_failures + 1, after.allocator_failures);
+    try std.testing.expectEqual(before.rollback_bytes + 16, after.rollback_bytes);
+}
+
+test "runtime scratch telemetry stays coherent under concurrent allocation" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = setScratchLimits(.{});
+    defer _ = setScratchLimits(previous);
+    const before = snapshot();
+    var ready = std.atomic.Value(u64).init(0);
+    var start = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(u64).init(0);
+    const Worker = struct {
+        fn run(index: usize, ready_count: *std.atomic.Value(u64), start_gate: *std.atomic.Value(bool), done_count: *std.atomic.Value(u64)) void {
+            var scratch = ScratchAllocator.init(
+                if (index % 2 == 0) .native_compilation else .wasm_compilation,
+                std.heap.page_allocator,
+            );
+            defer scratch.deinit();
+            const allocator = scratch.allocator();
+            _ = ready_count.fetchAdd(1, .release);
+            while (!start_gate.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..200) |iteration| {
+                const bytes = 17 + (iteration % 29);
+                const storage = allocator.alloc(u8, bytes) catch unreachable;
+                allocator.free(storage);
+            }
+            _ = done_count.fetchAdd(1, .release);
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ index, &ready, &start, &done });
+    while (ready.load(.acquire) != threads.len) std.atomic.spinLoopHint();
+    start.store(true, .release);
+    while (done.load(.acquire) != threads.len) {
+        const live = snapshot().scratch;
+        try std.testing.expectEqual(live.current_bytes, live.domainCurrentTotal());
+        for (live.domains) |domain_state| {
+            try std.testing.expectEqual(
+                domain_state.current_bytes,
+                domain_state.admitted_bytes - domain_state.rollback_bytes - domain_state.released_bytes,
+            );
+        }
+        std.Thread.yield() catch {};
+    }
+    for (threads) |thread| thread.join();
+    const after = snapshot();
+    try std.testing.expectEqual(before.scratch.current_bytes, after.scratch.current_bytes);
+    try std.testing.expectEqual(after.scratch.current_bytes, after.scratch.domainCurrentTotal());
+    try std.testing.expectEqual(
+        @as(u64, 400),
+        after.scratch.domain(.native_compilation).admissions - before.scratch.domain(.native_compilation).admissions,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 400),
+        after.scratch.domain(.wasm_compilation).admissions - before.scratch.domain(.wasm_compilation).admissions,
+    );
 }
 
 test "internal work reuses typed slots and nested admission" {

@@ -4268,6 +4268,10 @@ pub const Context = struct {
     /// Owns the opt-in allocator counters and exact per-cycle GC pause samples.
     /// Null preserves the production allocator chain and short-circuits sinks.
     runtime_attribution_profiler: ?*RuntimeAttributionProfiler = null,
+    /// Process-wide budget/accounting wrapper for zig-gc pointer/index
+    /// worklists. The heap owns every allocation; this wrapper remains stable
+    /// until heap teardown proves its requested-byte balance returned to zero.
+    gc_auxiliary_scratch: ?runtime_threads.ScratchAllocator = null,
     /// Runaway-step ceiling handed to every interpreter this realm creates.
     /// See `TestingOptions.step_budget`.
     step_budget: u64 = interp.max_steps,
@@ -5741,6 +5745,10 @@ pub const Context = struct {
         errdefer if (owned_gc_state) |state| {
             state.backing.beginBulkTeardown();
             state.heap.deinitRetainingCellStorage();
+            if (self.gc_auxiliary_scratch) |*scratch| {
+                scratch.deinit();
+                self.gc_auxiliary_scratch = null;
+            }
             self.runDeferredPostSweepCallbacks();
             state.backing.deinit();
             state.realms.deinit(context_gpa);
@@ -5808,10 +5816,12 @@ pub const Context = struct {
             const private_gc_scratch = !options.enable_threads and
                 !options.concurrent_gc and !options.parallel_gc;
             const collector_auxiliary_inner = if (private_gc_scratch) gpa else std.heap.page_allocator;
+            self.gc_auxiliary_scratch = runtime_threads.ScratchAllocator.init(.gc_auxiliary, collector_auxiliary_inner);
+            const collector_auxiliary = self.gc_auxiliary_scratch.?.allocator();
             h.setAuxAllocator(if (runtime_attribution_profiler) |profile|
-                profile.collectorAuxiliaryAllocator(collector_auxiliary_inner)
+                profile.collectorAuxiliaryAllocator(collector_auxiliary)
             else
-                collector_auxiliary_inner);
+                collector_auxiliary);
             h.setNurseryTenuringAge(runtime_gc_tenuring_age);
             h.setNurseryEnabled(true);
             h.setMovingNurseryEnabled(true);
@@ -6764,6 +6774,10 @@ pub const Context = struct {
                 h.deinit();
             }
             self.gc = null;
+        }
+        if (self.gc_auxiliary_scratch) |*scratch| {
+            scratch.deinit();
+            self.gc_auxiliary_scratch = null;
         }
         self.runDeferredPostSweepCallbacks();
         if (self.gc_cell_backing) |backing| {
@@ -25249,16 +25263,18 @@ test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {
 
 test "enable_gc: collector scratch allocator follows the context concurrency policy" {
     const Identity = struct {
-        fn expect(actual: std.mem.Allocator, expected: std.mem.Allocator) !void {
-            try std.testing.expectEqual(expected.ptr, actual.ptr);
-            try std.testing.expectEqual(expected.vtable, actual.vtable);
+        fn expect(ctx: *Context, expected: std.mem.Allocator) !void {
+            const scratch = if (ctx.gc_auxiliary_scratch) |*scratch_state| scratch_state else return error.TestUnexpectedResult;
+            try std.testing.expectEqual(expected.ptr, scratch.inner.ptr);
+            try std.testing.expectEqual(expected.vtable, scratch.inner.vtable);
+            try std.testing.expectEqual(@intFromPtr(scratch), @intFromPtr(ctx.gc.?.aux.ptr));
         }
     };
 
     {
         const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
         defer ctx.destroy();
-        try Identity.expect(ctx.gc.?.aux, std.testing.allocator);
+        try Identity.expect(ctx, std.testing.allocator);
     }
     {
         const ctx = try Context.createWith(std.testing.allocator, .{
@@ -25266,7 +25282,7 @@ test "enable_gc: collector scratch allocator follows the context concurrency pol
             .concurrent_gc = true,
         });
         defer ctx.destroy();
-        try Identity.expect(ctx.gc.?.aux, std.heap.page_allocator);
+        try Identity.expect(ctx, std.heap.page_allocator);
     }
     {
         const ctx = try Context.createWith(std.testing.allocator, .{
@@ -25275,8 +25291,29 @@ test "enable_gc: collector scratch allocator follows the context concurrency pol
             .gil = true,
         });
         defer ctx.destroy();
-        try Identity.expect(ctx.gc.?.aux, std.heap.page_allocator);
+        try Identity.expect(ctx, std.heap.page_allocator);
     }
+}
+
+test "enable_gc: collector scratch returns its process budget at teardown" {
+    const before = runtime_threads.snapshot().scratch.domain(.gc_auxiliary);
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    _ = try ctx.evaluate(
+        \\const roots = [];
+        \\for (let i = 0; i < 400; i++) roots.push({ i, child: { value: i + 1 } });
+        \\roots.length
+    );
+    ctx.collectGarbage();
+    const live = runtime_threads.snapshot().scratch.domain(.gc_auxiliary);
+    try std.testing.expect(live.admissions > before.admissions);
+    try std.testing.expect(live.peak_bytes >= live.current_bytes);
+    ctx.destroy();
+    const after = runtime_threads.snapshot().scratch.domain(.gc_auxiliary);
+    try std.testing.expectEqual(before.current_bytes, after.current_bytes);
+    try std.testing.expectEqual(
+        after.current_bytes,
+        after.admitted_bytes - after.rollback_bytes - after.released_bytes,
+    );
 }
 
 test "GC compaction is fail-closed, rewrites a protected graph, and reaches a dense fixed point" {
