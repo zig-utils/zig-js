@@ -618,13 +618,20 @@ fn validateDefinedTypes(mod: *const types.Module, diag: *types.Diagnostic) Error
 }
 
 pub fn validate(mod: *types.Module, diag: *types.Diagnostic) Error!void {
-    validateWithAllocator(mod, diag, std.heap.page_allocator) catch |err| switch (err) {
+    return validateWithAllocator(mod, diag, std.heap.page_allocator);
+}
+
+/// Validate with caller-owned temporary storage. Published operand and label
+/// depths still come from `mod.arena`; only the abstract validation stacks use
+/// `allocator`, so callers may release it as soon as validation returns.
+pub fn validateWithAllocator(mod: *types.Module, diag: *types.Diagnostic, allocator: Allocator) Error!void {
+    validateAllocating(mod, diag, allocator) catch |err| switch (err) {
         error.OutOfMemory => return failMod(diag, "out of memory"),
         error.Invalid => return error.Invalid,
     };
 }
 
-fn validateWithAllocator(mod: *types.Module, diag: *types.Diagnostic, allocator: Allocator) (Error || Allocator.Error)!void {
+fn validateAllocating(mod: *types.Module, diag: *types.Diagnostic, allocator: Allocator) (Error || Allocator.Error)!void {
     // 1. Type indices must resolve; reference value positions are opt-in.
     try validateDefinedTypes(mod, diag);
     for (mod.imports) |imp| switch (imp.desc) {
@@ -3182,7 +3189,7 @@ fn validateGcWithFailingAllocator(allocator: Allocator) !void {
         &diag,
     );
     defer decode.destroyModule(std.testing.allocator, mod);
-    try validateWithAllocator(mod, &diag, allocator);
+    try validateAllocating(mod, &diag, allocator);
 }
 
 test "wasm.validate GC allocation failures are rollback safe" {

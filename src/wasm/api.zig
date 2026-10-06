@@ -818,13 +818,15 @@ fn compileModuleObject(
     defer copy.deinit();
     const owner = self.wasm_store_ctx orelse return self.throwError("TypeError", "WebAssembly store is unavailable");
     const store: *context.Context = @ptrCast(@alignCast(owner));
+    var scratch = runtime_threads.ScratchAllocator.init(.wasm_compilation, store.gpa);
+    defer scratch.deinit();
     var diag: types.Diagnostic = .{};
     const module = decode.decodeWithFeatures(store.gpa, copy.bytes, store.wasm_features, &diag) catch |err| switch (err) {
         error.Malformed => return throwCompileError(self, descriptor.compile_error_proto, &diag),
         error.OutOfMemory => return error.OutOfMemory,
     };
     errdefer decode.destroyModule(store.gpa, module);
-    validate_mod.validate(module, &diag) catch
+    validate_mod.validateWithAllocator(module, &diag, scratch.allocator()) catch
         return throwCompileError(self, descriptor.compile_error_proto, &diag);
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = prototype };
@@ -844,17 +846,22 @@ fn moduleConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
 fn validate(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     if (args.len == 0) return self.throwError("TypeError", "WebAssembly.validate requires a BufferSource");
+    var work = runtime_threads.beginInternalWork(.wasm_compilation);
+    defer work.end();
     const copy = try copyBufferSource(self, args[0]);
     defer copy.deinit();
     const store = if (self.wasm_store_ctx) |store_ptr| @as(?*context.Context, @ptrCast(@alignCast(store_ptr))) else null;
     const allocator = if (store) |owner| owner.gpa else self.arena;
+    var scratch = runtime_threads.ScratchAllocator.init(.wasm_compilation, allocator);
+    defer scratch.deinit();
+    const scratch_allocator = scratch.allocator();
     var diag: types.Diagnostic = .{};
-    const module = decode.decodeWithFeatures(allocator, copy.bytes, if (store) |owner| owner.wasm_features else .{}, &diag) catch |err| return switch (err) {
+    const module = decode.decodeWithFeatures(scratch_allocator, copy.bytes, if (store) |owner| owner.wasm_features else .{}, &diag) catch |err| return switch (err) {
         error.Malformed => Value.boolVal(false),
         error.OutOfMemory => error.OutOfMemory,
     };
-    defer decode.destroyModule(allocator, module);
-    validate_mod.validate(module, &diag) catch return Value.boolVal(false);
+    defer decode.destroyModule(scratch_allocator, module);
+    validate_mod.validateWithAllocator(module, &diag, scratch_allocator) catch return Value.boolVal(false);
     return Value.boolVal(true);
 }
 
@@ -3018,6 +3025,49 @@ test "wasm api installs errors validates and reflects Module" {
         \\callType && compileType && sections.length === 1 && sections[0].byteLength === 2;
     );
     try std.testing.expect(boundaries.isBoolean() and boundaries.asBool());
+}
+
+test "wasm api bounds temporary compilation storage without retaining modules" {
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    const before = runtime_threads.snapshot().scratch.domain(.wasm_compilation);
+
+    var denied_limits = runtime_threads.ScratchLimits{};
+    denied_limits.max_domain_bytes[@backingInt(runtime_threads.ScratchKind.wasm_compilation)] = 0;
+    const previous_limits = runtime_threads.setScratchLimits(denied_limits);
+    var restored = false;
+    defer {
+        if (!restored) _ = runtime_threads.setScratchLimits(previous_limits);
+    }
+
+    const denied_module = try store.evaluate(
+        \\const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,10,1,6,97,110,115,119,101,114,0,0,10,6,1,4,0,65,42,11]);
+        \\try { new WebAssembly.Module(bytes); false; }
+        \\catch (e) { e instanceof WebAssembly.CompileError && e.message.includes('out of memory'); }
+    );
+    try std.testing.expect(denied_module.isBoolean() and denied_module.asBool());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.evaluate(
+            \\const validateBytes = new Uint8Array([0,97,115,109,1,0,0,0]);
+            \\WebAssembly.validate(validateBytes);
+        ),
+    );
+    const denied = runtime_threads.snapshot().scratch.domain(.wasm_compilation);
+    try std.testing.expectEqual(before.policy_rejections + 2, denied.policy_rejections);
+    try std.testing.expectEqual(before.current_bytes, denied.current_bytes);
+
+    _ = runtime_threads.setScratchLimits(previous_limits);
+    restored = true;
+    const recovered = try store.evaluate(
+        \\const recoveredBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,10,1,6,97,110,115,119,101,114,0,0,10,6,1,4,0,65,42,11]);
+        \\const recoveredModule = new WebAssembly.Module(recoveredBytes);
+        \\WebAssembly.validate(recoveredBytes) && new WebAssembly.Instance(recoveredModule).exports.answer() === 42;
+    );
+    try std.testing.expect(recovered.isBoolean() and recovered.asBool());
+    const after = runtime_threads.snapshot().scratch.domain(.wasm_compilation);
+    try std.testing.expect(after.admissions > denied.admissions);
+    try std.testing.expectEqual(before.current_bytes, after.current_bytes);
 }
 
 test "wasm api corpus harness invokes float functions bit-exactly" {
