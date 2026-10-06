@@ -3248,11 +3248,19 @@ fn resolveAlias(initial: optimizer.ValueId, aliases: [jit.numeric_scratch_capaci
 }
 
 pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
-    return compileWithObservability(chunk, false);
+    return compileWithAllocator(chunk, std.heap.page_allocator);
 }
 
 pub fn compileObserved(chunk: *const bc.Chunk) !jit.CompiledCode {
-    return compileWithObservability(chunk, true);
+    return compileObservedWithAllocator(chunk, std.heap.page_allocator);
+}
+
+pub fn compileWithAllocator(chunk: *const bc.Chunk, scratch_allocator: std.mem.Allocator) !jit.CompiledCode {
+    return compileWithObservability(chunk, false, scratch_allocator);
+}
+
+pub fn compileObservedWithAllocator(chunk: *const bc.Chunk, scratch_allocator: std.mem.Allocator) !jit.CompiledCode {
+    return compileWithObservability(chunk, true, scratch_allocator);
 }
 
 fn lowerCompactedLoop(
@@ -3282,14 +3290,18 @@ fn lowerCompactedLoop(
     };
 }
 
-fn compileWithObservability(chunk: *const bc.Chunk, native_observability: bool) !jit.CompiledCode {
-    var plan = try optimizer.build(chunk, std.heap.page_allocator);
+fn compileWithObservability(
+    chunk: *const bc.Chunk,
+    native_observability: bool,
+    scratch_allocator: std.mem.Allocator,
+) !jit.CompiledCode {
+    var plan = try optimizer.build(chunk, scratch_allocator);
     defer plan.deinit();
-    var program = lower(chunk, &plan, std.heap.page_allocator) catch |err| switch (err) {
-        error.UnsupportedChunk => lowerFusedLoopOsr(chunk, &plan, std.heap.page_allocator) catch |fused_err| switch (fused_err) {
-            error.UnsupportedChunk => lowerLoopOsr(chunk, &plan, std.heap.page_allocator) catch |loop_err| switch (loop_err) {
-                error.UnsupportedChunk => lowerGeneralLoopOsr(chunk, &plan, std.heap.page_allocator) catch |general_err| switch (general_err) {
-                    error.UnsupportedChunk => try lowerCompactedLoop(chunk, &plan, std.heap.page_allocator),
+    var program = lower(chunk, &plan, scratch_allocator) catch |err| switch (err) {
+        error.UnsupportedChunk => lowerFusedLoopOsr(chunk, &plan, scratch_allocator) catch |fused_err| switch (fused_err) {
+            error.UnsupportedChunk => lowerLoopOsr(chunk, &plan, scratch_allocator) catch |loop_err| switch (loop_err) {
+                error.UnsupportedChunk => lowerGeneralLoopOsr(chunk, &plan, scratch_allocator) catch |general_err| switch (general_err) {
+                    error.UnsupportedChunk => try lowerCompactedLoop(chunk, &plan, scratch_allocator),
                     else => return general_err,
                 },
                 else => return loop_err,
@@ -3299,7 +3311,7 @@ fn compileWithObservability(chunk: *const bc.Chunk, native_observability: bool) 
         else => return err,
     };
     defer program.deinit();
-    return compileAarch64(&program, native_observability);
+    return compileAarch64WithAllocator(&program, native_observability, scratch_allocator);
 }
 
 const LoopRegionPatch = struct {
@@ -3316,6 +3328,7 @@ fn emitLoopRegionTarget(
     entry_deopt_index: u16,
     patches: *std.ArrayListUnmanaged(LoopRegionPatch),
     pc_map: *jit.NativePcMapBuilder,
+    scratch_allocator: std.mem.Allocator,
 ) !void {
     switch (target.kind) {
         .block => {
@@ -3329,7 +3342,7 @@ fn emitLoopRegionTarget(
                 );
                 if (program.observe_loop_backedges) try emitBackedgeObserver(assembler);
             }
-            try patches.append(std.heap.page_allocator, .{
+            try patches.append(scratch_allocator, .{
                 .at = try assembler.branchPlaceholder(),
                 .target_block = target.block,
             });
@@ -3359,15 +3372,23 @@ fn emitLoopRegionTarget(
 }
 
 fn compileAarch64(program: *const Program, native_observability: bool) !jit.CompiledCode {
+    return compileAarch64WithAllocator(program, native_observability, std.heap.page_allocator);
+}
+
+fn compileAarch64WithAllocator(
+    program: *const Program,
+    native_observability: bool,
+    scratch_allocator: std.mem.Allocator,
+) !jit.CompiledCode {
     if (!jit.optimizer_supported) return error.UnsupportedTarget;
     var memory = try jit.CodeMemory.init(
         @as(usize, program.operations.len) * 192 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
     );
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
-    var returns = aarch64.ReturnBranches.init(std.heap.page_allocator);
+    var returns = aarch64.ReturnBranches.init(scratch_allocator);
     defer returns.deinit();
-    var pc_map = jit.NativePcMapBuilder.init(std.heap.page_allocator, native_observability);
+    var pc_map = jit.NativePcMapBuilder.init(scratch_allocator, native_observability);
     defer pc_map.deinit();
     try pc_map.mark(0, null);
     try assembler.pushPair(29, 30);
@@ -3424,9 +3445,9 @@ fn compileAarch64(program: *const Program, native_observability: bool) !jit.Comp
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
         if (program.loop_region_blocks.len != 0) {
             var patches: std.ArrayListUnmanaged(LoopRegionPatch) = .empty;
-            defer patches.deinit(std.heap.page_allocator);
-            const block_positions = try std.heap.page_allocator.alloc(usize, program.loop_region_blocks.len);
-            defer std.heap.page_allocator.free(block_positions);
+            defer patches.deinit(scratch_allocator);
+            const block_positions = try scratch_allocator.alloc(usize, program.loop_region_blocks.len);
+            defer scratch_allocator.free(block_positions);
 
             try emitBlockOperations(&assembler, &returns, program, program.loop_region_entry_operations_block, &pc_map);
             for (program.loop_region_blocks, 0..) |region, region_index| {
@@ -3462,6 +3483,7 @@ fn compileAarch64(program: *const Program, native_observability: bool) !jit.Comp
                         entry_deopt_index,
                         &patches,
                         &pc_map,
+                        scratch_allocator,
                     );
                 } else {
                     try pc_map.mark(
@@ -3481,6 +3503,7 @@ fn compileAarch64(program: *const Program, native_observability: bool) !jit.Comp
                         entry_deopt_index,
                         &patches,
                         &pc_map,
+                        scratch_allocator,
                     );
                     try assembler.patchConditionBranch(false_edge, assembler.position());
                     try emitLoopRegionTarget(
@@ -3492,6 +3515,7 @@ fn compileAarch64(program: *const Program, native_observability: bool) !jit.Comp
                         entry_deopt_index,
                         &patches,
                         &pc_map,
+                        scratch_allocator,
                     );
                 }
                 if (program.loop_region_dynamic_checks) {
@@ -3687,7 +3711,7 @@ fn compileAarch64(program: *const Program, native_observability: bool) !jit.Comp
     try assembler.popPair(29, 30);
     try assembler.ret();
     try memory.publish(assembler.bytes().len);
-    const native_pc_map = try pc_map.finish();
+    const native_pc_map = try pc_map.finishWithAllocator(std.heap.page_allocator);
     errdefer if (native_pc_map) |metadata| metadata.destroy();
     const deopt = try jit.DeoptMetadata.create(
         std.heap.page_allocator,
@@ -5117,6 +5141,7 @@ test "optimizer schedules edge assignments as parallel copies" {
 
 test "observed optimizer code records exact operation branch and return PCs" {
     if (!jit.optimizer_supported) return error.SkipZigTest;
+    const runtime_threads = @import("../runtime_threads.zig");
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5126,9 +5151,15 @@ test "observed optimizer code records exact operation branch and return PCs" {
     defer ordinary.deinit();
     try std.testing.expect(ordinary.native_pc_map == null);
 
-    var observed = try compileObserved(&chunk);
+    var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, std.testing.allocator);
+    const scratch_allocator = scratch.allocator();
+    var observed = try compileObservedWithAllocator(&chunk, scratch_allocator);
+    try std.testing.expectEqual(@as(u64, 0), scratch.currentBytes());
+    scratch.deinit();
     defer observed.deinit();
-    const entries = observed.native_pc_map.?.entries;
+    const metadata = observed.native_pc_map.?;
+    try std.testing.expect(metadata.allocator.ptr != scratch_allocator.ptr);
+    const entries = metadata.entries;
     try std.testing.expect(entries.len >= 6);
     try std.testing.expectEqual(@as(u32, 0), entries[0].native_offset);
     try std.testing.expect(entries[0].bytecode_offset == null);

@@ -1048,12 +1048,28 @@ pub const NativePcMapBuilder = struct {
     }
 
     pub fn finish(self: *NativePcMapBuilder) !?*NativePcMapMetadata {
+        return self.finishWithAllocator(self.allocator);
+    }
+
+    /// Transfer the finished map to its long-lived owner without forcing the
+    /// compilation-local builder to use that owner's allocator. Native
+    /// compilation scratch can therefore be bounded independently from
+    /// metadata retained by a published artifact.
+    pub fn finishWithAllocator(
+        self: *NativePcMapBuilder,
+        persistent_allocator: std.mem.Allocator,
+    ) !?*NativePcMapMetadata {
         if (!self.enabled or self.entries.items.len == 0) return null;
-        const metadata = try self.allocator.create(NativePcMapMetadata);
-        errdefer self.allocator.destroy(metadata);
+        const metadata = try persistent_allocator.create(NativePcMapMetadata);
+        errdefer persistent_allocator.destroy(metadata);
+        const entries = if (self.allocator.ptr == persistent_allocator.ptr and
+            self.allocator.vtable == persistent_allocator.vtable)
+            try self.entries.toOwnedSlice(self.allocator)
+        else
+            try persistent_allocator.dupe(native_observability.PcLocation, self.entries.items);
         metadata.* = .{
-            .allocator = self.allocator,
-            .entries = try self.entries.toOwnedSlice(self.allocator),
+            .allocator = persistent_allocator,
+            .entries = entries,
         };
         return metadata;
     }

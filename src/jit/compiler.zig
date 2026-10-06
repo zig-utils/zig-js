@@ -16,14 +16,26 @@ const Chunk = bc.Chunk;
 const Value = value.Value;
 
 pub fn compile(chunk: *const Chunk) !jit.CompiledCode {
-    return compileWithObservability(chunk, false);
+    return compileWithAllocator(chunk, std.heap.page_allocator);
 }
 
 pub fn compileObserved(chunk: *const Chunk) !jit.CompiledCode {
-    return compileWithObservability(chunk, true);
+    return compileObservedWithAllocator(chunk, std.heap.page_allocator);
 }
 
-fn compileWithObservability(chunk: *const Chunk, native_observability: bool) !jit.CompiledCode {
+pub fn compileWithAllocator(chunk: *const Chunk, scratch_allocator: std.mem.Allocator) !jit.CompiledCode {
+    return compileWithObservability(chunk, false, scratch_allocator);
+}
+
+pub fn compileObservedWithAllocator(chunk: *const Chunk, scratch_allocator: std.mem.Allocator) !jit.CompiledCode {
+    return compileWithObservability(chunk, true, scratch_allocator);
+}
+
+fn compileWithObservability(
+    chunk: *const Chunk,
+    native_observability: bool,
+    scratch_allocator: std.mem.Allocator,
+) !jit.CompiledCode {
     // VM activation setup initializes this non-parameter slot with a managed
     // exotic object. Native entry analyses currently model only parameter
     // inputs, so reject before constant/numeric selection rather than treating
@@ -39,7 +51,7 @@ fn compileWithObservability(chunk: *const Chunk, native_observability: bool) !ji
         compiled.bytecode_steps = selection.steps;
         return compiled;
     }
-    return compileNumeric(chunk, native_observability);
+    return compileNumeric(chunk, native_observability, scratch_allocator);
 }
 
 /// Allocation-free entry filter for eager tiering. A false result guarantees
@@ -639,11 +651,10 @@ fn enqueueState(
     try worklist.append(allocator, target);
 }
 
-fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
+fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool, allocator: std.mem.Allocator) !Analysis {
     if (chunk.code.items.len == 0 or chunk.code.items.len > max_code_len) return error.UnsupportedChunk;
     if (chunk.local_count > max_slots or chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
 
-    const allocator = std.heap.page_allocator;
     const thresholds = try collectRangeThresholds(chunk, allocator);
     defer allocator.free(thresholds);
     const states = try allocator.alloc(?State, chunk.code.items.len);
@@ -922,8 +933,11 @@ fn analyzeRepresentations(
     return states;
 }
 
-fn selectIntegerLocals(chunk: *const Chunk, analysis: *const Analysis) !IntegerSelection {
-    const allocator = std.heap.page_allocator;
+fn selectIntegerLocals(
+    chunk: *const Chunk,
+    analysis: *const Analysis,
+    allocator: std.mem.Allocator,
+) !IntegerSelection {
     var selected = candidateIntegerLocals(chunk, analysis);
     while (true) {
         const states = try analyzeRepresentations(chunk, analysis, selected, allocator);
@@ -1360,26 +1374,29 @@ fn patchControlToOffset(assembler: *aarch64.Assembler, fixup: ControlFixup, targ
     }
 }
 
-fn compileNumeric(chunk: *const Chunk, native_observability: bool) !jit.CompiledCode {
+fn compileNumeric(
+    chunk: *const Chunk,
+    native_observability: bool,
+    allocator: std.mem.Allocator,
+) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
-    var analysis = try analyzeNumeric(chunk, true);
+    var analysis = try analyzeNumeric(chunk, true, allocator);
     defer analysis.deinit();
-    var selection = selectIntegerLocals(chunk, &analysis) catch blk: {
-        const states = try analyzeRepresentations(chunk, &analysis, 0, std.heap.page_allocator);
-        break :blk IntegerSelection{ .locals = 0, .states = states, .allocator = std.heap.page_allocator };
+    var selection = selectIntegerLocals(chunk, &analysis, allocator) catch blk: {
+        const states = try analyzeRepresentations(chunk, &analysis, 0, allocator);
+        break :blk IntegerSelection{ .locals = 0, .states = states, .allocator = allocator };
     };
     defer selection.deinit();
     if (selection.locals == 0) {
         selection.deinit();
         analysis.deinit();
-        analysis = try analyzeNumeric(chunk, false);
-        const states = try analyzeRepresentations(chunk, &analysis, 0, std.heap.page_allocator);
-        selection = .{ .locals = 0, .states = states, .allocator = std.heap.page_allocator };
+        analysis = try analyzeNumeric(chunk, false, allocator);
+        const states = try analyzeRepresentations(chunk, &analysis, 0, allocator);
+        selection = .{ .locals = 0, .states = states, .allocator = allocator };
     }
     if (analysis.max_stack_depth > numeric_stack_register_capacity or chunk.local_count > numeric_local_register_capacity)
         return error.UnsupportedChunk;
-    const allocator = std.heap.page_allocator;
     const code_len = chunk.code.items.len;
     const blocks = try buildBlocks(chunk, &analysis, allocator);
     defer allocator.free(blocks);
@@ -1656,7 +1673,7 @@ fn compileNumeric(chunk: *const Chunk, native_observability: bool) !jit.Compiled
     const frame_epilogue_offset = try emitRestoreAndReturn(&assembler, selection.locals);
 
     try memory.publish(assembler.bytes().len);
-    const native_pc_map = try pc_map.finish();
+    const native_pc_map = try pc_map.finishWithAllocator(std.heap.page_allocator);
     errdefer if (native_pc_map) |metadata| metadata.destroy();
     const entry: jit.NativeEntry = @ptrCast(@alignCast(memory.executableBytes().ptr));
     const required_numeric_slots: u64 = if (chunk.param_count == 64)
@@ -1729,6 +1746,7 @@ test "observed baseline code records exact bytecode PC changes" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const Parser = @import("../parser.zig").Parser;
     const Compiler = @import("../compiler.zig").Compiler;
+    const runtime_threads = @import("../runtime_threads.zig");
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1742,10 +1760,16 @@ test "observed baseline code records exact bytecode PC changes" {
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
     const chunk = root.fns.items[0].chunk.?;
-    var compiled = try compileObserved(chunk);
+    var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, std.testing.allocator);
+    const scratch_allocator = scratch.allocator();
+    var compiled = try compileObservedWithAllocator(chunk, scratch_allocator);
+    try std.testing.expectEqual(@as(u64, 0), scratch.currentBytes());
+    scratch.deinit();
     defer compiled.deinit();
 
-    const entries = compiled.native_pc_map.?.entries;
+    const metadata = compiled.native_pc_map.?;
+    try std.testing.expect(metadata.allocator.ptr != scratch_allocator.ptr);
+    const entries = metadata.entries;
     try std.testing.expect(entries.len > chunk.code.items.len);
     try std.testing.expectEqual(@as(u32, 0), entries[0].native_offset);
     try std.testing.expect(entries[0].bytecode_offset == null);
@@ -1807,9 +1831,9 @@ test "integer provenance converges through benchmark-shaped loops" {
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
     const chunk = root.fns.items[0].chunk.?;
-    var analysis = try analyzeNumeric(chunk, true);
+    var analysis = try analyzeNumeric(chunk, true, std.testing.allocator);
     defer analysis.deinit();
-    var selection = try selectIntegerLocals(chunk, &analysis);
+    var selection = try selectIntegerLocals(chunk, &analysis, std.testing.allocator);
     defer selection.deinit();
     try std.testing.expectEqual(@as(usize, integer_local_register_capacity), @popCount(selection.locals));
 
@@ -1870,7 +1894,7 @@ test "integer ranges bound guarded straight-line remainder" {
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
     const chunk = root.fns.items[0].chunk.?;
-    var analysis = try analyzeNumeric(chunk, true);
+    var analysis = try analyzeNumeric(chunk, true, std.testing.allocator);
     defer analysis.deinit();
 
     for (chunk.code.items, 0..) |inst, ip| if (inst.op == .ret) {
@@ -1898,7 +1922,7 @@ test "integer provenance rejects live mixed-kind locals" {
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
     const chunk = root.fns.items[0].chunk.?;
-    try std.testing.expectError(error.UnsupportedChunk, analyzeNumeric(chunk, true));
+    try std.testing.expectError(error.UnsupportedChunk, analyzeNumeric(chunk, true, std.testing.allocator));
 }
 
 test "compiler executes guarded integer remainder loop" {

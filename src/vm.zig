@@ -7801,11 +7801,14 @@ fn loadOrCompileOptimizer(
         var claim = claim_value;
         var work = runtime_threads.beginInternalWork(.native_compilation);
         defer work.end();
+        var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, std.heap.page_allocator);
+        defer scratch.deinit();
+        const scratch_allocator = scratch.allocator();
         const tier_up_started_ns = tierTimingStarted(vm);
         var compiled = (if (owner.nativeObservabilityEnabled())
-            optimizer_compiler.compileObserved(chunk)
+            optimizer_compiler.compileObservedWithAllocator(chunk, scratch_allocator)
         else
-            optimizer_compiler.compile(chunk)) catch |err| {
+            optimizer_compiler.compileWithAllocator(chunk, scratch_allocator)) catch |err| {
             recordOptimizerTierUp(vm, tier_up_started_ns, false);
             if (err == error.OutOfMemory) {
                 chunk.optimizer_tier.invalidate();
@@ -7936,13 +7939,19 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         var claim = claim_value;
         var work = runtime_threads.beginInternalWork(.native_compilation);
         defer work.end();
+        var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, std.heap.page_allocator);
+        defer scratch.deinit();
+        const scratch_allocator = scratch.allocator();
         const tier_up_started_ns = tierTimingStarted(vm);
         var compiled = (if (owner.nativeObservabilityEnabled())
-            jit_compiler.compileObserved(chunk)
+            jit_compiler.compileObservedWithAllocator(chunk, scratch_allocator)
         else
-            jit_compiler.compile(chunk)) catch {
+            jit_compiler.compileWithAllocator(chunk, scratch_allocator)) catch |err| {
             recordBaselineTierUp(vm, tier_up_started_ns, false);
-            chunk.tier.publishRejected();
+            if (err == error.OutOfMemory)
+                chunk.tier.invalidate()
+            else
+                chunk.tier.publishRejected();
             claim.release();
             return null;
         };
@@ -15748,6 +15757,76 @@ test "vm: hot primitive constant function tiers through native entry" {
     const optimizer_profile = function_chunk.optimizer_profile.snapshot();
     try std.testing.expectEqual(@as(u64, 4), optimizer_profile.entries);
     try std.testing.expect(optimizer_profile.sawValue(.number));
+}
+
+test "vm: native compilation scratch denial preserves fallback and permits retry" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function sum(n) {
+        \\  var total = 0;
+        \\  for (var i = 0; i < n; i = i + 1) total = total + i;
+        \\  return total;
+        \\}
+        \\function answer() { return (1 + 2) * 14; }
+    );
+    const root = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .prefer_managed_baseline = true,
+    });
+    _ = try run(&machine, root, null);
+
+    const sum_chunk = root.fns.items[0].chunk.?;
+    const answer_chunk = root.fns.items[1].chunk.?;
+    var sum_slots = [_]Value{ Value.num(10), Value.undef(), Value.undef() };
+    var sum_frame = Frame{ .slots = &sum_slots, .parent = null };
+    var answer_slots: [0]Value = .{};
+    var answer_frame = Frame{ .slots = &answer_slots, .parent = null };
+
+    var denied_limits = runtime_threads.ScratchLimits{};
+    denied_limits.max_domain_bytes[@backingInt(runtime_threads.ScratchKind.native_compilation)] = 0;
+    const previous_limits = runtime_threads.setScratchLimits(denied_limits);
+    var restored = false;
+    defer {
+        if (!restored) _ = runtime_threads.setScratchLimits(previous_limits);
+    }
+    const before = runtime_threads.snapshot().scratch.domain(.native_compilation);
+
+    try std.testing.expectEqual(@as(f64, 45), (try run(&machine, sum_chunk, &sum_frame)).asNum());
+    try std.testing.expectEqual(jit.TierState.cold, sum_chunk.tier.loadState());
+    for (0..10) |_| {
+        try std.testing.expectEqual(@as(f64, 42), (try run(&machine, answer_chunk, &answer_frame)).asNum());
+    }
+    try std.testing.expectEqual(jit.OptimizerTierState.profiling, answer_chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(answer_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expectEqual(@as(u64, 0), answer_chunk.optimizer_tier.compileCount());
+    const denied = runtime_threads.snapshot().scratch.domain(.native_compilation);
+    try std.testing.expect(denied.policy_rejections >= before.policy_rejections + 2);
+    try std.testing.expectEqual(before.current_bytes, denied.current_bytes);
+
+    _ = runtime_threads.setScratchLimits(previous_limits);
+    restored = true;
+    sum_slots = .{ Value.num(10), Value.undef(), Value.undef() };
+    try std.testing.expectEqual(@as(f64, 45), (try run(&machine, sum_chunk, &sum_frame)).asNum());
+    try std.testing.expectEqual(jit.TierState.ready, sum_chunk.tier.loadState());
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, answer_chunk, &answer_frame)).asNum());
+    try std.testing.expectEqual(jit.OptimizerTierState.ready, answer_chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(answer_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+    const after = runtime_threads.snapshot().scratch.domain(.native_compilation);
+    try std.testing.expect(after.admissions > denied.admissions);
+    try std.testing.expectEqual(before.current_bytes, after.current_bytes);
 }
 
 test "vm: optimizer profiles aggregate function behavior without claiming execution" {
