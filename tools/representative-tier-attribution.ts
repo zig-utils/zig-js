@@ -37,6 +37,7 @@ export type TierSnapshot = {
   phase: "configuration" | "warmup" | "invocation";
   checksum: number;
   execution: CounterMap;
+  runtime_operations: CounterMap;
   timing: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
@@ -62,6 +63,7 @@ export type TierDelta = {
   phase: TierSnapshot["phase"];
   checksum: number;
   execution: CounterMap;
+  runtime_operations: CounterMap;
   timing: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
@@ -768,6 +770,7 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     execution: Object.fromEntries(
       Object.keys(row.execution).map((name) => [name, 0]),
     ),
+    runtime_operations: {},
     timing: Object.fromEntries(timingMetrics.map((name) => [name, 0])),
     admissions: Object.fromEntries(
       Object.keys(row.admissions).map((name) => [name, 0]),
@@ -811,6 +814,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         phase: row.phase,
         checksum: row.checksum,
         execution: subtractMap(row.execution, before.execution),
+        runtime_operations: subtractMap(row.runtime_operations, before.runtime_operations),
         timing: subtractTiming(row.timing, before.timing),
         admissions: subtractMap(row.admissions, before.admissions),
         synchronization: subtractSynchronization(row.synchronization, before.synchronization),
@@ -881,9 +885,15 @@ function validateRows(
       requireValue(row.lanes === entry.lanes, `unexpected lanes for ${workload}`);
       requireValue(row.jobs === jobs, `unexpected jobs for ${workload}`);
       requireValue(row.phase === phases[phaseIndex], `unexpected phase for ${workload}`);
+      const runtimeOperations = row.runtime_operations;
+      requireValue(
+        runtimeOperations && typeof runtimeOperations === "object" && !Array.isArray(runtimeOperations),
+        `runtime-operation attribution inventory drift for ${workload}`,
+      );
       requireValue(
         Number.isInteger(row.checksum) &&
           Object.values(row.execution).every(Number.isInteger) &&
+          Object.values(row.runtime_operations).every(Number.isInteger) &&
           Object.values(row.timing).every(Number.isInteger) &&
           Object.values(row.admissions).every(Number.isInteger) &&
           Object.values(row.synchronization).every(Number.isInteger) &&
@@ -898,6 +908,13 @@ function validateRows(
           Object.values(row.heap).every(Number.isInteger) &&
           Object.values(row.process).every(Number.isInteger),
         `non-integral attribution for ${workload}`,
+      );
+      requireValue(
+        Object.keys(runtimeOperations).every((name) => /^[a-z][a-z0-9_]*$/.test(name)) &&
+          Object.values(runtimeOperations).every((value) => Number.isSafeInteger(value) && value >= 0) &&
+          Object.values(runtimeOperations).reduce((sum, value) => sum + value, 0) ===
+            row.execution.runtime_operation_calls,
+        `runtime-operation attribution is incoherent for ${workload}`,
       );
       validateMemoryInventory(row.memory, workload);
       validateMemoryPressure(row);
@@ -1660,6 +1677,7 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           wasm_dispatches: entry.owner.family?.startsWith("wasm_") || entry.workload.startsWith("wasm_") ? index : 0,
           environment_allocations: index,
         },
+        runtime_operations: index === 0 ? {} : { load_var: index },
         timing: {
           baseline_attempts: 0,
           baseline_tier_ups: 0,
@@ -1825,6 +1843,15 @@ export function selfTest(): void {
   const execution = JSON.parse(JSON.stringify(rows));
   delete execution[0].execution.vm_dispatches;
   expectFailure(() => validate(execution, manifest, true), "execution attribution inventory drift");
+  const nonIntegralRuntimeOperation = JSON.parse(JSON.stringify(rows));
+  nonIntegralRuntimeOperation[1].runtime_operations.load_var = 0.5;
+  expectFailure(() => validate(nonIntegralRuntimeOperation, manifest, true), "non-integral attribution");
+  const incoherentRuntimeOperation = JSON.parse(JSON.stringify(rows));
+  incoherentRuntimeOperation[1].runtime_operations.load_var += 1;
+  expectFailure(() => validate(incoherentRuntimeOperation, manifest, true), "runtime-operation attribution is incoherent");
+  const regressedRuntimeOperation = JSON.parse(JSON.stringify(rows));
+  regressedRuntimeOperation[2].runtime_operations = { get_prop: 2 };
+  expectFailure(() => validate(regressedRuntimeOperation, manifest, true), "load_var attribution counter regressed");
   const missingShape = JSON.parse(JSON.stringify(rows));
   delete missingShape[0].shape.transition_misses;
   expectFailure(() => validate(missingShape, manifest, true), "Shape attribution inventory drift");

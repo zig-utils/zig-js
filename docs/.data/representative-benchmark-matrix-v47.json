@@ -1,0 +1,74 @@
+{
+  "schema_version": 47,
+  "matrix_id": "zig-js-representative-v47",
+  "status": "frozen",
+  "frozen_date": "2026-10-07",
+  "owner_issue": 1031,
+  "history_policy": "This version hash-inherits every V46 workload, representation, width, job count, checksum, execution mode, scored operation, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, process classification, memory diagnostic, and aggregate attribution counter. It changes no scored row or execution boundary. It versions the diagnostic per-opcode runtime-operation histogram added by #1016 as schema 1 within the existing schema-17 tier-attribution sidecar, and re-pins the shared zig-js comparison runner. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, process policy, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v46",
+    "path": "docs/.data/representative-benchmark-matrix-v46.json",
+    "sha256": "6a692d7c85b8f3ab4c3c814317e73361cde43a17344dc5293758d0d238f5831a",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_inventory_diagnostics",
+      "memory_pressure_diagnostics",
+      "tier_attribution",
+      "json_pipeline_integration"
+    ]
+  },
+  "change": "Adds the schema-v1 contract for the sparse per-bytecode runtime-operation histogram emitted by the shared zig-js comparison runner, requires every count to be a nonnegative integer, reconciles each cumulative histogram exactly to runtime_operation_calls, and rejects per-opcode counter regression across phase boundaries. The histogram is diagnostic and does not enter scored timing, phase equivalence, allocation replay, performance ratios, stability decisions, or publication acceptance.",
+  "runtime_operation_diagnostics": {
+    "schema_version": 1,
+    "row_field": "runtime_operations",
+    "scored": false,
+    "reconciliation": "Every sparse per-bytecode count is a nonnegative integer, cumulative counts cannot regress across phase boundaries, and their exact sum equals execution.runtime_operation_calls.",
+    "publication_boundary": "The histogram is diagnostic and does not enter scored timing, phase equivalence, allocation replay, performance ratios, stability decisions, or publication acceptance."
+  },
+  "exact_parent_integration": {
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "6f6fcb3bcbf2422a9e3c0bfd03b7ff04cf6cac31f5ed1cfdec6ce3d41009722b"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "9b638839aadc247d5b3381d1dc7cc1cffd47a4bee6d73dfc2bd13d4ee7bedee9"
+      }
+    ],
+    "publication_boundary": "V47 preserves every V46 timing, efficiency, cleanliness, checksum, serial-child, process-classification, provenance, mixed-tier allocation-replay, and memory-diagnostic gate. The schema-17 tier-attribution sidecar gains a schema-v1 diagnostic per-opcode runtime-operation histogram contract, validated against its existing aggregate counter."
+  },
+  "context_lifecycle_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "6f6fcb3bcbf2422a9e3c0bfd03b7ff04cf6cac31f5ed1cfdec6ce3d41009722b"
+    },
+    "publication_boundary": "V47 changes only the shared runner hash. Lifecycle scenarios, options, checksums, phase and finalizer reconciliation, plateau policy, measured-boundary occupancy, and evidence ruling are unchanged."
+  },
+  "no_jit_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "6f6fcb3bcbf2422a9e3c0bfd03b7ff04cf6cac31f5ed1cfdec6ce3d41009722b"
+    },
+    "publication_boundary": "V47 changes only the shared runner hash. Required-bytecode and no-native modes, logical work, checksums, scored attribution, quickening contracts, publication duration, and exact-parent requirements are unchanged."
+  },
+  "string_indexing_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "6f6fcb3bcbf2422a9e3c0bfd03b7ff04cf6cac31f5ed1cfdec6ce3d41009722b"
+    },
+    "publication_boundary": "V47 changes only the shared runner hash. Every string representation, width, job count, checksum, required-bytecode boundary, scored attribution value, measured-boundary occupancy rule, and exact allocation replay remains unchanged."
+  }
+}
