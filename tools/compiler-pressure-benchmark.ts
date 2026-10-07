@@ -659,10 +659,16 @@ function environment(
       "-detailLevel",
       "mini",
     ]),
-    hardwareValue = (name: string): string =>
-      hardware.match(new RegExp(`^\\s*${name}:\\s*(.+)$`, "m"))?.[1] || "unavailable",
-    coreCount = hardwareValue("Total Number of Cores").match(/^\d+/)?.[0] || "unavailable",
-    memoryNumber = hardwareValue("Memory").match(/^\d+(?:\.\d+)?/)?.[0],
+    hardwareValue = (name: string): string => {
+      const prefix = `${name}:`,
+        line = hardware
+          .split("\n")
+          .map((entry) => entry.trim())
+          .find((entry) => entry.startsWith(prefix));
+      return line ? line.slice(prefix.length).trim() : "unavailable";
+    },
+    coreCount = hardwareValue("Total Number of Cores").split(" ")[0] || "unavailable",
+    memoryNumber = hardwareValue("Memory").split(" ")[0],
     memory = memoryNumber ? `${Number(memoryNumber).toFixed(1)} GiB` : "unavailable";
   return {
     Date: output(["date", "+%Y-%m-%dT%H:%M:%S%z"]),
