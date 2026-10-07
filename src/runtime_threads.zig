@@ -85,6 +85,7 @@ const Counters = struct {
     peak_blocked: std.atomic.Value(u64) = .init(0),
     block_transitions: std.atomic.Value(u64) = .init(0),
     runnable_transitions: std.atomic.Value(u64) = .init(0),
+    start_cancellations: std.atomic.Value(u64) = .init(0),
     configured_stack_bytes: std.atomic.Value(u64) = .init(0),
     peak_configured_stack_bytes: std.atomic.Value(u64) = .init(0),
 };
@@ -96,10 +97,34 @@ var mutation_generation: std.atomic.Value(u64) = .init(0);
 const SlotWaiter = struct {
     kind: Kind,
     priority: Priority,
+    stack_bytes: usize = 0,
     ticket: u64,
     cond: std.Io.Condition = .init,
+    previous: ?*SlotWaiter = null,
     next: ?*SlotWaiter = null,
-    granted: bool = false,
+    cancellation: ?*StartCancellation = null,
+    disposition: enum { pending, granted, canceled } = .pending,
+};
+
+/// Caller-owned cancellation edge for a typed thread that may still be
+/// waiting to enter the runnable scheduler. The handle must outlive the joined
+/// OS thread and may be canceled repeatedly.
+pub const StartCancellation = struct {
+    canceled: bool = false,
+    waiter: ?*SlotWaiter = null,
+
+    /// Cancel a pre-entry waiter. Returns true only when this call removed the
+    /// thread from the scheduler queue; a concurrently granted/running thread
+    /// observes its owner's ordinary stop signal instead.
+    pub fn cancel(self: *StartCancellation) bool {
+        const io = engine_io.get();
+        coordinator.mutex.lockUncancelable(io);
+        defer coordinator.mutex.unlock(io);
+        self.canceled = true;
+        const waiter = self.waiter orelse return false;
+        cancelSlotWaiterLocked(waiter, io);
+        return true;
+    }
 };
 
 const WorkAdmission = enum {
@@ -168,6 +193,7 @@ const PriorityCounters = struct {
     waiters: std.atomic.Value(u64) = .init(0),
     peak_waiters: std.atomic.Value(u64) = .init(0),
     grants: std.atomic.Value(u64) = .init(0),
+    cancellations: std.atomic.Value(u64) = .init(0),
     last_grant_ticket: std.atomic.Value(u64) = .init(0),
 };
 
@@ -218,6 +244,7 @@ pub const ResourceSnapshot = struct {
     peak_blocked: u64,
     block_transitions: u64,
     runnable_transitions: u64,
+    start_cancellations: u64,
     configured_stack_bytes: u64,
     peak_configured_stack_bytes: u64,
 };
@@ -240,6 +267,7 @@ pub const PrioritySnapshot = struct {
     waiters: u64,
     peak_waiters: u64,
     grants: u64,
+    cancellations: u64,
     last_grant_ticket: u64,
 };
 
@@ -323,7 +351,7 @@ pub const SchedulerSnapshot = struct {
 };
 
 pub const Snapshot = struct {
-    schema_version: u32 = 8,
+    schema_version: u32 = 9,
     generation: u64,
     scheduler: SchedulerSnapshot,
     resources: [kind_count]ResourceSnapshot,
@@ -680,6 +708,17 @@ fn recordRunnableState(kind: Kind) void {
     _ = state.runnable_transitions.fetchAdd(1, .monotonic);
 }
 
+fn recordStartCancellationState(kind: Kind, stack_bytes: usize) void {
+    const state = &counters[@backingInt(kind)];
+    _ = state.completions.fetchAdd(1, .monotonic);
+    _ = state.start_cancellations.fetchAdd(1, .monotonic);
+    const live = state.live.fetchSub(1, .monotonic);
+    const blocked = state.blocked.fetchSub(1, .monotonic);
+    const stack = state.configured_stack_bytes.fetchSub(stack_bytes, .monotonic);
+    std.debug.assert(live > 0 and blocked > 0 and stack >= stack_bytes);
+    releaseAdmission(state, stack_bytes);
+}
+
 const AutomaticPolicy = struct {
     host_logical_cpus: u64,
     host_reservation: u64,
@@ -750,6 +789,7 @@ fn loadScheduler() SchedulerSnapshot {
             .waiters = state.waiters.load(.acquire),
             .peak_waiters = state.peak_waiters.load(.acquire),
             .grants = state.grants.load(.acquire),
+            .cancellations = state.cancellations.load(.acquire),
             .last_grant_ticket = state.last_grant_ticket.load(.acquire),
         };
     }
@@ -826,6 +866,14 @@ fn finishSlotWaitState(priority: Priority, ticket: u64) void {
     std.debug.assert(ticket > previous_ticket);
 }
 
+fn cancelSlotWaitState(priority: Priority) void {
+    finishSchedulerWaitState();
+    const priority_state = &coordinator.priority[@backingInt(priority)];
+    const priority_waiters = priority_state.waiters.fetchSub(1, .monotonic);
+    std.debug.assert(priority_waiters > 0);
+    _ = priority_state.cancellations.fetchAdd(1, .monotonic);
+}
+
 fn hasQueuedWaitersLocked() bool {
     return coordinator.slot_waiters.load(.monotonic) != 0;
 }
@@ -835,6 +883,7 @@ fn enqueueWaiterLocked(waiter: *SlotWaiter) void {
     waiter.ticket = coordinator.next_ticket;
     const index = @backingInt(waiter.priority);
     if (coordinator.wait_tails[index]) |tail| {
+        waiter.previous = tail;
         tail.next = waiter;
     } else {
         coordinator.wait_heads[index] = waiter;
@@ -843,6 +892,29 @@ fn enqueueWaiterLocked(waiter: *SlotWaiter) void {
     beginMutation();
     beginSlotWaitState(waiter.priority);
     finishMutation();
+}
+
+fn cancelSlotWaiterLocked(waiter: *SlotWaiter, io: std.Io) void {
+    std.debug.assert(waiter.disposition == .pending);
+    const index = @backingInt(waiter.priority);
+    if (waiter.previous) |previous|
+        previous.next = waiter.next
+    else
+        coordinator.wait_heads[index] = waiter.next;
+    if (waiter.next) |next|
+        next.previous = waiter.previous
+    else
+        coordinator.wait_tails[index] = waiter.previous;
+    waiter.previous = null;
+    waiter.next = null;
+    waiter.cancellation.?.waiter = null;
+    beginMutation();
+    cancelSlotWaitState(waiter.priority);
+    recordStartCancellationState(waiter.kind, waiter.stack_bytes);
+    finishMutation();
+    waiter.disposition = .canceled;
+    waiter.cond.signal(io);
+    dispatchSlotsLocked(io);
 }
 
 fn enqueueWorkWaiterLocked(waiter: *WorkWaiter) void {
@@ -908,15 +980,20 @@ fn grantThreadWaiterLocked(priority: Priority, io: std.Io) void {
     const index = @backingInt(priority);
     const waiter = coordinator.wait_heads[index] orelse unreachable;
     coordinator.wait_heads[index] = waiter.next;
-    if (waiter.next == null) coordinator.wait_tails[index] = null;
+    if (waiter.next) |next|
+        next.previous = null
+    else
+        coordinator.wait_tails[index] = null;
+    waiter.previous = null;
     waiter.next = null;
+    if (waiter.cancellation) |cancellation| cancellation.waiter = null;
 
     beginMutation();
     finishSlotWaitState(priority, waiter.ticket);
     reserveSlotState();
     recordRunnableState(waiter.kind);
     finishMutation();
-    waiter.granted = true;
+    waiter.disposition = .granted;
     waiter.cond.signal(io);
 }
 
@@ -936,15 +1013,19 @@ fn dispatchSlotsLocked(io: std.Io) void {
     }
 }
 
-fn waitForSlotLocked(kind: Kind, io: std.Io) void {
+fn waitForSlotLocked(kind: Kind, stack_bytes: usize, cancellation: ?*StartCancellation, io: std.Io) bool {
     var waiter = SlotWaiter{
         .kind = kind,
         .priority = priorityFor(kind),
+        .stack_bytes = stack_bytes,
         .ticket = 0,
+        .cancellation = cancellation,
     };
     enqueueWaiterLocked(&waiter);
+    if (cancellation) |value| value.waiter = &waiter;
     dispatchSlotsLocked(io);
-    while (!waiter.granted) waiter.cond.waitUncancelable(io, &coordinator.mutex);
+    while (waiter.disposition == .pending) waiter.cond.waitUncancelable(io, &coordinator.mutex);
+    return waiter.disposition == .granted;
 }
 
 fn waitForWorkLocked(kind: InternalWorkKind, io: std.Io) WorkAdmission {
@@ -983,23 +1064,30 @@ fn admitHostWork(kind: InternalWorkKind) WorkAdmission {
     return waitForWorkLocked(kind, io);
 }
 
-fn startThread(kind: Kind, stack_bytes: usize) void {
+fn startThread(kind: Kind, stack_bytes: usize, cancellation: ?*StartCancellation) bool {
     const io = engine_io.get();
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
     ensureCoordinatorInitializedLocked();
+    if (cancellation) |value| if (value.canceled) {
+        beginMutation();
+        recordStartState(kind, stack_bytes, false);
+        recordStartCancellationState(kind, stack_bytes);
+        finishMutation();
+        return false;
+    };
     if (slotAvailableLocked() and !hasQueuedWaitersLocked()) {
         beginMutation();
         reserveSlotState();
         recordStartState(kind, stack_bytes, true);
         finishMutation();
-        return;
+        return true;
     }
 
     beginMutation();
     recordStartState(kind, stack_bytes, false);
     finishMutation();
-    waitForSlotLocked(kind, io);
+    return waitForSlotLocked(kind, stack_bytes, cancellation, io);
 }
 
 fn blockThread(kind: Kind) void {
@@ -1018,7 +1106,7 @@ fn resumeThread(kind: Kind) void {
     coordinator.mutex.lockUncancelable(io);
     defer coordinator.mutex.unlock(io);
     if (!slotAvailableLocked() or hasQueuedWaitersLocked()) {
-        waitForSlotLocked(kind, io);
+        std.debug.assert(waitForSlotLocked(kind, 0, null, io));
         return;
     }
     beginMutation();
@@ -1070,6 +1158,7 @@ fn loadResource(state: *const Counters) ResourceSnapshot {
         .peak_blocked = state.peak_blocked.load(.acquire),
         .block_transitions = state.block_transitions.load(.acquire),
         .runnable_transitions = state.runnable_transitions.load(.acquire),
+        .start_cancellations = state.start_cancellations.load(.acquire),
         .configured_stack_bytes = state.configured_stack_bytes.load(.acquire),
         .peak_configured_stack_bytes = state.peak_configured_stack_bytes.load(.acquire),
     };
@@ -1326,18 +1415,32 @@ pub fn beginInternalWork(kind: InternalWorkKind) InternalWorkScope {
     return .{ .kind = kind, .admission = admission };
 }
 
-pub fn spawn(
+fn ignoreStartCancellation() void {}
+
+fn spawnImpl(
     comptime kind: Kind,
     config: std.Thread.SpawnConfig,
+    cancellation: ?*StartCancellation,
     comptime function: anytype,
     args: anytype,
+    comptime cancel_function: anytype,
+    cancel_args: anytype,
 ) !std.Thread {
     if (!tryAdmit(kind, config.stack_size)) return error.ThreadQuotaExceeded;
     const Runner = struct {
-        fn run(call_args: @TypeOf(args), stack_bytes: usize) void {
+        fn run(
+            call_args: @TypeOf(args),
+            canceled_args: @TypeOf(cancel_args),
+            start_cancellation: ?*StartCancellation,
+            stack_bytes: usize,
+        ) void {
             std.debug.assert(current_thread == null);
             current_thread = .{ .kind = kind };
-            startThread(kind, stack_bytes);
+            if (!startThread(kind, stack_bytes, start_cancellation)) {
+                current_thread = null;
+                @call(.auto, cancel_function, canceled_args);
+                return;
+            }
             defer {
                 const state = current_thread orelse unreachable;
                 std.debug.assert(state.kind == kind and state.blocking_depth == 0);
@@ -1347,10 +1450,35 @@ pub fn spawn(
             @call(.auto, function, call_args);
         }
     };
-    return std.Thread.spawn(config, Runner.run, .{ args, config.stack_size }) catch |err| {
+    return std.Thread.spawn(config, Runner.run, .{ args, cancel_args, cancellation, config.stack_size }) catch |err| {
         recordFailure(kind, config.stack_size);
         return err;
     };
+}
+
+pub fn spawn(
+    comptime kind: Kind,
+    config: std.Thread.SpawnConfig,
+    comptime function: anytype,
+    args: anytype,
+) !std.Thread {
+    return spawnImpl(kind, config, null, function, args, ignoreStartCancellation, .{});
+}
+
+/// Spawn a typed thread whose owner can cancel it while it is queued for its
+/// initial runnable slot. Cancellation runs `cancel_function` on the spawned
+/// thread without entering `function`; neither callback runs on the canceling
+/// owner thread.
+pub fn spawnCancelable(
+    comptime kind: Kind,
+    config: std.Thread.SpawnConfig,
+    cancellation: *StartCancellation,
+    comptime function: anytype,
+    args: anytype,
+    comptime cancel_function: anytype,
+    cancel_args: anytype,
+) !std.Thread {
+    return spawnImpl(kind, config, cancellation, function, args, cancel_function, cancel_args);
 }
 
 test "runtime thread telemetry is coherent across concurrent starts and exits" {
@@ -1392,7 +1520,7 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(u32, 8), snapshot().schema_version);
+    try std.testing.expectEqual(@as(u32, 9), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
     var release = std.atomic.Value(bool).init(false);
@@ -1464,7 +1592,7 @@ test "runtime scratch allocator enforces domain and total limits with exact roll
     wasm_allocator.free(second);
 
     const live = snapshot();
-    try std.testing.expectEqual(@as(u32, 8), live.schema_version);
+    try std.testing.expectEqual(@as(u32, 9), live.schema_version);
     try std.testing.expectEqual(before.scratch.current_bytes + 32, live.scratch.current_bytes);
     try std.testing.expectEqual(live.scratch.current_bytes, live.scratch.domainCurrentTotal());
     const native_before = before.scratch.domain(.native_compilation);
@@ -1882,6 +2010,125 @@ test "runtime scheduler grants weighted priorities with FIFO class order" {
     try std.testing.expectEqual(before.priority(.foreground).grants + 4, after.priority(.foreground).grants);
     try std.testing.expectEqual(before.priority(.background).grants + 2, after.priority(.background).grants);
     try std.testing.expectEqual(after.active_slots, snapshot().runnableTotal());
+}
+
+test "runtime scheduler cancels typed starts at every queue position" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    var restored = false;
+    defer if (!restored) {
+        _ = setSchedulerLimits(previous);
+    };
+
+    const before = snapshot();
+    var cancellations: [3]StartCancellation = @splat(.{});
+    var ran = std.atomic.Value(u64).init(0);
+    var canceled = std.atomic.Value(u64).init(0);
+    const Entry = struct {
+        fn run(count: *std.atomic.Value(u64)) void {
+            _ = count.fetchAdd(1, .release);
+        }
+        fn cancel(count: *std.atomic.Value(u64)) void {
+            _ = count.fetchAdd(1, .release);
+        }
+    };
+    var threads: [3]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index| {
+        thread.* = try spawnCancelable(
+            .script_worker,
+            .{},
+            &cancellations[index],
+            Entry.run,
+            .{&ran},
+            Entry.cancel,
+            .{&canceled},
+        );
+        const deadline = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds + std.time.ns_per_s;
+        while (snapshot().scheduler.slot_waiters != before.scheduler.slot_waiters + index + 1 and
+            std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < deadline)
+            std.Thread.yield() catch {};
+        try std.testing.expectEqual(before.scheduler.slot_waiters + index + 1, snapshot().scheduler.slot_waiters);
+    }
+
+    // Remove the middle, then the head, then the tail. Each canceled OS
+    // thread must finish while runnable capacity remains paused at zero.
+    try std.testing.expect(cancellations[1].cancel());
+    try std.testing.expect(cancellations[0].cancel());
+    try std.testing.expect(cancellations[2].cancel());
+    try std.testing.expect(!cancellations[1].cancel());
+    for (threads) |thread| thread.join();
+
+    const after = snapshot();
+    const resource_before = before.resource(.script_worker);
+    const resource_after = after.resource(.script_worker);
+    const priority_before = before.scheduler.priority(.background);
+    const priority_after = after.scheduler.priority(.background);
+    try std.testing.expectEqual(@as(u64, 0), ran.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 3), canceled.load(.acquire));
+    try std.testing.expectEqual(resource_before.starts + 3, resource_after.starts);
+    try std.testing.expectEqual(resource_before.completions + 3, resource_after.completions);
+    try std.testing.expectEqual(resource_before.start_cancellations + 3, resource_after.start_cancellations);
+    try std.testing.expectEqual(resource_before.live, resource_after.live);
+    try std.testing.expectEqual(resource_before.blocked, resource_after.blocked);
+    try std.testing.expectEqual(resource_before.configured_stack_bytes, resource_after.configured_stack_bytes);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+    try std.testing.expectEqual(priority_before.waiters, priority_after.waiters);
+    try std.testing.expectEqual(priority_before.grants, priority_after.grants);
+    try std.testing.expectEqual(priority_before.cancellations + 3, priority_after.cancellations);
+    try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
+
+    _ = setSchedulerLimits(previous);
+    restored = true;
+}
+
+test "runtime scheduler grant and start cancellation have one winner" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    defer _ = setSchedulerLimits(previous);
+    var ran = std.atomic.Value(u64).init(0);
+    var canceled = std.atomic.Value(u64).init(0);
+    const Entry = struct {
+        fn run(count: *std.atomic.Value(u64)) void {
+            _ = count.fetchAdd(1, .release);
+        }
+        fn cancel(count: *std.atomic.Value(u64)) void {
+            _ = count.fetchAdd(1, .release);
+        }
+        fn grant() void {
+            _ = setSchedulerLimits(.{ .max_runnable_threads = 1 });
+        }
+        fn cancelStart(value: *StartCancellation) void {
+            _ = value.cancel();
+        }
+    };
+
+    for (0..32) |_| {
+        _ = setSchedulerLimits(.{ .max_runnable_threads = 0 });
+        const before_waiters = snapshot().scheduler.slot_waiters;
+        var cancellation = StartCancellation{};
+        const thread = try spawnCancelable(
+            .script_worker,
+            .{},
+            &cancellation,
+            Entry.run,
+            .{&ran},
+            Entry.cancel,
+            .{&canceled},
+        );
+        const deadline = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds + std.time.ns_per_s;
+        while (snapshot().scheduler.slot_waiters == before_waiters and
+            std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < deadline)
+            std.Thread.yield() catch {};
+        try std.testing.expectEqual(before_waiters + 1, snapshot().scheduler.slot_waiters);
+
+        const grant = try std.Thread.spawn(.{}, Entry.grant, .{});
+        const cancel = try std.Thread.spawn(.{}, Entry.cancelStart, .{&cancellation});
+        grant.join();
+        cancel.join();
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(u64, 32), ran.load(.acquire) + canceled.load(.acquire));
 }
 
 test "runtime scheduler bounds runnable slots and wakes policy waiters" {

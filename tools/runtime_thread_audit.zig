@@ -5,7 +5,6 @@ const std = @import("std");
 const inventory_path = "docs/.data/runtime-thread-inventory-v1.json";
 const max_source_bytes = 16 * 1024 * 1024;
 const direct_spawn = "std.Thread.spawn";
-const typed_spawn = "runtime_threads.spawn(";
 
 const SourceCount = struct { path: []const u8, count: usize };
 const Resource = struct {
@@ -48,6 +47,35 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 }
 
 const DirectScopes = struct { production: usize = 0, test_only: usize = 0 };
+
+fn countTypedSpawns(source: [:0]const u8, resource_id: ?[]const u8) usize {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var prior: [5][]const u8 = .{ "", "", "", "", "" };
+    var result: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) break;
+        const text = source[token.loc.start..token.loc.end];
+        const typed_prefix = std.mem.eql(u8, prior[1], "runtime_threads") and
+            std.mem.eql(u8, prior[2], ".") and
+            (std.mem.eql(u8, prior[3], "spawn") or std.mem.eql(u8, prior[3], "spawnCancelable")) and
+            std.mem.eql(u8, prior[4], "(");
+        if (resource_id) |id| {
+            if (typed_prefix and std.mem.eql(u8, text, ".")) {
+                const resource = tokenizer.next();
+                if (resource.tag == .eof) break;
+                const resource_text = source[resource.loc.start..resource.loc.end];
+                if (std.mem.eql(u8, resource_text, id)) result += 1;
+                prior = .{ prior[2], prior[3], prior[4], text, resource_text };
+                continue;
+            }
+        } else if (typed_prefix and std.mem.eql(u8, text, ".")) {
+            result += 1;
+        }
+        prior = .{ prior[1], prior[2], prior[3], prior[4], text };
+    }
+    return result;
+}
 
 fn classifyDirectSpawns(gpa: std.mem.Allocator, source: []const u8) !DirectScopes {
     const zsource = try gpa.dupeSentinel(u8, source, 0);
@@ -173,6 +201,8 @@ fn auditSources(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !struc
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
         const source = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_source_bytes));
         defer gpa.free(source);
+        const source_z = try gpa.dupeSentinel(u8, source, 0);
+        defer gpa.free(source_z);
         const path = try std.fs.path.join(gpa, &.{ "src", entry.path });
         defer gpa.free(path);
 
@@ -201,11 +231,9 @@ fn auditSources(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !struc
             direct_total += direct;
         }
 
-        typed_total += count(source, typed_spawn);
+        typed_total += countTypedSpawns(source_z, null);
         for (inventory.resources, 0..) |resource, resource_index| {
-            const pattern = try std.fmt.allocPrint(gpa, "runtime_threads.spawn(.{s}", .{resource.id});
-            defer gpa.free(pattern);
-            const found = count(source, pattern);
+            const found = countTypedSpawns(source_z, resource.id);
             if (found == 0) continue;
             var expected: usize = 0;
             for (resource.call_sites) |site| {

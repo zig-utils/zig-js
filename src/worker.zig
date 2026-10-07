@@ -722,6 +722,9 @@ pub const Worker = struct {
     outbox: Channel = .{},
     /// The stop word the worker context's step checkpoints poll.
     stop: std.atomic.Value(bool) = .init(false),
+    /// Removes this Worker from the initial runnable-slot queue when hard
+    /// termination wins before its entry point starts.
+    start_cancellation: runtime_threads.StartCancellation = .{},
     src: []const u8,
     /// When set, the worker evaluates a module graph instead of `src`.
     module: ?ModuleConfig = null,
@@ -840,7 +843,15 @@ pub const Worker = struct {
             .src = try alloc.dupe(u8, src),
         };
         errdefer alloc.free(w.src);
-        w.thread = runtime_threads.spawn(.script_worker, .{}, workerMain, .{w}) catch return error.OutOfMemory;
+        w.thread = runtime_threads.spawnCancelable(
+            .script_worker,
+            .{},
+            &w.start_cancellation,
+            workerMain,
+            .{w},
+            workerStartCanceled,
+            .{w},
+        ) catch return error.OutOfMemory;
         return w;
     }
 
@@ -880,7 +891,15 @@ pub const Worker = struct {
             .src = &.{},
             .module = .{ .entry_path = path_copy, .entry_source = src_copy, .host = host },
         };
-        w.thread = runtime_threads.spawn(.module_worker, .{}, workerMain, .{w}) catch return error.OutOfMemory;
+        w.thread = runtime_threads.spawnCancelable(
+            .module_worker,
+            .{},
+            &w.start_cancellation,
+            workerMain,
+            .{w},
+            workerStartCanceled,
+            .{w},
+        ) catch return error.OutOfMemory;
         return w;
     }
 
@@ -909,6 +928,7 @@ pub const Worker = struct {
         w.beginClosing();
         w.inspector_wait_abort.store(true, .release);
         w.stop.store(true, .monotonic);
+        _ = w.start_cancellation.cancel();
         agent.interruptWaiters();
         w.inbox.close();
         w.inspector_commands.wake();
@@ -1119,13 +1139,20 @@ fn closePendingInspectorCommands(w: *Worker) void {
     }
 }
 
+fn finishWorkerStart(w: *Worker) void {
+    closePendingInspectorCommands(w);
+    w.outbox.close();
+    w.inspector_target_state.store(.closed, .release);
+    w.notifyHost(); // final receive observes the closed target and outbox
+}
+
+fn workerStartCanceled(w: *Worker) void {
+    finishWorkerStart(w);
+}
+
 fn workerMain(w: *Worker) void {
-    defer {
-        closePendingInspectorCommands(w);
-        w.outbox.close();
-        w.inspector_target_state.store(.closed, .release);
-        w.notifyHost(); // final receive observes the closed target and outbox
-    }
+    defer finishWorkerStart(w);
+    if (w.stop.load(.monotonic)) return;
     const ctx = Context.createWith(alloc, w.context_options) catch {
         return;
     };
@@ -1257,6 +1284,97 @@ test "worker inbox park publishes blocked runtime state" {
         after.block_transitions - before.block_transitions,
         after.runnable_transitions - before.runnable_transitions,
     );
+}
+
+test "terminated worker exits while runnable scheduler is paused" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    var restored = false;
+    defer if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+    };
+
+    const before = runtime_threads.snapshot();
+    var sink = HookSink{};
+    var hooks = HostHooks{ .ctx = &sink, .notify = HookSink.notify };
+    const w = try Worker.spawn("postMessage('user source ran');");
+    w.setHostHooks(&hooks);
+    var destroyed = false;
+    defer if (!destroyed) {
+        w.terminate();
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+        w.join();
+        w.destroy();
+    };
+
+    const io = agent.engineIo();
+    const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + std.time.ns_per_s;
+    while (runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+
+    w.terminate();
+    var joined = std.atomic.Value(bool).init(false);
+    const Joiner = struct {
+        fn run(worker: *Worker, done: *std.atomic.Value(bool)) void {
+            worker.join();
+            done.store(true, .release);
+        }
+    };
+    const joiner = try std.Thread.spawn(.{}, Joiner.run, .{ w, &joined });
+    const join_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 250 * std.time.ns_per_ms;
+    while (!joined.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < join_deadline)
+        std.Thread.yield() catch {};
+    const joined_while_paused = joined.load(.acquire);
+    if (!joined_while_paused) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+    }
+
+    joiner.join();
+    w.destroy();
+    destroyed = true;
+    try std.testing.expect(joined_while_paused);
+    try std.testing.expectEqual(@as(u32, 1), sink.woken.load(.acquire));
+
+    const module_before = runtime_threads.snapshot();
+    CanceledModuleProbe.loads.store(0, .release);
+    const module = try Worker.spawnModule(
+        "entry.js",
+        "import './must-not-load.js'; export const value = 1;",
+        CanceledModuleProbe.host(),
+    );
+    const module_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + std.time.ns_per_s;
+    while (runtime_threads.snapshot().scheduler.slot_waiters == module_before.scheduler.slot_waiters and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < module_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(module_before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+    module.terminate();
+    joined.store(false, .release);
+    const module_joiner = try std.Thread.spawn(.{}, Joiner.run, .{ module, &joined });
+    const module_join_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 250 * std.time.ns_per_ms;
+    while (!joined.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < module_join_deadline)
+        std.Thread.yield() catch {};
+    const module_joined_while_paused = joined.load(.acquire);
+    if (!module_joined_while_paused) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+    }
+    module_joiner.join();
+    try std.testing.expectEqual(@as(u64, 0), CanceledModuleProbe.loads.load(.acquire));
+    try std.testing.expectEqual(
+        module_before.resource(.module_worker).start_cancellations + 1,
+        runtime_threads.snapshot().resource(.module_worker).start_cancellations,
+    );
+    module.destroy();
+    try std.testing.expect(module_joined_while_paused);
+
+    if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+    }
 }
 
 test "runtime scheduler one slot hands off across isolated Workers" {
@@ -1481,6 +1599,20 @@ const StaticModules = struct {
                 return e.source;
             }
         }
+        return null;
+    }
+
+    fn host() ContextMod.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
+const CanceledModuleProbe = struct {
+    var loads: std.atomic.Value(u64) = .init(0);
+    var host_ctx: u8 = 0;
+
+    fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+        _ = loads.fetchAdd(1, .release);
         return null;
     }
 

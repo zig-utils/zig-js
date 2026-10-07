@@ -46,15 +46,17 @@ _ = js.setRuntimeThreadSchedulerLimits(.{});
 Each resource row reports attempts, successful starts, completions, spawn
 failures, policy rejections, in-flight spawn calls, admitted reservations, live
 and peak threads, current/peak runnable and blocked threads, block/resume
-transition totals, current/peak configured stack bytes, and the active limits.
-The schema-v7 thread invariants are `attempts = starts + spawn_failures +
+transition totals, pre-entry start cancellations, current/peak configured
+stack bytes, and the active limits. The schema-v9 thread invariants are
+`attempts = starts + spawn_failures +
 admission_rejections + in_flight_attempts`, `live = starts - completions`, and
 `live = runnable + blocked`. The scheduler row reports its runnable limit,
 policy mode, detected logical CPU count, automatic host reservation, configured
 override, active and peak slots, current and peak queued waiters, and cumulative
 slot waits. It also reports current/peak internal work in general slots and in
 the reserved host lane. Each priority row reports its weight, current/peak typed
-thread waiters, cumulative grants, and last granted ticket. Each internal-work
+thread waiters, cumulative grants and cancellations, and last granted ticket.
+Each internal-work
 row reports requests, starts, completions, current/peak active work, typed and
 nested slot reuse, reserved/general host admissions, current/peak waiters,
 cumulative waits and wait time, and last granted ticket. The coherent invariants
@@ -106,6 +108,15 @@ woken from an engine condition never queues for that slot while holding its
 reacquired wait mutex: it tries immediate admission first, and if capacity or
 older waiters prevent it, releases the mutex, parks in the scheduler queue,
 then reacquires the mutex before returning to its caller.
+
+Script and module Workers carry a caller-owned start-cancellation handle. Hard
+`terminate()` removes a still-queued Worker under the same coordinator mutex,
+balances its blocked/live/stack reservation, and runs only terminal channel and
+inspector cleanup on the spawned OS thread. A concurrent slot grant wins
+atomically; the Worker then observes its ordinary stop word before evaluating
+source. Graceful `close()` does not cancel a start because it must preserve
+drain-then-stop delivery. Cancellation never raises runnable capacity or runs
+user code outside a slot.
 
 The runnable limit defaults to `max(1, logical CPUs - 1)`. The reserved lane
 keeps capacity available for the embedder or foreground host mutator, which

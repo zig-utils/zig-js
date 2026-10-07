@@ -141,7 +141,9 @@ export function parseInvocation(text: string): {
   integer(metadata.lane_configured_stack_bytes, "metadata.lane_configured_stack_bytes");
   requireValue(metadata.logical_cpus > 0, "logical CPU count must be positive");
   requireValue(
-    metadata.runtime_thread_schema === 7 || metadata.runtime_thread_schema === 8,
+    metadata.runtime_thread_schema === 7 ||
+      metadata.runtime_thread_schema === 8 ||
+      metadata.runtime_thread_schema === 9,
     "unexpected runtime-thread telemetry schema",
   );
   requireValue(typeof metadata.scratch_available === "boolean", "scratch_available must be boolean");

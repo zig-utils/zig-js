@@ -54,7 +54,7 @@
       "admission": "Process-wide per-resource thread and configured-stack limits; allocation, policy, or OS spawn failure returns OutOfMemory",
       "stack_policy": "Platform default",
       "blocking": "Inbox and inspector queues, engine waits, and teardown joins publish nested runnable/blocked transitions",
-      "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
+      "shutdown": "Caller closes or terminates, then joins and destroys the Worker; hard termination cancels a still-queued scheduler start before user source runs",
       "scratch_memory": "Isolated Context, bounded channels, structured-clone buffers, optional inspector state",
       "coordinator_status": "shared_cpu_slots",
       "scheduler_priority": "background"
@@ -68,7 +68,7 @@
       "admission": "Process-wide per-resource thread and configured-stack limits; allocation, policy, or OS spawn failure returns OutOfMemory",
       "stack_policy": "Platform default",
       "blocking": "Inbox and inspector queues, engine waits, and teardown joins publish nested runnable/blocked transitions",
-      "shutdown": "Caller closes or terminates, then joins and destroys the Worker",
+      "shutdown": "Caller closes or terminates, then joins and destroys the Worker; hard termination cancels a still-queued scheduler start before the module graph loads",
       "scratch_memory": "Isolated Context, module registry/source copies, bounded channels, optional inspector state",
       "coordinator_status": "shared_cpu_slots",
       "scheduler_priority": "background"
@@ -104,25 +104,26 @@
     { "path": "src/agent.zig", "count": 2 },
     { "path": "src/bytecode.zig", "count": 12 },
     { "path": "src/c_api.zig", "count": 10 },
-    { "path": "src/context.zig", "count": 33 },
+    { "path": "src/context.zig", "count": 34 },
     { "path": "src/fetch_headers.zig", "count": 1 },
     { "path": "src/gc.zig", "count": 2 },
     { "path": "src/gil.zig", "count": 2 },
     { "path": "src/interpreter.zig", "count": 13 },
     { "path": "src/jit/gdb_jit.zig", "count": 1 },
     { "path": "src/jit/optimizer_compiler.zig", "count": 1 },
-    { "path": "src/jit.zig", "count": 13 },
+    { "path": "src/jit.zig", "count": 15 },
     { "path": "src/jsstring.zig", "count": 1 },
     { "path": "src/jsthread.zig", "count": 3 },
     { "path": "src/parallel_lock.zig", "count": 2 },
     { "path": "src/root_handshake.zig", "count": 1 },
-    { "path": "src/runtime_threads.zig", "count": 1 },
+    { "path": "src/runtime_threads.zig", "count": 4 },
     { "path": "src/shape.zig", "count": 3 },
     { "path": "src/shared_buffer.zig", "count": 1 },
     { "path": "src/strcell.zig", "count": 4 },
     { "path": "src/structured_clone.zig", "count": 1 },
     { "path": "src/value.zig", "count": 20 },
     { "path": "src/vm.zig", "count": 8 },
-    { "path": "src/wasm/exec.zig", "count": 8 }
+    { "path": "src/wasm/exec.zig", "count": 8 },
+    { "path": "src/worker.zig", "count": 2 }
   ]
 }
