@@ -973,7 +973,24 @@ export function renderExact(
         `| ${laneCount} | ${mode} | ${rsd(parent.map((row) => row.elapsed_ns)).toFixed(2)}% | ${rsd(candidate.map((row) => row.elapsed_ns)).toFixed(2)}% | ${(operations * 1e9 / median(parent.map((row) => row.elapsed_ns))).toFixed(2)} fixture invocations/s | ${(operations * 1e9 / median(candidate.map((row) => row.elapsed_ns))).toFixed(2)} fixture invocations/s |`,
       );
     }
+  const maxWallRsd = Math.max(
+    ...lanes.flatMap((laneCount) =>
+      MODES.flatMap((mode) =>
+        VARIANTS.map((variant) =>
+          rsd(
+            exactSelected(rows, variant, mode, "cold", laneCount).map(
+              (row) => row.elapsed_ns,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
   lines.push(
+    "",
+    maxWallRsd <= 10
+      ? `All cold wall-time series remain at or below 10% RSD (maximum ${maxWallRsd.toFixed(2)}%).`
+      : `Cold timing is inconclusive where RSD exceeds 10% (maximum ${maxWallRsd.toFixed(2)}%); the accounting, lifecycle, RSS, and checksum evidence remains valid, but no speed claim is made from those rows.`,
     "",
     "## Candidate scratch accounting",
     "",
@@ -1017,7 +1034,7 @@ export function renderExact(
     "## Reproduce",
     "",
     "```bash",
-    "home-tool run tools/compiler-pressure-benchmark.ts --runner /tmp/compiler-pressure-candidate --parent-runner /tmp/compiler-pressure-parent --parent-revision <sha> --candidate-revision <sha> --gc-path <zig-gc> --regex-path <zig-regex> --raw-out <json> --markdown-out <md>",
+    `home-tool run tools/compiler-pressure-benchmark.ts --runner /tmp/compiler-pressure-candidate --parent-runner /tmp/compiler-pressure-parent --parent-revision <sha> --candidate-revision <sha> --gc-path <zig-gc> --regex-path <zig-regex> --samples ${info.Samples} --warmups ${info.Warmups} --raw-out <json> --markdown-out <md>`,
     "```",
     "",
   );
@@ -1317,6 +1334,10 @@ function main(): void {
     requireValue(
       quick || candidateRevision === revision(ROOT),
       "candidate revision does not match the clean checked-out HEAD",
+    );
+    requireValue(
+      quick || warmups >= 4,
+      "exact-parent publication requires at least four discarded warmup processes",
     );
     const exact = collectExact(
         parentRunner,
