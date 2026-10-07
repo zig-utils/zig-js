@@ -17,7 +17,7 @@ const workload_source = @embedFile("compiler_pressure.js");
 const workload_source_path = "bench/compiler_pressure.js";
 const workload_source_sha256 = "7260df7f15efb177a067d8457df244044b6ea3c4c7e39b3225726228ba46d83f";
 const benchmark_allocator = std.heap.c_allocator;
-const schema_version = 2;
+const schema_version = 3;
 const cold_invocations = 10;
 const warm_invocations = 3;
 
@@ -29,6 +29,7 @@ const Mode = enum {
 const Phase = enum {
     cold,
     warm,
+    teardown,
 };
 
 const ProcessResourceSnapshot = struct {
@@ -190,6 +191,123 @@ const RuntimePhase = struct {
     }
 };
 
+const ScratchDomainPoint = struct {
+    requests: u64 = 0,
+    requested_bytes: u64 = 0,
+    admissions: u64 = 0,
+    admitted_bytes: u64 = 0,
+    policy_rejections: u64 = 0,
+    rejected_bytes: u64 = 0,
+    allocator_failures: u64 = 0,
+    rollback_bytes: u64 = 0,
+    releases: u64 = 0,
+    released_bytes: u64 = 0,
+    current_bytes: u64 = 0,
+    peak_bytes: u64 = 0,
+
+    fn capture(domain: anytype) ScratchDomainPoint {
+        return .{
+            .requests = domain.requests,
+            .requested_bytes = domain.requested_bytes,
+            .admissions = domain.admissions,
+            .admitted_bytes = domain.admitted_bytes,
+            .policy_rejections = domain.policy_rejections,
+            .rejected_bytes = domain.rejected_bytes,
+            .allocator_failures = domain.allocator_failures,
+            .rollback_bytes = domain.rollback_bytes,
+            .releases = domain.releases,
+            .released_bytes = domain.released_bytes,
+            .current_bytes = domain.current_bytes,
+            .peak_bytes = domain.peak_bytes,
+        };
+    }
+};
+
+const ScratchPoint = struct {
+    available: bool = false,
+    current_bytes: u64 = 0,
+    peak_bytes: u64 = 0,
+    gc_auxiliary: ScratchDomainPoint = .{},
+    native_compilation: ScratchDomainPoint = .{},
+    wasm_compilation: ScratchDomainPoint = .{},
+
+    fn capture() ScratchPoint {
+        const snapshot = js.runtimeThreadSnapshot();
+        if (comptime !@hasField(@TypeOf(snapshot), "scratch")) return .{};
+        const scratch = snapshot.scratch;
+        const result: ScratchPoint = .{
+            .available = true,
+            .current_bytes = scratch.current_bytes,
+            .peak_bytes = scratch.peak_bytes,
+            .gc_auxiliary = .capture(scratch.domains[0]),
+            .native_compilation = .capture(scratch.domains[1]),
+            .wasm_compilation = .capture(scratch.domains[2]),
+        };
+        std.debug.assert(result.current_bytes ==
+            result.gc_auxiliary.current_bytes +
+                result.native_compilation.current_bytes +
+                result.wasm_compilation.current_bytes);
+        return result;
+    }
+};
+
+const ScratchDomainPhase = struct {
+    requests: u64 = 0,
+    requested_bytes: u64 = 0,
+    admissions: u64 = 0,
+    admitted_bytes: u64 = 0,
+    policy_rejections: u64 = 0,
+    rejected_bytes: u64 = 0,
+    allocator_failures: u64 = 0,
+    rollback_bytes: u64 = 0,
+    releases: u64 = 0,
+    released_bytes: u64 = 0,
+    current_before: u64 = 0,
+    current_after: u64 = 0,
+    peak_after: u64 = 0,
+
+    fn between(before: ScratchDomainPoint, after: ScratchDomainPoint) ScratchDomainPhase {
+        return .{
+            .requests = after.requests -| before.requests,
+            .requested_bytes = after.requested_bytes -| before.requested_bytes,
+            .admissions = after.admissions -| before.admissions,
+            .admitted_bytes = after.admitted_bytes -| before.admitted_bytes,
+            .policy_rejections = after.policy_rejections -| before.policy_rejections,
+            .rejected_bytes = after.rejected_bytes -| before.rejected_bytes,
+            .allocator_failures = after.allocator_failures -| before.allocator_failures,
+            .rollback_bytes = after.rollback_bytes -| before.rollback_bytes,
+            .releases = after.releases -| before.releases,
+            .released_bytes = after.released_bytes -| before.released_bytes,
+            .current_before = before.current_bytes,
+            .current_after = after.current_bytes,
+            .peak_after = after.peak_bytes,
+        };
+    }
+};
+
+const ScratchPhase = struct {
+    available: bool = false,
+    current_before: u64 = 0,
+    current_after: u64 = 0,
+    peak_after: u64 = 0,
+    gc_auxiliary: ScratchDomainPhase = .{},
+    native_compilation: ScratchDomainPhase = .{},
+    wasm_compilation: ScratchDomainPhase = .{},
+
+    fn between(before: ScratchPoint, after: ScratchPoint) ScratchPhase {
+        std.debug.assert(before.available == after.available);
+        return .{
+            .available = after.available,
+            .current_before = before.current_bytes,
+            .current_after = after.current_bytes,
+            .peak_after = after.peak_bytes,
+            .gc_auxiliary = .between(before.gc_auxiliary, after.gc_auxiliary),
+            .native_compilation = .between(before.native_compilation, after.native_compilation),
+            .wasm_compilation = .between(before.wasm_compilation, after.wasm_compilation),
+        };
+    }
+};
+
 const Lane = struct {
     io: std.Io,
     mode: Mode,
@@ -329,10 +447,33 @@ fn laneMain(lane: *Lane) void {
 
 fn printMetadata(writer: *std.Io.Writer, logical_cpus: usize) !void {
     const runtime = RuntimePoint.capture();
+    const scratch = ScratchPoint.capture();
     try writer.print(
-        "{{\"kind\":\"zig-js-compiler-pressure-metadata\",\"schema\":{d},\"source_path\":\"{s}\",\"source_sha256\":\"{s}\",\"logical_cpus\":{d},\"jit_supported\":{s},\"cold_invocations\":{d},\"warm_invocations\":{d},\"runtime_thread_schema\":{d},\"lane_configured_stack_bytes\":{d}}}\n",
-        .{ schema_version, workload_source_path, workload_source_sha256, logical_cpus, if (js.jit.supported) "true" else "false", cold_invocations, warm_invocations, runtime.schema_version, std.Thread.SpawnConfig.default_stack_size },
+        "{{\"kind\":\"zig-js-compiler-pressure-metadata\",\"schema\":{d},\"source_path\":\"{s}\",\"source_sha256\":\"{s}\",\"logical_cpus\":{d},\"jit_supported\":{s},\"cold_invocations\":{d},\"warm_invocations\":{d},\"runtime_thread_schema\":{d},\"scratch_available\":{s},\"lane_configured_stack_bytes\":{d}}}\n",
+        .{ schema_version, workload_source_path, workload_source_sha256, logical_cpus, if (js.jit.supported) "true" else "false", cold_invocations, warm_invocations, runtime.schema_version, if (scratch.available) "true" else "false", std.Thread.SpawnConfig.default_stack_size },
     );
+}
+
+fn printScratchDomain(writer: *std.Io.Writer, domain: ScratchDomainPhase) !void {
+    try writer.writeByte('{');
+    inline for (comptime std.meta.fieldNames(ScratchDomainPhase), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(domain, name) });
+    }
+    try writer.writeByte('}');
+}
+
+fn printScratch(writer: *std.Io.Writer, scratch: ScratchPhase) !void {
+    try writer.print(
+        "{{\"available\":{s},\"current_before\":{d},\"current_after\":{d},\"peak_after\":{d},\"gc_auxiliary\":",
+        .{ if (scratch.available) "true" else "false", scratch.current_before, scratch.current_after, scratch.peak_after },
+    );
+    try printScratchDomain(writer, scratch.gc_auxiliary);
+    try writer.writeAll(",\"native_compilation\":");
+    try printScratchDomain(writer, scratch.native_compilation);
+    try writer.writeAll(",\"wasm_compilation\":");
+    try printScratchDomain(writer, scratch.wasm_compilation);
+    try writer.writeByte('}');
 }
 
 fn printRow(
@@ -346,6 +487,7 @@ fn printRow(
     checksum: f64,
     compiler: CompilerSnapshot,
     runtime: RuntimePhase,
+    scratch: ScratchPhase,
     before: ProcessResourceSnapshot,
     after: ProcessResourceSnapshot,
 ) !void {
@@ -379,7 +521,9 @@ fn printRow(
         if (index != 0) try writer.writeByte(',');
         try writer.print("\"{s}\":{d}", .{ name, @field(runtime, name) });
     }
-    try writer.writeAll("}}\n");
+    try writer.writeAll("},\"scratch\":");
+    try printScratch(writer, scratch);
+    try writer.writeAll("}\n");
 }
 
 fn runSample(
@@ -398,15 +542,19 @@ fn runSample(
     var cold_done: std.Io.Semaphore = .{};
     var warm_done: std.Io.Semaphore = .{};
     var spawned: usize = 0;
+    var joined = false;
     defer {
-        for (lanes[0..spawned]) |*lane| {
-            lane.start_warm.post(io);
-            lane.release.post(io);
+        if (!joined) {
+            for (lanes[0..spawned]) |*lane| {
+                lane.start_warm.post(io);
+                lane.release.post(io);
+            }
+            for (threads[0..spawned]) |thread| thread.join();
         }
-        for (threads[0..spawned]) |thread| thread.join();
     }
 
     const cold_runtime_before = RuntimePoint.capture();
+    const cold_scratch_before = ScratchPoint.capture();
     const cold_process_before = try processResourceSnapshot();
     const cold_started = nowNs(io);
     for (lanes, 0..) |*lane, lane_index| {
@@ -424,6 +572,7 @@ fn runSample(
     for (0..lane_count) |_| cold_done.waitUncancelable(io);
     const cold_elapsed: u64 = @intCast(nowNs(io) - cold_started);
     const cold_process_after = try processResourceSnapshot();
+    const cold_scratch_after = ScratchPoint.capture();
     const cold_runtime_after = RuntimePoint.capture();
     for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
 
@@ -440,15 +589,17 @@ fn runSample(
         return error.JitOffPublishedNativeCode;
     if (mode == .jit_on and js.jit.supported and cold.publications() == 0)
         return error.JitOnDidNotPublishNativeCode;
-    try printRow(writer, mode, .cold, lane_count, jobs, sample, cold_elapsed, checksum, cold, RuntimePhase.between(cold_runtime_before, cold_runtime_after), cold_process_before, cold_process_after);
+    try printRow(writer, mode, .cold, lane_count, jobs, sample, cold_elapsed, checksum, cold, RuntimePhase.between(cold_runtime_before, cold_runtime_after), ScratchPhase.between(cold_scratch_before, cold_scratch_after), cold_process_before, cold_process_after);
 
     const warm_runtime_before = RuntimePoint.capture();
+    const warm_scratch_before = ScratchPoint.capture();
     const warm_process_before = try processResourceSnapshot();
     const warm_started = nowNs(io);
     for (lanes) |*lane| lane.start_warm.post(io);
     for (0..lane_count) |_| warm_done.waitUncancelable(io);
     const warm_elapsed: u64 = @intCast(nowNs(io) - warm_started);
     const warm_process_after = try processResourceSnapshot();
+    const warm_scratch_after = ScratchPoint.capture();
     const warm_runtime_after = RuntimePoint.capture();
     for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
 
@@ -460,9 +611,20 @@ fn runSample(
     }
     if (checksum != expected_checksum) return error.ChecksumMismatch;
     const warm = CompilerSnapshot.subtract(cumulative_warm, cold);
-    try printRow(writer, mode, .warm, lane_count, jobs, sample, warm_elapsed, checksum, warm, RuntimePhase.between(warm_runtime_before, warm_runtime_after), warm_process_before, warm_process_after);
+    try printRow(writer, mode, .warm, lane_count, jobs, sample, warm_elapsed, checksum, warm, RuntimePhase.between(warm_runtime_before, warm_runtime_after), ScratchPhase.between(warm_scratch_before, warm_scratch_after), warm_process_before, warm_process_after);
 
+    const teardown_runtime_before = RuntimePoint.capture();
+    const teardown_scratch_before = ScratchPoint.capture();
+    const teardown_process_before = try processResourceSnapshot();
+    const teardown_started = nowNs(io);
     for (lanes) |*lane| lane.release.post(io);
+    for (threads[0..spawned]) |thread| thread.join();
+    joined = true;
+    const teardown_elapsed: u64 = @intCast(nowNs(io) - teardown_started);
+    const teardown_process_after = try processResourceSnapshot();
+    const teardown_scratch_after = ScratchPoint.capture();
+    const teardown_runtime_after = RuntimePoint.capture();
+    try printRow(writer, mode, .teardown, lane_count, jobs, sample, teardown_elapsed, checksum, .{}, RuntimePhase.between(teardown_runtime_before, teardown_runtime_after), ScratchPhase.between(teardown_scratch_before, teardown_scratch_after), teardown_process_before, teardown_process_after);
 }
 
 fn parseMode(text: []const u8) !Mode {
