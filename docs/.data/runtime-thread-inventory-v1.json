@@ -40,7 +40,7 @@
       "admission": "Optional Context max_js_threads cap, 15-bit thread-id space, and process-wide per-resource thread/configured-stack limits",
       "stack_policy": "64 MiB reserved stack",
       "blocking": "Lock, Condition, Atomics.wait, join, GIL contention, and engine backoff publish nested runnable/blocked transitions",
-      "shutdown": "Thread completion is published once; join/asyncJoin and Context teardown reclaim records",
+      "shutdown": "Thread completion is published once; Context teardown cancels still-queued starts, waits for running Threads, and joins every OS handle before reclaiming records",
       "scratch_memory": "Per-thread interpreter registration, microtask queue, entry arguments, and native stack",
       "coordinator_status": "shared_cpu_slots",
       "scheduler_priority": "foreground"
@@ -113,7 +113,7 @@
     { "path": "src/jit/optimizer_compiler.zig", "count": 1 },
     { "path": "src/jit.zig", "count": 15 },
     { "path": "src/jsstring.zig", "count": 1 },
-    { "path": "src/jsthread.zig", "count": 3 },
+    { "path": "src/jsthread.zig", "count": 4 },
     { "path": "src/parallel_lock.zig", "count": 2 },
     { "path": "src/root_handshake.zig", "count": 1 },
     { "path": "src/runtime_threads.zig", "count": 4 },

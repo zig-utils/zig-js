@@ -6708,6 +6708,7 @@ pub const Context = struct {
         if (self.gil) |g| {
             self.teardown_stop.store(true, .release);
             agent.interruptWaiters();
+            jsthread.cancelQueuedThreadStarts(self);
             // Spawned threads need the lock to finish: park until each is
             // done, then OS-join the handles.
             if (self.parallel_js) {

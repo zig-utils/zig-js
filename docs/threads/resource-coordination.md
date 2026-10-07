@@ -118,6 +118,13 @@ source. Graceful `close()` does not cancel a start because it must preserve
 drain-then-stop delivery. Cancellation never raises runnable capacity or runs
 user code outside a slot.
 
+Shared-realm JavaScript `Thread` records use the same pre-entry cancellation
+edge during Context teardown. A canceled start releases its reserved
+interpreter registration and realm-queue transfer, clears entry roots, and
+publishes completed/exited state before the Context frees either record. A
+Thread that already won a slot continues through the existing teardown stop and
+checkpoint protocol.
+
 The runnable limit defaults to `max(1, logical CPUs - 1)`. The reserved lane
 keeps capacity available for the embedder or foreground host mutator, which
 runs outside the typed engine-thread boundary. If host detection fails, the

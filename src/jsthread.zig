@@ -44,6 +44,7 @@ pub const ThreadRecord = struct {
     gil: *gil_mod.Gil,
     ctx: *Context,
     thread: ?std.Thread = null,
+    start_cancellation: runtime_threads.StartCancellation = .{},
     interpreter_registration: ?Context.ActiveInterpreterReservation = null,
     /// Precisely rooted before spawn and through the body call. An OS thread
     /// waiting to register its interpreter has no scanned argument stack yet.
@@ -855,7 +856,15 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     ctx.js_threads.appendAssumeCapacity(rec);
     if (ctx.js_threads.items.len >= 3) ctx.enableCooperativeGcTracking();
 
-    rec.thread = runtime_threads.spawn(.javascript_thread, .{ .stack_size = 64 << 20 }, threadMain, .{rec}) catch {
+    rec.thread = runtime_threads.spawnCancelable(
+        .javascript_thread,
+        .{ .stack_size = 64 << 20 },
+        &rec.start_cancellation,
+        threadMain,
+        .{rec},
+        threadStartCanceled,
+        .{rec},
+    ) catch {
         rec.done = true;
         rec.exited = true;
         rec.entry_function = Value.undef();
@@ -864,6 +873,14 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
         return self.throwError("Error", "Thread: could not spawn OS thread");
     };
     return Value.obj(rec.js_obj.?);
+}
+
+/// Context teardown cancels only Threads that have not won their initial
+/// runnable slot. Running Threads retain the ordinary stop/checkpoint path.
+pub fn cancelQueuedThreadStarts(ctx: *Context) void {
+    for (ctx.js_threads.items) |rec| {
+        if (rec.thread != null) _ = rec.start_cancellation.cancel();
+    }
 }
 
 /// Acquire the realm GIL for a terminating thread's completion/settlement
@@ -1034,6 +1051,24 @@ fn threadMain(rec: *ThreadRecord) void {
     // Serialized with peer enqueues by the source and destination queue locks
     // under no-GIL (a direct transfer in GIL mode).
     transferMicrotasks(rec.ctx, microtasks, &rec.ctx.microtasks, &rec.microtask_transfer);
+}
+
+fn threadStartCanceled(rec: *ThreadRecord) void {
+    cancelUnusedThreadTransfer(rec);
+    if (rec.interpreter_registration) |*reservation| {
+        reservation.cancel();
+        rec.interpreter_registration = null;
+    }
+    std.debug.assert(rec.microtasks.?.isEmpty());
+    rec.microtasks = null;
+    rootThreadResult(rec, Value.undef());
+    var pending = publishThreadCompletion(rec, false, Value.undef());
+    var machine = rec.ctx.interpreter();
+    for (pending.items) |*join| join.settlement.cancel(&machine);
+    machine.deinit();
+    finishThreadJoinSettlement(rec);
+    pending.deinit(rec.ctx.arena());
+    markThreadExited(rec);
 }
 
 fn transferMicrotasks(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue, transfer: *promise.MicrotaskTransfer) void {
@@ -5274,6 +5309,178 @@ test "runtime scheduler one slot hands off across JavaScript Thread waits" {
         try std.testing.expect(resources.scheduler.active_slots <= 1);
         try std.testing.expectEqual(resources.scheduler.active_slots, resources.runnableTotal());
     }
+}
+
+test "Context teardown exits while a JavaScript Thread start is scheduler-paused" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    var restored = false;
+    defer if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+    };
+
+    const before = runtime_threads.snapshot();
+    var context_ready = std.atomic.Value(bool).init(false);
+    var start = std.atomic.Value(bool).init(false);
+    var created = std.atomic.Value(bool).init(false);
+    var destroy_start = std.atomic.Value(bool).init(false);
+    var destroyed = std.atomic.Value(bool).init(false);
+    var body_runs = std.atomic.Value(u64).init(0);
+    const Owner = struct {
+        fn run(
+            ready_flag: *std.atomic.Value(bool),
+            start_flag: *std.atomic.Value(bool),
+            created_flag: *std.atomic.Value(bool),
+            destroy_start_flag: *std.atomic.Value(bool),
+            destroyed_flag: *std.atomic.Value(bool),
+            body_run_count: *std.atomic.Value(u64),
+        ) void {
+            const ctx = Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_threads = true,
+                .enable_gc = true,
+                .parallel_gc = true,
+                .parallel_js = true,
+                .enable_jit = false,
+            }) catch return;
+            ready_flag.store(true, .release);
+            while (!start_flag.load(.acquire)) std.Thread.yield() catch {};
+            const Callback = struct {
+                fn run(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+                    const self: *Interpreter = @ptrCast(@alignCast(raw));
+                    const count: *std.atomic.Value(u64) = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+                    _ = count.fetchAdd(1, .release);
+                    return Value.undef();
+                }
+            };
+            var callable = value.Object{ .native = Callback.run, .private_data = body_run_count };
+            var machine = ctx.interpreter();
+            machine.active_native = ctx.env.get("Thread").?.asObj();
+            machine.new_target = Value.obj(machine.active_native.?);
+            _ = threadCtorFn(&machine, Value.undef(), &.{Value.obj(&callable)}) catch {
+                machine.deinit();
+                ctx.destroy();
+                return;
+            };
+            machine.deinit();
+            created_flag.store(true, .release);
+            while (!destroy_start_flag.load(.acquire)) std.Thread.yield() catch {};
+            ctx.destroy();
+            destroyed_flag.store(true, .release);
+        }
+    };
+    const owner = try std.Thread.spawn(.{}, Owner.run, .{ &context_ready, &start, &created, &destroy_start, &destroyed, &body_runs });
+    var joined = false;
+    defer if (!joined) {
+        destroy_start.store(true, .release);
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+        owner.join();
+    };
+
+    const io = agent.engineIo();
+    const context_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!context_ready.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < context_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(context_ready.load(.acquire));
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    start.store(true, .release);
+    const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while ((!created.load(.acquire) or runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(created.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+    destroy_start.store(true, .release);
+
+    const destroy_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!destroyed.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < destroy_deadline)
+        std.Thread.yield() catch {};
+    const destroyed_while_paused = destroyed.load(.acquire);
+    _ = runtime_threads.setSchedulerLimits(previous);
+    restored = true;
+    owner.join();
+    joined = true;
+    try std.testing.expect(destroyed_while_paused);
+    try std.testing.expectEqual(@as(u64, 0), body_runs.load(.acquire));
+}
+
+test "canceled JavaScript Thread start releases constructor reservations" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    var restored = false;
+    defer if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+    };
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+
+    const interpreter_reservations = ctx.active_interpreter_reservations;
+    const microtask_reservations = ctx.microtasks.reservations;
+    const before = runtime_threads.snapshot();
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    var body_runs = std.atomic.Value(u64).init(0);
+    const Callback = struct {
+        fn run(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(raw));
+            const count: *std.atomic.Value(u64) = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+            _ = count.fetchAdd(1, .release);
+            return Value.undef();
+        }
+    };
+    var callable = value.Object{ .native = Callback.run, .private_data = &body_runs };
+    var machine = ctx.interpreter();
+    machine.active_native = ctx.env.get("Thread").?.asObj();
+    machine.new_target = Value.obj(machine.active_native.?);
+    _ = try threadCtorFn(&machine, Value.undef(), &.{Value.obj(&callable)});
+    machine.deinit();
+    const rec = ctx.js_threads.items[ctx.js_threads.items.len - 1];
+
+    const io = agent.engineIo();
+    const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+    try std.testing.expectEqual(interpreter_reservations + 1, ctx.active_interpreter_reservations);
+    try std.testing.expectEqual(microtask_reservations + 1, ctx.microtasks.reservations);
+
+    cancelQueuedThreadStarts(ctx);
+    const exit_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (true) {
+        rec.join_mutex.lockUncancelable(io);
+        const exited = rec.exited;
+        rec.join_mutex.unlock(io);
+        if (exited) break;
+        if (std.Io.Timestamp.now(io, .awake).nanoseconds >= exit_deadline)
+            return error.TestUnexpectedResult;
+        std.Thread.yield() catch {};
+    }
+
+    try std.testing.expectEqual(@as(u64, 0), body_runs.load(.acquire));
+    try std.testing.expectEqual(interpreter_reservations, ctx.active_interpreter_reservations);
+    try std.testing.expectEqual(microtask_reservations, ctx.microtasks.reservations);
+    try std.testing.expect(rec.interpreter_registration == null);
+    try std.testing.expect(rec.microtasks == null);
+    try std.testing.expect(rec.entry_function.isUndefined());
+    try std.testing.expectEqual(@as(usize, 0), rec.entry_args.len);
+    rec.join_mutex.lockUncancelable(io);
+    const complete = rec.done and rec.joins_settled and rec.exited;
+    rec.join_mutex.unlock(io);
+    try std.testing.expect(complete);
+    const after = runtime_threads.snapshot();
+    try std.testing.expectEqual(
+        before.resource(.javascript_thread).start_cancellations + 1,
+        after.resource(.javascript_thread).start_cancellations,
+    );
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+
+    _ = runtime_threads.setSchedulerLimits(previous);
+    restored = true;
 }
 
 test "runtime scheduler one slot hands off finite property waitAsync notification" {
