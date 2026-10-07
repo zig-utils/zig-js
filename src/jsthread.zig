@@ -3785,6 +3785,7 @@ fn transferPropAsyncQueue(self: *Interpreter, rec: *ThreadRecord, from: *promise
     rec.join_mutex.lockUncancelable(io);
     defer rec.join_mutex.unlock(io);
     var ticket = rec.prop_async_head;
+    var transferred = false;
     while (ticket) |t| : (ticket = t.thread_next) {
         std.debug.assert(t.thread == rec);
         if (t.microtasks != from) continue;
@@ -3798,7 +3799,9 @@ fn transferPropAsyncQueue(self: *Interpreter, rec: *ThreadRecord, from: *promise
         t.exit_completion = .{};
         t.microtasks = to;
         rec.gil.unlockPropWaiters();
+        transferred = true;
     }
+    if (transferred) rec.gil.publishPropertyWaitStateChange();
 }
 
 fn abandonPropAsyncQueue(self: *Interpreter, queue: *promise.MicrotaskQueue) void {
@@ -3837,18 +3840,47 @@ pub fn pollPropAsync(self: *Interpreter) void {
     drainPropAsyncBatch(self, &expired, Value.str("timed-out"));
 }
 
-/// Earliest finite property `Atomics.waitAsync` deadline in this realm, or
-/// null when there are no finite timers to keep the shell alive for.
+/// Earliest finite property `Atomics.waitAsync` deadline owned by this
+/// interpreter's microtask queue, or null when that queue has no finite timer.
 pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
     const g = self.gil orelse return null;
+    const queue = self.microtasks orelse return null;
     var nearest: ?i96 = null;
     g.lockPropWaiters();
     defer g.unlockPropWaiters();
     for (g.prop_async.items) |raw| {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (t.microtasks != queue) continue;
         if (t.deadline_ns) |d| nearest = if (nearest) |m| @min(m, d) else d;
     }
     return nearest;
+}
+
+/// Park a finite property waitAsync owner on the realm progress edge. Promise
+/// roots are frozen for a concurrent collector, and the runtime blocking scope
+/// inside `Gil.waitForRunLoopStateChange` releases the typed thread's runnable
+/// slot until a notify or deadline makes progress possible.
+pub fn waitForPropAsyncStateChange(self: *Interpreter, observed: u64, deadline: i96) void {
+    const g = self.gil orelse return;
+    const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+    if (deadline <= now) return;
+    self.serviceMutatorStopSafepoint();
+    self.serviceGcSafepoint();
+    stack_scan.beginPark();
+    self.gc_parked.store(true, .release);
+    defer {
+        self.lockGcRoots();
+        self.gc_parked.store(false, .release);
+        self.unlockGcRoots();
+        stack_scan.endPark();
+    }
+    const released_gil = self.use_thread_gil;
+    if (released_gil) g.release();
+    defer if (released_gil) g.acquire();
+    g.waitForRunLoopStateChange(observed, .{ .duration = .{
+        .raw = .fromNanoseconds(@intCast(deadline - now)),
+        .clock = .awake,
+    } });
 }
 
 /// Drop tickets of a dying realm (their promises die with the arena).
@@ -4323,7 +4355,9 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
         n += settle.len;
     }
     g.unlockPropWaiters();
+    const settled = settle.len != 0;
     drainPropAsyncBatch(self, &settle, Value.str("ok"));
+    if (settled) g.publishPropertyWaitStateChange();
     return Value.num(@floatFromInt(n));
 }
 
@@ -5236,6 +5270,51 @@ test "runtime scheduler one slot hands off across JavaScript Thread waits" {
             \\schedulerWaiter.join() + schedulerNotifier.join();
         );
         try std.testing.expectEqual(@as(f64, 3), result.asNum());
+        const resources = runtime_threads.snapshot();
+        try std.testing.expect(resources.scheduler.active_slots <= 1);
+        try std.testing.expectEqual(resources.scheduler.active_slots, resources.runnableTotal());
+    }
+}
+
+test "runtime scheduler one slot hands off finite property waitAsync notification" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    for ([_]bool{ false, true }) |serialized| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = !serialized,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\const propertyAsyncGate = { ready: 0, cell: 0, outcome: 0, notified: 0 };
+            \\const propertyAsyncWaiter = new Thread(function () {
+            \\  const pending = Atomics.waitAsync(propertyAsyncGate, "cell", 0, 5000);
+            \\  Atomics.store(propertyAsyncGate, "ready", 1);
+            \\  Atomics.notify(propertyAsyncGate, "ready", 1);
+            \\  return pending.value.then(function (value) {
+            \\    Atomics.store(propertyAsyncGate, "outcome", value === "ok" ? 1 : -1);
+            \\    return value;
+            \\  });
+            \\});
+            \\const propertyAsyncNotifier = new Thread(function () {
+            \\  while (Atomics.load(propertyAsyncGate, "ready") === 0)
+            \\    Atomics.wait(propertyAsyncGate, "ready", 0);
+            \\  Atomics.store(propertyAsyncGate, "cell", 1);
+            \\  const notified = Atomics.notify(propertyAsyncGate, "cell", 1);
+            \\  Atomics.store(propertyAsyncGate, "notified", notified);
+            \\  return notified;
+            \\});
+            \\const propertyAsyncJoined = propertyAsyncWaiter.join();
+            \\const propertyAsyncNotifierResult = propertyAsyncNotifier.join();
+            \\propertyAsyncJoined instanceof Promise &&
+            \\  propertyAsyncNotifierResult === 1 &&
+            \\  Atomics.load(propertyAsyncGate, "notified") === 1 &&
+            \\  Atomics.load(propertyAsyncGate, "outcome") === 1;
+        );
+        try std.testing.expect(result.isBoolean() and result.asBool());
         const resources = runtime_threads.snapshot();
         try std.testing.expect(resources.scheduler.active_slots <= 1);
         try std.testing.expectEqual(resources.scheduler.active_slots, resources.runnableTotal());

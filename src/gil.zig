@@ -41,9 +41,10 @@ pub const Gil = struct {
     /// emptiness alone is not run-loop quiescence: teardown must not overtake a
     /// condition reacquire or asyncHold delivery after another thread owns it.
     tasks_in_flight: std.atomic.Value(usize) = .init(0),
-    /// Sleepable task-lifecycle edge. `api_lock` still protects the queue; this
-    /// independent mutex/condition lets a quiescence observer wait for an
-    /// already-dequeued peer task without polling or holding any queue lock.
+    /// Sleepable realm-progress edge. `api_lock` and `prop_mutex` still protect
+    /// their own queues; this independent mutex/condition lets a quiescence
+    /// observer wait for an already-dequeued peer task or a property waitAsync
+    /// settlement without polling or holding either queue lock.
     task_state_mutex: std.Io.Mutex = .init,
     task_state_cond: std.Io.Condition = .init,
     task_state_generation: u64 = 0,
@@ -224,6 +225,30 @@ pub const Gil = struct {
         g.task_state_generation +%= 1;
         g.task_state_cond.broadcast(io);
         g.task_state_mutex.unlock(io);
+    }
+
+    pub fn publishPropertyWaitStateChange(g: *Gil) void {
+        g.publishTaskStateChange();
+    }
+
+    pub fn runLoopStateGeneration(g: *Gil) u64 {
+        const io = agent.engineIo();
+        g.task_state_mutex.lockUncancelable(io);
+        defer g.task_state_mutex.unlock(io);
+        return g.task_state_generation;
+    }
+
+    /// Wait until a peer publishes realm progress or the caller's own timer
+    /// expires. The generation closes the notify-before-park window; the
+    /// blocking scope releases this engine thread's runnable scheduler slot.
+    pub fn waitForRunLoopStateChange(g: *Gil, observed: u64, timeout: std.Io.Timeout) void {
+        const io = agent.engineIo();
+        g.task_state_mutex.lockUncancelable(io);
+        defer g.task_state_mutex.unlock(io);
+        if (g.task_state_generation != observed) return;
+        var blocking = runtime_threads.beginBlocking();
+        defer blocking.endWithMutex(&g.task_state_mutex, io);
+        io_compat.conditionWaitTimeout(&g.task_state_cond, io, &g.task_state_mutex, timeout) catch {};
     }
 
     fn beginTaskBurst(g: *Gil, count: usize) void {

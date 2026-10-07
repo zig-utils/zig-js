@@ -12464,12 +12464,16 @@ pub const Interpreter = struct {
                         jsthread.waitForTaskStateChange(self);
                         continue;
                     }
-                    if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
-                        const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
-                        if (deadline > now) {
-                            if (park_with_gil) g.release();
-                            std.Io.sleep(agent.engineIo(), .fromNanoseconds(@intCast(deadline - now)), .awake) catch {};
-                            if (park_with_gil) g.acquire();
+                    if (jsthread.nextPropAsyncDeadline(self) != null) {
+                        // Sample the wake generation before confirming the
+                        // deadline again. A notify in either gap then changes
+                        // the generation or removes the ticket, so it cannot
+                        // be lost immediately before the condition park.
+                        const state_generation = g.runLoopStateGeneration();
+                        if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
+                            const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+                            if (deadline > now)
+                                jsthread.waitForPropAsyncStateChange(self, state_generation, deadline);
                         }
                         continue;
                     }
