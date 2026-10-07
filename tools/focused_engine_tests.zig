@@ -1046,6 +1046,23 @@ const runtime_cases = [_]Case{
         .expected = 2047,
     },
     .{
+        // #1029: nested template substitutions alternate concatenation chains
+        // with internal ToString nodes. At 300 levels that path crossed the
+        // production source-nesting guard under TSan even though the same
+        // ordinary-depth parentheses case ran, so it must stay iterative too.
+        .name = "nested template substitutions evaluate without native recursion",
+        .source =
+        \\function nest(open, core, close, n) { return open.repeat(n) + core + close.repeat(n); }
+        \\var deep = (0, eval)(nest("`${", "7", "}`", 300)) === "7";
+        \\class P { #x; static has(o) { return `${`${#x in o}`}`; } }
+        \\var brand = P.has(new P()) === "true" && P.has({}) === "false";
+        \\var side = 0;
+        \\var shorted = `${`${false && (side = 1)}`}` === "false" && side === 0;
+        \\deep && brand && shorted ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
         // #937: creating a generator compiles its body, nested function bodies
         // included. Each shape sweeps depths until the parser gives up. Every
         // depth must either work or throw the RangeError -- never crash -- and

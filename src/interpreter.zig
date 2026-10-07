@@ -22085,12 +22085,15 @@ pub const Interpreter = struct {
         return Value.num(try self.toNumberV(primitive));
     }
 
-    /// Evaluate a left-deep chain of binary, logical and comma links without
-    /// recursing down its left spine (#935). The parser builds `a + b + c` in a
-    /// loop, and a template literal desugars to two links per substitution, so
-    /// an 8 KB template or a long generated concatenation handed evaluation a
-    /// spine thousands of links deep. Recursing once per link overflowed the
-    /// native stack on programs other engines run.
+    /// Evaluate binary, logical and comma links without native recursion
+    /// through either their left spine or a template substitution (#935,
+    /// #1029). The parser builds `a + b + c` in a loop, and a template literal
+    /// desugars to two links plus an internal `ToString` unary per substitution.
+    /// Nested templates therefore alternate a chain with the `ToString` in its
+    /// right operand; flattening only the left spine still consumed several
+    /// native frames per source level and exhausted a TSan build around 300
+    /// levels. Such a chain switches to an explicit action stack. Ordinary
+    /// flat chains keep the compact pointer spine and its allocation profile.
     ///
     /// Behaviour matches the recursive form exactly. Each link below `top`
     /// crosses `beginNodeEvaluation` top-down before any operand runs, just as
@@ -22098,8 +22101,22 @@ pub const Interpreter = struct {
     /// GC safepoints land where they did. Then the leftmost operand is evaluated
     /// and each link folds in its right operand bottom-up: the same
     /// left-to-right order, with `&&`, `||` and `??` still skipping theirs.
-    /// `top` itself was already entered by the `eval` that dispatched here.
+    /// `top` itself was already entered by the `eval` that dispatched here. A
+    /// single ordinary chain link keeps the direct evaluator path, so the
+    /// common case does not allocate this action stack.
     noinline fn evalChain(self: *Interpreter, top: *const Node) EvalError!Value {
+        // Detect the alternating template shape before entering any child. The
+        // action machine below owns those checkpoints; ordinary chains then run
+        // the established compact-spine loop with its exact failure ordering.
+        var probe = top;
+        while (true) {
+            if (isTemplateChainOperand(ast.chainRight(probe)))
+                return self.evalNestedTemplateChain(top);
+            const probe_left = ast.chainLeft(probe);
+            if (!isEvalChainLink(probe_left)) break;
+            probe = probe_left;
+        }
+
         const scratch = self.scratch_allocator orelse self.arena;
         var spine: ast.ChainSpine(*const Node) = .{};
         defer spine.deinit(scratch);
@@ -22111,13 +22128,126 @@ pub const Interpreter = struct {
             try self.beginNodeEvaluation(left);
             link = left;
         }
+
         var acc = try self.eval(ast.chainLeft(link));
         while (spine.pop()) |next| acc = try self.foldChainLink(next, acc);
         return acc;
     }
 
-    /// Apply one chain link to the value accumulated from everything to its
-    /// left, evaluating the link's right operand only when the operator does.
+    fn evalNestedTemplateChain(self: *Interpreter, top: *const Node) EvalError!Value {
+        const Action = union(enum) {
+            apply_template_to_string,
+            finish_private_in: []const u8,
+            finish_left: *const Node,
+            finish_binary: struct {
+                link: *const Node,
+                left: Value,
+                root_mark: usize,
+            },
+        };
+
+        const scratch = self.scratch_allocator orelse self.arena;
+        var actions: std.ArrayListUnmanaged(Action) = .empty;
+        defer actions.deinit(scratch);
+        const roots_mark = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(roots_mark);
+
+        var current = top;
+        var current_entered = true;
+        var result: Value = undefined;
+
+        evaluate: while (true) {
+            switch (current.*) {
+                .unary => |u| if (u.op == .to_string) {
+                    if (!current_entered) try self.beginNodeEvaluation(current);
+                    try actions.append(scratch, .apply_template_to_string);
+                    current = u.operand;
+                    current_entered = false;
+                    continue :evaluate;
+                },
+                .binary => |binary| {
+                    if (!current_entered) try self.beginNodeEvaluation(current);
+                    if (isEvalChainLink(current)) {
+                        try actions.append(scratch, .{ .finish_left = current });
+                        current = ast.chainLeft(current);
+                    } else {
+                        std.debug.assert(binary.op == .in_op and binary.left.* == .private_identifier);
+                        try actions.append(scratch, .{ .finish_private_in = binary.left.private_identifier.name });
+                        current = binary.right;
+                    }
+                    current_entered = false;
+                    continue :evaluate;
+                },
+                .logical, .sequence => {
+                    if (!current_entered) try self.beginNodeEvaluation(current);
+                    try actions.append(scratch, .{ .finish_left = current });
+                    current = ast.chainLeft(current);
+                    current_entered = false;
+                    continue :evaluate;
+                },
+                else => {},
+            }
+
+            // Leaves and non-template unary expressions retain the ordinary
+            // evaluator. It owns their checkpoint because this loop has not
+            // entered them yet.
+            result = try self.eval(current);
+
+            while (actions.pop()) |action| switch (action) {
+                .apply_template_to_string => {
+                    result = try self.applyUnary(.to_string, result);
+                },
+                .finish_private_in => |key| {
+                    result = Value.boolVal(try self.privateIn(key, result));
+                },
+                .finish_left => |link| switch (link.*) {
+                    .binary => {
+                        const root_mark = try self.pushTempRoot(result);
+                        try actions.append(scratch, .{ .finish_binary = .{
+                            .link = link,
+                            .left = result,
+                            .root_mark = root_mark,
+                        } });
+                        current = link.binary.right;
+                        current_entered = false;
+                        continue :evaluate;
+                    },
+                    .logical => |logical| {
+                        const evaluate_right = switch (logical.op) {
+                            .@"and" => result.toBoolean(),
+                            .@"or" => !result.toBoolean(),
+                            .nullish => result.isNull() or result.isUndefined(),
+                        };
+                        if (evaluate_right) {
+                            current = logical.right;
+                            current_entered = false;
+                            continue :evaluate;
+                        }
+                    },
+                    .sequence => |sequence| {
+                        current = sequence.second;
+                        current_entered = false;
+                        continue :evaluate;
+                    },
+                    else => unreachable,
+                },
+                .finish_binary => |pending| {
+                    const left = self.tempRoot(pending.root_mark, pending.left);
+                    const binary = pending.link.binary;
+                    const folded = self.applyBinary(binary.op, left, result) catch |err| {
+                        self.restoreTempRoots(pending.root_mark);
+                        return err;
+                    };
+                    self.restoreTempRoots(pending.root_mark);
+                    result = folded;
+                },
+            };
+            return result;
+        }
+    }
+
+    /// Apply one compact-spine link after its left side. Nested template
+    /// operands were diverted to `evalNestedTemplateChain` before evaluation.
     fn foldChainLink(self: *Interpreter, link: *const Node, acc: Value) EvalError!Value {
         return switch (link.*) {
             .binary => |b| blk: {
@@ -22129,10 +22259,13 @@ pub const Interpreter = struct {
                 .@"or" => if (acc.toBoolean()) acc else try self.eval(l.right),
                 .nullish => if (acc.isNull() or acc.isUndefined()) try self.eval(l.right) else acc,
             },
-            // The discarded left value was already evaluated for its effects.
-            .sequence => |sq| try self.eval(sq.second),
+            .sequence => |sequence| try self.eval(sequence.second),
             else => unreachable,
         };
+    }
+
+    fn isTemplateChainOperand(node: *const Node) bool {
+        return node.* == .unary and node.unary.op == .to_string and isEvalChainLink(node.unary.operand);
     }
 
     /// Whether `node` continues a chain `evalChain` can fold as left-then-right.
