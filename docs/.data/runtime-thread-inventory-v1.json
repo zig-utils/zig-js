@@ -26,7 +26,7 @@
       "admission": "Only when gc_concurrent is enabled and an old collection is due, within process-wide per-resource thread and configured-stack limits; any spawn failure finishes marking synchronously",
       "stack_policy": "Platform default",
       "blocking": "CPU tracing loop; the joining mutator publishes its blocked transition",
-      "shutdown": "finishConcurrentGCIfActive signals and joins before cycle completion or Context teardown",
+      "shutdown": "finishConcurrentGCIfActive signals the marker, cancels a still-queued initial start, joins the OS thread, and completes the active mark synchronously",
       "scratch_memory": "Collector mark work owned and reported by the Context heap",
       "coordinator_status": "shared_cpu_slots",
       "scheduler_priority": "safety"
@@ -104,7 +104,7 @@
     { "path": "src/agent.zig", "count": 2 },
     { "path": "src/bytecode.zig", "count": 12 },
     { "path": "src/c_api.zig", "count": 10 },
-    { "path": "src/context.zig", "count": 34 },
+    { "path": "src/context.zig", "count": 35 },
     { "path": "src/fetch_headers.zig", "count": 1 },
     { "path": "src/gc.zig", "count": 2 },
     { "path": "src/gil.zig", "count": 2 },

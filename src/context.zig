@@ -4615,6 +4615,7 @@ pub const Context = struct {
     /// at the finish safepoint. `gc_marker_stop` tells it to stop and return.
     gc_concurrent: bool = false,
     gc_marker: ?std.Thread = null,
+    gc_marker_start_cancellation: runtime_threads.StartCancellation = .{},
     gc_marker_stop: std.atomic.Value(bool) = .init(false),
     /// A single-mutator concurrent sweep completed at a VM safepoint, but its
     /// Context-owned post-sweep maintenance has not yet reached a quiescent
@@ -8960,6 +8961,33 @@ pub const Context = struct {
         }
     }
 
+    /// A canceled marker never entered the concurrent tracer. The Context
+    /// owner still owns the active mark and closes it synchronously after
+    /// joining this OS thread in `finishConcurrentGCIfActive`.
+    fn gcMarkerStartCanceled() void {}
+
+    fn startConcurrentGcMarker(self: *Context, h: *GcHeap) void {
+        std.debug.assert(self.gc_marker == null);
+        self.gc_marker_start_cancellation = .{};
+        self.gc_marker = runtime_threads.spawnCancelable(
+            .concurrent_gc_marker,
+            .{},
+            &self.gc_marker_start_cancellation,
+            gcMarkerLoop,
+            .{self},
+            gcMarkerStartCanceled,
+            .{},
+        ) catch blk: {
+            self.gc_scan_native_stack = true;
+            h.finishConcurrentMark();
+            self.gc_scan_native_stack = false;
+            self.endConcurrentEnvironmentTrace();
+            if (!self.markWorkCollectionAborted(h))
+                self.gc_concurrent_post_sweep_pending = true;
+            break :blk null;
+        };
+    }
+
     const ConcurrentGcFinishResult = enum {
         inactive,
         finished,
@@ -8981,6 +9009,7 @@ pub const Context = struct {
         defer if (entered_conductor) self.leaveJitGcConductor();
         if (self.gc_marker) |t| {
             self.gc_marker_stop.store(true, .release);
+            _ = self.gc_marker_start_cancellation.cancel();
             var blocking = runtime_threads.beginBlocking();
             defer blocking.end();
             t.join();
@@ -9429,15 +9458,7 @@ pub const Context = struct {
                 h.beginConcurrentMark();
                 self.gc_scan_native_stack = false;
                 self.gc_marker_stop.store(false, .release);
-                self.gc_marker = runtime_threads.spawn(.concurrent_gc_marker, .{}, gcMarkerLoop, .{self}) catch blk: {
-                    self.gc_scan_native_stack = true;
-                    h.finishConcurrentMark();
-                    self.gc_scan_native_stack = false;
-                    self.endConcurrentEnvironmentTrace();
-                    if (!self.markWorkCollectionAborted(h))
-                        self.gc_concurrent_post_sweep_pending = true;
-                    break :blk null;
-                };
+                self.startConcurrentGcMarker(h);
             }
             return;
         }
@@ -39621,6 +39642,162 @@ test "enable_gc concurrent finish drains post-sweep slab maintenance once" {
         backing.bucket_chunks[idx].items.len,
     );
     try std.testing.expect(!ctx.drainConcurrentPostSweepMaintenance(.ordinary_collection, false));
+}
+
+test "concurrent GC marker finish exits while its start is scheduler-paused" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    var restored = false;
+    defer if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+    };
+
+    const before = runtime_threads.snapshot();
+    var context_ready = std.atomic.Value(bool).init(false);
+    var start = std.atomic.Value(bool).init(false);
+    var marker_created = std.atomic.Value(bool).init(false);
+    var finish_start = std.atomic.Value(bool).init(false);
+    var finished = std.atomic.Value(bool).init(false);
+    const Owner = struct {
+        fn run(
+            ready_flag: *std.atomic.Value(bool),
+            start_flag: *std.atomic.Value(bool),
+            marker_created_flag: *std.atomic.Value(bool),
+            finish_start_flag: *std.atomic.Value(bool),
+            finished_flag: *std.atomic.Value(bool),
+        ) void {
+            const ctx = Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .concurrent_gc = true,
+                .enable_jit = false,
+            }) catch return;
+            ready_flag.store(true, .release);
+            while (!start_flag.load(.acquire)) std.Thread.yield() catch {};
+            const heap = ctx.gc.?;
+            ctx.beginConcurrentEnvironmentTrace();
+            ctx.gc_scan_native_stack = true;
+            heap.beginConcurrentMark();
+            ctx.gc_scan_native_stack = false;
+            ctx.gc_marker_stop.store(false, .release);
+            ctx.startConcurrentGcMarker(heap);
+            if (ctx.gc_marker == null) {
+                ctx.destroy();
+                return;
+            }
+            marker_created_flag.store(true, .release);
+            while (!finish_start_flag.load(.acquire)) std.Thread.yield() catch {};
+            _ = ctx.finishConcurrentGCIfActive();
+            finished_flag.store(true, .release);
+            ctx.destroy();
+        }
+    };
+    const owner = try std.Thread.spawn(.{}, Owner.run, .{ &context_ready, &start, &marker_created, &finish_start, &finished });
+    var joined = false;
+    defer if (!joined) {
+        finish_start.store(true, .release);
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+        owner.join();
+    };
+
+    const io = agent.engineIo();
+    const context_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!context_ready.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < context_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(context_ready.load(.acquire));
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    start.store(true, .release);
+    const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while ((!marker_created.load(.acquire) or runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(marker_created.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+    finish_start.store(true, .release);
+
+    const finish_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!finished.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < finish_deadline)
+        std.Thread.yield() catch {};
+    const finished_while_paused = finished.load(.acquire);
+    _ = runtime_threads.setSchedulerLimits(previous);
+    restored = true;
+    owner.join();
+    joined = true;
+    try std.testing.expect(finished_while_paused);
+}
+
+test "concurrent GC marker cancellation balances repeated queued and running cycles" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .concurrent_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    const heap = ctx.gc.?;
+    const before = runtime_threads.snapshot();
+    const io = agent.engineIo();
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    for (0..8) |iteration| {
+        ctx.beginConcurrentEnvironmentTrace();
+        ctx.gc_scan_native_stack = true;
+        heap.beginConcurrentMark();
+        ctx.gc_scan_native_stack = false;
+        ctx.gc_marker_stop.store(false, .release);
+        ctx.startConcurrentGcMarker(heap);
+        try std.testing.expect(ctx.gc_marker != null);
+
+        const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+        while (runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters and
+            std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+            std.Thread.yield() catch {};
+        try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+        try std.testing.expectEqual(Context.ConcurrentGcFinishResult.finished, ctx.finishConcurrentGCIfActive());
+        try std.testing.expect(ctx.gc_marker == null);
+        try std.testing.expect(!heap.concurrent.load(.acquire));
+        _ = ctx.drainConcurrentPostSweepMaintenance(.ordinary_collection, false);
+
+        const after = runtime_threads.snapshot();
+        const resource_before = before.resource(.concurrent_gc_marker);
+        const resource_after = after.resource(.concurrent_gc_marker);
+        try std.testing.expectEqual(resource_before.live, resource_after.live);
+        try std.testing.expectEqual(resource_before.runnable, resource_after.runnable);
+        try std.testing.expectEqual(resource_before.blocked, resource_after.blocked);
+        try std.testing.expectEqual(resource_before.configured_stack_bytes, resource_after.configured_stack_bytes);
+        try std.testing.expectEqual(resource_before.start_cancellations + @as(u64, @intCast(iteration)) + 1, resource_after.start_cancellations);
+        try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+        try std.testing.expectEqual(
+            before.scheduler.priority(.safety).cancellations + @as(u64, @intCast(iteration)) + 1,
+            after.scheduler.priority(.safety).cancellations,
+        );
+    }
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    ctx.beginConcurrentEnvironmentTrace();
+    ctx.gc_scan_native_stack = true;
+    heap.beginConcurrentMark();
+    ctx.gc_scan_native_stack = false;
+    ctx.gc_marker_stop.store(false, .release);
+    ctx.startConcurrentGcMarker(heap);
+    try std.testing.expect(ctx.gc_marker != null);
+    const running_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (runtime_threads.snapshot().resource(.concurrent_gc_marker).runnable == before.resource(.concurrent_gc_marker).runnable and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < running_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(
+        before.resource(.concurrent_gc_marker).runnable + 1,
+        runtime_threads.snapshot().resource(.concurrent_gc_marker).runnable,
+    );
+    try std.testing.expectEqual(Context.ConcurrentGcFinishResult.finished, ctx.finishConcurrentGCIfActive());
+    _ = ctx.drainConcurrentPostSweepMaintenance(.ordinary_collection, false);
+    const after_running = runtime_threads.snapshot();
+    try std.testing.expectEqual(before.resource(.concurrent_gc_marker).live, after_running.resource(.concurrent_gc_marker).live);
+    try std.testing.expectEqual(before.resource(.concurrent_gc_marker).runnable, after_running.resource(.concurrent_gc_marker).runnable);
+    try std.testing.expectEqual(before.resource(.concurrent_gc_marker).start_cancellations + 8, after_running.resource(.concurrent_gc_marker).start_cancellations);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after_running.scheduler.slot_waiters);
 }
 
 test "enable_gc concurrent (M3): the production driver marks on a thread while JS runs" {

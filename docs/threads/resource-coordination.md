@@ -125,6 +125,12 @@ publishes completed/exited state before the Context frees either record. A
 Thread that already won a slot continues through the existing teardown stop and
 checkpoint protocol.
 
+Concurrent-GC finish boundaries also cancel a marker that is still waiting for
+its initial safety slot before joining its OS thread. The Context owner then
+closes that active mark through the existing synchronous finish path. A marker
+that already won a slot observes the stop flag and retains the ordinary
+concurrent trace, join, and finish ordering.
+
 The runnable limit defaults to `max(1, logical CPUs - 1)`. The reserved lane
 keeps capacity available for the embedder or foreground host mutator, which
 runs outside the typed engine-thread boundary. If host detection fails, the
