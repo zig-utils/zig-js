@@ -1488,6 +1488,76 @@ test "runtime scratch allocator enforces domain and total limits with exact roll
     try std.testing.expectEqual(wasm_before.current_bytes, after.scratch.domain(.wasm_compilation).current_bytes);
 }
 
+test "runtime scratch allocator accounts resize remap nested release and readmission" {
+    const bounded = ScratchLimits{
+        .max_total_bytes = 96,
+        .max_domain_bytes = @splat(96),
+    };
+    const previous = setScratchLimits(bounded);
+    defer _ = setScratchLimits(previous);
+    const before = snapshot();
+
+    var storage: [256]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var scratch = ScratchAllocator.init(.gc_auxiliary, fixed.allocator());
+    defer scratch.deinit();
+    const allocator = scratch.allocator();
+
+    var memory = try allocator.alloc(u8, 24);
+    try std.testing.expectEqual(@as(u64, 24), scratch.currentBytes());
+    try std.testing.expect(allocator.resize(memory, 48));
+    memory = memory.ptr[0..48];
+    try std.testing.expectEqual(@as(u64, 48), scratch.currentBytes());
+    memory = allocator.remap(memory, 64) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 64), scratch.currentBytes());
+    try std.testing.expect(allocator.remap(memory, 97) == null);
+    try std.testing.expectEqual(@as(u64, 64), scratch.currentBytes());
+
+    // Lowering policy below existing ownership must reject growth without
+    // underflowing either `max - current` check. Existing storage stays valid.
+    _ = setScratchLimits(.{
+        .max_total_bytes = 32,
+        .max_domain_bytes = @splat(32),
+    });
+    try std.testing.expectError(error.OutOfMemory, allocator.alloc(u8, 1));
+    try std.testing.expectEqual(@as(u64, 64), scratch.currentBytes());
+    _ = setScratchLimits(bounded);
+
+    memory = allocator.remap(memory, 8) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 8), scratch.currentBytes());
+
+    var outer = ScratchAllocator.init(.gc_auxiliary, fixed.allocator());
+    defer outer.deinit();
+    var inner = ScratchAllocator.init(.gc_auxiliary, fixed.allocator());
+    defer inner.deinit();
+    const outer_allocator = outer.allocator();
+    const inner_allocator = inner.allocator();
+    const outer_memory = try outer_allocator.alloc(u8, 40);
+    const inner_memory = try inner_allocator.alloc(u8, 32);
+    try std.testing.expectEqual(@as(u64, 80), snapshot().scratch.domain(.gc_auxiliary).current_bytes - before.scratch.domain(.gc_auxiliary).current_bytes);
+    inner_allocator.free(inner_memory);
+    outer_allocator.free(outer_memory);
+    allocator.free(memory);
+
+    // Released capacity is immediately admissible again; no waiter or hidden
+    // reserve participates in the fail-closed allocation boundary.
+    const readmitted = try allocator.alloc(u8, 96);
+    allocator.free(readmitted);
+
+    const after = snapshot();
+    const domain_before = before.scratch.domain(.gc_auxiliary);
+    const domain_after = after.scratch.domain(.gc_auxiliary);
+    try std.testing.expectEqual(before.scratch.current_bytes, after.scratch.current_bytes);
+    try std.testing.expectEqual(after.scratch.current_bytes, after.scratch.domainCurrentTotal());
+    try std.testing.expectEqual(domain_before.current_bytes, domain_after.current_bytes);
+    try std.testing.expectEqual(@as(u64, 8), domain_after.requests - domain_before.requests);
+    try std.testing.expectEqual(@as(u64, 6), domain_after.admissions - domain_before.admissions);
+    try std.testing.expectEqual(@as(u64, 2), domain_after.policy_rejections - domain_before.policy_rejections);
+    try std.testing.expectEqual(@as(u64, 34), domain_after.rejected_bytes - domain_before.rejected_bytes);
+    try std.testing.expectEqual(@as(u64, 232), domain_after.admitted_bytes - domain_before.admitted_bytes);
+    try std.testing.expectEqual(@as(u64, 232), domain_after.released_bytes - domain_before.released_bytes);
+}
+
 test "runtime scratch allocator rolls back an admitted backing failure" {
     const previous = setScratchLimits(.{});
     defer _ = setScratchLimits(previous);
