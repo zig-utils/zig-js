@@ -40,6 +40,29 @@ repository option is required so publication records and checks that exact Git
 revision. Reports also preserve SHA-256 identities for both engine runners and
 the frozen workload source.
 
+## Cross-subsystem scratch-accounting exact-parent result
+
+Issue [#1027](https://github.com/zig-utils/zig-js/issues/1027) publishes one
+process-wide accounting policy across GC auxiliary work, native compilation,
+and Wasm compilation. The nine-pair [dated report](.data/compiler-scratch-exact-parent-2026-10-07.md)
+and [216 raw phase rows](.data/compiler-scratch-exact-parent-2026-10-07.json)
+compare exact parent `b4f5544d` with candidate `24d7ff72` at one lane and at
+twice the host width. Parent and candidate use the same overlaid runner,
+workload checksum, Zig, zig-gc, and zig-regex revisions.
+
+| candidate JIT-on width | native bytes requested / released p50 | native peak p50 | process scratch after teardown | checksum |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 lane | 24.30 / 24.30 MiB | 0.60 MiB | 0 bytes | 29,668,441 |
+| 20 lanes | 486.03 / 486.03 MiB | 4.13 MiB | 0 bytes | 642,913,460 |
+
+Every candidate row records zero policy rejections and allocator failures;
+native scratch balances before the cold phase returns, Context-owned GC
+auxiliary bytes survive the warm control, and teardown returns aggregate
+process scratch to zero. Peak RSS changes by -0.1% to -0.5% in the four cold
+rows. Dedicated timing remains diagnostic because two one-lane series exceed
+10% RSD (maximum 28.92%); the report therefore makes no speed claim from those
+rows and keeps all samples rather than retrying or discarding them.
+
 ## `JSON.stringify` retained-frame cache diagnostic
 
 Issue [#1022](https://github.com/zig-utils/zig-js/issues/1022) bounds the

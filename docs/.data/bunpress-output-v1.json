@@ -65,8 +65,8 @@
     },
     {
       "path": "benchmarks/index.html",
-      "bytes": 460454,
-      "sha256": "a354f876ebe83a246dcd98e563ad7a4cb1e4ffb0e8b6f7832978b83c182f56bb"
+      "bytes": 463224,
+      "sha256": "f974518bd58daea1e3348dfa3017ca33312fe0b8c5c3c5ba427fb0604b28086e"
     },
     {
       "path": "c-api/README/index.html",
@@ -180,8 +180,8 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 273329,
-      "sha256": "54cca675f3a4d0807f2ea8e501dd8e01327efe04280de9cf5812256113c355ef"
+      "bytes": 274323,
+      "sha256": "8ffcabc0711e94fa7c1715760095bf657fbb704222e8f3178603c66b95cfc9c9"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "73e6cd54ceddd59c62358382c33299be12c199c3c88a3df77ac9c815f81a3df5"
+  "tree_sha256": "4106e9fde3ed4ba7e36cd93b9a758da16f3036506781cce15b83c8be3932ebfa"
 }
