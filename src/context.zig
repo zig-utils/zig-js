@@ -2199,7 +2199,15 @@ pub const GcCellBacking = struct {
     }
 
     pub fn usesCellSlab(total: usize) bool {
-        return bucketIndex(total, .@"16") != null;
+        return cellSlabBytes(total) != null;
+    }
+
+    /// The bytes reserved by the production slab for one cell request, after
+    /// size-class rounding. Null means the request uses the backing allocator
+    /// directly instead of owned slab storage.
+    pub fn cellSlabBytes(total: usize) ?usize {
+        const idx = bucketIndex(total, .@"16") orelse return null;
+        return bucket_sizes[idx];
     }
 
     /// Validate an allocation-start address before zig-gc dereferences its

@@ -5019,7 +5019,9 @@ test "Promise fits the 256-byte GC slab" {
     // paths remain transactional.
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(promise.RejectionTrackerState));
     try std.testing.expect(@sizeOf(promise.Promise) <= 224);
-    try std.testing.expectEqual(@as(usize, 256), Heap.cellAllocationBytes(promise.Promise));
+    const requested_bytes = Heap.cellAllocationBytes(promise.Promise);
+    try std.testing.expect(requested_bytes <= 256);
+    try std.testing.expectEqual(@as(?usize, 256), ContextMod.GcCellBacking.cellSlabBytes(requested_bytes));
 }
 
 fn managedCellType(comptime kind: CellKind) type {
