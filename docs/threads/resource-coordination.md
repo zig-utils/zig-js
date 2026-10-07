@@ -131,6 +131,11 @@ closes that active mark through the existing synchronous finish path. A marker
 that already won a slot observes the stop flag and retains the ordinary
 concurrent trace, join, and finish ordering.
 
+Private-ABI VM groups cancel an execution watchdog that is still waiting for
+its initial safety slot before group teardown joins it. A watchdog that already
+won a slot retains the ordinary deadline, termination-publication, blocked
+sleep, and stop/join behavior.
+
 The runnable limit defaults to `max(1, logical CPUs - 1)`. The reserved lane
 keeps capacity available for the embedder or foreground host mutator, which
 runs outside the typed engine-thread boundary. If host detection fails, the

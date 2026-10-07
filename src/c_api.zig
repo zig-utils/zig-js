@@ -1397,6 +1397,7 @@ const CContextGroup = struct {
     watchdog_fired_ns: std.atomic.Value(u64) = .init(0),
     watchdog_stop: std.atomic.Value(bool) = .init(false),
     watchdog_thread: ?std.Thread = null,
+    watchdog_start_cancellation: runtime_threads.StartCancellation = .{},
     /// `JSC::VMTraps::NeedWatchdogCheck` trap bit: set by
     /// `JSC__VM__notifyNeedWatchdogCheck`, consumed (cleared + deadline
     /// re-check) at the running interpreter's next step checkpoint. Every
@@ -1599,6 +1600,7 @@ const CContextGroup = struct {
         // join latency below ~1ms.
         if (self.watchdog_thread) |thread| {
             self.watchdog_stop.store(true, .release);
+            _ = self.watchdog_start_cancellation.cancel();
             var blocking = runtime_threads.beginBlocking();
             defer blocking.end();
             thread.join();
@@ -15225,6 +15227,10 @@ fn privateExecutionWatchdog(group: *CContextGroup) void {
     }
 }
 
+/// A pre-entry cancellation needs no watchdog cleanup: the group owner retains
+/// every deadline and termination field until it joins this OS thread.
+fn privateExecutionWatchdogStartCanceled() void {}
+
 /// `vm->ensureWatchdog().setTimeLimit(Seconds{limit})` (bindings.cpp:4875).
 /// Mapping: `+inf` is `Watchdog::noTimeLimit`; non-positive limits fire at the
 /// next watchdog tick; NaN stays armed but never fires (JSC comparison
@@ -15246,7 +15252,15 @@ export fn JSC__VM__setExecutionTimeLimit(vm_ref: ?*anyopaque, timeout: f64) call
     };
     group.execution_deadline_ns.store(deadline, .release);
     if (deadline != 0 and group.watchdog_thread == null) {
-        group.watchdog_thread = runtime_threads.spawn(.execution_watchdog, .{}, privateExecutionWatchdog, .{group}) catch null;
+        group.watchdog_thread = runtime_threads.spawnCancelable(
+            .execution_watchdog,
+            .{},
+            &group.watchdog_start_cancellation,
+            privateExecutionWatchdog,
+            .{group},
+            privateExecutionWatchdogStartCanceled,
+            .{},
+        ) catch null;
     }
 }
 
@@ -36722,6 +36736,138 @@ test "private VM termination observes asynchronous requests published during a h
             "counter = 0; while (counter < 4096) counter++; counter",
         )).asNum());
     }
+}
+
+test "private VM watchdog group teardown exits while its start is scheduler-paused" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    var restored = false;
+    defer if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+    };
+
+    const before = runtime_threads.snapshot();
+    var context_ready = std.atomic.Value(bool).init(false);
+    var start = std.atomic.Value(bool).init(false);
+    var watchdog_created = std.atomic.Value(bool).init(false);
+    var release_start = std.atomic.Value(bool).init(false);
+    var released = std.atomic.Value(bool).init(false);
+    const Owner = struct {
+        fn run(
+            ready_flag: *std.atomic.Value(bool),
+            start_flag: *std.atomic.Value(bool),
+            watchdog_created_flag: *std.atomic.Value(bool),
+            release_start_flag: *std.atomic.Value(bool),
+            released_flag: *std.atomic.Value(bool),
+        ) void {
+            const primary = Context.createWith(std.testing.allocator, .{ .enable_jit = false }) catch return;
+            const group_ref = createContextGroupForPrimary(primary, gpa) orelse {
+                primary.destroy();
+                return;
+            };
+            ready_flag.store(true, .release);
+            while (!start_flag.load(.acquire)) std.Thread.yield() catch {};
+            JSC__VM__setExecutionTimeLimit(group_ref, 60.0);
+            const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+            if (group.watchdog_thread == null) {
+                JSContextGroupRelease(group_ref);
+                return;
+            }
+            watchdog_created_flag.store(true, .release);
+            while (!release_start_flag.load(.acquire)) std.Thread.yield() catch {};
+            JSContextGroupRelease(group_ref);
+            released_flag.store(true, .release);
+        }
+    };
+    const owner = try std.Thread.spawn(.{}, Owner.run, .{ &context_ready, &start, &watchdog_created, &release_start, &released });
+    var joined = false;
+    defer if (!joined) {
+        release_start.store(true, .release);
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+        owner.join();
+    };
+
+    const io = agent.engineIo();
+    const context_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!context_ready.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < context_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(context_ready.load(.acquire));
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    start.store(true, .release);
+    const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while ((!watchdog_created.load(.acquire) or runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(watchdog_created.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+    release_start.store(true, .release);
+
+    const release_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!released.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < release_deadline)
+        std.Thread.yield() catch {};
+    const released_while_paused = released.load(.acquire);
+    _ = runtime_threads.setSchedulerLimits(previous);
+    restored = true;
+    owner.join();
+    joined = true;
+    try std.testing.expect(released_while_paused);
+}
+
+test "private VM watchdog cancellation balances repeated queued and running groups" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    const before = runtime_threads.snapshot();
+    const resource_before = before.resource(.execution_watchdog);
+    const io = agent.engineIo();
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    for (0..8) |iteration| {
+        const primary = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
+        const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+        JSC__VM__setExecutionTimeLimit(group_ref, 60.0);
+        const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+        try std.testing.expect(group.watchdog_thread != null);
+        const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+        while (runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters and
+            std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+            std.Thread.yield() catch {};
+        try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+        JSContextGroupRelease(group_ref);
+
+        const after = runtime_threads.snapshot();
+        const resource_after = after.resource(.execution_watchdog);
+        try std.testing.expectEqual(resource_before.live, resource_after.live);
+        try std.testing.expectEqual(resource_before.runnable, resource_after.runnable);
+        try std.testing.expectEqual(resource_before.blocked, resource_after.blocked);
+        try std.testing.expectEqual(resource_before.configured_stack_bytes, resource_after.configured_stack_bytes);
+        try std.testing.expectEqual(resource_before.start_cancellations + @as(u64, @intCast(iteration)) + 1, resource_after.start_cancellations);
+        try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+        try std.testing.expectEqual(
+            before.scheduler.priority(.safety).cancellations + @as(u64, @intCast(iteration)) + 1,
+            after.scheduler.priority(.safety).cancellations,
+        );
+    }
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    const primary = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
+    const group_ref = createContextGroupForPrimary(primary, gpa) orelse return error.GroupCreateFailed;
+    JSC__VM__setExecutionTimeLimit(group_ref, 60.0);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    try std.testing.expect(group.watchdog_thread != null);
+    const running_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (runtime_threads.snapshot().resource(.execution_watchdog).blocked == resource_before.blocked and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < running_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(resource_before.blocked + 1, runtime_threads.snapshot().resource(.execution_watchdog).blocked);
+    JSContextGroupRelease(group_ref);
+    const after_running = runtime_threads.snapshot();
+    try std.testing.expectEqual(resource_before.live, after_running.resource(.execution_watchdog).live);
+    try std.testing.expectEqual(resource_before.runnable, after_running.resource(.execution_watchdog).runnable);
+    try std.testing.expectEqual(resource_before.blocked, after_running.resource(.execution_watchdog).blocked);
+    try std.testing.expectEqual(resource_before.start_cancellations + 8, after_running.resource(.execution_watchdog).start_cancellations);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after_running.scheduler.slot_waiters);
 }
 
 test "private VM termination watchdog never sets the owner's permanent stop" {

@@ -82,7 +82,7 @@
       "admission": "Created on first finite time limit within process-wide per-resource thread and configured-stack limits; spawn failure leaves synchronous checkpoint enforcement active",
       "stack_policy": "Platform default",
       "blocking": "Every bounded deadline sleep publishes a runnable/blocked transition",
-      "shutdown": "ContextGroup destruction sets watchdog_stop and joins the thread",
+      "shutdown": "ContextGroup destruction sets watchdog_stop, cancels a still-queued initial start, and joins the thread before reclaiming VM state",
       "scratch_memory": "No dynamic work queue; fixed ContextGroup atomics and native stack",
       "coordinator_status": "shared_cpu_slots",
       "scheduler_priority": "safety"
@@ -103,7 +103,7 @@
   "test_only_direct_spawns": [
     { "path": "src/agent.zig", "count": 2 },
     { "path": "src/bytecode.zig", "count": 12 },
-    { "path": "src/c_api.zig", "count": 10 },
+    { "path": "src/c_api.zig", "count": 11 },
     { "path": "src/context.zig", "count": 35 },
     { "path": "src/fetch_headers.zig", "count": 1 },
     { "path": "src/gc.zig", "count": 2 },
