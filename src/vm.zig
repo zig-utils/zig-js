@@ -1291,6 +1291,8 @@ var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_store_hits: std.atomic.Value(u64) = .init(0);
+var quick_arguments_index_hits: std.atomic.Value(u64) = .init(0);
+var quick_arguments_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
@@ -1524,6 +1526,44 @@ inline fn quickTypedArrayStore(vm: *Interpreter, receiver: Value, key: Value, st
         std.math.maxInt(usize);
     try vm.taStore(typed_array, index, vm.tempRoot(stored_root, stored));
     return vm.tempRoot(stored_root, stored);
+}
+
+/// A Number array index needs no ToPropertyKey call. Mapped arguments retain
+/// their live parameter cells; severed or strict indices use the ordinary
+/// synchronized dense storage. Accessor-bearing objects stay generic because
+/// the exact index may have been redefined.
+inline fn quickArgumentsLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
+    const index = quickArrayIndex(key) orelse return null;
+    if (!receiver.isObject()) return null;
+    const object = receiver.asObj();
+    if (!object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
+        object.accessorsMap() != null)
+        return null;
+    try vm.checkRestricted(object);
+    if (interp.argMapGet(object, index)) |mapped| return mapped;
+    return object.denseElement(index);
+}
+
+inline fn quickArgumentsStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!?Value {
+    const index = quickArrayIndex(key) orelse return null;
+    if (!receiver.isObject()) return null;
+    const object = receiver.asObj();
+    if (!object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
+        object.accessorsMap() != null)
+        return null;
+    try vm.checkRestricted(object);
+    if (interp.argMapHas(object, index)) {
+        interp.argMapSet(object, index, stored);
+        _ = object.setElementAt(index, stored);
+        return stored;
+    }
+    if (object.attrsMap() != null) {
+        var buffer: [10]u8 = undefined;
+        const name = std.fmt.bufPrint(&buffer, "{d}", .{index}) catch return null;
+        if (!object.getAttr(name).writable) return null;
+    }
+    if (!object.setDenseElement(index, stored)) return null;
+    return stored;
 }
 
 fn specializeQuickArrayExpression(ops: []const QuickArrayNumericOp) QuickArrayExpressionSpecialization {
@@ -9392,6 +9432,11 @@ fn runChunk(
                         if (builtin.is_test) _ = quick_typed_array_index_hits.fetchAdd(1, .monotonic);
                         break :fast;
                     }
+                    if (try quickArgumentsLoad(vm, obj, key)) |element| {
+                        try stack.append(stack_alloc, element);
+                        if (builtin.is_test) _ = quick_arguments_index_hits.fetchAdd(1, .monotonic);
+                        break :fast;
+                    }
                     // A present dense element has no observable coercion,
                     // accessor, hole, or prototype work. Shared arrays take a
                     // short element-lock snapshot; isolated arrays read their
@@ -9650,6 +9695,11 @@ fn runChunk(
                 if (try quickTypedArrayStore(vm, obj, key, v)) |stored| {
                     try stack.append(stack_alloc, stored);
                     if (builtin.is_test) _ = quick_typed_array_store_hits.fetchAdd(1, .monotonic);
+                    continue;
+                }
+                if (try quickArgumentsStore(vm, obj, key, v)) |stored| {
+                    try stack.append(stack_alloc, stored);
+                    if (builtin.is_test) _ = quick_arguments_store_hits.fetchAdd(1, .monotonic);
                     continue;
                 }
                 if (try quickDenseArrayStore(vm, obj, key, v)) {
@@ -22251,6 +22301,105 @@ test "vm: computed numeric typed array stores preserve coercion and buffer reval
         \\ big[0] === 12n && wrongBigIntType) ? 1 : 0
     )).asNum());
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > before);
+}
+
+test "vm: computed numeric arguments access preserves mapping and exotic overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const reads_before = quick_arguments_index_hits.load(.monotonic);
+    const stores_before = quick_arguments_store_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+        \\function mapped(a, b) {
+        \\  let args = arguments;
+        \\  let initial = args[0] === 1 && args[-0] === 1;
+        \\  args[0] = 7; let storeLinked = a === 7;
+        \\  a = 8; let loadLinked = args[0] === 8;
+        \\  args[-1] = 3; let named = args[-1] === 3;
+        \\  let keyCoercions = 0;
+        \\  let key = { toString: function () { keyCoercions = keyCoercions + 1; return "1"; } };
+        \\  args[key] = 6; let objectKey = b === 6 && keyCoercions === 1;
+        \\  delete args[0]; args[0] = 9; let severed = a === 8 && args[0] === 9;
+        \\  let gets = 0; let sets = 0;
+        \\  Object.defineProperty(args, "1", {
+        \\    get: function () { gets = gets + 1; return 4; },
+        \\    set: function (value) { sets = sets + value; }, configurable: true
+        \\  });
+        \\  args[1] = 5; let accessor = args[1] === 4 && gets === 1 && sets === 5;
+        \\  return initial && storeLinked && loadLinked && named && objectKey && severed && accessor;
+        \\}
+        \\function unmapped(a) { "use strict"; arguments[0] = 4; a = 5; return arguments[0] === 4 && a === 5; }
+        \\(mapped(1, 2) && unmapped(1)) ? 1 : 0
+    )).asNum());
+    const reads_after = quick_arguments_index_hits.load(.monotonic);
+    const stores_after = quick_arguments_store_hits.load(.monotonic);
+    try std.testing.expect(reads_after > reads_before);
+    try std.testing.expect(stores_after > stores_before);
+
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+        \\function accessor(a) {
+        \\  let args = arguments; let gets = 0; let sets = 0;
+        \\  Object.defineProperty(args, "0", {
+        \\    get: function () { gets = gets + 1; return 4; },
+        \\    set: function (value) { sets = sets + value; }, configurable: true
+        \\  });
+        \\  args[0] = 5; return args[0] === 4 && gets === 1 && sets === 5;
+        \\}
+        \\accessor(1) ? 1 : 0
+    )).asNum());
+    try std.testing.expectEqual(reads_after, quick_arguments_index_hits.load(.monotonic));
+    try std.testing.expectEqual(stores_after, quick_arguments_store_hits.load(.monotonic));
+
+    const stores_after_accessor = quick_arguments_store_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+        \\function attributed(a) {
+        \\  let args = arguments;
+        \\  Object.defineProperty(args, "0", { writable: false });
+        \\  args[0] = 9; return args[0] === 1 && a === 1;
+        \\}
+        \\attributed(1) ? 1 : 0
+    )).asNum());
+    try std.testing.expectEqual(stores_after_accessor, quick_arguments_store_hits.load(.monotonic));
+}
+
+test "vm: numeric arguments fast paths enforce restriction ownership" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function make(value) { return arguments; } make(7)");
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const arguments = try run(&machine, chunk, null);
+    const Claim = struct {
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+
+        fn run(self: *@This()) void {
+            const previous = self.object.claimRestriction(
+                self.allocator,
+                @intCast(std.Thread.getCurrentId()),
+            ) catch unreachable;
+            std.debug.assert(previous == null);
+        }
+    };
+    var claim = Claim{ .object = arguments.asObj(), .allocator = allocator };
+    const owner = try std.Thread.spawn(.{}, Claim.run, .{&claim});
+    owner.join();
+
+    try std.testing.expectError(error.Throw, quickArgumentsLoad(&machine, arguments, Value.num(0)));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    machine.exception = Value.undef();
+    try std.testing.expectError(
+        error.Throw,
+        quickArgumentsStore(&machine, arguments, Value.num(0), Value.num(8)),
+    );
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(@as(f64, 7), arguments.asObj().denseElement(0).?.asNum());
 }
 
 test "vm: quickens isolated polymorphic own-data property loops with exact steps" {

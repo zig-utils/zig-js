@@ -45,8 +45,8 @@
     },
     {
       "path": "advanced/vm-quickening/index.html",
-      "bytes": 225639,
-      "sha256": "48af17b5af66f392f4c8fe3fa3cf658cb26e77badd06a8406bd1b5b6fbae4417"
+      "bytes": 225693,
+      "sha256": "c065a79353591020f885182c1bef701e845b1eacbf8b279ef3b1d7fd51a81596"
     },
     {
       "path": "api/index.html",
@@ -181,7 +181,7 @@
     {
       "path": "search-index.json",
       "bytes": 274323,
-      "sha256": "4b90ea670163e7b23d1474f45cc7f934105fcec36e7735f2904d65190d63b3a4"
+      "sha256": "b979dfe6e97282156a8f87b0f929470b94c9d7b509787f680fee0c03e8da5906"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "e8bcb1082b449c004aa865f018842489fa0263d8540a34ec9e022b9183d3234b"
+  "tree_sha256": "8915189637d0e592f4567927e0e1360c333e26707535f15dd3635ac33f9e3bac"
 }
