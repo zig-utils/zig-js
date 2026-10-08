@@ -23299,6 +23299,34 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
 }
 
+test "vm: Date component conversion ignores extra values across GC" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\let order = []; let evaluated = 0;
+            \\function component(index, value) {
+            \\  return { valueOf: function () { order.push(index); $vm.gc(); return value; } };
+            \\}
+            \\function extra() { evaluated++; return { valueOf: function () { throw new Error("extra"); } }; }
+            \\let date = new Date(component(0, 2020), component(1, 0), component(2, 1),
+            \\  component(3, 0), component(4, 0), component(5, 0), component(6, 0), extra(), Symbol(), 1n);
+            \\let good = !Number.isNaN(date.getTime()) && evaluated === 1 && order.join(",") === "0,1,2,3,4,5,6";
+            \\class DerivedDate extends Date {}
+            \\let derived = new DerivedDate(2020, 0, 1, 0, 0, 0, 0, Symbol());
+            \\good && derived instanceof DerivedDate && !Number.isNaN(derived.getTime())
+        );
+        try std.testing.expect(result.asBool());
+    }
+}
+
 test "vm: Date local constructors and setters clip after UTC conversion" {
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{

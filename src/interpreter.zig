@@ -56331,13 +56331,15 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         return (try self.dateMethod(d, "toString", &.{})) orelse Value.str("Invalid Date");
     }
     if (args.len >= 2) {
-        // Multi-component form: ToNumber each component once (invoking valueOf),
-        // with years 0–99 mapped to 1900–1999.
-        const buf = try self.arena.alloc(Value, args.len);
-        for (args, 0..) |av, i| buf[i] = Value.num(try self.toNumberV(av));
+        // Date(...values) converts only its seven defined components, in
+        // order. Further argument expressions have already been evaluated;
+        // their values have no observable conversion here.
+        const count = @min(args.len, 7);
+        var buf: [7]Value = undefined;
+        for (args[0..count], 0..) |av, i| buf[i] = Value.num(try self.toNumberV(av));
         const yi = @trunc(buf[0].asNum());
         if (yi >= 0 and yi <= 99) buf[0] = Value.num(yi + 1900);
-        return self.makeDate(try self.dateUtcFromLocal(Interpreter.dateMakeFromArgs(buf)));
+        return self.makeDate(try self.dateUtcFromLocal(Interpreter.dateMakeFromArgs(buf[0..count])));
     }
     if (args.len == 1) {
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
@@ -58596,6 +58598,42 @@ test "interpreter array literal, index, length, push/pop" {
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let xs = [7, 9]; xs.pop()")).asNum());
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + ['a','b','c']")).asStr());
+}
+
+test "interpreter Date component conversion ignores extra values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let calls = 0;
+        \\let extra = { valueOf: function () { calls++; throw new Error("extra"); } };
+        \\let date = new Date(2020, 0, 1, 0, 0, 0, 0, extra, Symbol(), 1n, NaN);
+        \\calls === 0 && !Number.isNaN(date.getTime())
+    )).asBool());
+    try std.testing.expectEqualStrings("eval:0,1,2,3,4,5,6", (try evalSource(a,
+        \\let order = []; let evaluated = 0;
+        \\function component(index, value) { return { valueOf: function () { order.push(index); return value; } }; }
+        \\function extra() { evaluated++; return { valueOf: function () { throw new Error("extra"); } }; }
+        \\let date = new Date(component(0, 2020), component(1, 0), component(2, 1),
+        \\  component(3, 0), component(4, 0), component(5, 0), component(6, 0), extra());
+        \\(evaluated === 1 && !Number.isNaN(date.getTime()) ? "eval:" : "bad:") + order.join(",")
+    )).asStr());
+    try std.testing.expect((try evalSource(a,
+        \\let order = [];
+        \\function component(index, value) { return { valueOf: function () { order.push(index); return value; } }; }
+        \\let date = new Date(component(0, NaN), component(1, 0), component(2, 1),
+        \\  component(3, 0), component(4, 0), component(5, 0), component(6, 0));
+        \\let nan = Number.isNaN(date.getTime()) && order.join(",") === "0,1,2,3,4,5,6";
+        \\order = []; let thrown = false;
+        \\try { new Date(component(0, 2020), { valueOf: function () { order.push(1); throw new Error("month"); } }, component(2, 1)); }
+        \\catch (error) { thrown = error.message === "month"; }
+        \\nan && thrown && order.join(",") === "0,1"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\class DerivedDate extends Date {}
+        \\let date = new DerivedDate(2020, 0, 1, 0, 0, 0, 0, Symbol());
+        \\date instanceof DerivedDate && !Number.isNaN(date.getTime())
+    )).asBool());
 }
 
 test "interpreter Date local conversion precedes TimeClip at both boundaries" {
