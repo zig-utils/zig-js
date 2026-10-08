@@ -1982,6 +1982,21 @@ test "mixed resource pressure reconciles threads work scratch cancellation and b
     try std.testing.expectEqual(@as(u64, 2), canceled_runs.load(.acquire));
 
     marker_block.store(true, .release);
+    // The weighted cursor is process-wide, so the first released slot may
+    // select safety or the older background host-work ticket. Drive either
+    // legal choice; a background grant must still preserve ticket order and
+    // the next grant must service the continuously queued watchdog.
+    const first_grant_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (watchdog_runs.load(.acquire) != 1 and !host_work_entered.load(.acquire) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < first_grant_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(watchdog_runs.load(.acquire) == 1 or host_work_entered.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), script_runs.load(.acquire));
+    if (host_work_entered.load(.acquire)) {
+        host_work_release.store(true, .release);
+        handles[2].?.join();
+        handles[2] = null;
+    }
     const watchdog_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
     while (watchdog_runs.load(.acquire) != 1 and std.Io.Timestamp.now(io, .awake).nanoseconds < watchdog_deadline)
         std.Thread.yield() catch {};
@@ -1991,15 +2006,17 @@ test "mixed resource pressure reconciles threads work scratch cancellation and b
     watchdog_release.store(true, .release);
     handles[3].?.join();
     handles[3] = null;
-    const host_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
-    while (!host_work_entered.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < host_deadline)
-        std.Thread.yield() catch {};
-    try std.testing.expect(host_work_entered.load(.acquire));
-    try std.testing.expectEqual(before.scheduler.internal_work_general_active + 1, snapshot().scheduler.internal_work_general_active);
+    if (handles[2] != null) {
+        const host_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+        while (!host_work_entered.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < host_deadline)
+            std.Thread.yield() catch {};
+        try std.testing.expect(host_work_entered.load(.acquire));
+        try std.testing.expectEqual(before.scheduler.internal_work_general_active + 1, snapshot().scheduler.internal_work_general_active);
 
-    host_work_release.store(true, .release);
-    handles[2].?.join();
-    handles[2] = null;
+        host_work_release.store(true, .release);
+        handles[2].?.join();
+        handles[2] = null;
+    }
     const script_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
     while (script_runs.load(.acquire) != 1 and std.Io.Timestamp.now(io, .awake).nanoseconds < script_deadline)
         std.Thread.yield() catch {};

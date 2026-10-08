@@ -255,8 +255,8 @@
     },
     {
       "path": "threads/resource-coordination/index.html",
-      "bytes": 209734,
-      "sha256": "00645beb0d19982856e8165fcdf2966ae2c8bdca6e3c448957b1b31f7cc785fe"
+      "bytes": 209753,
+      "sha256": "19886dca003731aa052b6241d3df076fad20543a8b50376ca882e2a58b2f2fe9"
     },
     {
       "path": "threads/testing/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "5df09df4bf133f81da7a2d3a29f7446313b5f34aab779aef3e4c2f5c2740673c"
+  "tree_sha256": "597933e7ce1bd78ad92f9303c796fd3d175449c5a01c95498c91387884a5435c"
 }
