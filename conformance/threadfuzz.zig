@@ -5552,7 +5552,8 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\    gate[key] = 0;
         \\    const marker = {d} + i;
         \\    observeNormal(new Thread((gate, key, marker) => {{
-        \\      const waiter = Atomics.waitAsync(gate, key, 0, 5000);
+        \\      // Readiness below proves publication; timeout behavior has its own cohort.
+        \\      const waiter = Atomics.waitAsync(gate, key, 0);
         \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
         \\        throw new Error('bad property notify waitAsync shape');
         \\      ready();
@@ -5598,7 +5599,8 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\    const marker = {d} + i;
         \\    observeNormal(new Thread((sab, slot, marker) => {{
         \\      const view = new Int32Array(sab);
-        \\      const waiter = Atomics.waitAsync(view, slot, 0, 5000);
+        \\      // Readiness below proves publication; timeout behavior has its own cohort.
+        \\      const waiter = Atomics.waitAsync(view, slot, 0);
         \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
         \\        throw new Error('bad typed notify waitAsync shape');
         \\      ready();

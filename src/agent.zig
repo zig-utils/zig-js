@@ -850,6 +850,9 @@ pub fn interruptWaiters() void {
         if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
     }
     removeEmptyListsLocked();
+    // Async harvesters park on the table-wide condition rather than a ticket
+    // condition. The caller has already release-published its stop word.
+    waiters_cond.broadcast(io);
 }
 
 // ---- Atomics.waitAsync ------------------------------------------------------
@@ -943,6 +946,19 @@ fn waitAsyncEnqueueWithAllocator(storage: *SharedBufferStorage, offset: usize, c
 /// has an infinite deadline and no agent thread is alive to notify it; the
 /// owner should then `abandonAsync` and leave those promises pending).
 pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
+    return harvestAsyncInterruptible(owner, out, false, null);
+}
+
+/// A spawned shared-realm Thread that returns a waitAsync-derived Promise must
+/// keep its infinite native ticket live until a peer notifies it or the owning
+/// Context requests termination. Ordinary host checkpoints pass false and keep
+/// the existing host prerogative to abandon an otherwise unsettleable Promise.
+pub fn harvestAsyncInterruptible(
+    owner: *const anyopaque,
+    out: []Settled,
+    wait_for_infinite: bool,
+    interrupt: ?WaitInterrupt,
+) usize {
     if (!waiters_used.load(.monotonic)) return 0;
     const io = engineIo();
     waiters_mutex.lockUncancelable(io);
@@ -980,15 +996,16 @@ pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
         }
         removeEmptyListsLocked();
         if (n > 0 or outstanding == 0) return n;
-        if (!group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
-        const wait_ns: u64 = if (nearest) |d| @intCast(@max(1, d - now)) else 100 * std.time.ns_per_ms;
+        if (interrupt) |i| if (i.is_interrupted(i.ctx)) return 0;
+        if (!wait_for_infinite and !group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
+        const wait_timeout: std.Io.Timeout = if (nearest) |d| .{ .duration = .{
+            .raw = .fromNanoseconds(@intCast(@max(1, d - now))),
+            .clock = .awake,
+        } } else .none;
         {
             var blocking = runtime_threads.beginBlocking();
             defer blocking.endWithMutex(&waiters_mutex, io);
-            io_compat.conditionWaitTimeout(&waiters_cond, io, &waiters_mutex, .{ .duration = .{
-                .raw = .fromNanoseconds(wait_ns),
-                .clock = .awake,
-            } }) catch {};
+            io_compat.conditionWaitTimeout(&waiters_cond, io, &waiters_mutex, wait_timeout) catch {};
         }
     }
 }
@@ -1171,6 +1188,74 @@ test "waiter table host interruption unlinks a blocking ticket" {
     defer waiters_mutex.unlock(engineIo());
     if (waiters.get(.{ .storage = storage, .offset = 0 })) |list|
         try std.testing.expectEqual(@as(usize, 0), list.tickets.items.len);
+}
+
+test "waiter table Thread harvest keeps an infinite async ticket until notify" {
+    const storage = try SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const word: *i32 = @ptrCast(@alignCast(storage.slab));
+    @atomicStore(i32, word, 0, .seq_cst);
+    var owner: u8 = 0;
+    defer abandonAsync(&owner);
+    const admitted = try waitAsyncEnqueue(storage, 0, i32, 0, null, &owner);
+    try std.testing.expect(admitted == .enqueued);
+
+    const Result = struct {
+        count: usize = 0,
+        settled: Settled = undefined,
+    };
+    var result: Result = .{};
+    const Worker = struct {
+        fn run(owner_token: *const anyopaque, out: *Result) void {
+            var settled: [1]Settled = undefined;
+            out.count = harvestAsyncInterruptible(owner_token, &settled, true, null);
+            if (out.count == 1) out.settled = settled[0];
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{ &owner, &result });
+    try std.testing.expectEqual(@as(usize, 1), notify(storage, 0, 1));
+    thread.join();
+
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqual(admitted.enqueued, result.settled.id);
+    try std.testing.expectEqual(WaitOutcome.ok, result.settled.outcome);
+}
+
+test "waiter table interruption wakes an infinite Thread harvester" {
+    const storage = try SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const word: *i32 = @ptrCast(@alignCast(storage.slab));
+    @atomicStore(i32, word, 0, .seq_cst);
+    var owner: u8 = 0;
+    defer abandonAsync(&owner);
+    const admitted = try waitAsyncEnqueue(storage, 0, i32, 0, null, &owner);
+    try std.testing.expect(admitted == .enqueued);
+
+    var stop = std.atomic.Value(bool).init(false);
+    var count: usize = 1;
+    const interrupted = struct {
+        fn check(raw: *anyopaque) bool {
+            const flag: *const std.atomic.Value(bool) = @ptrCast(@alignCast(raw));
+            return flag.load(.acquire);
+        }
+    }.check;
+    const Worker = struct {
+        fn run(owner_token: *const anyopaque, flag: *std.atomic.Value(bool), result: *usize, callback: *const fn (*anyopaque) bool) void {
+            var settled: [1]Settled = undefined;
+            result.* = harvestAsyncInterruptible(owner_token, &settled, true, .{
+                .ctx = @ptrCast(flag),
+                .is_interrupted = callback,
+            });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{ &owner, &stop, &count, interrupted });
+    stop.store(true, .release);
+    interruptWaiters();
+    thread.join();
+
+    try std.testing.expectEqual(@as(usize, 0), count);
+    abandonAsync(&owner);
+    try std.testing.expectEqual(@as(usize, 0), notify(storage, 0, 1));
 }
 
 test "agent reports drain FIFO with a head cursor" {

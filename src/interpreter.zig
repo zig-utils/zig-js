@@ -11956,7 +11956,7 @@ pub const Interpreter = struct {
 
     pub fn drainAgentCheckpoint(self: *Interpreter) EvalError!void {
         try self.drainHostMicrotasks();
-        try self.settleAsyncWaiters();
+        try self.settleAsyncWaitersMode(true);
         try self.keepaliveTimers();
     }
 
@@ -12527,6 +12527,15 @@ pub const Interpreter = struct {
     /// abandoned pending, the host's prerogative). Called after the main
     /// microtask drain in Context.evaluate/evaluateModule and agent realms.
     pub fn settleAsyncWaiters(self: *Interpreter) EvalError!void {
+        return self.settleAsyncWaitersMode(false);
+    }
+
+    fn asyncWaitInterrupted(raw: *anyopaque) bool {
+        const flag: *const std.atomic.Value(bool) = @ptrCast(@alignCast(raw));
+        return flag.load(.acquire);
+    }
+
+    fn settleAsyncWaitersMode(self: *Interpreter, wait_for_infinite: bool) EvalError!void {
         const park_with_gil = self.use_thread_gil and self.gil != null;
         if (self.gil) |g| {
             // Quiescence loop: pumped tasks queue microtasks which can queue
@@ -12569,13 +12578,29 @@ pub const Interpreter = struct {
         const listp = self.async_waiters orelse return;
         if (self.asyncWaiterCount(listp) == 0) return;
         const owner: *const anyopaque = @ptrCast(listp);
+        const interrupt: ?agent.WaitInterrupt = if (wait_for_infinite) blk: {
+            const flag = self.stop_flag orelse {
+                self.abandonAsyncWaiters();
+                return self.throwError("Error", "worker terminated");
+            };
+            break :blk .{
+                .ctx = @ptrCast(@constCast(flag)),
+                .is_interrupted = asyncWaitInterrupted,
+            };
+        } else null;
         var buf: [16]agent.Settled = undefined;
         while (self.asyncWaiterCount(listp) > 0) {
             // harvestAsync blocks; under a GIL the notifier needs the VM lock.
             if (park_with_gil) self.gil.?.release();
-            const n = agent.harvestAsync(owner, &buf);
+            const n = agent.harvestAsyncInterruptible(owner, &buf, wait_for_infinite, interrupt);
             if (park_with_gil) self.gil.?.acquire();
-            if (n == 0) break;
+            if (n == 0) {
+                if (interrupt) |i| if (i.is_interrupted(i.ctx)) {
+                    self.abandonAsyncWaiters();
+                    return self.throwError("Error", "worker terminated");
+                };
+                break;
+            }
             for (buf[0..n]) |s| {
                 if (self.takeAsyncWaiter(listp, s.id)) |e| {
                     defer self.async_waiter_completion = null;

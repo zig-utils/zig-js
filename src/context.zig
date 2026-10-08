@@ -45985,7 +45985,7 @@ test "waitAsync detached nested completion roots survive moving nursery collecti
     try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
 }
 
-test "property waitAsync notify races Thread exit without duplicate or orphan completion" {
+test "mixed waitAsync readiness publishes exact notify counts across Thread exit" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -45996,28 +45996,42 @@ test "property waitAsync notify races Thread exit without duplicate or orphan co
         });
         defer ctx.destroy();
         const result = try ctx.evaluate(
-            \\var completionRace = { cell: 0, pause: 0, completed: 0, bad: 0 };
+            \\var completionRace = { cell: 0, ready: 0, completed: 0, bad: 0 };
+            \\var completionView = new Int32Array(new SharedArrayBuffer(4));
             \\var completionThreads = [];
             \\for (let i = 0; i < 8; i++) completionThreads.push(new Thread(function () {
             \\  const waiter = Atomics.waitAsync(completionRace, "cell", 0);
+            \\  Atomics.add(completionRace, "ready", 1);
+            \\  Atomics.notify(completionRace, "ready");
             \\  waiter.value.then(function (outcome) {
             \\    if (outcome !== "ok") Atomics.add(completionRace, "bad", 1);
             \\    Atomics.add(completionRace, "completed", 1);
             \\  });
             \\  return 897;
             \\}));
-            \\var notified = 0;
-            \\while (notified < 8) {
-            \\  notified += Atomics.notify(completionRace, "cell");
-            \\  if (notified < 8) Atomics.wait(completionRace, "pause", 0, 1);
-            \\}
-            \\for (const worker of completionThreads) {
-            \\  if (worker.join() !== 897) throw new Error("wrong worker completion");
-            \\}
-            \\if (Atomics.notify(completionRace, "cell") !== 0) throw new Error("orphan ticket");
+            \\for (let i = 0; i < 8; i++) completionThreads.push(new Thread(function () {
+            \\  const waiter = Atomics.waitAsync(completionView, 0, 0);
+            \\  Atomics.add(completionRace, "ready", 1);
+            \\  Atomics.notify(completionRace, "ready");
+            \\  waiter.value.then(function (outcome) {
+            \\    if (outcome !== "ok") Atomics.add(completionRace, "bad", 1);
+            \\    Atomics.add(completionRace, "completed", 1);
+            \\  });
+            \\  return 898;
+            \\}));
+            \\while (Atomics.load(completionRace, "ready") < 16)
+            \\  Atomics.wait(completionRace, "ready", Atomics.load(completionRace, "ready"), 1);
+            \\if (Atomics.notify(completionRace, "cell", 8) !== 8)
+            \\  throw new Error("property waiters were not all published");
+            \\if (Atomics.notify(completionView, 0, 8) !== 8)
+            \\  throw new Error("typed waiters were not all published");
+            \\for (let i = 0; i < completionThreads.length; i++)
+            \\  if (completionThreads[i].join() !== (i < 8 ? 897 : 898)) throw new Error("wrong worker completion");
+            \\if (Atomics.notify(completionRace, "cell") !== 0) throw new Error("orphan property ticket");
+            \\if (Atomics.notify(completionView, 0) !== 0) throw new Error("orphan typed ticket");
             \\completionRace;
         );
-        try std.testing.expectEqual(@as(f64, 8), result.asObj().getOwn("completed").?.asNum());
+        try std.testing.expectEqual(@as(f64, 16), result.asObj().getOwn("completed").?.asNum());
         try std.testing.expectEqual(@as(f64, 0), result.asObj().getOwn("bad").?.asNum());
         try std.testing.expectEqual(@as(usize, 0), ctx.gil.?.prop_async.items.len);
         try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
