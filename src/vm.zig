@@ -1289,6 +1289,7 @@ var quick_property_kernel_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_plan_decode_attempts: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
+var quick_typed_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
@@ -1478,6 +1479,27 @@ inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, st
         return false;
     try vm.checkRestricted(object);
     return object.replaceDenseElement(index, stored);
+}
+
+/// A primitive Number key has no observable ToPropertyKey hook. Resolve the
+/// Integer-Indexed Exotic read here so `get_index` does not allocate its string
+/// form and re-enter the generic property walker. Other key kinds retain the
+/// canonical coercion path, including the distinct string key `"-0"`.
+inline fn quickTypedArrayLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
+    if (!key.isNumber()) return null;
+    if (!receiver.isObject()) return null;
+    const object = receiver.asObj();
+    const typed_array = object.typedArray() orelse return null;
+    try vm.checkRestricted(object);
+    const number = key.asNum();
+    if (!std.math.isFinite(number) or number < 0 or @trunc(number) != number)
+        return Value.undef();
+    const length = typed_array.currentLength() orelse return Value.undef();
+    if (number >= @as(f64, @floatFromInt(length))) return Value.undef();
+    // ToPropertyKey(-0) is the string "0", so a Number negative zero reads
+    // element zero even though a literal string key "-0" is invalid.
+    const index: usize = if (number == 0) 0 else @intFromFloat(number);
+    return try vm.taLoad(typed_array, index);
 }
 
 fn specializeQuickArrayExpression(ops: []const QuickArrayNumericOp) QuickArrayExpressionSpecialization {
@@ -9341,6 +9363,11 @@ fn runChunk(
                 if (obj.isNull() or obj.isUndefined())
                     return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 fast: {
+                    if (try quickTypedArrayLoad(vm, obj, key)) |element| {
+                        try stack.append(stack_alloc, element);
+                        if (builtin.is_test) _ = quick_typed_array_index_hits.fetchAdd(1, .monotonic);
+                        break :fast;
+                    }
                     // A present dense element has no observable coercion,
                     // accessor, hole, or prototype work. Shared arrays take a
                     // short element-lock snapshot; isolated arrays read their
@@ -22089,6 +22116,66 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = []; values.push(7); seen * 10 + values.length
     )).asNum());
     try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
+}
+
+test "vm: computed numeric typed array reads preserve integer-indexed semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const before = quick_typed_array_index_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+        \\let values = new Uint8Array([7, 8]);
+        \\let big = new BigInt64Array(1); big[0] = 9n;
+        \\let resizableBuffer = new ArrayBuffer(2, { maxByteLength: 4 });
+        \\let resizable = new Uint8Array(resizableBuffer); resizable[0] = 5;
+        \\resizableBuffer.resize(0);
+        \\let detachedBuffer = new ArrayBuffer(1);
+        \\let detached = new Uint8Array(detachedBuffer); detached[0] = 6;
+        \\detachedBuffer.transfer();
+        \\let coercions = 0;
+        \\let objectKey = { toString: function () { coercions = coercions + 1; return "1"; } };
+        \\(values[0] === 7 && values[-0] === 7 && values[2] === undefined &&
+        \\ values[-1] === undefined && values[1.5] === undefined &&
+        \\ values[NaN] === undefined && values[Infinity] === undefined &&
+        \\ values[4294967295] === undefined &&
+        \\ values["-0"] === undefined && big[0] === 9n &&
+        \\ resizable[0] === undefined && detached[0] === undefined &&
+        \\ values[objectKey] === 8 && coercions === 1) ? 1 : 0
+    )).asNum());
+    try std.testing.expect(quick_typed_array_index_hits.load(.monotonic) > before);
+}
+
+test "vm: computed numeric typed array reads enforce restriction ownership" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "new Uint8Array([7])");
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const typed_array = try run(&machine, chunk, null);
+    const Claim = struct {
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+
+        fn run(self: *@This()) void {
+            const previous = self.object.claimRestriction(
+                self.allocator,
+                @intCast(std.Thread.getCurrentId()),
+            ) catch unreachable;
+            std.debug.assert(previous == null);
+        }
+    };
+    var claim = Claim{ .object = typed_array.asObj(), .allocator = allocator };
+    const owner = try std.Thread.spawn(.{}, Claim.run, .{&claim});
+    owner.join();
+
+    try std.testing.expectError(error.Throw, quickTypedArrayLoad(&machine, typed_array, Value.num(0)));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
 }
 
 test "vm: quickens isolated polymorphic own-data property loops with exact steps" {
