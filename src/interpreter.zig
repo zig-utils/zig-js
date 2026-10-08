@@ -11347,6 +11347,18 @@ pub const Interpreter = struct {
         return true;
     }
 
+    fn arrayProtoChainCleanForIndexedSetChecked(self: *Interpreter, o: *value.Object) EvalError!bool {
+        var cur = self.effectiveProto(o);
+        while (cur) |c| {
+            try self.checkRestricted(c);
+            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
+                return false;
+            if (c.indexed_own_seen.load(.acquire)) return false;
+            cur = self.effectiveProto(c);
+        }
+        return true;
+    }
+
     pub fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
@@ -11404,12 +11416,12 @@ pub const Interpreter = struct {
         return false;
     }
 
-    fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
+    pub fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
         if (!recv.isObject()) return false;
         const o = recv.asObj();
         try self.checkRestricted(o);
         if (!o.is_array or o.is_arguments or o.accessorsMap() != null or o.attrsMap() != null or
-            o.has_indexed_property.load(.monotonic) or !o.isExtensible() or !self.arrayProtoChainCleanForIndexedSet(o))
+            o.has_indexed_property.load(.monotonic) or !o.isExtensible() or !try self.arrayProtoChainCleanForIndexedSetChecked(o))
             return false;
         const dense_cap: usize = 1 << 24;
         return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
