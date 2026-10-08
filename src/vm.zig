@@ -2897,6 +2897,7 @@ fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
                 return vm.throwError("Error", "worker terminated");
             try vm.serviceVmTraps();
             if (vm.use_thread_gil) if (vm.gil) |gil| gil.yieldIfContended();
+            vm.handoffRuntimeSlotIfContended();
             vm.serviceMutatorStopSafepoint();
             if (vm.gc_safepoint_fn != null) vm.serviceGcSafepoint();
         }
@@ -4227,8 +4228,9 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
             vm.gc_moving_safepoint = saved_moving;
             vm.gc_precise_safepoint = saved_precise;
         }
+        vm.handoffRuntimeSlotIfContended();
         vm.serviceGcSafepoint();
-    }
+    } else vm.handoffRuntimeSlotIfContended();
     return 0;
 }
 
@@ -8532,8 +8534,9 @@ fn runChunk(
             if (vm.gc_safepoint_fn != null) {
                 exec.acc = acc;
                 exec.ip = ip;
+                vm.handoffRuntimeSlotIfContended();
                 vm.serviceGcSafepoint();
-            }
+            } else vm.handoffRuntimeSlotIfContended();
         }
         if (execution_inventory != null) vm_dispatches += 1;
         const inst = code[ip];

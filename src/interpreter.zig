@@ -19,6 +19,7 @@ const stack_scan = @import("stack_scan.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const gc_mod = @import("gc.zig");
 const gc_relocation = @import("gc_relocation.zig");
+const runtime_threads = @import("runtime_threads.zig");
 const jit = @import("jit.zig");
 const jsthread = @import("jsthread.zig");
 const parser_mod = @import("parser.zig");
@@ -6360,6 +6361,7 @@ pub const Interpreter = struct {
                 return self.throwError("Error", "worker terminated");
             try self.serviceVmTraps();
             if (self.use_thread_gil) if (self.gil) |g| g.yieldIfContended();
+            self.handoffRuntimeSlotIfContended();
             // Mid-script GC: the tree-walker holds live `Value`s only as native
             // Zig locals/registers, which the conservative native-stack scan
             // covers; run a guarded collection. No-op when the GC is off.
@@ -12325,6 +12327,32 @@ pub const Interpreter = struct {
         const f = self.gc_safepoint_fn orelse return;
         const ctx = self.gc_safepoint_ctx orelse return;
         f(ctx, self);
+    }
+
+    /// Let an older queued engine thread run when this no-GIL interpreter
+    /// reaches a bounded execution checkpoint. Roots remain frozen while the
+    /// runtime scheduler parks this thread and later reacquires a runnable
+    /// slot. GIL-mode contention is handled by `Gil.yieldIfContended`; retaining
+    /// that lock while yielding only the runtime slot would invert the two
+    /// schedulers.
+    pub fn handoffRuntimeSlotIfContended(self: *Interpreter) void {
+        if (self.use_thread_gil or !runtime_threads.runnableSlotContended()) return;
+        self.serviceMutatorStopSafepoint();
+        self.serviceGcSafepoint();
+        self.gc_moving_parked.store(
+            self.gc_precise_safepoint and self.gc_moving_safepoint,
+            .monotonic,
+        );
+        stack_scan.beginPark();
+        self.gc_parked.store(true, .release);
+        defer {
+            self.lockGcRoots();
+            self.gc_moving_parked.store(false, .monotonic);
+            self.gc_parked.store(false, .release);
+            self.unlockGcRoots();
+            stack_scan.endPark();
+        }
+        _ = runtime_threads.handoffRunnableSlotIfContended();
     }
 
     pub fn holdJobRootCount(roots: ?*const HoldJobRootFrame) usize {

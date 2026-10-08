@@ -31899,6 +31899,54 @@ test "parallel_js compiled legacy arguments remain invocation-local" {
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
+test "parallel_js one-slot scheduler makes progress through tree and bytecode loops" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const previous = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    const source =
+        \\const gate = { ready: 0 };
+        \\const first = new Thread(() => {
+        \\  Atomics.add(gate, "ready", 1);
+        \\  while (Atomics.load(gate, "ready") !== 2) {}
+        \\  return 19;
+        \\});
+        \\const second = new Thread(() => {
+        \\  Atomics.add(gate, "ready", 1);
+        \\  return 23;
+        \\});
+        \\first.join() + second.join();
+    ;
+
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        var watchdog_done = std.atomic.Value(bool).init(false);
+        const Watchdog = struct {
+            fn run(context: *Context, done: *std.atomic.Value(bool)) void {
+                const io = agent.engineIo();
+                const deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+                while (!done.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < deadline)
+                    std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+                if (!done.load(.acquire)) context.requestTermination();
+            }
+        };
+        const watchdog = try std.Thread.spawn(.{}, Watchdog.run, .{ ctx, &watchdog_done });
+        const result = ctx.evaluate(source);
+        watchdog_done.store(true, .release);
+        watchdog.join();
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 42), (try result).asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
 test "forced tree-walker and required bytecode preserve named rest parameters" {
     const source =
         \\function restCollect(head, ...tail) {

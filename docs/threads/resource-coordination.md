@@ -102,6 +102,18 @@ compilers consume available general slots or wait. Reserved admission can wake
 only internal work, while general background grants preserve ticket order
 between internal work and typed Worker waiters.
 
+GIL-free JavaScript execution also hands its runnable slot to an older queued
+thread at the interpreter, bytecode, quickened, and native-tier checkpoints.
+The no-contention path is one acquire load every 1,024 execution steps and does
+not enter the coordinator lock. A contended checkpoint first services the
+realm and GC publication hooks, freezes its interpreter roots while parked,
+and publishes relocation-safe VM/native roots when that tier has materialized
+them. The thread then rejoins the weighted queue before resuming JavaScript.
+This keeps a CPU-bound shared-realm loop from occupying every runnable slot
+while another `Thread` that must satisfy its progress condition remains queued.
+GIL-mode execution continues to yield through the GIL scheduler so it never
+retains the GIL while waiting to reacquire a runtime slot.
+
 The coordinator reserves a slot, publishes the selected resource as runnable,
 and removes its waiter in one coherent mutation before signaling it. A thread
 woken from an engine condition never queues for that slot while holding its
@@ -180,5 +192,7 @@ runnable/blocked and synchronous internal-work state, and enforces automatically
 sized, priority-scheduled shared CPU slots. Issue
 [#985](https://github.com/zig-utils/zig-js/issues/985) owns synchronous compiler
 admission and its performance evidence. Issue
+[#1040](https://github.com/zig-utils/zig-js/issues/1040) owns cooperative
+CPU-bound slot handoff. Issue
 [#502](https://github.com/zig-utils/zig-js/issues/502) owns the remaining
 cross-subsystem memory-pressure work.

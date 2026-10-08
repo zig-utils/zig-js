@@ -1357,6 +1357,24 @@ pub fn beginBlocking() BlockingScope {
     return .{ .active = true };
 }
 
+/// Give an older queued runnable waiter this typed thread's slot, then wait to
+/// reacquire one. The acquire-only uncontended check keeps ordinary JavaScript
+/// checkpoints out of the coordinator lock. Callers that own managed roots
+/// must publish and freeze them around this function exactly as for any other
+/// native blocking scope.
+pub fn runnableSlotContended() bool {
+    return current_thread != null and coordinator.slot_waiters.load(.acquire) != 0;
+}
+
+pub fn handoffRunnableSlotIfContended() bool {
+    const state = current_thread orelse return false;
+    std.debug.assert(state.blocking_depth == 0);
+    if (!runnableSlotContended()) return false;
+    var blocking = beginBlocking();
+    blocking.end();
+    return true;
+}
+
 /// Synchronous internal CPU work remains on its requesting thread. A typed
 /// engine thread reuses its runnable slot; an untyped host request uses the
 /// automatic host reservation or joins the background queue for a general
@@ -1565,6 +1583,55 @@ test "runtime blocking scopes account nested and concurrent transitions once" {
     try std.testing.expectEqual(before.runnable, after.runnable);
     try std.testing.expectEqual(before.blocked, after.blocked);
     try std.testing.expectEqual(after.live, after.runnable + after.blocked);
+}
+
+test "runtime runnable checkpoint hands one slot to an older waiter" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    defer _ = setSchedulerLimits(previous);
+    const before = snapshot();
+    var first_entered = std.atomic.Value(bool).init(false);
+    var permit_handoff = std.atomic.Value(bool).init(false);
+    var uncontended = std.atomic.Value(bool).init(true);
+    var handed_off = std.atomic.Value(bool).init(false);
+    var second_ran = std.atomic.Value(bool).init(false);
+    const First = struct {
+        fn run(entered: *std.atomic.Value(bool), permit: *std.atomic.Value(bool), empty_result: *std.atomic.Value(bool), handoff_result: *std.atomic.Value(bool)) void {
+            empty_result.store(handoffRunnableSlotIfContended(), .release);
+            entered.store(true, .release);
+            while (!permit.load(.acquire)) std.atomic.spinLoopHint();
+            handoff_result.store(handoffRunnableSlotIfContended(), .release);
+        }
+    };
+    const Second = struct {
+        fn run(ran: *std.atomic.Value(bool)) void {
+            ran.store(true, .release);
+        }
+    };
+    const first = try spawn(.script_worker, .{}, First.run, .{ &first_entered, &permit_handoff, &uncontended, &handed_off });
+    while (!first_entered.load(.acquire)) std.atomic.spinLoopHint();
+    const second = try spawn(.script_worker, .{}, Second.run, .{&second_ran});
+    const deadline = std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    while (snapshot().scheduler.slot_waiters != before.scheduler.slot_waiters + 1 and
+        std.Io.Timestamp.now(engine_io.get(), .awake).nanoseconds < deadline)
+    {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, snapshot().scheduler.slot_waiters);
+    permit_handoff.store(true, .release);
+    first.join();
+    second.join();
+
+    try std.testing.expect(!uncontended.load(.acquire));
+    try std.testing.expect(handed_off.load(.acquire));
+    try std.testing.expect(second_ran.load(.acquire));
+    const after = snapshot();
+    try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+    // The initially queued second start and the first thread's cooperative
+    // handoff each contribute one blocked-to-runnable transition pair.
+    try std.testing.expectEqual(before.resource(.script_worker).block_transitions + 2, after.resource(.script_worker).block_transitions);
+    try std.testing.expectEqual(before.resource(.script_worker).runnable_transitions + 2, after.resource(.script_worker).runnable_transitions);
 }
 
 test "runtime scratch allocator enforces domain and total limits with exact rollback" {
