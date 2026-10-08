@@ -6631,6 +6631,22 @@ pub const Object = struct {
         updated,
     };
 
+    /// Replace one existing writable named data property under a coherent
+    /// descriptor snapshot. This never creates a property and never consumes
+    /// an accessor, so callers can fall back to full OrdinarySet on `false`
+    /// without having performed a partial mutation.
+    pub fn replaceNamedOwnData(self: *Object, name: []const u8, v: Value) bool {
+        self.lockPropertiesFor(.receiver_set);
+        defer self.unlockProperties();
+        if (self.getAccessorUnlocked(name) != null) return false;
+        const shape = self.shape orelse return false;
+        const slot = (@constCast(shape)).lookup(name) orelse return false;
+        if (!self.getAttrUnlocked(name).writable) return false;
+        gcBarrier(self, v);
+        self.slotsItems()[slot] = v;
+        return true;
+    }
+
     /// Complete the receiver half of OrdinarySet under one property snapshot.
     /// The caller has already walked the prototype chain and proved that no
     /// inherited setter or non-writable descriptor intercepts the operation.
