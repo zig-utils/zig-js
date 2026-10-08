@@ -16679,20 +16679,14 @@ pub const Interpreter = struct {
                     if (std.mem.eql(u8, key, "byteOffset") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.num(@floatFromInt(if (cur == null) 0 else ta.byte_offset));
                     if (std.mem.eql(u8, key, "buffer") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.obj(ta.buffer);
                     if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.num(@floatFromInt(ta.kind.byteSize()));
-                    if (arrayIndex(key)) |i| {
-                        if (i >= (cur orelse 0)) {
+                    if (canonicalNumericIndexString(key)) |n| {
+                        if (!isValidIntegerIndex(ta, n)) {
                             if (found) |slot| slot.* = false;
                             return Value.undef();
                         }
+                        const i: usize = @intFromFloat(n);
                         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
                         return value.taRead(ta, i);
-                    }
-                    // A canonical numeric key that isn't a plain in-range index
-                    // ("-0", "-1", "1.5", out-of-bounds, …) reads as undefined and
-                    // never consults the prototype (Integer-Indexed [[Get]]).
-                    if (canonicalNumericIndexString(key) != null) {
-                        if (found) |slot| slot.* = false;
-                        return Value.undef();
                     }
                     // other keys (methods, constructor, @@toStringTag) fall through.
                 }
@@ -17638,8 +17632,7 @@ pub const Interpreter = struct {
         if (o.moduleNs() != null) return false;
         if (o.typedArray()) |ta| {
             // Integer-Indexed Exotic [[Set]] for a canonical numeric key.
-            const numkey: ?f64 = if (arrayIndex(key)) |i| @as(f64, @floatFromInt(i)) else canonicalNumericIndexString(key);
-            if (numkey) |n| {
+            if (canonicalNumericIndexString(key)) |n| {
                 const same = (receiver.isObject() and receiver.asObj() == o);
                 if (same) {
                     // IntegerIndexedElementSet: ToNumber/ToBigInt always runs (an
@@ -56652,6 +56645,12 @@ pub fn mappedParameterCellSet(o: *value.Object, i: usize, v: Value) bool {
 pub fn canonicalNumericIndexString(key: []const u8) ?f64 {
     if (key.len == 0) return null;
     if (std.mem.eql(u8, key, "-0")) return -0.0;
+    // These decimals are exactly representable and reproduce the same key
+    // under ToString. Larger integers still need the ECMA-262
+    // CanonicalNumericIndexString round trip: rounding can change their name.
+    if (Interpreter.arrayIndex(key)) |index| {
+        if (index <= std.math.maxInt(u32)) return @floatFromInt(index);
+    }
     // A key must start like a number for this to ever match (cheap reject).
     const c0 = key[0];
     if ((c0 < '0' or c0 > '9') and c0 != '-' and c0 != '.' and c0 != 'I' and c0 != 'N') return null;
@@ -58595,6 +58594,33 @@ test "interpreter array literal, index, length, push/pop" {
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let xs = [7, 9]; xs.pop()")).asNum());
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + ['a','b','c']")).asStr());
+}
+
+test "interpreter TypedArray rounded decimal keys remain ordinary names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let values = new Uint8Array(1), coerced = 0;
+        \\let payload = { valueOf: function () { coerced = coerced + 1; return 7; } };
+        \\values["9007199254740993"] = payload;
+        \\values["18446744073709551615"] = payload;
+        \\let descriptor = Object.getOwnPropertyDescriptor(values, "9007199254740993");
+        \\let ordinary = values["9007199254740993"] === payload &&
+        \\  values["18446744073709551615"] === payload && coerced === 0 &&
+        \\  descriptor.value === payload && descriptor.writable && descriptor.enumerable && descriptor.configurable;
+        \\delete values["9007199254740993"];
+        \\Object.defineProperty(values, "9007199254740993", { value: 8, configurable: true });
+        \\let redefined = values["9007199254740993"] === 8;
+        \\let prototype = { "9007199254740993": 9 };
+        \\delete values["9007199254740993"]; Object.setPrototypeOf(values, prototype);
+        \\let inherited = values["9007199254740993"] === 9;
+        \\values["9007199254740992"] = payload;
+        \\let canonical = coerced === 1 && values["9007199254740992"] === undefined &&
+        \\  !Object.hasOwn(values, "9007199254740992");
+        \\let big = new BigInt64Array(1); big["9007199254740993"] = 1;
+        \\ordinary && redefined && inherited && canonical && big["9007199254740993"] === 1
+    )).asBool());
 }
 
 test "interpreter string length and indexing" {
