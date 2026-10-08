@@ -156,27 +156,6 @@
       "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_dense_array_create_hits", "quick_sparse_array_index_hits", "quick_sparse_array_store_hits", "quick_sparse_array_create_hits", "quick_array_prototype_index_hits", "quick_typed_array_index_hits", "quick_typed_array_store_hits", "quick_arguments_index_hits", "quick_arguments_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
     },
     {
-      "id": "polymorphic-property-loop",
-      "title": "Polymorphic property loop kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact indexed-selector loop reading and writing named own data properties"],
-      "guards": ["exact opcode/constants/backedge", "packed selector array", "plain selected object", "exact IC slots", "numeric selected/checksum values"],
-      "miss_behavior": ["resume ordinary loop bytecode before any fused mutation", "nonmatching bytecode uses the explicit unsupported array plan"],
-      "metadata_lifetime": "The QuickPolymorphicPropertyLoop variant lives in the instruction-indexed Chunk-arena QuickArrayPlan.",
-      "no_gil_synchronization": "The plan is safely published, but the kernel currently requires isolated execution and therefore does not claim shared-realm coverage.",
-      "observable_steps_debugger": "The kernel advances exact bytecode steps within checkpoint/budget limits and is disabled for debug execution.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickPolymorphicPropertyLoop = struct {"},
-        {"path": "src/vm.zig", "text": "fn compileQuickPolymorphicPropertyLoop("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: quickens isolated polymorphic own-data property loops with exact steps\""}
-      ],
-      "metrics": ["quick_polymorphic_property_loop_hits"]
-    },
-    {
       "id": "fixed-shape-object-allocation-loop",
       "title": "Fixed-shape object-allocation loop kernel",
       "classification": "legacy_narrow",
@@ -351,7 +330,7 @@
       "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
       "QuickPropertySpecialization": ["generic", "property_local_add_mod", "property_add_constant", "property_pair_add", "property_pair_sub"],
       "QuickArrayBound": ["constant", "local"],
-      "QuickArrayPlan": ["unsupported", "polymorphic_property", "object_allocation"],
+      "QuickArrayPlan": ["unsupported", "object_allocation"],
       "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
       "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
       "QuickLeafPlan": ["unsupported", "numeric"],
@@ -393,7 +372,6 @@
       "quick_array_length_hits",
       "quick_array_prototype_data_hits",
       "quick_array_push_hits",
-      "quick_polymorphic_property_loop_hits",
       "quick_object_allocation_loop_hits",
       "quick_object_allocation_checkpoint_crossings",
       "quick_object_allocation_first_entry_steps",

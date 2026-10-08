@@ -1046,23 +1046,6 @@ const QuickArrayBound = union(enum) {
     local: u32,
 };
 
-const QuickPolymorphicPropertyLoop = struct {
-    index_local: u32,
-    array_local: u32,
-    object_local: u32,
-    value_local: u32,
-    checksum_local: u32,
-    extra_local: u32,
-    bound: QuickArrayBound,
-    selector_mask: i32,
-    modulus: f64,
-    checksum_mask: i32,
-    increment: f64,
-    get_prop_instruction: u32,
-    set_prop_instruction: u32,
-    exit_ip: u32,
-};
-
 const QuickObjectAllocationLoop = struct {
     counter_local: u32,
     array_local: u32,
@@ -1089,7 +1072,6 @@ const QuickObjectAllocationLoop = struct {
 
 const QuickArrayPlan = union(enum) {
     unsupported,
-    polymorphic_property: QuickPolymorphicPropertyLoop,
     object_allocation: QuickObjectAllocationLoop,
 };
 
@@ -1210,7 +1192,6 @@ var quick_arguments_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
-var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_checkpoint_crossings: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_first_entry_steps: std.atomic.Value(u64) = .init(std.math.maxInt(u64));
@@ -1549,87 +1530,6 @@ inline fn quickArgumentsStore(vm: *Interpreter, receiver: Value, key: Value, sto
     return stored;
 }
 
-fn compileQuickPolymorphicPropertyLoop(chunk: *Chunk, start: usize) ?QuickPolymorphicPropertyLoop {
-    const code = chunk.code.items;
-    if (start + 38 > code.len) return null;
-    const expected = [_]bc.Op{
-        .load_local, .load_const,  .lt,          .jump_if_false,
-        .load_local, .load_local,  .load_const,  .bit_and,
-        .get_index,  .store_local, .pop,         .load_local,
-        .get_prop,   .load_local,  .add,         .load_local,
-        .add,        .load_const,  .mod,         .store_local,
-        .pop,        .load_local,  .load_local,  .set_prop,
-        .pop,        .load_local,  .load_local,  .load_const,
-        .bit_and,    .add,         .store_local, .pop,
-        .load_local, .load_const,  .add,         .store_local,
-        .pop,        .jump,
-    };
-    for (expected, 0..) |op, offset|
-        if (offset != 1 and code[start + offset].op != op) return null;
-
-    const index_local = code[start].a;
-    const object_local = code[start + 9].a;
-    const value_local = code[start + 19].a;
-    const checksum_local = code[start + 25].a;
-    const locals = [_]u32{
-        index_local,    code[start + 4].a,  object_local, value_local,
-        checksum_local, code[start + 15].a,
-    };
-    for (locals, 0..) |local, left|
-        for (locals[left + 1 ..]) |other| if (local == other) return null;
-    if (code[start + 3].a != start + expected.len or
-        code[start + 5].a != index_local or
-        code[start + 11].a != object_local or code[start + 21].a != object_local or
-        code[start + 13].a != index_local or
-        code[start + 22].a != value_local or code[start + 26].a != value_local or
-        code[start + 30].a != checksum_local or
-        code[start + 32].a != index_local or code[start + 35].a != index_local or
-        code[start + 37].a != start or
-        code[start + 12].a >= chunk.names.items.len or code[start + 23].a >= chunk.names.items.len or
-        !std.mem.eql(u8, chunk.names.items[code[start + 12].a], chunk.names.items[code[start + 23].a]))
-        return null;
-
-    const bound: QuickArrayBound = switch (code[start + 1].op) {
-        .load_local => .{ .local = code[start + 1].a },
-        .load_const => constant: {
-            if (code[start + 1].a >= chunk.consts.items.len) return null;
-            const value_ = chunk.consts.items[code[start + 1].a];
-            if (!value_.isNumber()) return null;
-            break :constant .{ .constant = value_.asNum() };
-        },
-        else => return null,
-    };
-    switch (bound) {
-        .local => |local| for (locals[0..5]) |modified| {
-            if (local == modified) return null;
-        },
-        .constant => {},
-    }
-    const constant_instructions = [_]usize{ start + 6, start + 17, start + 27, start + 33 };
-    var constants: [4]f64 = undefined;
-    for (constant_instructions, 0..) |instruction, index| {
-        const constant_index = code[instruction].a;
-        if (constant_index >= chunk.consts.items.len or !chunk.consts.items[constant_index].isNumber()) return null;
-        constants[index] = chunk.consts.items[constant_index].asNum();
-    }
-    return .{
-        .index_local = index_local,
-        .array_local = code[start + 4].a,
-        .object_local = object_local,
-        .value_local = value_local,
-        .checksum_local = checksum_local,
-        .extra_local = code[start + 15].a,
-        .bound = bound,
-        .selector_mask = Value.num(constants[0]).toInt32(),
-        .modulus = constants[1],
-        .checksum_mask = Value.num(constants[2]).toInt32(),
-        .increment = constants[3],
-        .get_prop_instruction = @intCast(start + 12),
-        .set_prop_instruction = @intCast(start + 23),
-        .exit_ip = @intCast(start + expected.len),
-    };
-}
-
 fn compileQuickObjectAllocationLoop(chunk: *Chunk, start: usize) ?QuickObjectAllocationLoop {
     const code = chunk.code.items;
     const expected = [_]bc.Op{
@@ -1736,8 +1636,6 @@ fn compileQuickObjectAllocationLoop(chunk: *Chunk, start: usize) ?QuickObjectAll
 fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
     if (compileQuickObjectAllocationLoop(chunk, start)) |allocation|
         return .{ .object_allocation = allocation };
-    if (compileQuickPolymorphicPropertyLoop(chunk, start)) |property|
-        return .{ .polymorphic_property = property };
     return .unsupported;
 }
 
@@ -2939,83 +2837,6 @@ fn tryQuickArrayLoop(
             max_extra_steps,
             parallel_sync,
         ),
-        .polymorphic_property => |property| quick: {
-            // Shared frames/objects retain ordinary per-op locking and
-            // interleaving. This tier is for isolated contexts where the exact
-            // trace contains no calls or other observable re-entry points.
-            if (parallel_sync or frame.escaped.load(.monotonic)) break :quick null;
-            const index_slot: usize = @intCast(property.index_local);
-            const array_slot: usize = @intCast(property.array_local);
-            const object_slot: usize = @intCast(property.object_local);
-            const value_slot: usize = @intCast(property.value_local);
-            const checksum_slot: usize = @intCast(property.checksum_local);
-            const extra_slot: usize = @intCast(property.extra_local);
-            for ([_]usize{ index_slot, array_slot, object_slot, value_slot, checksum_slot, extra_slot }) |slot|
-                if (slot >= frame.slots.len) break :quick null;
-
-            const array_value = frame.slots[array_slot];
-            if (!array_value.isObject()) break :quick null;
-            const array = array_value.asObj();
-            if (!quickPropertyAccessAllowed(array) or !array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
-                array.accessorsMap() != null or array.holesMap() != null or
-                array.arrayLengthFloor() > array.elementsItems().len)
-                break :quick null;
-            if (!frame.slots[index_slot].isNumber() or !frame.slots[checksum_slot].isNumber() or
-                !frame.slots[extra_slot].isNumber())
-                break :quick null;
-            const bound = quickArrayBoundValue(property.bound, frame) orelse break :quick null;
-            var index = frame.slots[index_slot].asNum();
-            var checksum = frame.slots[checksum_slot].asNum();
-            const extra = frame.slots[extra_slot].asNum();
-            if (!(index < bound.asNum())) break :quick null;
-
-            const steps_per_iteration: u64 = 38;
-            const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
-            if (max_iterations == 0) break :quick null;
-            var iterations: u64 = 0;
-            var completed = false;
-            var last_object: Value = undefined;
-            var last_value: f64 = undefined;
-            while (iterations < max_iterations and index < bound.asNum()) {
-                const next_index = index + property.increment;
-                const completes_loop = !(next_index < bound.asNum());
-                const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
-                    (if (completes_loop) @as(u64, 4) else 0);
-                if (completed_extra_steps > max_extra_steps) break;
-
-                const selected = Value.num(index).toInt32() & property.selector_mask;
-                if (selected < 0) break;
-                const element_index: usize = @intCast(selected);
-                if (element_index >= array.elementsItems().len) break;
-                const object_value = array.elementsItems()[element_index];
-                const object = quickPlainObject(object_value) orelse break;
-                if (object.proxyHandler() != null or object.proxy_revoked or object.shape == null) break;
-                const read_slot = quickOwnDataSlot(chunk, property.get_prop_instruction, object) orelse break;
-                const write_slot = quickOwnDataSlot(chunk, property.set_prop_instruction, object) orelse break;
-                if (read_slot != write_slot) break;
-                const current = quickSlotNumber(object, read_slot) orelse break;
-                const next = numberRemainder((current + index) + extra, property.modulus);
-                const updated = Value.num(next);
-                gc_mod.barrierValueFrom(object, updated);
-                object.slotsItems()[write_slot] = updated;
-                checksum += @floatFromInt(Value.num(next).toInt32() & property.checksum_mask);
-                index = next_index;
-                last_object = object_value;
-                last_value = next;
-                iterations += 1;
-                completed = completes_loop;
-                if (completed) break;
-            }
-            if (iterations == 0) break :quick null;
-            frame.slots[index_slot] = Value.num(index);
-            frame.slots[object_slot] = last_object;
-            frame.slots[value_slot] = Value.num(last_value);
-            frame.slots[checksum_slot] = Value.num(checksum);
-            break :quick .{
-                .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
-                .next_ip = if (completed) property.exit_ip else start,
-            };
-        },
     };
 }
 
@@ -8173,7 +7994,6 @@ fn runChunk(
                                     _ = quick_object_allocation_checkpoint_crossings.fetchAdd(1, .monotonic);
                             }
                             if (builtin.is_test) switch (plan.*) {
-                                .polymorphic_property => _ = quick_polymorphic_property_loop_hits.fetchAdd(1, .monotonic),
                                 .object_allocation => {},
                                 .unsupported => {},
                             };
@@ -13482,6 +13302,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         .{ .entry = .initial, .name = "activationPropertyLoop", .argument = 8, .expected = 28093728 },
         .{ .entry = .initial, .name = "activationArraySum", .argument = 8, .expected = 36 },
         .{ .entry = .initial, .name = "activationArrayPush", .argument = 8, .expected = 806 },
+        .{ .entry = .initial, .name = "activationPolymorphic", .argument = 32, .expected = 2498 },
         .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
         .{ .entry = .inline_, .name = "activationLegacy", .argument = 4, .expected = 4 },
         .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
@@ -13502,6 +13323,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         \\function activationPropertyLoop(limit){const object={a:0,b:1,c:2,d:3};let i=0;while(i<limit){object.a=(object.a+i)%1000003;object.b=object.b+1;object.c=object.a+object.b;object.d=object.c-object.b;i=i+1;}return object.a*1000000+object.b*10000+object.c*100+object.d;}
         \\function activationArraySum(){const values=[1,2,3,4,5,6,7,8];let total=0;for(let i=0;i<values.length;i=i+1)total=total+values[i];return total;}
         \\function activationArrayPush(limit){let values=[];for(let i=0;i<limit;i=i+1)values.push((i+2+1)&7);return values.length*100+values[3];}
+        \\function activationPolymorphic(limit){let objects=[{value:1,a:0},{b:0,value:2},{c:0,d:0,value:3},{e:0,f:0,g:0,value:4}],checksum=0;for(let i=0;i<limit;i=i+1){let object=objects[i&3];let next=(object.value+i+2)%1000003;object.value=next;checksum=checksum+(next&1023);}return checksum+objects[0].value+objects[1].value+objects[2].value+objects[3].value;}
         \\function activationLegacy(v){return activationLegacy.arguments[0];}
         \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
         \\function activationNestedB(v){return activationNestedA(v);}
@@ -23744,7 +23566,209 @@ test "vm: numeric arguments fast paths enforce restriction ownership" {
     try std.testing.expectEqual(@as(f64, 7), arguments.asObj().denseElement(0).?.asNum());
 }
 
-test "vm: quickens isolated polymorphic own-data property loops with exact steps" {
+test "vm: polymorphic property execution runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 9992), (try ctx.evaluate(
+        \\function propertyLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  const objects = [{value:1,a:0},{b:0,value:2},{c:0,d:0,value:3},{e:0,f:0,g:0,value:4}];
+        \\  let checksum = 0;
+        \\  for (let i = 0; i < 32; i = i + 1) {
+        \\    let object = objects[i & 3];
+        \\    let next = (object.value + i + 2) % 1000003;
+        \\    object.value = next;
+        \\    checksum = checksum + (next & 1023);
+        \\  }
+        \\  return checksum + objects[0].value + objects[1].value + objects[2].value + objects[3].value;
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(propertyLane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
+test "vm: polymorphic property execution preserves ordered live property effects" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\function update(objects, lane, limit) {
+        \\  let checksum = 0;
+        \\  for (let i = 0; i < limit; i = i + 1) {
+        \\    let object = objects[i & 3];
+        \\    let next = (object.value + i + lane) % 1000003;
+        \\    object.value = next;
+        \\    checksum = checksum + (next & 1023);
+        \\  }
+        \\  return checksum;
+        \\}
+        \\let events = ''; const raw = [{value:1,a:0},{b:0,value:2},{c:0,d:0,value:3},{e:0,f:0,g:0,value:4}];
+        \\const proxies = raw.map((object, index) => new Proxy(object, {
+        \\  get(target, key, receiver) { events += 'g' + index + ','; $vm.gc(); return Reflect.get(target, key, receiver); },
+        \\  set(target, key, value, receiver) { events += 's' + index + ','; $vm.gc(); return Reflect.set(target, key, value, receiver); }
+        \\}));
+        \\const proxyResult = update(proxies, 2, 8);
+        \\let reads = 0, writes = 0, backing = 1; const changing = {};
+        \\Object.defineProperty(changing, 'value', {
+        \\  configurable: true,
+        \\  get() { reads++; $vm.gc(); return backing; },
+        \\  set(value) { writes++; backing = value; if (writes === 2) { delete changing.value; Object.setPrototypeOf(changing, {value:50}); } }
+        \\});
+        \\const changingResult = update([changing, changing, changing, changing], 2, 4);
+        \\let coercions = 0; const lane = { valueOf() { coercions++; $vm.gc(); return 2; } };
+        \\const coercionResult = update([{value:1},{value:2},{value:3},{value:4}], lane, 4);
+        \\const first = {value:1}, marker = {}, throws = {}; let caught = false;
+        \\Object.defineProperty(throws, 'value', { get() { return 2; }, set(value) { $vm.gc(); throw marker; } });
+        \\try { update([first, throws, {value:3}, {value:4}], 2, 4); } catch (error) { caught = error === marker; }
+        \\let receiverValue = 0;
+        \\const receiver = Object.create({
+        \\  get value() { if (this !== receiver) throw new Error('get receiver'); $vm.gc(); return 1; },
+        \\  set value(value) { if (this !== receiver) throw new Error('set receiver'); $vm.gc(); receiverValue = value; }
+        \\});
+        \\const receiverResult = update([receiver, receiver, receiver, receiver], 2, 1);
+        \\proxyResult === 78 && events === 'g0,s0,g1,s1,g2,s2,g3,s3,g0,s0,g1,s1,g2,s2,g3,s3,' &&
+        \\  raw[0].value === 9 && raw[1].value === 12 && raw[2].value === 15 && raw[3].value === 18 &&
+        \\  changingResult === 122 && reads === 2 && writes === 2 && changing.value === 59 &&
+        \\  Object.hasOwn(changing, 'value') && Object.getPrototypeOf(changing).value === 50 &&
+        \\  coercionResult === 24 && coercions === 4 && caught && first.value === 3 &&
+        \\  receiverResult === 3 && receiverValue === 3
+    )).asBool());
+}
+
+test "vm: polymorphic property execution survives moving GC" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+    const array = try ctx.evaluate(
+        \\globalThis.polyMoveDiscard = [];
+        \\for (let i = 0; i < 4096; i++) polyMoveDiscard.push({dead:i,child:{value:i}});
+        \\globalThis.polyMoveObjects = [{value:1,a:0},{b:0,value:2},{c:0,d:0,value:3},{e:0,f:0,g:0,value:4}];
+        \\function warmedUpdate(objects, lane) {
+        \\  let checksum = 0;
+        \\  for (let i = 0; i < 32; i = i + 1) {
+        \\    let object = objects[i & 3];
+        \\    let next = (object.value + i + lane) % 1000003;
+        \\    object.value = next;
+        \\    checksum = checksum + (next & 1023);
+        \\  }
+        \\  return checksum + objects[0].value + objects[1].value + objects[2].value + objects[3].value;
+        \\}
+        \\if (warmedUpdate(polyMoveObjects, 2) !== 2498) throw new Error('update');
+        \\polyMoveObjects
+    );
+    const handle = try ctx.protectValue(array);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const old_array = @intFromPtr(handle.get().asObj());
+    const old_object = @intFromPtr(handle.get().asObj().denseElement(2).?.asObj());
+    _ = try ctx.evaluate("polyMoveDiscard = null");
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0);
+    try std.testing.expect(old_array != @intFromPtr(handle.get().asObj()));
+    try std.testing.expect(old_object != @intFromPtr(handle.get().asObj().denseElement(2).?.asObj()));
+    try std.testing.expectEqual(@as(f64, 7538), (try ctx.evaluate("warmedUpdate(polyMoveObjects, 2)")).asNum());
+    try std.testing.expect((try ctx.evaluate("polyMoveObjects[0].value === 257 && polyMoveObjects[1].value === 274 && polyMoveObjects[2].value === 291 && polyMoveObjects[3].value === 308")).asBool());
+}
+
+test "vm: polymorphic property execution retains budget and stop checkpoints" {
+    for ([_]bool{ false, true }) |stop_at_checkpoint| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator,
+            \\function update(objects, lane) {
+            \\  let checksum = 0;
+            \\  for (let i = 0; i < 100; i = i + 1) {
+            \\    let object = objects[i & 3];
+            \\    let next = (object.value + i + lane) % 1000003;
+            \\    object.value = next;
+            \\    checksum = checksum + (next & 1023);
+            \\  }
+            \\  return checksum;
+            \\}
+            \\update([{value:1},{value:2},{value:3},{value:4}], 2)
+        );
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var stop: std.atomic.Value(bool) = .init(stop_at_checkpoint);
+        var machine = try initTestInterpreter(.{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .stop_flag = &stop,
+            .step_budget = 1024,
+        });
+        try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+        try std.testing.expectEqual(@as(u64, if (stop_at_checkpoint) 1024 else 1025), machine.steps);
+        try std.testing.expectEqualStrings(if (stop_at_checkpoint) "Error" else "RangeError", machine.exception.asObj().errorName());
+    }
+}
+
+test "vm: polymorphic property execution preserves source hooks" {
+    const Capture = struct {
+        updates: usize = 0,
+        fn profile(raw: *anyopaque, _: *Interpreter, location: interp.DebugStatementLocation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (location.location.line == 6) self.updates += 1;
+        }
+        fn debug(raw: *anyopaque, machine: *Interpreter, location: interp.DebugStatementLocation) EvalError!void {
+            profile(raw, machine, location);
+        }
+    };
+    for ([_]bool{ false, true }) |debug| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = if (debug) .tree_walker else .required,
+        });
+        defer ctx.destroy();
+        var capture = Capture{};
+        if (debug) {
+            ctx.debug_statement_ctx = &capture;
+            ctx.debug_statement_hook = Capture.debug;
+        } else {
+            ctx.profile_statement_ctx = &capture;
+            ctx.profile_statement_hook = Capture.profile;
+        }
+        try std.testing.expectEqual(@as(f64, 2498), (try ctx.evaluate(
+            \\function update(objects, lane) {
+            \\  let checksum = 0;
+            \\  for (let i = 0; i < 32; i = i + 1) {
+            \\    let object = objects[i & 3];
+            \\    let next = (object.value + i + lane) % 1000003;
+            \\    object.value = next;
+            \\    checksum = checksum + (next & 1023);
+            \\  }
+            \\  return checksum + objects[0].value + objects[1].value + objects[2].value + objects[3].value;
+            \\}
+            \\update([{value:1,a:0},{b:0,value:2},{c:0,d:0,value:3},{e:0,f:0,g:0,value:4}], 2)
+        )).asNum());
+        try std.testing.expectEqual(@as(usize, 32), capture.updates);
+    }
+}
+
+test "vm: polymorphic property execution preserves exact bytecode steps and effects" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -23782,9 +23806,9 @@ test "vm: quickens isolated polymorphic own-data property loops with exact steps
         \\kernel(objects, 2)
         ,
     };
-    const hits_before = quick_polymorphic_property_loop_hits.load(.monotonic);
-    var hits = hits_before;
-    for (sources) |source| {
+    const expected_results = [_]f64{ 2498, 1602498 };
+    const expected_steps = [_]u64{ 1287, 1485 };
+    for (sources, 0..) |source, source_index| {
         var results: [2]Value = undefined;
         var steps: [2]u64 = undefined;
         for ([_]bool{ false, true }, 0..) |parallel, run_index| {
@@ -23798,17 +23822,12 @@ test "vm: quickens isolated polymorphic own-data property loops with exact steps
             var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
             results[run_index] = try run(&machine, chunk, null);
             steps[run_index] = machine.steps;
-            const next_hits = quick_polymorphic_property_loop_hits.load(.monotonic);
-            if (parallel)
-                try std.testing.expectEqual(hits, next_hits)
-            else
-                try std.testing.expect(next_hits > hits);
-            hits = next_hits;
+            try std.testing.expectEqual(expected_results[source_index], results[run_index].asNum());
+            try std.testing.expectEqual(expected_steps[source_index], steps[run_index]);
         }
         try std.testing.expectEqual(results[1].rawBits(), results[0].rawBits());
         try std.testing.expectEqual(steps[1], steps[0]);
     }
-    try std.testing.expect(hits > hits_before);
 }
 
 test "vm: quickens fixed-shape object allocation loops with exact steps and guarded fallback" {

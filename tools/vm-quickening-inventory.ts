@@ -15,7 +15,6 @@ const ENTRY_IDS = [
   "literal-shape-transition",
   "property-update-trace",
   "array-opcode-fast-paths",
-  "polymorphic-property-loop",
   "fixed-shape-object-allocation-loop",
   "numeric-leaf-call",
   "numeric-call-loop",
@@ -31,7 +30,6 @@ const UNSUPPORTED_IDS = [
   "allocation-dispatch",
 ];
 const LEGACY_ENTRY_IDS = [
-  "polymorphic-property-loop",
   "fixed-shape-object-allocation-loop",
   "numeric-call-loop",
   "reusable-immediate-closure",
@@ -294,7 +292,7 @@ function renderMarkdown(data: any): string {
     "",
     "Every legacy pattern above remains labeled `legacy_narrow`; none is used as evidence that its broader property, index, call, arithmetic, control, or allocation family is covered.",
     "",
-    "The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). The exact four-property counted-loop kernel was removed in [issue #1076](https://github.com/zig-utils/zig-js/issues/1076). The exact packed-array sum loop kernel and its compile-time candidate hint were removed in [issue #1077](https://github.com/zig-utils/zig-js/issues/1077). The packed-array push loop kernel, its numeric-expression decoder/specialization, and its candidate hint were removed in [issue #1078](https://github.com/zig-utils/zig-js/issues/1078). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.",
+    "The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). The exact four-property counted-loop kernel was removed in [issue #1076](https://github.com/zig-utils/zig-js/issues/1076). The exact packed-array sum loop kernel and its compile-time candidate hint were removed in [issue #1077](https://github.com/zig-utils/zig-js/issues/1077). The packed-array push loop kernel, its numeric-expression decoder/specialization, and its candidate hint were removed in [issue #1078](https://github.com/zig-utils/zig-js/issues/1078). The exact polymorphic property loop kernel and its candidate hint were removed in [issue #1079](https://github.com/zig-utils/zig-js/issues/1079). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.",
     "",
     "## Explicitly unsupported broad families",
     "",
