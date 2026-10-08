@@ -743,7 +743,7 @@ fn readModuleNative(raw: *anyopaque, _: Value, args: []const Value) js.HostError
 fn defineNative(ctx: *js.Context, name: []const u8, f: js.NativeFn) !void {
     const obj = try ctx.arena().create(js.Object);
     obj.* = .{ .native = f };
-    try ctx.env.put(name, Value.obj(obj));
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, name, Value.obj(obj));
 }
 
 // ---------------------------------------------------------------------------
@@ -770,7 +770,7 @@ fn printWorkerReport(gpa: std.mem.Allocator, io: std.Io, report: FileReport) voi
 fn exceptionDetail(ctx: *js.Context, err: anyerror, fallback_buf: []u8) []const u8 {
     if (err == error.Throw) {
         if (ctx.exception) |exc| {
-            ctx.env.put("__pendingExc", exc) catch {};
+            ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "__pendingExc", exc) catch {};
             if (ctx.evaluate("try{__excText(__pendingExc)}catch(_){\"harness exception\"}")) |v| {
                 if (v.isString()) return v.asStr();
             } else |_| {}

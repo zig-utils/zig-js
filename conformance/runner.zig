@@ -81,7 +81,7 @@ const cases = [_]Case{
 fn defineNative(ctx: *js.Context, name: []const u8, f: js.NativeFn) !void {
     const obj = try ctx.arena().create(js.Object);
     obj.* = .{ .native = f };
-    try ctx.env.put(name, Value.obj(obj));
+    try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, name, Value.obj(obj));
 }
 
 fn runCase(case: Case) bool {
