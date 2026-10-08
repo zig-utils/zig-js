@@ -1474,12 +1474,22 @@ inline fn quickArrayIndex(key: Value) ?usize {
     return @intFromFloat(number);
 }
 
+/// Primitive Number and canonical String array indices need no observable
+/// ToPropertyKey work. Keep this separate from `quickArrayIndex`: packed loop
+/// plans require a Number because they increment it arithmetically.
+inline fn quickPropertyArrayIndex(key: Value) ?usize {
+    if (key.isNumber()) return quickArrayIndex(key);
+    if (!key.isString()) return null;
+    const index = Interpreter.arrayIndex(key.asStr()) orelse return null;
+    return if (index < 4294967295) index else null;
+}
+
 /// Distant Array indices live in ordinary named slots after dense growth
-/// declines them. A primitive Number key has no observable coercion, so an
-/// exact own-data snapshot can serve the read without allocating the decimal
-/// property key. Misses and accessors retain the full [[Get]] path.
+/// declines them. A primitive Number or canonical String key has no observable
+/// coercion, so an exact own-data snapshot can serve the read without allocating
+/// the decimal property key. Misses and accessors retain the full [[Get]] path.
 inline fn quickSparseArrayLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
-    const index = quickArrayIndex(key) orelse return null;
+    const index = quickPropertyArrayIndex(key) orelse return null;
     if (!receiver.isObject()) return null;
     const object = receiver.asObj();
     if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
@@ -1496,7 +1506,7 @@ inline fn quickSparseArrayLoad(vm: *Interpreter, receiver: Value, key: Value) Ev
 
 inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!bool {
     if (!receiver.isObject()) return false;
-    const index = quickArrayIndex(key) orelse return false;
+    const index = quickPropertyArrayIndex(key) orelse return false;
     const object = receiver.asObj();
     if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
         object.accessorsMap() != null or object.attrsMap() != null)
@@ -1505,11 +1515,12 @@ inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, st
     return object.replaceDenseElement(index, stored);
 }
 
-/// Update an existing sparse Array data property without replaying the whole
-/// prototype/receiver set algorithm. The synchronized replacement refuses
-/// creation, accessors, and non-writable descriptors before any mutation.
+/// Update an existing sparse Array data property for a primitive Number or
+/// canonical String key without replaying the whole prototype/receiver set
+/// algorithm. The synchronized replacement refuses creation, accessors, and
+/// non-writable descriptors before any mutation.
 inline fn quickSparseArrayStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!?Value {
-    const index = quickArrayIndex(key) orelse return null;
+    const index = quickPropertyArrayIndex(key) orelse return null;
     if (!receiver.isObject()) return null;
     const object = receiver.asObj();
     if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
@@ -1566,12 +1577,12 @@ inline fn quickTypedArrayStore(vm: *Interpreter, receiver: Value, key: Value, st
     return vm.tempRoot(stored_root, stored);
 }
 
-/// A Number array index needs no ToPropertyKey call. Mapped arguments retain
-/// their live parameter cells; severed or strict indices use the ordinary
-/// synchronized dense storage. Accessor-bearing objects stay generic because
-/// the exact index may have been redefined.
+/// A primitive Number or canonical String array index needs no ToPropertyKey
+/// call. Mapped arguments retain their live parameter cells; severed or strict
+/// indices use the ordinary synchronized dense storage. Accessor-bearing
+/// objects stay generic because the exact index may have been redefined.
 inline fn quickArgumentsLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
-    const index = quickArrayIndex(key) orelse return null;
+    const index = quickPropertyArrayIndex(key) orelse return null;
     if (!receiver.isObject()) return null;
     const object = receiver.asObj();
     if (!object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
@@ -1583,7 +1594,7 @@ inline fn quickArgumentsLoad(vm: *Interpreter, receiver: Value, key: Value) Eval
 }
 
 inline fn quickArgumentsStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!?Value {
-    const index = quickArrayIndex(key) orelse return null;
+    const index = quickPropertyArrayIndex(key) orelse return null;
     if (!receiver.isObject()) return null;
     const object = receiver.asObj();
     if (!object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
@@ -9482,7 +9493,7 @@ fn runChunk(
                     if (obj.isObject()) {
                         const o = obj.asObj();
                         if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked) {
-                            if (quickArrayIndex(key)) |index| {
+                            if (quickPropertyArrayIndex(key)) |index| {
                                 try vm.checkRestricted(o);
                                 const element = if (parallel_sync)
                                     o.denseElement(index)
@@ -22499,6 +22510,106 @@ test "vm: numeric sparse array stores enforce restriction ownership" {
     );
     try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
     try std.testing.expectEqual(@as(f64, 7), array.asObj().getOwn("1000000").?.asNum());
+}
+
+test "vm: quickens canonical primitive string array indices" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const dense_reads = quick_dense_array_index_hits.load(.monotonic);
+        const dense_stores = quick_dense_array_store_hits.load(.monotonic);
+        const sparse_reads = quick_sparse_array_index_hits.load(.monotonic);
+        const sparse_stores = quick_sparse_array_store_hits.load(.monotonic);
+        const argument_reads = quick_arguments_index_hits.load(.monotonic);
+        const argument_stores = quick_arguments_store_hits.load(.monotonic);
+        const typed_reads = quick_typed_array_index_hits.load(.monotonic);
+
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = [7]; values["0"]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let values = [1]; values["0"] = 7; 1
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\function update(a) { let old = arguments["0"]; arguments["0"] = 7; return a + old; }
+            \\update(1)
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 3), (try vmRun(allocator,
+            \\let values = [1, , 3]; values["2"]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = []; values[1000000] = 7; values["1000000"]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\let values = []; values[1000000] = 7; values["1000000"] = 8;
+            \\values[1000000]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 5), (try vmRun(allocator,
+            \\function update(a) { "use strict"; arguments["0"] = 4; return arguments["0"] + a; }
+            \\update(1)
+        )).asNum());
+
+        try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > dense_reads);
+        try std.testing.expect(quick_dense_array_store_hits.load(.monotonic) > dense_stores);
+        try std.testing.expect(quick_sparse_array_index_hits.load(.monotonic) > sparse_reads);
+        try std.testing.expect(quick_sparse_array_store_hits.load(.monotonic) > sparse_stores);
+        try std.testing.expect(quick_arguments_index_hits.load(.monotonic) > argument_reads);
+        try std.testing.expect(quick_arguments_store_hits.load(.monotonic) > argument_stores);
+        const eligible_dense_reads = quick_dense_array_index_hits.load(.monotonic);
+        const eligible_dense_stores = quick_dense_array_store_hits.load(.monotonic);
+        const eligible_sparse_reads = quick_sparse_array_index_hits.load(.monotonic);
+        const eligible_sparse_stores = quick_sparse_array_store_hits.load(.monotonic);
+        const eligible_argument_reads = quick_arguments_index_hits.load(.monotonic);
+        const eligible_argument_stores = quick_arguments_store_hits.load(.monotonic);
+
+        // Holes/inheritance, own accessors, and non-canonical strings retain
+        // ordinary property semantics.
+        try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+            \\Array.prototype["1"] = 9; let values = [1, , 3]; values["1"]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 11), (try vmRun(allocator,
+            \\let values = [1];
+            \\Object.defineProperty(values, "0", { get: function () { return 11; } });
+            \\values["0"]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 10), (try vmRun(allocator,
+            \\let values = [];
+            \\values["01"] = 1; values["-0"] = 2;
+            \\values["1.5"] = 3; values["4294967295"] = 4;
+            \\values["01"] + values["-0"] + values["1.5"] + values["4294967295"]
+        )).asNum());
+
+        // Proxy, object, and Symbol keys remain generic and observable.
+        try std.testing.expectEqual(@as(f64, 16), (try vmRun(allocator,
+            \\let seen = 0; let values = new Proxy([1], {
+            \\  get: function () { return 9; },
+            \\  set: function (target, key, value) { seen = value; return true; }
+            \\});
+            \\let result = values["0"]; values["0"] = 7; result + seen
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 4), (try vmRun(allocator,
+            \\let coercions = 0; let values = [1];
+            \\let key = { toString: function () { coercions = coercions + 1; return "0"; } };
+            \\let symbol = Symbol(); values[symbol] = 2;
+            \\values[key] + values[symbol] + coercions
+        )).asNum());
+
+        // TypedArrays keep their separate Integer-Indexed string-key path.
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = new Uint8Array([7]); values["0"]
+        )).asNum());
+        try std.testing.expectEqual(typed_reads, quick_typed_array_index_hits.load(.monotonic));
+        try std.testing.expectEqual(eligible_dense_reads, quick_dense_array_index_hits.load(.monotonic));
+        try std.testing.expectEqual(eligible_dense_stores, quick_dense_array_store_hits.load(.monotonic));
+        try std.testing.expectEqual(eligible_sparse_reads, quick_sparse_array_index_hits.load(.monotonic));
+        try std.testing.expectEqual(eligible_sparse_stores, quick_sparse_array_store_hits.load(.monotonic));
+        try std.testing.expectEqual(eligible_argument_reads, quick_arguments_index_hits.load(.monotonic));
+        try std.testing.expectEqual(eligible_argument_stores, quick_arguments_store_hits.load(.monotonic));
+    }
 }
 
 test "vm: computed numeric typed array reads preserve integer-indexed semantics" {
