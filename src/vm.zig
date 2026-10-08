@@ -22881,6 +22881,133 @@ test "vm: quickens distant sparse array creation" {
     }
 }
 
+test "vm: Array searches preserve inherited and observable indexed lookups" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\var search = Array.prototype.indexOf, last = Array.prototype.lastIndexOf, includes = Array.prototype.includes;
+            \\var values = new Array(3); Object.setPrototypeOf(values, Object.create(new String('abc')));
+            \\var checks = search.call(values, 'b') === 1 && last.call(values, 'b') === 1 &&
+            \\  includes.call(values, 'b') && !includes.call(values, undefined) &&
+            \\  search.call(values, 'b', 2) === -1 && last.call(values, 'b', 0) === -1 &&
+            \\  search.call(values, 'b', -2) === 1 && last.call(values, 'b', -2) === 1 &&
+            \\  search.call(values, 'a', Infinity) === -1 && !includes.call(values, 'a', Infinity);
+            \\var large = new Array(5000000); Object.setPrototypeOf(large, { 1: 'b' });
+            \\checks = checks && search.call(large, 'b') === 1 && last.call(large, 'b', 1) === 1 && includes.call(large, 'b');
+            \\var astral = new Array(2); Object.setPrototypeOf(astral, new String('\uD83D\uDE00'));
+            \\checks = checks && search.call(astral, '\uD83D') === 0 && last.call(astral, '\uDE00') === 1 &&
+            \\  includes.call(astral, '\uDE00') && !includes.call(astral, undefined);
+            \\var events = [], target = Object.create(null);
+            \\Object.setPrototypeOf(values, new Proxy(target, {
+            \\  has: function (object, key) { events.push('has:' + key); return key === '1'; },
+            \\  get: function (object, key, receiver) { events.push('get:' + key); $vm.gc(); return key === '1' ? 'found' : 'other'; }
+            \\}));
+            \\checks = checks && search.call(values, 'found') === 1 && events.join(',') === 'has:0,has:1,get:1';
+            \\events = [];
+            \\checks = checks && last.call(values, 'found') === 1 && events.join(',') === 'has:2,has:1,get:1';
+            \\events = [];
+            \\checks = checks && includes.call(values, 'found') && events.join(',') === 'get:0,get:1';
+            \\for (var method = 0; method < 3; method++) {
+            \\  var mutating = new Array(2);
+            \\  Object.defineProperty(mutating, '0', { get: function () { $vm.gc(); mutating[1] = 'found'; return 'first'; } });
+            \\  if (method === 0) checks = checks && search.call(mutating, 'found') === 1;
+            \\  if (method === 1) checks = checks && last.call(mutating, 'found') === -1;
+            \\  if (method === 2) checks = checks && includes.call(mutating, 'found') && !includes.call(mutating, undefined);
+            \\}
+            \\var changed = new Array(3), coercions = 0;
+            \\var from = { valueOf: function () { coercions++; Object.setPrototypeOf(changed, new String('abc')); $vm.gc(); return 0; } };
+            \\checks = checks && search.call(changed, 'b', from) === 1 && coercions === 1;
+            \\Object.setPrototypeOf(changed, { 0: NaN });
+            \\checks && includes.call(changed, NaN) && search.call(changed, NaN) === -1
+        )).asBool());
+    }
+}
+
+test "vm: Array searches preserve inherited reads across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate(
+        \\globalThis.searchPrototype = new String('abc');
+        \\function searchLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  for (var round = 0; round < 16; round++) {
+        \\    var values = new Array(3); Object.setPrototypeOf(values, searchPrototype);
+        \\    if (Array.prototype.indexOf.call(values, 'b') !== 1 ||
+        \\        Array.prototype.lastIndexOf.call(values, 'b') !== 1 ||
+        \\        !Array.prototype.includes.call(values, 'b') || Array.prototype.includes.call(values, undefined))
+        \\      throw new Error('inherited search mismatch');
+        \\  }
+        \\  return 1;
+        \\}
+        \\var threads = [];
+        \\for (var lane = 0; lane < 4; lane++) threads.push(new Thread(searchLane));
+        \\var total = 0;
+        \\for (var lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
+test "vm: Array searches service stop and watchdog requests armed by fromIndex" {
+    const Arm = struct {
+        fn call(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const stop: *std.atomic.Value(bool) = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            stop.store(true, .release);
+            return Value.undef();
+        }
+    };
+    for ([_][]const u8{ "indexOf", "lastIndexOf", "includes" }) |name| {
+        for ([_]bool{ false, true }) |watchdog| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try Shape.createRoot(allocator);
+            try interp.installGlobals(&env, root_shape);
+            var stop: std.atomic.Value(bool) = .init(false);
+            var deadline: std.atomic.Value(u64) = .init(1);
+            var terminated: std.atomic.Value(bool) = .init(false);
+            var machine = try initTestInterpreter(.{
+                .arena = allocator,
+                .env = &env,
+                .root_shape = root_shape,
+                .stop_flag = if (watchdog) null else &stop,
+                .watchdog_check_flag = if (watchdog) &stop else null,
+                .watchdog_deadline_ns = if (watchdog) &deadline else null,
+                .termination_request_flag = if (watchdog) &terminated else null,
+            });
+            const arm = try gc_mod.allocObj(allocator);
+            arm.* = .{ .native = Arm.call, .private_data = &stop };
+            try env.put("armSearchStop", Value.obj(arm));
+            const source = try std.fmt.allocPrint(allocator,
+                \\var values = new Array(1073741824); Object.setPrototypeOf(values, new String('abc'));
+                \\Array.prototype.{s}.call(values, 'missing', {{ valueOf: function () {{ armSearchStop(); return 0; }} }})
+            , .{name});
+            var parser = try Parser.init(allocator, source);
+            const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+            try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+            try std.testing.expectEqual(!watchdog, stop.load(.acquire));
+            try std.testing.expectEqual(watchdog, terminated.load(.acquire));
+            try std.testing.expect(machine.steps < 1024);
+            try std.testing.expectEqualStrings("Error", machine.exception.asObj().errorName());
+            try std.testing.expectEqualStrings("worker terminated", (try machine.getProperty(machine.exception, "message")).asStr());
+        }
+    }
+}
+
 test "vm: borrowed Array methods read live mapped arguments" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{

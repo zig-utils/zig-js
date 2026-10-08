@@ -11311,9 +11311,10 @@ pub const Interpreter = struct {
         return @intFromFloat(n);
     }
 
-    fn arrayPrototypeMayInterceptIndexedSet(o: *value.Object) bool {
+    fn arrayPrototypeMayHaveIndexedProperties(o: *value.Object) bool {
         if (o.proxyHandler() != null or o.proxy_revoked or o.typedArray() != null or
-            o.has_indexed_property.load(.monotonic) or o.indexed_own_seen.load(.acquire))
+            o.has_indexed_property.load(.monotonic) or o.indexed_own_seen.load(.acquire) or
+            o.moduleNs() != null or o.hostClassHooks() != null or o.restrictionOwner() != 0)
             return true;
         // ECMA-262 10.4.3.5 StringGetOwnProperty supplies virtual non-writable UTF-16 character
         // descriptors that are absent from both Shape and dense storage.
@@ -11324,7 +11325,7 @@ pub const Interpreter = struct {
     fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (arrayPrototypeMayInterceptIndexedSet(c)) return false;
+            if (arrayPrototypeMayHaveIndexedProperties(c)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -11334,7 +11335,7 @@ pub const Interpreter = struct {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
             try self.checkRestricted(c);
-            if (arrayPrototypeMayInterceptIndexedSet(c)) return false;
+            if (arrayPrototypeMayHaveIndexedProperties(c)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -11343,7 +11344,7 @@ pub const Interpreter = struct {
     pub fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (arrayPrototypeMayInterceptIndexedSet(c)) return false;
+            if (arrayPrototypeMayHaveIndexedProperties(c)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -11387,12 +11388,27 @@ pub const Interpreter = struct {
     fn arrayProtoMayAffectIndexedHas(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
-                return true;
-            if (c.indexed_own_seen.load(.acquire)) return true;
+            if (arrayPrototypeMayHaveIndexedProperties(c)) return true;
             cur = self.effectiveProto(c);
         }
         return false;
+    }
+
+    fn arraySearchCanSkipHoles(self: *Interpreter, o: *value.Object) bool {
+        // Sparse enumeration replaces HasProperty/Get only when no indexed
+        // lookup can run user code or consult an exotic/live descriptor.
+        return o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
+            o.accessorsMap() == null and o.hostClassHooks() == null and
+            !self.arrayProtoMayAffectIndexedHas(o);
+    }
+
+    fn checkArraySearchInterrupts(self: *Interpreter, index: usize) EvalError!void {
+        // Native searches can visit many indices without advancing AST/bytecode
+        // steps. Poll between complete lookups without changing step accounting.
+        if (index & 1023 != 0) return;
+        if (self.stop_flag) |stop| if (stop.load(.monotonic))
+            return self.throwError("Error", "worker terminated");
+        try self.serviceVmTraps();
     }
 
     pub fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
@@ -19692,9 +19708,10 @@ pub const Interpreter = struct {
             // element.
             const k = if (args.len > 1) try self.fromIndexForward(self.arrayMethodArgument(roots, args, 1), ilen) else 0;
             const live_receiver = self.tempRoot(roots, receiver).asObj();
-            if ((!live_receiver.is_array or self.arrayProtoMayAffectIndexedHas(live_receiver)) and ilen <= (1 << 22)) {
+            if (!self.arraySearchCanSkipHoles(live_receiver)) {
                 var i = k;
                 while (i < ilen) : (i += 1) {
+                    try self.checkArraySearchInterrupts(i);
                     if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i) and value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0)))
                         return Value.num(@floatFromInt(i));
                 }
@@ -19720,9 +19737,10 @@ pub const Interpreter = struct {
             const roots = operand_roots.?;
             if (ilen == 0) return Value.boolVal(false);
             const k = if (args.len > 1) try self.fromIndexForward(self.arrayMethodArgument(roots, args, 1), ilen) else 0;
-            if (!self.tempRoot(roots, receiver).asObj().is_array and ilen <= (1 << 22)) {
+            if (!self.arraySearchCanSkipHoles(self.tempRoot(roots, receiver).asObj())) {
                 var i = k;
                 while (i < ilen) : (i += 1) {
+                    try self.checkArraySearchInterrupts(i);
                     if (value.sameValueZero(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0))) return Value.boolVal(true);
                 }
                 return Value.boolVal(false);
@@ -20258,10 +20276,11 @@ pub const Interpreter = struct {
                 }
             }
             const live_receiver = self.tempRoot(roots, receiver).asObj();
-            if ((!live_receiver.is_array or self.arrayProtoMayAffectIndexedHas(live_receiver)) and ilen <= (1 << 22)) {
+            if (!self.arraySearchCanSkipHoles(live_receiver)) {
                 var i = start + 1;
                 while (i > 0) {
                     i -= 1;
+                    try self.checkArraySearchInterrupts(i);
                     if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i) and value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0)))
                         return Value.num(@floatFromInt(i));
                 }
