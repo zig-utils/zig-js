@@ -16617,7 +16617,7 @@ pub const Interpreter = struct {
         switch (recv.kind()) {
             .object => {
                 const o = recv.asObj();
-                if (o.is_symbol or o.is_bigint) return self.getPrimitiveMember(recv, key);
+                if (o.is_symbol or o.is_bigint) return self.getPrimitiveMember(recv, key, found);
                 if (o.proxyHandler() != null or o.proxy_revoked) return self.proxyGet(o, key, receiver);
                 if (moduleNsOf(o)) |ns| {
                     try triggerDeferIfString(self, ns, key); // `import defer`: a string [[Get]] evaluates first
@@ -16817,50 +16817,41 @@ pub const Interpreter = struct {
                 if (value.isPrivateKey(key)) return self.throwInvalidPrivateAccess(key, .none);
                 // Legacy intrinsic gaps may still use a kind constructor fallback,
                 // but an explicit null prototype must terminate lookup exactly.
-                if (std.mem.eql(u8, key, "constructor") and !o.protoExplicitNull()) {
+                // Primitive wrappers already carry their complete prototype;
+                // deleting its constructor must leave the property absent.
+                if (std.mem.eql(u8, key, "constructor") and o.boxedPrimitive() == null and !o.protoExplicitNull()) {
                     if (self.constructorOf(recv)) |ctor| return ctor;
                 }
                 if (found) |slot| slot.* = false;
                 return Value.undef();
             },
-            .string, .number, .boolean => return self.getPrimitiveMember(recv, key),
+            .string, .number, .boolean => return self.getPrimitiveMember(recv, key, found),
             .undefined, .null => return self.throwError("TypeError", notAnObjectMessage(recv)),
         }
     }
 
     /// [[Get]] on a primitive base: ToObject(base) for lookup, with the original
     /// primitive as the receiver passed to inherited accessors/proxy traps.
-    fn getPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+    fn getPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8, found: ?*bool) EvalError!Value {
         if (recv.isString()) {
             if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(recv)));
             if (arrayIndex(key)) |i| {
                 if (try self.stringIndexValueOf(recv, i)) |v| return v;
-                return Value.undef();
             }
         }
-        const boxed = try self.boxPrimitiveBase(recv);
-        var cur: ?*value.Object = boxed;
-        while (cur) |c| {
-            try self.checkRestricted(c);
-            if (c.proxyHandler() != null or c.proxy_revoked)
-                return self.proxyGet(c, key, recv);
-            if (c.typedArray()) |ta| {
-                if (canonicalNumericIndexString(key)) |n|
-                    return self.integerIndexedElementGet(ta, n, null);
-            }
-            if (c.getAccessor(key)) |acc| {
-                if (acc.get) |g| {
-                    if (!g.isUndefined()) return self.callValueWithThis(g, &.{}, recv);
-                }
-                return Value.undef();
-            }
-            if (c.getOwn(key)) |v| return v;
-            cur = self.effectiveProto(c);
-        }
-        if (std.mem.eql(u8, key, "constructor")) {
-            if (self.constructorOf(recv)) |ctor| return ctor;
-        }
-        return Value.undef();
+        const receiver_root = try self.pushTempRoot(recv);
+        defer self.restoreTempRoots(receiver_root);
+        const boxed = Value.obj(try self.boxPrimitiveBase(self.tempRoot(receiver_root, recv)));
+        const target_root = try self.pushTempRoot(boxed);
+        // GetValue on a primitive reference performs ToObject for the lookup,
+        // while retaining the primitive Receiver for getters and Proxy traps.
+        return self.getPropertyWithReceiverFound(
+            self.tempRoot(target_root, boxed),
+            key,
+            self.tempRoot(receiver_root, recv),
+            found,
+            null,
+        );
     }
 
     /// The global constructor for a value's kind (`[].constructor === Array`).
@@ -58616,6 +58607,68 @@ test "interpreter array literal, index, length, push/pop" {
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + ['a','b','c']")).asStr());
 }
 
+test "interpreter primitive indexed misses use canonical prototype Get" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\String.prototype[1] = 9;
+        \\let named = "a"[1] === 9 && new String("a")[1] === 9;
+        \\delete String.prototype[1];
+        \\Object.setPrototypeOf(String.prototype, [7, 8, 9]);
+        \\let dense = "a"[2] === 9;
+        \\Object.setPrototypeOf(String.prototype, new Uint8Array([7, 8]));
+        \\named && dense && "a"[1] === 8 && ""[0] === 7 && "a"[0] === "a" &&
+        \\"😀".length === 2 && "😀"[0] === "\ud83d" && "😀"[1] === "\ude00"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let seen;
+        \\Object.defineProperty(String.prototype, "1", {
+        \\  get: function () { "use strict"; seen = this; return 8; }, configurable: true
+        \\});
+        \\let getter = "a"[1] === 8 && seen === "a";
+        \\delete String.prototype[1];
+        \\let calls = 0;
+        \\Object.setPrototypeOf(String.prototype, new Proxy({ "1": 9 }, {
+        \\  get: function (target, key, receiver) { calls++; seen = receiver; return target[key]; }
+        \\}));
+        \\getter && "a"[1] === 9 && seen === "a" && calls === 1
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\Object.setPrototypeOf(Number.prototype, [7]);
+        \\Object.setPrototypeOf(Boolean.prototype, new String("xy"));
+        \\function mapped(a) { a = 9; Object.setPrototypeOf(Symbol.prototype, arguments); return Symbol()[0]; }
+        \\String.prototype["9007199254740993"] = 8;
+        \\(1)[0] === 7 && true[1] === "y" && mapped(1) === 9 && "a"["9007199254740993"] === 8
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\delete Number.prototype.constructor; Object.setPrototypeOf(Number.prototype, null);
+        \\delete Symbol.prototype.constructor; Object.setPrototypeOf(Symbol.prototype, null);
+        \\(1).constructor === undefined && new Number(1).constructor === undefined &&
+        \\Symbol().constructor === undefined && Object(Symbol()).constructor === undefined
+    )).asBool());
+}
+
+test "interpreter primitive indexed misses preserve property-slot presence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    const string = Value.str("a");
+    try std.testing.expect((try machine.getPropertyIfExists(string, "1")) == null);
+    try std.testing.expect((try machine.getPropertyIfExists(Value.num(1), "missing")) == null);
+    const constructor = env.get("String").?;
+    const prototype = try machine.getProperty(constructor, "prototype");
+    try machine.setProp(prototype.asObj(), "1", Value.undef());
+    const present = (try machine.getPropertyIfExists(string, "1")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(present.isUndefined());
+    const character = (try machine.getPropertyIfExists(string, "0")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a", character.asStr());
+}
+
 test "interpreter inherited TypedArray indices honor exotic Get and HasProperty" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -58731,7 +58784,7 @@ test "String indexed access publishes one bounded immutable cell index" {
     const char_code = (try machine.stringMethod(bytes, "charCodeAt", &.{Value.num(100)}, false, string.asStringCell(), null, false)).?;
     try std.testing.expect(char_code.isNumber());
     try std.testing.expect(string.asStringCell().hasUtf16Index());
-    const primitive = try machine.getPrimitiveMember(string, "100");
+    const primitive = try machine.getPrimitiveMember(string, "100", null);
     const wrapper = try machine.makeWrapper(string);
     const boxed = try machine.getProperty(wrapper, "100");
     try std.testing.expect(primitive.isString() and boxed.isString());

@@ -23299,6 +23299,55 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
 }
 
+test "vm: primitive indexed misses use rooted canonical Get" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\String.prototype[1] = 9;
+            \\let named = "a"[1] === 9; delete String.prototype[1];
+            \\Object.setPrototypeOf(String.prototype, [7, 8]);
+            \\let dense = "a"[1] === 8;
+            \\Object.setPrototypeOf(String.prototype, new Uint8Array([7, 8]));
+            \\let typed = ""[0] === 7 && "a"[1] === 8 && "a"[0] === "a";
+            \\let seen;
+            \\Object.defineProperty(String.prototype, "1", {
+            \\  get: function () { "use strict"; seen = this; $vm.gc(); return 9; }, configurable: true
+            \\});
+            \\let getter = "a"[1] === 9 && seen === "a";
+            \\Object.defineProperty(String.prototype, "1", {
+            \\  get: function () { $vm.gc(); throw new Error("indexed getter"); }, configurable: true
+            \\});
+            \\let caught = false; try { "a"[1]; } catch (error) { caught = error.message === "indexed getter"; }
+            \\delete String.prototype[1];
+            \\let calls = 0;
+            \\Object.setPrototypeOf(String.prototype, new Proxy({ "1": 8 }, {
+            \\  get: function (target, key, receiver) { calls++; seen = receiver; return target[key]; }
+            \\}));
+            \\let proxy = "a"[1] === 8 && seen === "a" && calls === 1;
+            \\Object.setPrototypeOf(Number.prototype, [7]);
+            \\Object.setPrototypeOf(Boolean.prototype, new String("xy"));
+            \\function mapped(a) { a = 9; Object.setPrototypeOf(Symbol.prototype, arguments); return Symbol()[0]; }
+            \\let other = (1)[0] === 7 && true[1] === "y" && mapped(1) === 9;
+            \\Object.defineProperty(Symbol.prototype, "retained", {
+            \\  get: function () { "use strict"; $vm.gc(); return this.description === "kept"; }
+            \\});
+            \\let rootedSymbol = Symbol("kept").retained;
+            \\delete Number.prototype.constructor; Object.setPrototypeOf(Number.prototype, null);
+            \\let absent = (1).constructor === undefined && new Number(1).constructor === undefined;
+            \\named && dense && typed && getter && caught && proxy && other && rootedSymbol && absent
+        );
+        try std.testing.expect(result.asBool());
+    }
+}
+
 test "vm: inherited typed array Get and HasProperty preserve exotic boundaries" {
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
