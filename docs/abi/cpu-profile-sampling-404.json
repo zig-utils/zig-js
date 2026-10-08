@@ -22,6 +22,8 @@
     "Every VM owns an independent running flag, start timestamp, schedule, dropped-sample count, and sample vector; no profile data is process-global.",
     "Starting an already-started VM is a deliberate restart that clears the unconsumed session instead of merging timelines.",
     "Sampling is cooperative at source statement checkpoints after the current location and always-on activation chain are published.",
+    "The observation-only CPU hook preserves native-tier eligibility: managed baseline code samples at its existing exact bytecode checkpoint, while optimizer polls resume through the ordinary bytecode statement boundary.",
+    "Debugger and host-statement hooks still require bytecode because they may inspect mutable bindings or change execution; CPU profiling does not inherit that semantic restriction.",
     "No timer or foreign thread reads a mutable interpreter frame, invokes JavaScript, or changes inspector, worker-checkpoint, exception, or pause behavior.",
     "The Chrome output contains root and parent-sensitive call-tree nodes, samples, nonnegative timeDeltas, wall-clock microsecond bounds, hit counts, children, source positions, and positionTicks.",
     "The Markdown output is derived from the identical sample set and contains hot self time, total-time call tree, caller/callee details, and file aggregation.",

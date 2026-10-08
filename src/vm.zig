@@ -4202,6 +4202,31 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
     // A budget island can share this callback with an ordinary 1024-step
     // checkpoint. When neither condition applies there is no runtime work.
     if ((steps & 1023) != 0) return 0;
+    // CPU profiling observes the active execution tier. The baseline compiler
+    // publishes the exact instruction that triggered this checkpoint in
+    // `exit_ip`; resolve it through the same statement registry as bytecode.
+    // Debugger and host hooks still require bytecode because they can change
+    // execution or inspect live activation bindings.
+    if (vm.profile_statement_hook) |hook| {
+        if (frame.profile_bytecode_context) |bytecode_context| {
+            if (std.math.cast(u32, frame.exit_ip)) |bytecode_offset| {
+                if (resolveNativeBytecodeSource(vm, bytecode_context, bytecode_offset)) |source| {
+                    const location = interp.DebugStatementLocation{
+                        .script_id = source.script_id,
+                        .location = .{
+                            .byte_offset = source.position.byte_offset,
+                            .line = source.position.line,
+                            .column = source.position.column,
+                        },
+                        .source_url = source.source_url,
+                    };
+                    vm.debug_current_location = location;
+                    if (vm.stack_trace_call_frame) |call_frame| call_frame.location = location;
+                    hook(vm.profile_statement_ctx.?, vm, location);
+                }
+            }
+        }
+    }
     if (vm.stop_flag) |sf| if (sf.load(.monotonic)) {
         const abrupt = vm.catchableOutOfMemory(vm.throwError("Error", "worker terminated"));
         return @backingInt(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
@@ -7556,6 +7581,16 @@ test "vm: native operation dispatcher executes object and array construction eff
 }
 
 fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {
+    return tryRunManagedNativeWithProfileContext(vm, native, slots, exec, null);
+}
+
+fn tryRunManagedNativeWithProfileContext(
+    vm: *Interpreter,
+    native: *const jit.CompiledCode,
+    slots: []Value,
+    exec: ?*Exec,
+    profile_chunk: ?*const Chunk,
+) EvalError!NativeRunOutcome {
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
         !nativeSlotGuardsPass(native, slots)) return .miss;
     if (native.has_side_exits or native.native_operations != null) {
@@ -7571,6 +7606,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .scratch = scratch[0..].ptr,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .profile_bytecode_context = profile_chunk,
         .global_binding_caches = if (native.native_operations) |metadata| metadata.global_binding_caches.ptr else null,
         .call_links = if (native.native_operations) |metadata| metadata.call_links.ptr else null,
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
@@ -7630,6 +7666,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
 fn tryRunOsrNative(
     vm: *Interpreter,
     native: *const jit.CompiledCode,
+    chunk: *const Chunk,
     slots: []Value,
     exec: *Exec,
 ) EvalError!NativeRunOutcome {
@@ -7656,6 +7693,7 @@ fn tryRunOsrNative(
         .scratch = &scratch,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .profile_bytecode_context = chunk,
         .global_binding_caches = if (native.native_operations) |operations| operations.global_binding_caches.ptr else null,
         .call_links = if (native.native_operations) |operations| operations.call_links.ptr else null,
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
@@ -7839,7 +7877,7 @@ fn loadOrCompileOptimizer(
     return artifact;
 }
 
-fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*Frame, exec: *Exec) EvalError!NativeRunOutcome {
+fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, chunk: *const Chunk, frame: ?*Frame, exec: *Exec) EvalError!NativeRunOutcome {
     if (!native.entry_enabled) return .miss;
     const current_frame = frame;
     if (native.frame_slots > 0) {
@@ -7849,7 +7887,7 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*
     var empty_slots: [0]Value = .{};
     const slots: []Value = if (current_frame) |cf| cf.slots else empty_slots[0..];
     if (native.manages_steps) {
-        const outcome = try tryRunManagedNative(vm, native, slots, exec);
+        const outcome = try tryRunManagedNativeWithProfileContext(vm, native, slots, exec, chunk);
         if (builtin.is_test and native.kind == .optimizer and outcome == .complete)
             _ = optimizer_native_hits.fetchAdd(1, .monotonic);
         return outcome;
@@ -7862,8 +7900,7 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*
 }
 
 fn statementHooksRequireBytecode(vm: *const Interpreter) bool {
-    return vm.debug_statement_hook != null or vm.host_statement_hook != null or
-        vm.profile_statement_hook != null;
+    return vm.debug_statement_hook != null or vm.host_statement_hook != null;
 }
 
 fn nativeExecutionPermitted(vm: *const Interpreter, owner: *const jit.Owner) bool {
@@ -7886,7 +7923,7 @@ fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, g
     var empty_slots: [0]Value = .{};
     const slots: []Value = if (frame) |live_frame| live_frame.slots else empty_slots[0..];
     if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
-    const outcome = try tryRunOsrNative(vm, native, slots, exec);
+    const outcome = try tryRunOsrNative(vm, native, chunk, slots, exec);
     if (builtin.is_test and outcome == .complete) _ = optimizer_native_hits.fetchAdd(1, .monotonic);
     if (builtin.is_test and outcome == .deoptimized) _ = optimizer_osr_entries.fetchAdd(1, .monotonic);
     return outcome;
@@ -7917,7 +7954,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     )) |artifact| {
         if (!nativeExecutionPermitted(vm, owner)) return null;
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
-        switch (try tryExecuteNative(vm, artifact, frame, exec)) {
+        switch (try tryExecuteNative(vm, artifact, chunk, frame, exec)) {
             .complete => |result| return try finishChunkResult(vm, exec, chunk, result),
             .deoptimized => return null,
             .miss => {},
@@ -7970,7 +8007,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     };
     if (!nativeExecutionPermitted(vm, owner)) return null;
     const native = code orelse return null;
-    return switch (try tryExecuteNative(vm, native, frame, exec)) {
+    return switch (try tryExecuteNative(vm, native, chunk, frame, exec)) {
         .complete => |result| try finishChunkResult(vm, exec, chunk, result),
         .miss, .deoptimized => null,
     };
@@ -8175,7 +8212,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (optimizer_artifact) |artifact| if (artifact.frame_slots == slot_count and !artifact.has_side_exits) {
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         const optimized = if (artifact.manages_steps) optimized: {
-            const outcome = try tryRunManagedNative(vm, artifact, slots[0..slot_count], null);
+            const outcome = try tryRunManagedNativeWithProfileContext(vm, artifact, slots[0..slot_count], null, chunk);
             break :optimized switch (outcome) {
                 .complete => |value_word| value_word,
                 .miss, .deoptimized => null,
@@ -8197,7 +8234,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (native.frame_slots != slot_count) return null;
     if (native.has_side_exits) return null;
     const result = if (native.manages_steps) managed: {
-        const outcome = try tryRunManagedNative(vm, native, slots[0..slot_count], null);
+        const outcome = try tryRunManagedNativeWithProfileContext(vm, native, slots[0..slot_count], null, chunk);
         break :managed switch (outcome) {
             .complete => |value_word| value_word,
             .miss, .deoptimized => null,
@@ -20069,6 +20106,14 @@ fn optimizerProfileStatementNoop(
     _: interp.DebugStatementLocation,
 ) void {}
 
+fn optimizerHostStatementNoop(_: *anyopaque, _: *Interpreter) void {}
+
+fn optimizerDebugStatementNoop(
+    _: *anyopaque,
+    _: *Interpreter,
+    _: interp.DebugStatementLocation,
+) EvalError!void {}
+
 test "vm: optimizer executes multiple iterations after a hot backedge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -20130,7 +20175,28 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
     var hook_context: u8 = 0;
     machine.profile_statement_ctx = &hook_context;
     machine.profile_statement_hook = optimizerProfileStatementNoop;
-    const attempts_before_hook_refusal = optimizer_native_attempts.load(.monotonic);
+    const attempts_before_profile = optimizer_native_attempts.load(.monotonic);
+    var profiled_slots = refused_slots;
+    var profiled_frame = Frame{ .slots = &profiled_slots, .parent = null };
+    var profiled_exec = refused_exec;
+    try std.testing.expectEqual(NativeRunOutcome.deoptimized, try tryRunLoopOsr(
+        &machine,
+        &profiled_exec,
+        function_chunk,
+        &profiled_frame,
+        null,
+    ));
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before_profile);
+    try std.testing.expectEqual(@as(f64, 6), profiled_slots[1].asNum());
+    try std.testing.expectEqual(@as(usize, 13), profiled_exec.ip);
+    try std.testing.expectEqual(steps_before_refusal + 54, machine.steps);
+    machine.profile_statement_hook = null;
+    machine.profile_statement_ctx = null;
+    machine.steps = steps_before_refusal;
+
+    const attempts_before_semantic_hooks = optimizer_native_attempts.load(.monotonic);
+    machine.host_statement_ctx = &hook_context;
+    machine.host_statement_hook = optimizerHostStatementNoop;
     try std.testing.expectEqual(NativeRunOutcome.miss, try tryRunLoopOsr(
         &machine,
         &refused_exec,
@@ -20138,13 +20204,21 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
         &refused_frame,
         null,
     ));
+    machine.host_statement_hook = null;
+    machine.host_statement_ctx = null;
+    machine.debug_statement_ctx = &hook_context;
+    machine.debug_statement_hook = optimizerDebugStatementNoop;
+    try std.testing.expectEqual(NativeRunOutcome.miss, try tryRunLoopOsr(
+        &machine,
+        &refused_exec,
+        function_chunk,
+        &refused_frame,
+        null,
+    ));
+    machine.debug_statement_hook = null;
+    machine.debug_statement_ctx = null;
+    try std.testing.expectEqual(attempts_before_semantic_hooks, optimizer_native_attempts.load(.monotonic));
     try std.testing.expectEqual(steps_before_refusal, machine.steps);
-    try std.testing.expectEqual(attempts_before_hook_refusal, optimizer_native_attempts.load(.monotonic));
-    var entry_exec = Exec{};
-    try std.testing.expect(try tryRunNative(&machine, &entry_exec, function_chunk, &refused_frame, null) == null);
-    try std.testing.expectEqual(attempts_before_hook_refusal, optimizer_native_attempts.load(.monotonic));
-    machine.profile_statement_hook = null;
-    machine.profile_statement_ctx = null;
 
     try std.testing.expectEqual(NativeRunOutcome.deoptimized, try tryRunLoopOsr(
         &machine,

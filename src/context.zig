@@ -5988,7 +5988,7 @@ pub const Context = struct {
             .arena = self.arena(),
             .scratch_allocator = self.gpa,
             .env = &self.env,
-            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null and self.profile_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
+            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .jit_invalidation_ctx = if (self.parallel_js and self.enable_jit) self else null,
             .jit_invalidation_fn = if (self.parallel_js and self.enable_jit) clearJitCodeFromInterpreter else null,
             .debug_statement_ctx = self.debug_statement_ctx,
@@ -38790,6 +38790,75 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
         @as(u64, 1),
         profiled_host.tierAttributionSnapshot().execution.count(.host_callbacks),
     );
+}
+
+test "CPU profile hooks observe baseline and optimizer execution" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const Capture = struct {
+        calls: usize = 0,
+        saw_native_loop_source: bool = false,
+
+        fn hook(
+            capture_context: *anyopaque,
+            machine: *interp.Interpreter,
+            location: interp.DebugStatementLocation,
+        ) void {
+            _ = machine;
+            const self: *@This() = @ptrCast(@alignCast(capture_context));
+            self.calls += 1;
+            if (location.location.line >= 4 and location.location.line <= 6)
+                self.saw_native_loop_source = true;
+        }
+    };
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = true,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function profiledBaseline(limit) {
+        \\  var index = 0;
+        \\  var total = 0;
+        \\  while (index < limit) {
+        \\    total = total + index;
+        \\    index = index + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\function profiledOptimizer(point) {
+        \\  var index = 0;
+        \\  var total = 0;
+        \\  while (index < 64) {
+        \\    total = total + point.x + point.y;
+        \\    index = index + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\globalThis.profiledPoint = { x: 4, y: 6 };
+        \\profiledBaseline(2048);
+        \\for (var warm = 0; warm < 10; warm = warm + 1) {
+        \\  profiledOptimizer(profiledPoint);
+        \\}
+    );
+
+    var capture = Capture{};
+    ctx.profile_statement_ctx = &capture;
+    ctx.profile_statement_hook = Capture.hook;
+    defer {
+        ctx.profile_statement_hook = null;
+        ctx.profile_statement_ctx = null;
+    }
+    const before = ctx.tierAttributionSnapshot();
+    _ = try ctx.evaluate("profiledBaseline(4096) + profiledOptimizer(profiledPoint)");
+    const after = ctx.tierAttributionSnapshot();
+
+    try std.testing.expect(after.execution.count(.baseline_entries) > before.execution.count(.baseline_entries));
+    try std.testing.expect(after.execution.count(.optimizer_entries) > before.execution.count(.optimizer_entries));
+    try std.testing.expect(capture.calls > 0);
+    try std.testing.expect(capture.saw_native_loop_source);
 }
 
 test "memory pressure checkpoint reports unavailable domains without state" {

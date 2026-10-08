@@ -577,6 +577,16 @@ one sample set, with exact Home pointer and Bun by-value ownership. The pinned
 contract is [`cpu-profile-sampling-404.json`](cpu-profile-sampling-404.json);
 run `zig build test-private-cpu-profile`.
 
+Profiling preserves the active execution tier. Managed baseline code samples at
+the existing 1,024-step checkpoint after publishing its exact bytecode offset;
+the profiler resolves that offset through the same statement registry as the
+VM. Optimizer checkpoint exits resume at that ordinary VM boundary. Short
+native leaves can complete between samples, as with a normal periodic CPU
+profile. Debugger and host-statement hooks continue to require bytecode because
+they may inspect mutable bindings or change execution; the observation-only CPU
+hook does not. The native-tier witness is tracked by
+[#1043](https://github.com/zig-utils/zig-js/issues/1043).
+
 The six ReadableStream consumers share a realm-local default stream,
 controller, reader, and pull-driven queue. They preserve asynchronous ordering,
 lock/error/cancel transitions, split UTF-8, byte ownership, JSON rejection,

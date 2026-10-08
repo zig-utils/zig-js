@@ -724,6 +724,11 @@ pub const NativeFrame = extern struct {
     /// and on every exit.
     steps: ?*u64 = null,
     runtime_context: ?*anyopaque = null,
+    /// Optional bytecode chunk used by observation-only CPU profiling. Native
+    /// checkpoint islands publish `exit_ip` before the callback, so the VM can
+    /// resolve the same exact statement row as bytecode without making the
+    /// compiler emit a profiler-specific path.
+    profile_bytecode_context: ?*const anyopaque = null,
     /// Artifact-owned root-global proofs, one per operation descriptor. Entries
     /// contain no managed pointers and are published after canonical lookup.
     global_binding_caches: ?[*]NativeGlobalBindingCache = null,

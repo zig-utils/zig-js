@@ -235,6 +235,15 @@ identity. The Owner-local registry unlinks a retiring artifact, waits for
 pre-existing lock-free readers, and only then permits metadata destruction and
 executable address reuse.
 
+The observation-only CPU profile hook keeps native entry enabled. Managed
+baseline code samples only at its existing 1,024-step checkpoint, after live
+values and the exact `exit_ip` have been published; that bytecode offset resolves
+through the ordinary statement registry before the activation chain is copied.
+Optimizer checkpoint exits resume through the same VM statement boundary.
+Debugger and host-statement hooks still require bytecode because they may
+inspect mutable bindings or change execution. This preserves the workload's
+active tier without adding profiler-only code generation or a sampling thread.
+
 `Context.Options.native_code_publisher` installs an embedder-owned external
 publisher and implies `native_observability`. Publication returns an opaque
 artifact-owned token; retirement invokes its infallible unregister callback

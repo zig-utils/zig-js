@@ -33,7 +33,7 @@ const CONTRACT_DIGESTS: Record<string, string> = {
   "docs/abi/home-script-execution-context-7ed99c02.json":
     "a31d7fa5554cb94d9e1b4dd356fa77a8b3a72ace3b7a54b920df81207a8236a3",
   "docs/abi/cpu-profile-sampling-404.json":
-    "fa30c5e8b8f72b6396be992d6543882e735ca8a84a9981220f3273e378b1cda4",
+    "3376c49b5990506d380ab853102ca12df8cce141f1f9202fca7682d748237bf4",
   "docs/abi/readable-stream-consumption-405.json":
     "5e691e4a65f53bed760ad79ea36f2348bb53f8a190744599cfa01c4c2b7efff2",
   "docs/abi/fetch-body-lifecycle-407.json":
