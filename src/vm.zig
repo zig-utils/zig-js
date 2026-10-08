@@ -1289,6 +1289,7 @@ var quick_property_kernel_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_plan_decode_attempts: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
+var quick_sparse_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_arguments_index_hits: std.atomic.Value(u64) = .init(0);
@@ -1470,6 +1471,26 @@ inline fn quickArrayIndex(key: Value) ?usize {
     const number = key.asNum();
     if (!std.math.isFinite(number) or number < 0 or number >= 4294967295 or @trunc(number) != number) return null;
     return @intFromFloat(number);
+}
+
+/// Distant Array indices live in ordinary named slots after dense growth
+/// declines them. A primitive Number key has no observable coercion, so an
+/// exact own-data snapshot can serve the read without allocating the decimal
+/// property key. Misses and accessors retain the full [[Get]] path.
+inline fn quickSparseArrayLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
+    const index = quickArrayIndex(key) orelse return null;
+    if (!receiver.isObject()) return null;
+    const object = receiver.asObj();
+    if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
+        !object.has_indexed_property.load(.monotonic))
+        return null;
+    try vm.checkRestricted(object);
+    var buffer: [10]u8 = undefined;
+    const name = std.fmt.bufPrint(&buffer, "{d}", .{index}) catch return null;
+    return switch (object.namedOwnPropertySnapshot(name)) {
+        .data => |own| own.value,
+        .absent, .accessor => null,
+    };
 }
 
 inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!bool {
@@ -9459,6 +9480,11 @@ fn runChunk(
                                 if (element) |present| {
                                     try stack.append(stack_alloc, present);
                                     if (builtin.is_test) _ = quick_dense_array_index_hits.fetchAdd(1, .monotonic);
+                                    break :fast;
+                                }
+                                if (try quickSparseArrayLoad(vm, obj, key)) |sparse| {
+                                    try stack.append(stack_alloc, sparse);
+                                    if (builtin.is_test) _ = quick_sparse_array_index_hits.fetchAdd(1, .monotonic);
                                     break :fast;
                                 }
                             }
@@ -22245,6 +22271,95 @@ test "vm: quickens present numeric reads from holey arrays" {
         )).asNum());
         try std.testing.expectEqual(after_present + 1, quick_dense_array_index_hits.load(.monotonic));
     }
+}
+
+test "vm: quickens numeric sparse array reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const sparse_before = quick_sparse_array_index_hits.load(.monotonic);
+        const stores_before = quick_dense_array_store_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 15), (try vmRun(allocator,
+            \\let values = []; values[1000000] = 7;
+            \\Object.defineProperty(values, "1000001", {
+            \\  value: 8, writable: false, enumerable: true, configurable: true
+            \\});
+            \\values[1000000] + values[1000001]
+        )).asNum());
+        try std.testing.expect(quick_sparse_array_index_hits.load(.monotonic) >= sparse_before + 2);
+        try std.testing.expectEqual(stores_before, quick_dense_array_store_hits.load(.monotonic));
+        const sparse_after = quick_sparse_array_index_hits.load(.monotonic);
+
+        // A sparse property elsewhere does not disqualify a present dense read.
+        const dense_before = quick_dense_array_index_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let values = [1]; values[1000000] = 7; values[0]
+        )).asNum());
+        try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > dense_before);
+        try std.testing.expectEqual(sparse_after, quick_sparse_array_index_hits.load(.monotonic));
+
+        // Inherited data and own accessors retain ordinary [[Get]].
+        try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+            \\Array.prototype[1000000] = 9; let values = []; values[1000000]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 11), (try vmRun(allocator,
+            \\let values = [];
+            \\Object.defineProperty(values, "1000000", { get: function () { return 11; } });
+            \\values[1000000]
+        )).asNum());
+        try std.testing.expectEqual(sparse_after, quick_sparse_array_index_hits.load(.monotonic));
+
+        // Proxy observation and invalid Number keys remain generic.
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let target = []; target[1000000] = 7; let gets = 0;
+            \\let values = new Proxy(target, {
+            \\  get: function (object, key) { gets = gets + 1; return object[key]; }
+            \\});
+            \\values[1000000]; gets
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 11), (try vmRun(allocator,
+            \\let values = []; values[-1] = 5; values[1.5] = 6;
+            \\values[-1] + values[1.5]
+        )).asNum());
+        try std.testing.expectEqual(sparse_after, quick_sparse_array_index_hits.load(.monotonic));
+    }
+}
+
+test "vm: numeric sparse array reads enforce restriction ownership" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "let values = []; values[1000000] = 7; values");
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const array = try run(&machine, chunk, null);
+    const Claim = struct {
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+
+        fn run(self: *@This()) void {
+            const previous = self.object.claimRestriction(
+                self.allocator,
+                @intCast(std.Thread.getCurrentId()),
+            ) catch unreachable;
+            std.debug.assert(previous == null);
+        }
+    };
+    var claim = Claim{ .object = array.asObj(), .allocator = allocator };
+    const owner = try std.Thread.spawn(.{}, Claim.run, .{&claim});
+    owner.join();
+
+    try std.testing.expectError(error.Throw, quickSparseArrayLoad(&machine, array, Value.num(1000000)));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
 }
 
 test "vm: computed numeric typed array reads preserve integer-indexed semantics" {

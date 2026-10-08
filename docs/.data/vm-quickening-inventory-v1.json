@@ -119,13 +119,14 @@
       "classification": "general_adaptive",
       "implementation_kind": "opcode_fast_path",
       "coverage_status": "covered_guarded",
-      "surfaces": ["present dense get_index, including present elements in holey array storage", "existing dense set_index", "primitive numeric TypedArray get_index and set_index", "primitive numeric mapped and unmapped arguments get_index and set_index", "Array length read", "Array.prototype data read", "intrinsic Array.prototype.push call"],
-      "guards": ["real Array, direct TypedArray, or direct arguments receiver", "primitive Number key", "live arguments mapping or synchronized dense arguments storage", "no relevant proxy/revocation/accessor/attribute/indexed override", "requested dense reads must be present even when unrelated holes exist", "present packed/dense storage as required", "live in-bounds TypedArray view for element reads", "clean prototype chain for append", "exact intrinsic push identity"],
+      "surfaces": ["present dense get_index, including present elements in holey array storage", "primitive numeric sparse own-data get_index", "existing dense set_index", "primitive numeric TypedArray get_index and set_index", "primitive numeric mapped and unmapped arguments get_index and set_index", "Array length read", "Array.prototype data read", "intrinsic Array.prototype.push call"],
+      "guards": ["real Array, direct TypedArray, or direct arguments receiver", "primitive Number key", "live arguments mapping or synchronized dense arguments storage", "coherent sparse named-own data descriptor", "no relevant proxy/revocation/accessor/attribute/indexed override", "requested dense reads must be present even when unrelated holes exist", "present packed/dense storage as required", "live in-bounds TypedArray view for element reads", "clean prototype chain for append", "exact intrinsic push identity"],
       "miss_behavior": ["run ToPropertyKey and generic property/index semantics", "dispatch the ordinary callable", "never treat a hole or inherited indexed property as dense data"],
       "metadata_lifetime": "Array, TypedArray, and arguments index/length/push checks allocate no plan; prototype data reads use the instruction InlineCache for the Chunk lifetime.",
       "no_gil_synchronization": "Shared reads use element/property snapshots, TypedArray backing-store locks, and atomic arguments mapping cells; stores/appends use the corresponding object synchronization, and prototype observations use the IC seqlock.",
       "observable_steps_debugger": "Each shortcut remains within its already-counted opcode/call dispatch; observable coercion, proxy, accessor, and overridden-call cases miss before effects.",
       "source_anchors": [
+        {"path": "src/vm.zig", "text": "inline fn quickSparseArrayLoad("},
         {"path": "src/vm.zig", "text": "inline fn quickDenseArrayStore("},
         {"path": "src/vm.zig", "text": "inline fn quickTypedArrayLoad("},
         {"path": "src/vm.zig", "text": "inline fn quickTypedArrayStore("},
@@ -141,9 +142,11 @@
         {"path": "src/vm.zig", "text": "test \"vm: computed numeric typed array stores preserve coercion and buffer revalidation\""},
         {"path": "src/vm.zig", "text": "test \"vm: computed numeric arguments access preserves mapping and exotic overrides\""},
         {"path": "src/vm.zig", "text": "test \"vm: quickens present numeric reads from holey arrays\""},
+        {"path": "src/vm.zig", "text": "test \"vm: quickens numeric sparse array reads\""},
+        {"path": "src/vm.zig", "text": "test \"vm: numeric sparse array reads enforce restriction ownership\""},
         {"path": "src/vm.zig", "text": "test \"vm: shared array fast paths retain observable overrides\""}
       ],
-      "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_typed_array_index_hits", "quick_typed_array_store_hits", "quick_arguments_index_hits", "quick_arguments_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
+      "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_sparse_array_index_hits", "quick_typed_array_index_hits", "quick_typed_array_store_hits", "quick_arguments_index_hits", "quick_arguments_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
     },
     {
       "id": "packed-array-sum-loop",
@@ -389,7 +392,7 @@
       "id": "index-dispatch",
       "status": "unsupported",
       "covered_by": [],
-      "remaining": ["sparse arrays", "prototype-indexed properties", "string, Symbol, and object ToPropertyKey plus proxy/accessor cases"],
+      "remaining": ["sparse array stores", "prototype-indexed properties", "string, Symbol, and object ToPropertyKey plus proxy/accessor cases"],
       "fallback": "ordinary get_index/set_index bytecode with full ToPropertyKey and property semantics"
     },
     {
@@ -464,6 +467,7 @@
       "quick_property_plan_decode_attempts",
       "quick_dense_array_index_hits",
       "quick_dense_array_store_hits",
+      "quick_sparse_array_index_hits",
       "quick_typed_array_index_hits",
       "quick_typed_array_store_hits",
       "quick_arguments_index_hits",
