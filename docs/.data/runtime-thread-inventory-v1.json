@@ -104,7 +104,7 @@
     { "path": "src/agent.zig", "count": 3 },
     { "path": "src/bytecode.zig", "count": 12 },
     { "path": "src/c_api.zig", "count": 11 },
-    { "path": "src/context.zig", "count": 36 },
+    { "path": "src/context.zig", "count": 37 },
     { "path": "src/fetch_headers.zig", "count": 1 },
     { "path": "src/gc.zig", "count": 2 },
     { "path": "src/gil.zig", "count": 2 },

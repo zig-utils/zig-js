@@ -1768,6 +1768,7 @@ pub fn build(b: *std.Build) void {
     const threads_parallel_js = b.option(bool, "threads-parallel-js", "Run threaded PR-249 cases with the test-only parallel_js GIL-removal mode") orelse false;
     const threads_shard_index = b.option(usize, "threads-shard-index", "Run only this zero-based threads-test shard index") orelse null;
     const threads_shard_count = b.option(usize, "threads-shard-count", "Split threads-test cases across this many shards") orelse null;
+    const threads_runnable_slots = b.option(u64, "threads-runnable-slots", "Override runnable slots for small-host scheduler regressions") orelse null;
     // Machine-readable per-case execution record for #430: what a run actually
     // did with each file (mode, result, duration, optimizing-tier evidence), as
     // distinct from what `pr249-reference-inventory.json` says each file *is*.
@@ -1777,6 +1778,9 @@ pub fn build(b: *std.Build) void {
     }
     if (threads_parallel_js) {
         run_threads_test.addArg("parallel-js");
+    }
+    if (threads_runnable_slots) |slots| {
+        run_threads_test.addArgs(&.{ "runnable-slots", b.fmt("{d}", .{slots}) });
     }
     if (threads_sweep) {
         run_threads_test.addArg("sweep");

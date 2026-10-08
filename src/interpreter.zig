@@ -4250,6 +4250,7 @@ pub const Interpreter = struct {
     /// operation such as unshared WebAssembly.Memory growth cannot detach a
     /// buffer between `memory.buffer` and its consuming TypedArray constructor.
     mutator_stop_request: ?*const std.atomic.Value(u64) = null,
+    mutator_stop_owner: ?*const std.atomic.Value(?*Interpreter) = null,
     mutator_stop_ctx: ?*anyopaque = null,
     mutator_stop_fn: ?*const fn (ctx: *anyopaque, machine: *anyopaque) void = null,
     mutator_stop_published_gen: std.atomic.Value(u64) = .init(0),
@@ -12346,10 +12347,7 @@ pub const Interpreter = struct {
         stack_scan.beginPark();
         self.gc_parked.store(true, .release);
         defer {
-            self.lockGcRoots();
-            self.gc_moving_parked.store(false, .monotonic);
-            self.gc_parked.store(false, .release);
-            self.unlockGcRoots();
+            self.leaveGcPark();
             stack_scan.endPark();
         }
         _ = runtime_threads.handoffRunnableSlotIfContended();
@@ -12402,6 +12400,37 @@ pub const Interpreter = struct {
     }
     pub fn unlockGcRoots(self: *Interpreter) void {
         self.gc_root_lock.unlock();
+    }
+
+    /// Leave a native/runtime scheduler park without crossing a realm-wide
+    /// mutator stop that began while this interpreter was frozen. The stop
+    /// owner inspects `gc_parked` under `gc_root_lock`; publishing the current
+    /// generation or clearing the park under that same lock closes the wakeup
+    /// race. Successive stop generations are joined in place before JavaScript
+    /// mutation resumes.
+    pub fn leaveGcPark(self: *Interpreter) void {
+        while (true) {
+            self.lockGcRoots();
+            const request = if (self.mutator_stop_request) |request_word| request_word.load(.acquire) else 0;
+            const owns_stop = if (self.mutator_stop_owner) |owner|
+                owner.load(.acquire) == self
+            else
+                false;
+            if (request == 0 or owns_stop) {
+                self.gc_moving_parked.store(false, .monotonic);
+                self.gc_parked.store(false, .release);
+                self.unlockGcRoots();
+                return;
+            }
+            self.mutator_stop_published_gen.store(request, .release);
+            self.unlockGcRoots();
+
+            const request_word = self.mutator_stop_request orelse unreachable;
+            var spins: usize = 0;
+            while (request_word.load(.acquire) == request) : (spins += 1) {
+                if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            }
+        }
     }
 
     /// Host cleanup jobs for FinalizationRegistry. Collection appends registries

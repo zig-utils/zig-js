@@ -111,6 +111,11 @@ and publishes relocation-safe VM/native roots when that tier has materialized
 them. The thread then rejoins the weighted queue before resuming JavaScript.
 This keeps a CPU-bound shared-realm loop from occupying every runnable slot
 while another `Thread` that must satisfy its progress condition remains queued.
+An interpreter frozen in that queue also satisfies a later realm-wide mutator
+stop. Its park transition is pinned while the stop owner inspects it; on wake it
+publishes the active stop generation and remains frozen until the stop ends.
+This prevents small hosts from deadlocking when an unshared WebAssembly grow or
+ArrayBuffer operation begins after peers have handed off their runnable slots.
 GIL-mode execution continues to yield through the GIL scheduler so it never
 retains the GIL while waiting to reacquire a runtime slot.
 

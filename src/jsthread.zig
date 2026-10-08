@@ -3904,9 +3904,7 @@ pub fn waitForPropAsyncStateChange(self: *Interpreter, observed: u64, deadline: 
     stack_scan.beginPark();
     self.gc_parked.store(true, .release);
     defer {
-        self.lockGcRoots();
-        self.gc_parked.store(false, .release);
-        self.unlockGcRoots();
+        self.leaveGcPark();
         stack_scan.endPark();
     }
     const released_gil = self.use_thread_gil;
@@ -4795,9 +4793,7 @@ pub fn waitForTaskStateChange(self: *Interpreter) void {
     stack_scan.beginPark();
     self.gc_parked.store(true, .release);
     defer {
-        self.lockGcRoots();
-        self.gc_parked.store(false, .release);
-        self.unlockGcRoots();
+        self.leaveGcPark();
         stack_scan.endPark();
     }
     const released_gil = self.use_thread_gil;
@@ -4848,9 +4844,7 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
         // operand stack / frame slots before we resume and mutate them. Setting
         // the flag needs no lock (the store is followed only by the native wait,
         // no root mutation), but clearing it gates the transition back to running.
-        self.lockGcRoots();
-        self.gc_parked.store(false, .release);
-        self.unlockGcRoots();
+        self.leaveGcPark();
         stack_scan.endPark();
     }
     const released_gil = self.use_thread_gil;

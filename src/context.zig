@@ -6083,6 +6083,7 @@ pub const Context = struct {
             .gc_safepoint_ctx = if (self.gc != null) self else null,
             .gc_safepoint_fn = if (self.gc != null) collectMidScript else null,
             .mutator_stop_request = if (self.parallel_js) &self.mutator_stop_request else null,
+            .mutator_stop_owner = if (self.parallel_js) &self.mutator_stop_owner else null,
             .mutator_stop_ctx = if (self.parallel_js) self else null,
             .mutator_stop_fn = if (self.parallel_js) joinMutatorStop else null,
             .parallel_worker_count = if (self.parallel_js) &self.parallel_worker_count else null,
@@ -8270,7 +8271,17 @@ pub const Context = struct {
         defer self.unlockActiveInterpreters();
         for (self.active_interpreters.items) |machine| {
             if (machine == owner) continue;
-            if (machine.mutator_stop_published_gen.load(.acquire) != request) return false;
+            if (machine.mutator_stop_published_gen.load(.acquire) == request) continue;
+            // Native waits and bounded-scheduler handoffs freeze the entire
+            // interpreter before publishing `gc_parked`. Pin the transition
+            // back to running: `leaveGcPark` either observes this request and
+            // joins it, or clears the flag before this check and remains an
+            // ordinary running peer that must reach a statement boundary.
+            machine.lockGcRoots();
+            const stopped = machine.mutator_stop_published_gen.load(.acquire) == request or
+                machine.gc_parked.load(.acquire);
+            machine.unlockGcRoots();
+            if (!stopped) return false;
         }
         return true;
     }
@@ -9147,10 +9158,7 @@ pub const Context = struct {
             // a back-to-back collector could otherwise observe stale parked
             // state while this mutator resumes.
         }
-        machine.lockGcRoots();
-        machine.gc_moving_parked.store(false, .monotonic);
-        machine.gc_parked.store(false, .release);
-        machine.unlockGcRoots();
+        machine.leaveGcPark();
         stack_scan.endPark();
     }
 
@@ -31945,6 +31953,66 @@ test "parallel_js one-slot scheduler makes progress through tree and bytecode lo
         if (mode == .required)
             try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
     }
+}
+
+test "parallel_js mutator stop pins a scheduler-parked peer through resume" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    var owner = ctx.interpreter();
+    var peer = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&owner);
+    defer ctx.popActiveInterpreter(&owner);
+    try ctx.pushActiveInterpreter(&peer);
+    defer ctx.popActiveInterpreter(&peer);
+
+    const request = ctx.mintMutatorStopGeneration();
+    ctx.mutator_stop_owner.store(&owner, .release);
+    ctx.mutator_stop_request.store(request, .release);
+    defer {
+        ctx.mutator_stop_request.store(0, .release);
+        ctx.mutator_stop_owner.store(null, .release);
+    }
+    peer.gc_parked.store(true, .release);
+    try std.testing.expect(ctx.allMutatorsStoppedAtBoundary(request, &owner));
+
+    var entered = std.atomic.Value(bool).init(false);
+    var resumed = std.atomic.Value(bool).init(false);
+    const Resume = struct {
+        fn run(machine: *interp.Interpreter, started: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
+            started.store(true, .release);
+            machine.leaveGcPark();
+            done.store(true, .release);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Resume.run, .{ &peer, &entered, &resumed });
+    var joined = false;
+    defer if (!joined) {
+        ctx.mutator_stop_request.store(0, .release);
+        thread.join();
+    };
+    while (!entered.load(.acquire)) std.atomic.spinLoopHint();
+    const deadline = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + 5 * std.time.ns_per_s;
+    while (peer.mutator_stop_published_gen.load(.acquire) != request and
+        std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds < deadline)
+    {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(request, peer.mutator_stop_published_gen.load(.acquire));
+    try std.testing.expect(peer.gc_parked.load(.acquire));
+    try std.testing.expect(!resumed.load(.acquire));
+
+    ctx.mutator_stop_request.store(0, .release);
+    thread.join();
+    joined = true;
+    try std.testing.expect(resumed.load(.acquire));
+    try std.testing.expect(!peer.gc_parked.load(.acquire));
 }
 
 test "forced tree-walker and required bytecode preserve named rest parameters" {

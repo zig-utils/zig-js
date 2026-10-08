@@ -1104,6 +1104,7 @@ pub fn main(init: std.process.Init) !void {
     var inventory_path: ?[]const u8 = null;
     var shard_index: ?usize = null;
     var shard_count: ?usize = null;
+    var runnable_slots: ?u64 = null;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
     while (args.next()) |a| {
@@ -1123,6 +1124,16 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, a, "list")) list_mode = true;
         if (std.mem.eql(u8, a, "one")) one = args.next();
         if (std.mem.eql(u8, a, "inventory")) inventory_path = args.next();
+        if (std.mem.eql(u8, a, "runnable-slots")) {
+            const raw = args.next() orelse {
+                std.debug.print("threads-test: runnable-slots requires <count>\n", .{});
+                return error.InvalidRunnableSlots;
+            };
+            runnable_slots = std.fmt.parseInt(u64, raw, 10) catch {
+                std.debug.print("threads-test: invalid runnable slot count '{s}'\n", .{raw});
+                return error.InvalidRunnableSlots;
+            };
+        }
         if (std.mem.eql(u8, a, "shard")) {
             const raw_index = args.next() orelse {
                 std.debug.print("threads-test: shard requires <index> <count>\n", .{});
@@ -1148,6 +1159,14 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("threads-test: invalid shard {d}/{d}\n", .{ shard_i, shard_n });
         return error.InvalidShard;
     }
+
+    const previous_scheduler = if (runnable_slots) |slots|
+        js.setRuntimeThreadSchedulerLimits(.{ .max_runnable_threads = slots })
+    else
+        null;
+    defer if (previous_scheduler) |previous| {
+        _ = js.setRuntimeThreadSchedulerLimits(previous);
+    };
 
     // `list`: print the green allowlist (one path per line) and exit, so a
     // driver (CI's whole-corpus no-GIL TSan sweep) can run each entry in its own
