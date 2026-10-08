@@ -1041,45 +1041,9 @@ const QuickPropertyPlan = struct {
     resolved_target_slot: u32,
 };
 
-const max_quick_array_expression_ops = 16;
-const max_quick_array_expression_stack = 8;
-
-const QuickArrayNumericOp = union(enum) {
-    constant: f64,
-    local: u32,
-    add,
-    sub,
-    mul,
-    div,
-    mod,
-    bit_and,
-};
-
 const QuickArrayBound = union(enum) {
     constant: f64,
     local: u32,
-};
-
-const QuickArrayAdd3BitAnd = struct {
-    locals: [3]u32,
-    mask: i32,
-};
-
-const QuickArrayExpressionSpecialization = union(enum) {
-    generic,
-    add3_bit_and: QuickArrayAdd3BitAnd,
-};
-
-const QuickPackedArrayPushLoop = struct {
-    index_local: u32,
-    array_local: u32,
-    bound: QuickArrayBound,
-    increment: f64,
-    get_prop_instruction: u32,
-    ops: [max_quick_array_expression_ops]QuickArrayNumericOp,
-    op_count: u8,
-    specialization: QuickArrayExpressionSpecialization,
-    executed: u8,
 };
 
 const QuickPolymorphicPropertyLoop = struct {
@@ -1125,7 +1089,6 @@ const QuickObjectAllocationLoop = struct {
 
 const QuickArrayPlan = union(enum) {
     unsupported,
-    packed_push: QuickPackedArrayPushLoop,
     polymorphic_property: QuickPolymorphicPropertyLoop,
     object_allocation: QuickObjectAllocationLoop,
 };
@@ -1247,8 +1210,6 @@ var quick_arguments_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
-var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
-var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_checkpoint_crossings: std.atomic.Value(u64) = .init(0);
@@ -1588,124 +1549,6 @@ inline fn quickArgumentsStore(vm: *Interpreter, receiver: Value, key: Value, sto
     return stored;
 }
 
-fn specializeQuickArrayExpression(ops: []const QuickArrayNumericOp) QuickArrayExpressionSpecialization {
-    if (ops.len == 7) {
-        const first = switch (ops[0]) {
-            .local => |local| local,
-            else => return .generic,
-        };
-        const second = switch (ops[1]) {
-            .local => |local| local,
-            else => return .generic,
-        };
-        if (ops[2] != .add) return .generic;
-        const third = switch (ops[3]) {
-            .local => |local| local,
-            else => return .generic,
-        };
-        if (ops[4] != .add) return .generic;
-        const mask = switch (ops[5]) {
-            .constant => |number| number,
-            else => return .generic,
-        };
-        if (ops[6] != .bit_and) return .generic;
-        return .{ .add3_bit_and = .{
-            .locals = .{ first, second, third },
-            .mask = Value.num(mask).toInt32(),
-        } };
-    }
-    return .generic;
-}
-
-fn compileQuickPackedArrayPushLoop(chunk: *Chunk, start: usize) ?QuickPackedArrayPushLoop {
-    const code = chunk.code.items;
-    if (start + 16 > code.len or
-        code[start].op != .load_local or
-        (code[start + 1].op != .load_const and code[start + 1].op != .load_local) or
-        code[start + 2].op != .lt or
-        code[start + 3].op != .jump_if_false or
-        code[start + 4].op != .load_local or
-        code[start + 5].op != .dup or
-        code[start + 6].op != .get_prop or code[start + 6].a >= chunk.names.items.len or
-        !std.mem.eql(u8, chunk.names.items[code[start + 6].a], "push") or
-        code[start + 7].op != .swap)
-        return null;
-
-    const bound: QuickArrayBound = switch (code[start + 1].op) {
-        .load_local => .{ .local = code[start + 1].a },
-        .load_const => constant: {
-            if (code[start + 1].a >= chunk.consts.items.len) return null;
-            const value_ = chunk.consts.items[code[start + 1].a];
-            if (!value_.isNumber()) return null;
-            break :constant .{ .constant = value_.asNum() };
-        },
-        else => unreachable,
-    };
-
-    var ops: [max_quick_array_expression_ops]QuickArrayNumericOp = undefined;
-    var op_count: usize = 0;
-    var depth: usize = 0;
-    var cursor = start + 8;
-    while (cursor < code.len and code[cursor].op != .call_with_this) : (cursor += 1) {
-        if (op_count == ops.len) return null;
-        const op: QuickArrayNumericOp = switch (code[cursor].op) {
-            .load_local => local: {
-                depth += 1;
-                break :local .{ .local = code[cursor].a };
-            },
-            .load_const => constant: {
-                if (code[cursor].a >= chunk.consts.items.len) return null;
-                const value_ = chunk.consts.items[code[cursor].a];
-                if (!value_.isNumber()) return null;
-                depth += 1;
-                break :constant .{ .constant = value_.asNum() };
-            },
-            .add, .sub, .mul, .div, .mod, .bit_and => binary: {
-                if (depth < 2) return null;
-                depth -= 1;
-                break :binary switch (code[cursor].op) {
-                    .add => .add,
-                    .sub => .sub,
-                    .mul => .mul,
-                    .div => .div,
-                    .mod => .mod,
-                    .bit_and => .bit_and,
-                    else => unreachable,
-                };
-            },
-            else => return null,
-        };
-        if (depth > max_quick_array_expression_stack) return null;
-        ops[op_count] = op;
-        op_count += 1;
-    }
-    if (cursor >= code.len or code[cursor].a != 1 or depth != 1 or cursor + 8 > code.len) return null;
-    const exit = cursor + 8;
-    const index_local = code[start].a;
-    if (code[start + 3].a != exit or
-        code[cursor + 1].op != .pop or
-        code[cursor + 2].op != .load_local or code[cursor + 2].a != index_local or
-        code[cursor + 3].op != .load_const or code[cursor + 3].a >= chunk.consts.items.len or
-        code[cursor + 4].op != .add or
-        code[cursor + 5].op != .store_local or code[cursor + 5].a != index_local or
-        code[cursor + 6].op != .pop or
-        code[cursor + 7].op != .jump or code[cursor + 7].a != start)
-        return null;
-    const increment = chunk.consts.items[code[cursor + 3].a];
-    if (!increment.isNumber() or exit - start > std.math.maxInt(u8)) return null;
-    return .{
-        .index_local = index_local,
-        .array_local = code[start + 4].a,
-        .bound = bound,
-        .increment = increment.asNum(),
-        .get_prop_instruction = @intCast(start + 6),
-        .ops = ops,
-        .op_count = @intCast(op_count),
-        .specialization = specializeQuickArrayExpression(ops[0..op_count]),
-        .executed = @intCast(exit - start),
-    };
-}
-
 fn compileQuickPolymorphicPropertyLoop(chunk: *Chunk, start: usize) ?QuickPolymorphicPropertyLoop {
     const code = chunk.code.items;
     if (start + 38 > code.len) return null;
@@ -1895,7 +1738,6 @@ fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
         return .{ .object_allocation = allocation };
     if (compileQuickPolymorphicPropertyLoop(chunk, start)) |property|
         return .{ .polymorphic_property = property };
-    if (compileQuickPackedArrayPushLoop(chunk, start)) |push| return .{ .packed_push = push };
     return .unsupported;
 }
 
@@ -1919,53 +1761,6 @@ const QuickArrayLoopUpdate = struct {
     extra_steps: u64,
     next_ip: usize,
 };
-
-inline fn quickArrayNumericLocal(push: *const QuickPackedArrayPushLoop, frame: *Frame, index_value: Value, raw_local: u32) ?f64 {
-    const local: usize = @intCast(raw_local);
-    if (local >= frame.slots.len) return null;
-    const operand = if (raw_local == push.index_local) index_value else frame.slots[local];
-    return if (operand.isNumber()) operand.asNum() else null;
-}
-
-inline fn quickArrayNumericExpression(push: *const QuickPackedArrayPushLoop, frame: *Frame, index_value: Value) ?Value {
-    switch (push.specialization) {
-        .add3_bit_and => |specialized| {
-            const first = quickArrayNumericLocal(push, frame, index_value, specialized.locals[0]) orelse return null;
-            const second = quickArrayNumericLocal(push, frame, index_value, specialized.locals[1]) orelse return null;
-            const third = quickArrayNumericLocal(push, frame, index_value, specialized.locals[2]) orelse return null;
-            const sum = Value.num((first + second) + third).toInt32();
-            return Value.num(@floatFromInt(sum & specialized.mask));
-        },
-        .generic => {},
-    }
-    var numbers: [max_quick_array_expression_stack]f64 = undefined;
-    var depth: usize = 0;
-    for (push.ops[0..push.op_count]) |op| switch (op) {
-        .constant => |number| {
-            numbers[depth] = number;
-            depth += 1;
-        },
-        .local => |raw_local| {
-            numbers[depth] = quickArrayNumericLocal(push, frame, index_value, raw_local) orelse return null;
-            depth += 1;
-        },
-        .add, .sub, .mul, .div, .mod, .bit_and => {
-            const rhs = numbers[depth - 1];
-            const lhs = numbers[depth - 2];
-            depth -= 1;
-            numbers[depth - 1] = switch (op) {
-                .add => lhs + rhs,
-                .sub => lhs - rhs,
-                .mul => lhs * rhs,
-                .div => lhs / rhs,
-                .mod => numberRemainder(lhs, rhs),
-                .bit_and => @floatFromInt(Value.num(lhs).toInt32() & Value.num(rhs).toInt32()),
-                else => unreachable,
-            };
-        },
-    };
-    return if (depth == 1) Value.num(numbers[0]) else null;
-}
 
 fn quickArrayBoundValue(bound: QuickArrayBound, frame: *Frame) ?Value {
     return switch (bound) {
@@ -3220,44 +3015,6 @@ fn tryQuickArrayLoop(
                 .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
                 .next_ip = if (completed) property.exit_ip else start,
             };
-        },
-        .packed_push => |*push| quick: {
-            const executed: u64 = push.executed;
-            const max_iterations: usize = @intCast((max_extra_steps + 1) / executed);
-            if (max_iterations == 0 or max_iterations > 64) break :quick null;
-            const index_slot: usize = @intCast(push.index_local);
-            const array_slot: usize = @intCast(push.array_local);
-            if (index_slot >= frame.slots.len or array_slot >= frame.slots.len) break :quick null;
-            const array_value = frame.slots[array_slot];
-            if (!array_value.isObject()) break :quick null;
-            const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked) break :quick null;
-            const get_prop_instruction: usize = @intCast(push.get_prop_instruction);
-            if (get_prop_instruction >= chunk.code.items.len) break :quick null;
-            const name_index = chunk.code.items[get_prop_instruction].a;
-            if (name_index >= chunk.names.items.len) break :quick null;
-            const callee = quickArrayPrototypeData(
-                chunk,
-                get_prop_instruction,
-                array,
-                chunk.names.items[name_index],
-                parallel_sync,
-            ) orelse break :quick null;
-
-            var values: [64]Value = undefined;
-            var index_value = frame.slots[index_slot];
-            var iterations: usize = 0;
-            while (iterations < max_iterations) : (iterations += 1) {
-                if (!index_value.isNumber()) break;
-                const bound = quickArrayBoundValue(push.bound, frame) orelse break;
-                if (!(index_value.asNum() < bound.asNum())) break;
-                values[iterations] = quickArrayNumericExpression(push, frame, index_value) orelse break;
-                index_value = Value.num(index_value.asNum() + push.increment);
-            }
-            if (iterations == 0) break :quick null;
-            _ = (try vm.tryFastArrayPush(callee, array_value, values[0..iterations])) orelse break :quick null;
-            frame.slots[index_slot] = index_value;
-            break :quick .{ .extra_steps = @as(u64, @intCast(iterations)) * executed - 1, .next_ip = start };
         },
     };
 }
@@ -8416,13 +8173,6 @@ fn runChunk(
                                     _ = quick_object_allocation_checkpoint_crossings.fetchAdd(1, .monotonic);
                             }
                             if (builtin.is_test) switch (plan.*) {
-                                .packed_push => |push| {
-                                    _ = quick_packed_array_push_loop_hits.fetchAdd(1, .monotonic);
-                                    switch (push.specialization) {
-                                        .add3_bit_and => _ = quick_packed_array_specialized_expression_hits.fetchAdd(1, .monotonic),
-                                        .generic => {},
-                                    }
-                                },
                                 .polymorphic_property => _ = quick_polymorphic_property_loop_hits.fetchAdd(1, .monotonic),
                                 .object_allocation => {},
                                 .unsupported => {},
@@ -13731,6 +13481,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         .{ .entry = .initial, .name = "activationRecursive", .argument = 8, .expected = 21 },
         .{ .entry = .initial, .name = "activationPropertyLoop", .argument = 8, .expected = 28093728 },
         .{ .entry = .initial, .name = "activationArraySum", .argument = 8, .expected = 36 },
+        .{ .entry = .initial, .name = "activationArrayPush", .argument = 8, .expected = 806 },
         .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
         .{ .entry = .inline_, .name = "activationLegacy", .argument = 4, .expected = 4 },
         .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
@@ -13750,6 +13501,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         \\function activationRecursive(n){return n<2?n:activationRecursive(n-1)+activationRecursive(n-2);}
         \\function activationPropertyLoop(limit){const object={a:0,b:1,c:2,d:3};let i=0;while(i<limit){object.a=(object.a+i)%1000003;object.b=object.b+1;object.c=object.a+object.b;object.d=object.c-object.b;i=i+1;}return object.a*1000000+object.b*10000+object.c*100+object.d;}
         \\function activationArraySum(){const values=[1,2,3,4,5,6,7,8];let total=0;for(let i=0;i<values.length;i=i+1)total=total+values[i];return total;}
+        \\function activationArrayPush(limit){let values=[];for(let i=0;i<limit;i=i+1)values.push((i+2+1)&7);return values.length*100+values[3];}
         \\function activationLegacy(v){return activationLegacy.arguments[0];}
         \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
         \\function activationNestedB(v){return activationNestedA(v);}
@@ -21767,8 +21519,6 @@ test "vm: quickens packed dense numeric array reads" {
     const lengths_before = quick_array_length_hits.load(.monotonic);
     const prototype_data_before = quick_array_prototype_data_hits.load(.monotonic);
     const pushes_before = quick_array_push_hits.load(.monotonic);
-    const push_loops_before = quick_packed_array_push_loop_hits.load(.monotonic);
-    const specialized_expressions_before = quick_packed_array_specialized_expression_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
         \\function sum(values) {
         \\  let total = 0;
@@ -21801,9 +21551,6 @@ test "vm: quickens packed dense numeric array reads" {
         \\}
         \\fill(8, 2, 1)
     )).asNum());
-    try std.testing.expect(quick_packed_array_push_loop_hits.load(.monotonic) > push_loops_before);
-    try std.testing.expect(quick_packed_array_specialized_expression_hits.load(.monotonic) > specialized_expressions_before);
-    const push_loops_after = quick_packed_array_push_loop_hits.load(.monotonic);
     const pushes_after = quick_array_push_hits.load(.monotonic);
 
     // Holes and indexed accessors remain observable and must take [[Get]].
@@ -21875,7 +21622,6 @@ test "vm: quickens packed dense numeric array reads" {
         \\}
         \\fill()
     )).asNum());
-    try std.testing.expectEqual(push_loops_after, quick_packed_array_push_loop_hits.load(.monotonic));
 
     // An indexed prototype setter must observe push's ordinary [[Set]].
     try std.testing.expectEqual(@as(f64, 71), (try vmRun(allocator,
@@ -24324,6 +24070,185 @@ test "vm: shared array fast paths retain observable overrides" {
     )).asNum());
 }
 
+test "vm: array push execution preserves numeric expressions across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 3224), (try ctx.evaluate(
+        \\function fill(limit, job, lane) {
+        \\  const values = [];
+        \\  for (let i = 0; i < limit; i = i + 1) values.push((i + job + lane) & 7);
+        \\  return values.length * 100 + values[3];
+        \\}
+        \\function pushLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  return fill(8, 2, 1);
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(pushLane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
+test "vm: array push execution preserves method argument and receiver effects" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\function fill(values, limit, job, lane) {
+        \\  for (let i = 0; i < limit; i = i + 1) values.push((i + job + lane) & 7);
+        \\  return values;
+        \\}
+        \\let trace = ''; const raw = [];
+        \\const proxy = new Proxy(raw, {
+        \\  get(target, key, receiver) { trace += 'g:' + key + ','; $vm.gc(); return Reflect.get(target, key, receiver); },
+        \\  set(target, key, value, receiver) { trace += 's:' + key + ','; $vm.gc(); return Reflect.set(target, key, value, receiver); }
+        \\});
+        \\fill(proxy, 2, 2, 1);
+        \\let order = ''; const ordered = [];
+        \\Object.defineProperty(ordered, 'push', {
+        \\  get() { order += 'get;'; $vm.gc(); return Array.prototype.push; }
+        \\});
+        \\const job = { valueOf() { order += 'coerce;'; $vm.gc(); return 2; } };
+        \\fill(ordered, 2, job, 1);
+        \\let override = ''; const own = [];
+        \\own.push = function(value) { if (this !== own) throw new Error('receiver'); override += value + ','; $vm.gc(); };
+        \\fill(own, 3, 2, 1);
+        \\const partial = [], marker = {}, proto = Object.create(Array.prototype); let caught = false;
+        \\Object.defineProperty(proto, '1', { set(value) { $vm.gc(); throw marker; } });
+        \\Object.setPrototypeOf(partial, proto);
+        \\try { fill(partial, 3, 2, 1); } catch (error) { caught = error === marker; }
+        \\function liveFill() {
+        \\  const values = []; let limit = 3, calls = 0;
+        \\  values.push = function(value) { calls++; limit = 1; $vm.gc(); Array.prototype.push.call(this, value); };
+        \\  for (let i = 0; i < limit; i = i + 1) values.push(i);
+        \\  return calls === 1 && values.length === 1 && values[0] === 0;
+        \\}
+        \\trace === 'g:push,g:length,s:0,s:length,g:push,g:length,s:1,s:length,' &&
+        \\  raw.length === 2 && raw[0] === 3 && raw[1] === 4 &&
+        \\  order === 'get;coerce;get;coerce;' && ordered.length === 2 && ordered[0] === 3 && ordered[1] === 4 &&
+        \\  override === '3,4,5,' && own.length === 0 && caught && partial.length === 1 && partial[0] === 3 &&
+        \\  !Object.hasOwn(partial, '1') && liveFill()
+    )).asBool());
+}
+
+test "vm: array push execution survives moving GC" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+    const array = try ctx.evaluate(
+        \\globalThis.pushMoveDiscard = [];
+        \\for (let i = 0; i < 4096; i++) pushMoveDiscard.push({ dead: i, child: { value: i } });
+        \\globalThis.pushMoveArray = [];
+        \\function warmedFill(values, limit, job, lane) {
+        \\  for (let i = 0; i < limit; i = i + 1) values.push((i + job + lane) & 7);
+        \\  return values.length * 100 + values[3];
+        \\}
+        \\for (let i = 0; i < 4; i++) warmedFill(pushMoveArray, 2, 2, 1);
+        \\pushMoveArray
+    );
+    const handle = try ctx.protectValue(array);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const old_address = @intFromPtr(handle.get().asObj());
+    _ = try ctx.evaluate("pushMoveDiscard = null");
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0);
+    try std.testing.expect(old_address != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 1604), (try ctx.evaluate("warmedFill(pushMoveArray, 8, 2, 1)")).asNum());
+    try std.testing.expect((try ctx.evaluate("pushMoveArray[8] === 3 && pushMoveArray[11] === 6 && pushMoveArray[15] === 2")).asBool());
+}
+
+test "vm: array push execution retains budget and stop checkpoints" {
+    for ([_]bool{ false, true }) |stop_at_checkpoint| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator,
+            \\function fill(limit, job, lane) {
+            \\  const values = [];
+            \\  for (let i = 0; i < limit; i = i + 1) values.push((i + job + lane) & 7);
+            \\  return values.length;
+            \\}
+            \\fill(100, 2, 1)
+        );
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var stop: std.atomic.Value(bool) = .init(stop_at_checkpoint);
+        var machine = try initTestInterpreter(.{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .stop_flag = &stop,
+            .step_budget = 1024,
+        });
+        try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+        try std.testing.expectEqual(@as(u64, if (stop_at_checkpoint) 1024 else 1025), machine.steps);
+        try std.testing.expectEqualStrings(if (stop_at_checkpoint) "Error" else "RangeError", machine.exception.asObj().errorName());
+    }
+}
+
+test "vm: array push execution preserves source hooks" {
+    const Capture = struct {
+        pushes: usize = 0,
+        fn profile(raw: *anyopaque, _: *Interpreter, location: interp.DebugStatementLocation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (location.location.line == 5) self.pushes += 1;
+        }
+        fn debug(raw: *anyopaque, machine: *Interpreter, location: interp.DebugStatementLocation) EvalError!void {
+            profile(raw, machine, location);
+        }
+    };
+    for ([_]bool{ false, true }) |debug| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = if (debug) .tree_walker else .required,
+        });
+        defer ctx.destroy();
+        var capture = Capture{};
+        if (debug) {
+            ctx.debug_statement_ctx = &capture;
+            ctx.debug_statement_hook = Capture.debug;
+        } else {
+            ctx.profile_statement_ctx = &capture;
+            ctx.profile_statement_hook = Capture.profile;
+        }
+        try std.testing.expectEqual(@as(f64, 806), (try ctx.evaluate(
+            \\function fill(limit, job, lane) {
+            \\  const values = [];
+            \\  let i = 0;
+            \\  while (i < limit) {
+            \\    values.push((i + job + lane) & 7);
+            \\    i = i + 1;
+            \\  }
+            \\  return values.length * 100 + values[3];
+            \\}
+            \\fill(8, 2, 1)
+        )).asNum());
+        try std.testing.expectEqual(@as(usize, 8), capture.pushes);
+    }
+}
+
 test "vm: packed array sum execution runs across no-GIL workers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
@@ -24539,7 +24464,6 @@ test "vm: packed array sum execution preserves bytecode steps" {
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     var steps: [2]u64 = undefined;
-    var push_hits = quick_packed_array_push_loop_hits.load(.monotonic);
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         var parser = try Parser.init(allocator, source);
@@ -24551,9 +24475,6 @@ test "vm: packed array sum execution preserves bytecode steps" {
         var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         try std.testing.expectEqual(@as(f64, 36), (try run(&machine, chunk, null)).asNum());
         steps[run_index] = machine.steps;
-        const next_push_hits = quick_packed_array_push_loop_hits.load(.monotonic);
-        try std.testing.expect(next_push_hits > push_hits);
-        push_hits = next_push_hits;
     }
     try std.testing.expectEqual(@as(u64, 316), steps[0]);
     try std.testing.expectEqual(steps[1], steps[0]);

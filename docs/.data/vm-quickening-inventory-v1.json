@@ -156,27 +156,6 @@
       "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_dense_array_create_hits", "quick_sparse_array_index_hits", "quick_sparse_array_store_hits", "quick_sparse_array_create_hits", "quick_array_prototype_index_hits", "quick_typed_array_index_hits", "quick_typed_array_store_hits", "quick_arguments_index_hits", "quick_arguments_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
     },
     {
-      "id": "packed-array-push-loop",
-      "title": "Packed-array push loop kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact counted loop pushing a bounded numeric expression", "one add-three-and-bitmask expression specialization"],
-      "guards": ["exact loop/opcode shape", "at most sixteen accepted numeric expression ops", "numeric locals/constants", "intrinsic push identity and packed extensible Array"],
-      "miss_behavior": ["resume ordinary bytecode at the loop head", "generic bounded expression evaluation remains distinct from the add3_bit_and specialization"],
-      "metadata_lifetime": "The decoded QuickArrayPlan and expression specialization live in the Chunk arena and unsupported shapes retain an explicit tag.",
-      "no_gil_synchronization": "The plan pointer is acquire/release published; frame and array mutation follow their structure locks and append contract.",
-      "observable_steps_debugger": "The helper accounts exact per-iteration bytecodes, services boundary work through ordinary VM checkpoints, and is disabled with statement debugging.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickPackedArrayPushLoop = struct {"},
-        {"path": "src/vm.zig", "text": "fn compileQuickPackedArrayPushLoop("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: quickens packed dense numeric array reads\""}
-      ],
-      "metrics": ["quick_packed_array_push_loop_hits", "quick_packed_array_specialized_expression_hits"]
-    },
-    {
       "id": "polymorphic-property-loop",
       "title": "Polymorphic property loop kernel",
       "classification": "legacy_narrow",
@@ -371,10 +350,8 @@
     "tagged_types": {
       "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
       "QuickPropertySpecialization": ["generic", "property_local_add_mod", "property_add_constant", "property_pair_add", "property_pair_sub"],
-      "QuickArrayNumericOp": ["constant", "local", "add", "sub", "mul", "div", "mod", "bit_and"],
       "QuickArrayBound": ["constant", "local"],
-      "QuickArrayExpressionSpecialization": ["generic", "add3_bit_and"],
-      "QuickArrayPlan": ["unsupported", "packed_push", "polymorphic_property", "object_allocation"],
+      "QuickArrayPlan": ["unsupported", "polymorphic_property", "object_allocation"],
       "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
       "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
       "QuickLeafPlan": ["unsupported", "numeric"],
@@ -416,8 +393,6 @@
       "quick_array_length_hits",
       "quick_array_prototype_data_hits",
       "quick_array_push_hits",
-      "quick_packed_array_push_loop_hits",
-      "quick_packed_array_specialized_expression_hits",
       "quick_polymorphic_property_loop_hits",
       "quick_object_allocation_loop_hits",
       "quick_object_allocation_checkpoint_crossings",

@@ -736,14 +736,6 @@ pub const quick_call_loop_candidate: u8 = 1 << 0;
 pub const quick_array_loop_candidate: u8 = 1 << 1;
 
 fn mayStartQuickArrayLoop(code: []const Inst, start: usize) bool {
-    const packed_push = start + 7 < code.len and
-        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
-        code[start + 2].op == .lt and
-        code[start + 3].op == .jump_if_false and
-        code[start + 4].op == .load_local and
-        code[start + 5].op == .dup and
-        code[start + 6].op == .get_prop and
-        code[start + 7].op == .swap;
     const polymorphic_property = start + 8 < code.len and
         (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
         code[start + 2].op == .lt and
@@ -765,7 +757,7 @@ fn mayStartQuickArrayLoop(code: []const Inst, start: usize) bool {
         code[start + 9].op == .load_local and
         code[start + 10].op == .load_local and
         code[start + 11].op == .get_index;
-    return packed_push or polymorphic_property or object_allocation;
+    return polymorphic_property or object_allocation;
 }
 
 fn mayStartQuickCallLoop(code: []const Inst, start: usize) bool {

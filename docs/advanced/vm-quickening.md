@@ -17,7 +17,7 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 | --- | --- | ---: |
 | `general_adaptive` | Site/opcode behavior selected from runtime identity, shape, or representation guards rather than a whole benchmark-shaped body. | 6 |
 | `bounded_structural` | A bounded expression/trace decoder with explicit accepted operations and size limits. | 2 |
-| `legacy_narrow` | An exact bytecode-pattern kernel. It is useful implementation history, not broad dispatch-family coverage. | 5 |
+| `legacy_narrow` | An exact bytecode-pattern kernel. It is useful implementation history, not broad dispatch-family coverage. | 4 |
 
 ## Implemented guarded families
 
@@ -28,7 +28,6 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 | `literal-shape-transition` | `general_adaptive` | fixed-name init_prop CreateDataPropertyOrThrow transitions | run defineLiteralDataProp; record only the resulting direct child transition; computed/spread/accessor literal members stay generic |
 | `property-update-trace` | `bounded_structural` | up to twenty bytecodes and eight numeric operations ending in set_prop; optional canonical counted-loop tail | resume ordinary bytecode at the same load_local; cache an unsupported sentinel only in isolated execution; a tail mismatch keeps the assignment-only trace |
 | `array-opcode-fast-paths` | `general_adaptive` | present dense get_index, including present elements in holey array storage; primitive Number and canonical String sparse own-data get_index, replacement, and distant creation; ordinary prototype indexed dense or named-data get_index at arbitrary ancestor depth; existing dense set_index, including arrays with unrelated sparse data; guarded dense append, hole fill, and bounded gap growth; dense/sparse Array own-index creation through ordinary inherited writable data; primitive Number and canonical numeric String TypedArray get_index and set_index; primitive Number and canonical String mapped and unmapped arguments get_index and set_index; Array length read; Array.prototype data read; intrinsic Array.prototype.push call | run ToPropertyKey and generic property/index semantics; dispatch the ordinary callable; never treat a hole or inherited indexed property as dense data |
-| `packed-array-push-loop` | `legacy_narrow` | one exact counted loop pushing a bounded numeric expression; one add-three-and-bitmask expression specialization | resume ordinary bytecode at the loop head; generic bounded expression evaluation remains distinct from the add3_bit_and specialization |
 | `polymorphic-property-loop` | `legacy_narrow` | one exact indexed-selector loop reading and writing named own data properties | resume ordinary loop bytecode before any fused mutation; nonmatching bytecode uses the explicit unsupported array plan |
 | `fixed-shape-object-allocation-loop` | `legacy_narrow` | one exact selector/replacement loop allocating a three-property literal | return to the loop head before fused mutation; fall back after materializing state at GC/checkpoint boundaries; invalidate prepared shape state when the realm root Shape differs |
 | `numeric-leaf-call` | `bounded_structural` | straight-line numeric bytecode leaves; non-arrow static arguments[index] numeric expressions; captured scalar and receiver-property variants | perform the ordinary JS call; cache unsupported bytecode leaves explicitly; AST arguments leaves are revalidated for each exact call arity |
@@ -39,7 +38,7 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 
 Every legacy pattern above remains labeled `legacy_narrow`; none is used as evidence that its broader property, index, call, arithmetic, control, or allocation family is covered.
 
-The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). The exact four-property counted-loop kernel was removed in [issue #1076](https://github.com/zig-utils/zig-js/issues/1076). The exact packed-array sum loop kernel and its compile-time candidate hint were removed in [issue #1077](https://github.com/zig-utils/zig-js/issues/1077). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.
+The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). The exact four-property counted-loop kernel was removed in [issue #1076](https://github.com/zig-utils/zig-js/issues/1076). The exact packed-array sum loop kernel and its compile-time candidate hint were removed in [issue #1077](https://github.com/zig-utils/zig-js/issues/1077). The packed-array push loop kernel, its numeric-expression decoder/specialization, and its candidate hint were removed in [issue #1078](https://github.com/zig-utils/zig-js/issues/1078). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.
 
 ## Explicitly unsupported broad families
 
@@ -53,4 +52,4 @@ The exact numeric recurrence body recognizers and precomputed recurrence result/
 
 ## Drift gate
 
-The validator binds this inventory to 4 plan types, 12 tagged quickening types, 6 chunk metadata fields, 2 structural-candidate flags, and 38 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
+The validator binds this inventory to 4 plan types, 10 tagged quickening types, 6 chunk metadata fields, 2 structural-candidate flags, and 36 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
