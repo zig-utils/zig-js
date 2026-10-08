@@ -22643,6 +22643,37 @@ test "vm: quickens numeric sparse array stores" {
     }
 }
 
+test "vm: sparse creation preserves a higher existing array length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const before = quick_sparse_array_create_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 2000001), (try vmRun(allocator,
+            \\let values = []; values[2000000] = 1; values[1000000] = 2; values.length
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let values = [];
+            \\values["2000000"] = 1; values["1000000"] = 2;
+            \\(values.length === 2000001 && values[2000000] === 1 &&
+            \\ values[1000000] === 2 && Object.keys(values).join(",") === "1000000,2000000") ? 1 : 0
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 3000000), (try vmRun(allocator,
+            \\let values = new Array(3000000); values[1000000] = 7; values.length
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let values = [];
+            \\values[4294967294] = 7; values["1000000"] = 8;
+            \\(values.length === 4294967295 && values[4294967294] === 7 &&
+            \\ values[1000000] === 8) ? 1 : 0
+        )).asNum());
+        try std.testing.expect(quick_sparse_array_create_hits.load(.monotonic) >= before + 7);
+    }
+}
+
 test "vm: quickens distant sparse array creation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

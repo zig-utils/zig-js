@@ -6726,7 +6726,10 @@ pub const Object = struct {
         const dense_cap: usize = 1 << 24;
         if (index < dense_cap and index <= self.elementsItems().len + 1024) return false;
 
-        try self.setArrayLengthFloorUnlocked(arena, index + 1);
+        // Array exotic [[DefineOwnProperty]] raises length only when the new
+        // index reaches the old length. A descending sparse insertion must not
+        // truncate the logical length published by an earlier insertion.
+        try self.setArrayLengthFloorUnlocked(arena, @max(self.arrayLengthFloor(), index + 1));
         try self.setOwnUnlocked(arena, root, name, v);
         return true;
     }
