@@ -1293,6 +1293,7 @@ var quick_dense_array_create_hits: std.atomic.Value(u64) = .init(0);
 var quick_sparse_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_sparse_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_sparse_array_create_hits: std.atomic.Value(u64) = .init(0);
+var quick_array_prototype_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_arguments_index_hits: std.atomic.Value(u64) = .init(0);
@@ -1550,6 +1551,14 @@ inline fn quickSparseArrayStore(vm: *Interpreter, receiver: Value, key: Value, s
 inline fn quickSparseArrayCreate(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!bool {
     const index = quickPropertyArrayIndex(key) orelse return false;
     return vm.createFastArraySparseIndex(receiver, index, stored);
+}
+
+/// Resolve one direct prototype indexed data property after proving the Array
+/// receiver has no exact own property. Accessors, Proxies, exotics, and deeper
+/// chain walks retain ordinary [[Get]].
+inline fn quickArrayPrototypeIndexLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
+    const index = quickPropertyArrayIndex(key) orelse return null;
+    return vm.loadFastArrayPrototypeIndex(receiver, index);
 }
 
 /// A primitive Number key has no observable ToPropertyKey hook. Resolve the
@@ -9532,6 +9541,11 @@ fn runChunk(
                                 if (try quickSparseArrayLoad(vm, obj, key)) |sparse| {
                                     try stack.append(stack_alloc, sparse);
                                     if (builtin.is_test) _ = quick_sparse_array_index_hits.fetchAdd(1, .monotonic);
+                                    break :fast;
+                                }
+                                if (try quickArrayPrototypeIndexLoad(vm, obj, key)) |inherited| {
+                                    try stack.append(stack_alloc, inherited);
+                                    if (builtin.is_test) _ = quick_array_prototype_index_hits.fetchAdd(1, .monotonic);
                                     break :fast;
                                 }
                             }
@@ -22421,6 +22435,128 @@ test "vm: numeric sparse array reads enforce restriction ownership" {
     owner.join();
 
     try std.testing.expectError(error.Throw, quickSparseArrayLoad(&machine, array, Value.num(1000000)));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+}
+
+test "vm: quickens direct prototype indexed data reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const before = quick_array_prototype_index_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+            \\Array.prototype[1] = 9; let values = [1, , 3]; values[1]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let prototype = {}; prototype["1000000"] = 7;
+            \\let values = []; Object.setPrototypeOf(values, prototype);
+            \\values["1000000"]
+        )).asNum());
+        try std.testing.expect(quick_array_prototype_index_hits.load(.monotonic) >= before + 2);
+        const after = quick_array_prototype_index_hits.load(.monotonic);
+
+        // Exact receiver data wins before the prototype shortcut.
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\Array.prototype[0] = 9; let values = [1]; values[0]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let prototype = {}; prototype[1000000] = 9;
+            \\let values = []; values[1000000] = 7;
+            \\Object.setPrototypeOf(values, prototype); values[1000000]
+        )).asNum());
+
+        // Receiver/prototype accessors, deeper chains, and a Proxy prototype
+        // retain the complete [[Get]] algorithm.
+        try std.testing.expectEqual(@as(f64, 5), (try vmRun(allocator,
+            \\let values = [];
+            \\Object.defineProperty(values, "1", { get: function () { return 5; } });
+            \\values[1]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
+            \\let prototype = {};
+            \\Object.defineProperty(prototype, "1", { get: function () { return 6; } });
+            \\let values = []; Object.setPrototypeOf(values, prototype); values[1]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\let grand = { 1: 8 }; let prototype = Object.create(grand);
+            \\let values = []; Object.setPrototypeOf(values, prototype); values[1]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 10), (try vmRun(allocator,
+            \\let gets = 0; let prototype = new Proxy({ 1: 9 }, {
+            \\  get: function (target, key) { gets = gets + 1; return 9; }
+            \\});
+            \\let values = []; Object.setPrototypeOf(values, prototype);
+            \\values[1] + gets
+        )).asNum());
+
+        // Observable/non-canonical keys remain generic.
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\let coercions = 0; let prototype = { 1: 7 };
+            \\let values = []; Object.setPrototypeOf(values, prototype);
+            \\let key = { toString: function () { coercions = coercions + 1; return "1"; } };
+            \\values[key] + coercions
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 4), (try vmRun(allocator,
+            \\let prototype = { "01": 4 };
+            \\let values = []; Object.setPrototypeOf(values, prototype); values["01"]
+        )).asNum());
+        try std.testing.expectEqual(after, quick_array_prototype_index_hits.load(.monotonic));
+    }
+}
+
+test "vm: prototype indexed reads enforce restriction ownership" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\let prototype = { 1: 9 };
+        \\let inherited = [];
+        \\Object.setPrototypeOf(inherited, prototype);
+        \\let direct = [];
+        \\[inherited, prototype, direct]
+    );
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const result = try run(&machine, chunk, null);
+    const inherited = result.asObj().denseElement(0).?;
+    const prototype = result.asObj().denseElement(1).?.asObj();
+    const direct = result.asObj().denseElement(2).?;
+    const Claim = struct {
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+
+        fn run(self: *@This()) void {
+            const previous = self.object.claimRestriction(
+                self.allocator,
+                @intCast(std.Thread.getCurrentId()),
+            ) catch unreachable;
+            std.debug.assert(previous == null);
+        }
+    };
+    var prototype_claim = Claim{ .object = prototype, .allocator = allocator };
+    const prototype_owner = try std.Thread.spawn(.{}, Claim.run, .{&prototype_claim});
+    prototype_owner.join();
+    try std.testing.expectError(
+        error.Throw,
+        quickArrayPrototypeIndexLoad(&machine, inherited, Value.num(1)),
+    );
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+
+    var direct_claim = Claim{ .object = direct.asObj(), .allocator = allocator };
+    const direct_owner = try std.Thread.spawn(.{}, Claim.run, .{&direct_claim});
+    direct_owner.join();
+    try std.testing.expectError(
+        error.Throw,
+        quickArrayPrototypeIndexLoad(&machine, direct, Value.num(1)),
+    );
     try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
 }
 

@@ -11440,6 +11440,30 @@ pub const Interpreter = struct {
         return o.createSparseArrayOwnData(self.arena, self.root_shape, key, index, v);
     }
 
+    pub fn loadFastArrayPrototypeIndex(self: *Interpreter, recv: Value, index: usize) EvalError!?Value {
+        if (!recv.isObject()) return null;
+        const o = recv.asObj();
+        try self.checkRestricted(o);
+        if (!o.is_array or o.is_arguments or o.proxyHandler() != null or o.proxy_revoked)
+            return null;
+        var key_storage: [10]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch return null;
+        switch (o.indexedOwnPropertySnapshot(key, index)) {
+            .absent => {},
+            .data, .accessor => return null,
+        }
+
+        const prototype = self.effectiveProto(o) orelse return null;
+        try self.checkRestricted(prototype);
+        if (prototype.proxyHandler() != null or prototype.proxy_revoked or prototype.typedArray() != null or
+            prototype.moduleNs() != null or prototype.hostClassHooks() != null)
+            return null;
+        return switch (prototype.indexedOwnPropertySnapshot(key, index)) {
+            .data => |data| data,
+            .absent, .accessor => null,
+        };
+    }
+
     /// ToPropertyKey: a Symbol key uses its unique internal encoding (so
     /// symbol-keyed properties don't collide with string keys and stay out of
     /// string enumeration); other keys coerce to string.

@@ -6254,6 +6254,28 @@ pub const Object = struct {
         accessor: Accessor,
     };
 
+    pub const IndexedOwnPropertySnapshot = union(enum) {
+        absent,
+        data: Value,
+        accessor,
+    };
+
+    /// Snapshot one indexed own property across the named and dense Array
+    /// representations. The indexed transaction prevents an accessor/data
+    /// conversion from exposing a mixed result to shared-realm fast paths.
+    pub fn indexedOwnPropertySnapshot(self: *const Object, name: []const u8, index: usize) IndexedOwnPropertySnapshot {
+        const indexed_locked = element_locks_enabled.load(.acquire);
+        if (indexed_locked) self.lockIndexedProperty();
+        defer if (indexed_locked) self.unlockIndexedProperty();
+        switch (self.namedOwnPropertySnapshot(name)) {
+            .data => |own| return .{ .data = own.value },
+            .accessor => return .accessor,
+            .absent => {},
+        }
+        if (self.denseElement(index)) |element| return .{ .data = element };
+        return .absent;
+    }
+
     /// One insertion-ordered key from an all-data Shape, carrying the exact
     /// slot that Shape assigned it. The Shape is immutable; callers must still
     /// revalidate that the Object publishes this same Shape before loading the
