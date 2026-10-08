@@ -1004,11 +1004,6 @@ pub const Chunk = struct {
     /// Isolated execution publishes a plan only after fully decoding it and may
     /// cache its monomorphic slots; parallel mode does not consume this table.
     quick_property_plans: []?*anyopaque = &.{},
-    /// Lazily decoded multi-property counted-loop kernels. The slot table is
-    /// allocated with bytecode for atomic shared-mode plan publication. Kept
-    /// separate from single-assignment plans because a guarded kernel miss must
-    /// still be able to consult the ordinary plan at the same first instruction.
-    quick_property_kernel_plans: []?*anyopaque = &.{},
     /// Lazily decoded packed-array loop plans, indexed by loop-head bytecode.
     /// The slot table is allocated with the bytecode so shared execution can
     /// atomically publish a fully decoded plan without racing lazy table setup.
@@ -1047,8 +1042,6 @@ pub const Chunk = struct {
         @memset(self.ics, .{});
         self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
         @memset(self.optimizer_binary_profiles, .{});
-        self.quick_property_kernel_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
-        @memset(self.quick_property_kernel_plans, null);
         self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
         @memset(self.quick_array_plans, null);
         self.quick_call_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);

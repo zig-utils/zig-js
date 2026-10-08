@@ -1041,26 +1041,6 @@ const QuickPropertyPlan = struct {
     resolved_target_slot: u32,
 };
 
-const QuickPropertyKernelPlan = union(enum) {
-    unsupported,
-    four_property_loop: struct {
-        object_local: u32,
-        counter_local: u32,
-        bound: f64,
-        modulus: f64,
-        property_increment: f64,
-        counter_increment: f64,
-        read_instructions: [6]u32,
-        write_instructions: [4]u32,
-        exit_ip: u32,
-    },
-};
-
-const QuickPropertyKernelUpdate = struct {
-    extra_steps: u64,
-    next_ip: usize,
-};
-
 const QuickPackedArraySumLoop = struct {
     index_local: u32,
     array_local: u32,
@@ -1260,7 +1240,6 @@ const QuickGlobalBinding = union(enum) {
 var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
-var quick_property_kernel_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_plan_decode_attempts: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
@@ -3460,138 +3439,6 @@ fn propertyNamesMatch(chunk: *Chunk, instructions: []const usize) bool {
     return true;
 }
 
-fn compileQuickPropertyKernelPlan(chunk: *Chunk, start: usize) QuickPropertyKernelPlan {
-    const code = chunk.code.items;
-    if (start < 4 or start + 38 > code.len) return .unsupported;
-    const expected = [_]bc.Op{
-        .load_local, .load_local, .get_prop, .load_local, .add,      .load_const, .mod,        .set_prop,   .pop,
-        .load_local, .load_local, .get_prop, .load_const, .add,      .set_prop,   .pop,        .load_local, .load_local,
-        .get_prop,   .load_local, .get_prop, .add,        .set_prop, .pop,        .load_local, .load_local, .get_prop,
-        .load_local, .get_prop,   .sub,      .set_prop,   .pop,      .load_local, .load_const, .add,        .store_local,
-        .pop,        .jump,
-    };
-    for (expected, 0..) |op, offset| if (code[start + offset].op != op) return .unsupported;
-
-    const object_local = code[start].a;
-    const counter_local = code[start + 3].a;
-    for ([_]usize{ 1, 9, 10, 16, 17, 19, 24, 25, 27 }) |offset|
-        if (code[start + offset].a != object_local) return .unsupported;
-    if (code[start + 32].a != counter_local or code[start + 35].a != counter_local or
-        code[start - 4].op != .load_local or code[start - 4].a != counter_local or
-        code[start - 3].op != .load_const or code[start - 2].op != .lt or
-        code[start - 1].op != .jump_if_false or code[start - 1].a != @as(u32, @intCast(start + 38)) or
-        code[start + 37].a != @as(u32, @intCast(start - 4)))
-        return .unsupported;
-    if (!propertyNamesMatch(chunk, &.{ start + 2, start + 7, start + 18 }) or
-        !propertyNamesMatch(chunk, &.{ start + 11, start + 14, start + 20, start + 28 }) or
-        !propertyNamesMatch(chunk, &.{ start + 22, start + 26 }) or
-        !propertyNamesMatch(chunk, &.{start + 30}))
-        return .unsupported;
-
-    const constant_instructions = [_]usize{ start + 5, start + 12, start + 33, start - 3 };
-    var constants: [4]f64 = undefined;
-    for (constant_instructions, 0..) |instruction, index| {
-        const constant_index = code[instruction].a;
-        if (constant_index >= chunk.consts.items.len or !chunk.consts.items[constant_index].isNumber()) return .unsupported;
-        constants[index] = chunk.consts.items[constant_index].asNum();
-    }
-    return .{ .four_property_loop = .{
-        .object_local = object_local,
-        .counter_local = counter_local,
-        .modulus = constants[0],
-        .property_increment = constants[1],
-        .counter_increment = constants[2],
-        .bound = constants[3],
-        .read_instructions = .{
-            @intCast(start + 2),  @intCast(start + 11), @intCast(start + 18),
-            @intCast(start + 20), @intCast(start + 26), @intCast(start + 28),
-        },
-        .write_instructions = .{
-            @intCast(start + 7), @intCast(start + 14), @intCast(start + 22), @intCast(start + 30),
-        },
-        .exit_ip = @intCast(start + 38),
-    } };
-}
-
-fn quickPropertyKernelPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickPropertyKernelPlan {
-    if (start >= chunk.quick_property_kernel_plans.len) return null;
-    const slot = &chunk.quick_property_kernel_plans[start];
-    if (if (parallel_sync) @atomicLoad(?*anyopaque, slot, .acquire) else slot.*) |raw|
-        return @ptrCast(@alignCast(raw));
-    const plan = chunk.arena.create(QuickPropertyKernelPlan) catch return null;
-    plan.* = compileQuickPropertyKernelPlan(chunk, start);
-    if (parallel_sync) {
-        if (@cmpxchgStrong(?*anyopaque, slot, null, plan, .acq_rel, .acquire)) |published|
-            return @ptrCast(@alignCast(published));
-    } else {
-        slot.* = plan;
-    }
-    return plan;
-}
-
-fn tryQuickPropertyKernel(
-    chunk: *Chunk,
-    frame: *Frame,
-    start: usize,
-    max_extra_steps: u64,
-    parallel_sync: bool,
-) ?QuickPropertyKernelUpdate {
-    const plan = quickPropertyKernelPlan(chunk, start, parallel_sync) orelse return null;
-    const kernel = switch (plan.*) {
-        .unsupported => return null,
-        .four_property_loop => |kernel| kernel,
-    };
-    const max_iterations = (max_extra_steps + 1) / 42;
-    if (max_iterations == 0) return null;
-    const object_local: usize = @intCast(kernel.object_local);
-    const counter_local: usize = @intCast(kernel.counter_local);
-    if (object_local >= frame.slots.len or counter_local >= frame.slots.len) return null;
-    const frame_held = frame.lockSlots(parallel_sync);
-    defer frame.unlockSlots(frame_held);
-    if (!frame.slots[object_local].isObject()) return null;
-    const object = frame.slots[object_local].asObj();
-    if (object.is_array or object.proxyHandler() != null or object.proxy_revoked) return null;
-    if (parallel_sync) object.lockProperties();
-    defer if (parallel_sync) object.unlockProperties();
-    if (object.accessorsMap() != null or object.attrsMap() != null) return null;
-
-    var reads: [6]usize = undefined;
-    var writes: [4]usize = undefined;
-    for (kernel.read_instructions, 0..) |instruction, index|
-        reads[index] = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
-    for (kernel.write_instructions, 0..) |instruction, index|
-        writes[index] = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
-    if (reads[0] != writes[0] or reads[2] != writes[0] or
-        reads[1] != writes[1] or reads[3] != writes[1] or reads[5] != writes[1] or
-        reads[4] != writes[2])
-        return null;
-    var a = quickSlotNumber(object, writes[0]) orelse return null;
-    var b = quickSlotNumber(object, writes[1]) orelse return null;
-    var c = quickSlotNumber(object, writes[2]) orelse return null;
-    var d = quickSlotNumber(object, writes[3]) orelse return null;
-    if (!frame.slots[counter_local].isNumber()) return null;
-    var counter = frame.slots[counter_local].asNum();
-    var iterations: u64 = 0;
-    while (iterations < max_iterations and counter < kernel.bound) : (iterations += 1) {
-        a = numberRemainder(a + counter, kernel.modulus);
-        b += kernel.property_increment;
-        c = a + b;
-        d = c - b;
-        counter += kernel.counter_increment;
-    }
-    if (iterations == 0) return null;
-    object.slotsItems()[writes[0]] = Value.num(a);
-    object.slotsItems()[writes[1]] = Value.num(b);
-    object.slotsItems()[writes[2]] = Value.num(c);
-    object.slotsItems()[writes[3]] = Value.num(d);
-    frame.slots[counter_local] = Value.num(counter);
-    if (builtin.is_test) _ = quick_property_kernel_hits.fetchAdd(1, .monotonic);
-    return .{
-        .extra_steps = iterations * 42 - 1,
-        .next_ip = if (counter < kernel.bound) start else kernel.exit_ip,
-    };
-}
-
 fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
     if (builtin.is_test) _ = quick_property_plan_decode_attempts.fetchAdd(1, .monotonic);
     const code = chunk.code.items;
@@ -3744,20 +3591,6 @@ inline fn quickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
 }
 
 inline fn quickPropertySiteMayApply(chunk: *Chunk, start: usize, parallel_sync: bool) bool {
-    if (start >= chunk.quick_property_kernel_plans.len) return false;
-    const kernel_slot = &chunk.quick_property_kernel_plans[start];
-    const kernel_raw = if (parallel_sync)
-        @atomicLoad(?*anyopaque, kernel_slot, .acquire)
-    else
-        kernel_slot.*;
-    if (kernel_raw) |raw| {
-        const plan: *QuickPropertyKernelPlan = @ptrCast(@alignCast(raw));
-        switch (plan.*) {
-            .unsupported => {},
-            .four_property_loop => return true,
-        }
-    } else return true;
-
     if (parallel_sync) return false;
     if (chunk.quick_property_plans.len == 0) return true;
     if (start >= chunk.quick_property_plans.len) return false;
@@ -8694,12 +8527,6 @@ fn runChunk(
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                     const steps_until_budget = vm.step_budget - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                    if (tryQuickPropertyKernel(chunk, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                        if (execution_inventory != null) vm_quick_kernel_hits += 1;
-                        vm.steps += quick.extra_steps;
-                        ip = quick.next_ip;
-                        continue;
-                    }
                     if (!parallel_sync) {
                         if (tryNumericPropertyUpdate(chunk, cf, start, max_extra_steps)) |quick| {
                             if (execution_inventory != null) vm_quick_kernel_hits += 1;
@@ -13981,6 +13808,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         .{ .entry = .initial, .name = "activationLeaf", .argument = 1, .expected = 2 },
         .{ .entry = .initial, .name = "activationLegacy", .argument = 3, .expected = 3 },
         .{ .entry = .initial, .name = "activationRecursive", .argument = 8, .expected = 21 },
+        .{ .entry = .initial, .name = "activationPropertyLoop", .argument = 8, .expected = 28093728 },
         .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
         .{ .entry = .inline_, .name = "activationLegacy", .argument = 4, .expected = 4 },
         .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
@@ -13998,6 +13826,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
     _ = try ctx.evaluate(
         \\function activationLeaf(v){return v+1;}
         \\function activationRecursive(n){return n<2?n:activationRecursive(n-1)+activationRecursive(n-2);}
+        \\function activationPropertyLoop(limit){const object={a:0,b:1,c:2,d:3};let i=0;while(i<limit){object.a=(object.a+i)%1000003;object.b=object.b+1;object.c=object.a+object.b;object.d=object.c-object.b;i=i+1;}return object.a*1000000+object.b*10000+object.c*100+object.d;}
         \\function activationLegacy(v){return activationLegacy.arguments[0];}
         \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
         \\function activationNestedB(v){return activationNestedA(v);}
@@ -24700,7 +24529,6 @@ test "vm: caches unsupported isolated property quickening plans" {
         }
     }
     const start = candidate orelse return error.TestUnexpectedResult;
-    try std.testing.expect(quickPropertyKernelPlan(function_chunk, start, true) != null);
     try std.testing.expect(!quickPropertySiteMayApply(function_chunk, start, true));
     try std.testing.expect(quickPropertySiteMayApply(function_chunk, start, false));
     const attempts_before = quick_property_plan_decode_attempts.load(.monotonic);
@@ -24711,7 +24539,145 @@ test "vm: caches unsupported isolated property quickening plans" {
     try std.testing.expectEqual(attempts_before + 1, quick_property_plan_decode_attempts.load(.monotonic));
 }
 
-test "vm: fuses warmed four-property loops with exact bytecode steps" {
+test "vm: four-property execution runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 112374912), (try ctx.evaluate(
+        \\function propertyLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  const object = { a: 0, b: 1, c: 2, d: 3 };
+        \\  let i = 0;
+        \\  while (i < 8) {
+        \\    object.a = (object.a + i) % 1000003;
+        \\    object.b = object.b + 1;
+        \\    object.c = object.a + object.b;
+        \\    object.d = object.c - object.b;
+        \\    i = i + 1;
+        \\  }
+        \\  return object.a * 1000000 + object.b * 10000 + object.c * 100 + object.d;
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(propertyLane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
+test "vm: four-property execution preserves accessor GC and Proxy order" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\let events = [], raw = { a: 0, b: 1, c: 2, d: 3 };
+        \\let object = new Proxy(raw, {
+        \\  get(target, key) { events.push('get:' + key); $vm.gc(); return Reflect.get(target, key); },
+        \\  set(target, key, value) { events.push('set:' + key); $vm.gc(); return Reflect.set(target, key, value); }
+        \\});
+        \\let i = 0;
+        \\while (i < 1) {
+        \\  object.a = (object.a + i) % 1000003;
+        \\  object.b = object.b + 1;
+        \\  object.c = object.a + object.b;
+        \\  object.d = object.c - object.b;
+        \\  i = i + 1;
+        \\}
+        \\events.join(',') === 'get:a,set:a,get:b,set:b,get:a,get:b,set:c,get:c,get:b,set:d' &&
+        \\  raw.a === 0 && raw.b === 2 && raw.c === 2 && raw.d === 0
+    )).asBool());
+}
+
+test "vm: four-property execution retains budget and stop checkpoints" {
+    for ([_]bool{ false, true }) |stop_at_checkpoint| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator,
+            \\function propertyLoop() {
+            \\  const object = { a: 0, b: 1, c: 2, d: 3 }; let i = 0;
+            \\  while (i < 100) {
+            \\    object.a = (object.a + i) % 1000003; object.b = object.b + 1;
+            \\    object.c = object.a + object.b; object.d = object.c - object.b; i = i + 1;
+            \\  }
+            \\  return object.d;
+            \\}
+            \\propertyLoop()
+        );
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var stop: std.atomic.Value(bool) = .init(stop_at_checkpoint);
+        var machine = try initTestInterpreter(.{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .stop_flag = &stop,
+            .step_budget = 1024,
+        });
+        try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+        try std.testing.expectEqual(@as(u64, if (stop_at_checkpoint) 1024 else 1025), machine.steps);
+        try std.testing.expectEqualStrings(if (stop_at_checkpoint) "Error" else "RangeError", machine.exception.asObj().errorName());
+    }
+}
+
+test "vm: four-property execution preserves source hooks" {
+    const Capture = struct {
+        updates: usize = 0,
+        fn profile(raw: *anyopaque, _: *Interpreter, location: interp.DebugStatementLocation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (location.location.line >= 5 and location.location.line <= 8) self.updates += 1;
+        }
+        fn debug(raw: *anyopaque, machine: *Interpreter, location: interp.DebugStatementLocation) EvalError!void {
+            profile(raw, machine, location);
+        }
+    };
+    for ([_]bool{ false, true }) |debug| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = if (debug) .tree_walker else .required,
+        });
+        defer ctx.destroy();
+        var capture = Capture{};
+        if (debug) {
+            ctx.debug_statement_ctx = &capture;
+            ctx.debug_statement_hook = Capture.debug;
+        } else {
+            ctx.profile_statement_ctx = &capture;
+            ctx.profile_statement_hook = Capture.profile;
+        }
+        try std.testing.expectEqual(@as(f64, 28093728), (try ctx.evaluate(
+            \\function propertyLoop() {
+            \\  const object = { a: 0, b: 1, c: 2, d: 3 };
+            \\  let i = 0;
+            \\  while (i < 8) {
+            \\    object.a = (object.a + i) % 1000003;
+            \\    object.b = object.b + 1;
+            \\    object.c = object.a + object.b;
+            \\    object.d = object.c - object.b;
+            \\    i = i + 1;
+            \\  }
+            \\  return object.a * 1000000 + object.b * 10000 + object.c * 100 + object.d;
+            \\}
+            \\propertyLoop()
+        )).asNum());
+        try std.testing.expectEqual(@as(usize, 32), capture.updates);
+    }
+}
+
+test "vm: four-property execution preserves bytecode steps and effects" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -24732,10 +24698,8 @@ test "vm: fuses warmed four-property loops with exact bytecode steps" {
     ;
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
-    const hits_before = quick_property_kernel_hits.load(.monotonic);
     var results: [2]f64 = undefined;
     var steps: [2]u64 = undefined;
-    var kernel_hits = hits_before;
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         var parser = try Parser.init(allocator, source);
@@ -24747,10 +24711,9 @@ test "vm: fuses warmed four-property loops with exact bytecode steps" {
         var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         results[run_index] = (try run(&machine, chunk, null)).asNum();
         steps[run_index] = machine.steps;
-        const next_hits = quick_property_kernel_hits.load(.monotonic);
-        try std.testing.expect(next_hits > kernel_hits);
-        kernel_hits = next_hits;
     }
+    try std.testing.expectEqual(@as(f64, 28093728), results[0]);
+    try std.testing.expectEqual(@as(u64, 379), steps[0]);
     try std.testing.expectEqual(results[1], results[0]);
     try std.testing.expectEqual(steps[1], steps[0]);
 
@@ -24776,7 +24739,6 @@ test "vm: fuses warmed four-property loops with exact bytecode steps" {
         \\}
         \\accessorKernel()
     )).asNum());
-    try std.testing.expectEqual(kernel_hits, quick_property_kernel_hits.load(.monotonic));
 }
 
 test "vm: for loop with ++ and compound assignment" {

@@ -80,7 +80,7 @@
       "guards": ["numeric constants/locals/property slots", "fixed stack-depth bounds", "exact Shape and cached read/write slots", "plain non-array target without proxy/accessor/attribute behavior"],
       "miss_behavior": ["resume ordinary bytecode at the same load_local", "cache an unsupported sentinel only in isolated execution", "a tail mismatch keeps the assignment-only trace"],
       "metadata_lifetime": "QuickPropertyPlan records are lazily arena allocated and instruction indexed; resolved slots are isolated-mode advisory state.",
-      "no_gil_synchronization": "Ordinary property traces are refused in parallel mode; the separate four-property kernel owns the shared publication/locking contract.",
+      "no_gil_synchronization": "Bounded per-assignment property traces are refused in parallel mode; shared execution uses ordinary synchronized property opcodes and inline caches.",
       "observable_steps_debugger": "The plan records its exact executed bytecodes and advances the VM step budget; entry is disabled during debug execution and stops before checkpoints/budget exhaustion.",
       "source_anchors": [
         {"path": "src/vm.zig", "text": "const QuickPropertyPlan = struct {"},
@@ -91,27 +91,6 @@
         {"path": "src/vm.zig", "text": "test \"vm: caches unsupported isolated property quickening plans\""}
       ],
       "metrics": ["quick_property_update_hits", "quick_property_loop_tail_hits", "quick_property_specialized_hits", "quick_property_plan_decode_attempts"]
-    },
-    {
-      "id": "four-property-loop",
-      "title": "Four-property counted-loop kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact 38-bytecode numeric loop over four named properties"],
-      "guards": ["exact opcode sequence/constants/jump target", "plain non-array object", "ten exact IC-resolved slots with required alias relations", "numeric property values and loop counter"],
-      "miss_behavior": ["return to the ordinary bytecode loop head without mutation", "cache an explicit unsupported plan for nonmatching bytecode"],
-      "metadata_lifetime": "One instruction-indexed QuickPropertyKernelPlan is arena allocated, including an explicit unsupported variant.",
-      "no_gil_synchronization": "The plan pointer is acquire/release published; execution locks frame slots and object properties for the guarded batch.",
-      "observable_steps_debugger": "Each fused iteration accounts for exactly 42 bytecode steps, remains below the next checkpoint/budget, and is disabled during debug execution.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickPropertyKernelPlan = union(enum) {"},
-        {"path": "src/vm.zig", "text": "fn tryQuickPropertyKernel("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: fuses warmed four-property loops with exact bytecode steps\""}
-      ],
-      "metrics": ["quick_property_kernel_hits"]
     },
     {
       "id": "array-opcode-fast-paths",
@@ -406,7 +385,6 @@
   "runtime_contract": {
     "plan_types": [
       "QuickPropertyPlan",
-      "QuickPropertyKernelPlan",
       "QuickArrayPlan",
       "QuickLeafPlan",
       "QuickCallLoopPlan"
@@ -414,7 +392,6 @@
     "tagged_types": {
       "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
       "QuickPropertySpecialization": ["generic", "property_local_add_mod", "property_add_constant", "property_pair_add", "property_pair_sub"],
-      "QuickPropertyKernelPlan": ["unsupported", "four_property_loop"],
       "QuickArrayNumericOp": ["constant", "local", "add", "sub", "mul", "div", "mod", "bit_and"],
       "QuickArrayBound": ["constant", "local"],
       "QuickArrayExpressionSpecialization": ["generic", "add3_bit_and"],
@@ -428,7 +405,6 @@
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
-      "quick_property_kernel_plans",
       "quick_array_plans",
       "quick_call_plans",
       "quick_loop_candidates",
@@ -446,7 +422,6 @@
       "quick_property_update_hits",
       "quick_property_loop_tail_hits",
       "quick_property_specialized_hits",
-      "quick_property_kernel_hits",
       "quick_property_plan_decode_attempts",
       "quick_dense_array_index_hits",
       "quick_dense_array_store_hits",
