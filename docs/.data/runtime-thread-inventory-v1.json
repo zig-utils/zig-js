@@ -116,7 +116,7 @@
     { "path": "src/jsthread.zig", "count": 4 },
     { "path": "src/parallel_lock.zig", "count": 2 },
     { "path": "src/root_handshake.zig", "count": 1 },
-    { "path": "src/runtime_threads.zig", "count": 4 },
+    { "path": "src/runtime_threads.zig", "count": 5 },
     { "path": "src/shape.zig", "count": 3 },
     { "path": "src/shared_buffer.zig", "count": 1 },
     { "path": "src/strcell.zig", "count": 4 },

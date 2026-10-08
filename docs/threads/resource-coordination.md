@@ -165,6 +165,15 @@ missing inventory row, or direct spawn in a new source file fails. Update the
 JSON only after reviewing whether the new work belongs to production, test
 scaffolding, or an existing resource class.
 
+The unit gate also contains one deterministic mixed-pressure witness. It holds
+all three scratch domains at their shared limit while every typed resource
+class is active or queued, overlaps native and Wasm internal work, forces an
+exact scratch denial, cancels foreground and background starts, and drives a
+safety-to-host-work-to-Worker handoff through a real blocking transition. The
+test requires every current thread, scheduler, work, stack, waiter, and scratch
+counter to return exactly to its baseline before released capacity is admitted
+again.
+
 The boundary controls live-thread/configured-stack admission, records
 runnable/blocked and synchronous internal-work state, and enforces automatically
 sized, priority-scheduled shared CPU slots. Issue

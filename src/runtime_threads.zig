@@ -1802,6 +1802,245 @@ test "internal work reuses typed slots and nested admission" {
     try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
 }
 
+test "mixed resource pressure reconciles threads work scratch cancellation and blocking" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const before = snapshot();
+    const previous_scheduler = setSchedulerLimits(.{ .max_runnable_threads = 2 });
+    defer _ = setSchedulerLimits(previous_scheduler);
+    var scratch_limits = ScratchLimits{};
+    scratch_limits.max_total_bytes = before.scratch.current_bytes + 96;
+    for (&scratch_limits.max_domain_bytes, before.scratch.domains) |*limit, domain|
+        limit.* = domain.current_bytes + 96;
+    const previous_scratch = setScratchLimits(scratch_limits);
+    defer _ = setScratchLimits(previous_scratch);
+
+    const WaitGate = struct {
+        mutex: std.Io.Mutex = .init,
+        cond: std.Io.Condition = .init,
+        released: bool = false,
+
+        fn wait(self: *@This()) void {
+            const io = engine_io.get();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            while (!self.released) {
+                var blocking = beginBlocking();
+                defer blocking.endWithMutex(&self.mutex, io);
+                self.cond.waitUncancelable(io, &self.mutex);
+            }
+        }
+
+        fn open(self: *@This()) void {
+            const io = engine_io.get();
+            self.mutex.lockUncancelable(io);
+            self.released = true;
+            self.cond.broadcast(io);
+            self.mutex.unlock(io);
+        }
+    };
+    var marker_entered = std.atomic.Value(bool).init(false);
+    var marker_block = std.atomic.Value(bool).init(false);
+    var marker_gate = WaitGate{};
+    var thread_entered = std.atomic.Value(bool).init(false);
+    var thread_release = std.atomic.Value(bool).init(false);
+    var watchdog_runs = std.atomic.Value(u64).init(0);
+    var watchdog_release = std.atomic.Value(bool).init(false);
+    var script_runs = std.atomic.Value(u64).init(0);
+    var script_release = std.atomic.Value(bool).init(false);
+    var canceled_runs = std.atomic.Value(u64).init(0);
+    var host_work_entered = std.atomic.Value(bool).init(false);
+    var host_work_release = std.atomic.Value(bool).init(false);
+    var agent_cancellation = StartCancellation{};
+    var module_cancellation = StartCancellation{};
+    var handles: [7]?std.Thread = @splat(null);
+    defer {
+        marker_block.store(true, .release);
+        marker_gate.open();
+        thread_release.store(true, .release);
+        watchdog_release.store(true, .release);
+        script_release.store(true, .release);
+        host_work_release.store(true, .release);
+        _ = agent_cancellation.cancel();
+        _ = module_cancellation.cancel();
+        _ = setSchedulerLimits(.{});
+        for (&handles) |*handle| if (handle.*) |thread| {
+            thread.join();
+            handle.* = null;
+        };
+    }
+
+    const Marker = struct {
+        fn run(entered: *std.atomic.Value(bool), block: *std.atomic.Value(bool), gate: *WaitGate) void {
+            var scratch = ScratchAllocator.init(.gc_auxiliary, std.heap.page_allocator);
+            defer scratch.deinit();
+            const memory = scratch.allocator().alloc(u8, 32) catch return;
+            defer scratch.allocator().free(memory);
+            var work = beginInternalWork(.native_compilation);
+            defer work.end();
+            entered.store(true, .release);
+            while (!block.load(.acquire)) std.atomic.spinLoopHint();
+            gate.wait();
+        }
+    };
+    const JsThread = struct {
+        fn run(entered: *std.atomic.Value(bool), release: *std.atomic.Value(bool)) void {
+            var scratch = ScratchAllocator.init(.native_compilation, std.heap.page_allocator);
+            defer scratch.deinit();
+            const memory = scratch.allocator().alloc(u8, 32) catch return;
+            defer scratch.allocator().free(memory);
+            var work = beginInternalWork(.wasm_compilation);
+            defer work.end();
+            entered.store(true, .release);
+            while (!release.load(.acquire)) std.atomic.spinLoopHint();
+        }
+    };
+    const Queued = struct {
+        fn run(runs: *std.atomic.Value(u64), release: *std.atomic.Value(bool)) void {
+            _ = runs.fetchAdd(1, .release);
+            while (!release.load(.acquire)) std.atomic.spinLoopHint();
+        }
+        fn canceled(runs: *std.atomic.Value(u64)) void {
+            _ = runs.fetchAdd(1, .release);
+        }
+    };
+    const HostWork = struct {
+        fn run(entered: *std.atomic.Value(bool), release: *std.atomic.Value(bool)) void {
+            var work = beginInternalWork(.native_compilation);
+            defer work.end();
+            entered.store(true, .release);
+            while (!release.load(.acquire)) std.atomic.spinLoopHint();
+        }
+    };
+
+    handles[0] = try spawn(.concurrent_gc_marker, .{}, Marker.run, .{ &marker_entered, &marker_block, &marker_gate });
+    handles[1] = try spawn(.javascript_thread, .{}, JsThread.run, .{ &thread_entered, &thread_release });
+    const io = engine_io.get();
+    const holders_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while ((!marker_entered.load(.acquire) or !thread_entered.load(.acquire)) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < holders_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(marker_entered.load(.acquire));
+    try std.testing.expect(thread_entered.load(.acquire));
+
+    var wasm_scratch = ScratchAllocator.init(.wasm_compilation, std.heap.page_allocator);
+    defer wasm_scratch.deinit();
+    const wasm_memory = try wasm_scratch.allocator().alloc(u8, 32);
+    var wasm_memory_live = true;
+    defer if (wasm_memory_live) wasm_scratch.allocator().free(wasm_memory);
+
+    handles[2] = try std.Thread.spawn(.{}, HostWork.run, .{ &host_work_entered, &host_work_release });
+    const host_queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (snapshot().work(.native_compilation).waiters != before.work(.native_compilation).waiters + 1 and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < host_queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(before.work(.native_compilation).waiters + 1, snapshot().work(.native_compilation).waiters);
+    handles[3] = try spawn(.execution_watchdog, .{}, Queued.run, .{ &watchdog_runs, &watchdog_release });
+    handles[4] = try spawnCancelable(.test262_agent, .{}, &agent_cancellation, Queued.run, .{ &canceled_runs, &watchdog_release }, Queued.canceled, .{&canceled_runs});
+    handles[5] = try spawn(.script_worker, .{}, Queued.run, .{ &script_runs, &script_release });
+    handles[6] = try spawnCancelable(.module_worker, .{}, &module_cancellation, Queued.run, .{ &canceled_runs, &script_release }, Queued.canceled, .{&canceled_runs});
+
+    const pressure_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    var pressured = snapshot();
+    while ((pressured.scheduler.priority(.safety).waiters != before.scheduler.priority(.safety).waiters + 1 or
+        pressured.scheduler.priority(.foreground).waiters != before.scheduler.priority(.foreground).waiters + 1 or
+        pressured.scheduler.priority(.background).waiters != before.scheduler.priority(.background).waiters + 2 or
+        pressured.work(.native_compilation).waiters != before.work(.native_compilation).waiters + 1) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < pressure_deadline)
+    {
+        std.Thread.yield() catch {};
+        pressured = snapshot();
+    }
+    try std.testing.expectEqual(before.scheduler.active_slots + 2, pressured.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 5, pressured.scheduler.slot_waiters);
+    try std.testing.expectEqual(before.scheduler.priority(.safety).waiters + 1, pressured.scheduler.priority(.safety).waiters);
+    try std.testing.expectEqual(before.scheduler.priority(.foreground).waiters + 1, pressured.scheduler.priority(.foreground).waiters);
+    try std.testing.expectEqual(before.scheduler.priority(.background).waiters + 2, pressured.scheduler.priority(.background).waiters);
+    try std.testing.expectEqual(before.work(.native_compilation).active + 1, pressured.work(.native_compilation).active);
+    try std.testing.expectEqual(before.work(.native_compilation).waiters + 1, pressured.work(.native_compilation).waiters);
+    try std.testing.expectEqual(before.work(.wasm_compilation).active + 1, pressured.work(.wasm_compilation).active);
+    for (before.scratch.domains, pressured.scratch.domains) |before_domain, pressured_domain|
+        try std.testing.expectEqual(before_domain.current_bytes + 32, pressured_domain.current_bytes);
+    try std.testing.expectEqual(before.scratch.current_bytes + 96, pressured.scratch.current_bytes);
+
+    var denied = ScratchAllocator.init(.gc_auxiliary, std.heap.page_allocator);
+    defer denied.deinit();
+    try std.testing.expectError(error.OutOfMemory, denied.allocator().alloc(u8, 1));
+    const denied_state = snapshot();
+    try std.testing.expectEqual(
+        before.scratch.domain(.gc_auxiliary).policy_rejections + 1,
+        denied_state.scratch.domain(.gc_auxiliary).policy_rejections,
+    );
+    wasm_scratch.allocator().free(wasm_memory);
+    wasm_memory_live = false;
+
+    try std.testing.expect(agent_cancellation.cancel());
+    try std.testing.expect(module_cancellation.cancel());
+    handles[4].?.join();
+    handles[4] = null;
+    handles[6].?.join();
+    handles[6] = null;
+    try std.testing.expectEqual(@as(u64, 2), canceled_runs.load(.acquire));
+
+    marker_block.store(true, .release);
+    const watchdog_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (watchdog_runs.load(.acquire) != 1 and std.Io.Timestamp.now(io, .awake).nanoseconds < watchdog_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(u64, 1), watchdog_runs.load(.acquire));
+    try std.testing.expectEqual(before.resource(.concurrent_gc_marker).blocked + 1, snapshot().resource(.concurrent_gc_marker).blocked);
+
+    watchdog_release.store(true, .release);
+    handles[3].?.join();
+    handles[3] = null;
+    const host_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!host_work_entered.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < host_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(host_work_entered.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.internal_work_general_active + 1, snapshot().scheduler.internal_work_general_active);
+
+    host_work_release.store(true, .release);
+    handles[2].?.join();
+    handles[2] = null;
+    const script_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (script_runs.load(.acquire) != 1 and std.Io.Timestamp.now(io, .awake).nanoseconds < script_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(u64, 1), script_runs.load(.acquire));
+    script_release.store(true, .release);
+    handles[5].?.join();
+    handles[5] = null;
+
+    marker_gate.open();
+    handles[0].?.join();
+    handles[0] = null;
+    thread_release.store(true, .release);
+    handles[1].?.join();
+    handles[1] = null;
+
+    const after = snapshot();
+    for (std.meta.tags(Kind)) |kind| {
+        try std.testing.expectEqual(before.resource(kind).live, after.resource(kind).live);
+        try std.testing.expectEqual(before.resource(kind).runnable, after.resource(kind).runnable);
+        try std.testing.expectEqual(before.resource(kind).blocked, after.resource(kind).blocked);
+        try std.testing.expectEqual(before.resource(kind).configured_stack_bytes, after.resource(kind).configured_stack_bytes);
+    }
+    for (std.meta.tags(InternalWorkKind)) |kind| {
+        try std.testing.expectEqual(before.work(kind).active, after.work(kind).active);
+        try std.testing.expectEqual(before.work(kind).waiters, after.work(kind).waiters);
+    }
+    try std.testing.expectEqual(before.scheduler.active_slots, after.scheduler.active_slots);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+    try std.testing.expectEqual(before.scheduler.internal_work_general_active, after.scheduler.internal_work_general_active);
+    try std.testing.expectEqual(before.scheduler.host_work_reserved_active, after.scheduler.host_work_reserved_active);
+    try std.testing.expectEqual(before.scratch.current_bytes, after.scratch.current_bytes);
+    for (before.scratch.domains, after.scratch.domains) |before_domain, after_domain|
+        try std.testing.expectEqual(before_domain.current_bytes, after_domain.current_bytes);
+    try std.testing.expectEqual(before.resource(.test262_agent).start_cancellations + 1, after.resource(.test262_agent).start_cancellations);
+    try std.testing.expectEqual(before.resource(.module_worker).start_cancellations + 1, after.resource(.module_worker).start_cancellations);
+
+    const readmitted = try wasm_scratch.allocator().alloc(u8, 96);
+    wasm_scratch.allocator().free(readmitted);
+    try std.testing.expectEqual(before.scratch.current_bytes, snapshot().scratch.current_bytes);
+}
+
 test "host internal work uses one reservation and queues excess background work" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
     const previous = setSchedulerLimits(.{ .max_runnable_threads = 1 });
