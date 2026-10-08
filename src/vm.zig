@@ -1292,6 +1292,7 @@ var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_create_hits: std.atomic.Value(u64) = .init(0);
 var quick_sparse_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_sparse_array_store_hits: std.atomic.Value(u64) = .init(0);
+var quick_sparse_array_create_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_arguments_index_hits: std.atomic.Value(u64) = .init(0);
@@ -1540,6 +1541,15 @@ inline fn quickSparseArrayStore(vm: *Interpreter, receiver: Value, key: Value, s
     const name = std.fmt.bufPrint(&buffer, "{d}", .{index}) catch return null;
     if (!object.replaceNamedOwnData(name, stored)) return null;
     return stored;
+}
+
+/// Create a distant sparse Array data property after the interpreter proves a
+/// clean prototype chain. The Object helper rechecks and publishes the exact
+/// descriptor/length transaction; every observable or already-present case
+/// remains on ordinary [[Set]].
+inline fn quickSparseArrayCreate(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!bool {
+    const index = quickPropertyArrayIndex(key) orelse return false;
+    return vm.createFastArraySparseIndex(receiver, index, stored);
 }
 
 /// A primitive Number key has no observable ToPropertyKey hook. Resolve the
@@ -9782,6 +9792,11 @@ fn runChunk(
                 if (try quickSparseArrayStore(vm, obj, key, v)) |stored| {
                     if (builtin.is_test) _ = quick_sparse_array_store_hits.fetchAdd(1, .monotonic);
                     try stack.append(stack_alloc, stored);
+                    continue;
+                }
+                if (try quickSparseArrayCreate(vm, obj, key, v)) {
+                    if (builtin.is_test) _ = quick_sparse_array_create_hits.fetchAdd(1, .monotonic);
+                    try stack.append(stack_alloc, v);
                     continue;
                 }
                 try stack.append(stack_alloc, try nativeSetIndex(vm, obj, key, v));
@@ -22362,9 +22377,9 @@ test "vm: quickens numeric sparse array reads" {
 
         // Proxy observation and invalid Number keys remain generic.
         try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
-            \\let target = []; target[1000000] = 7; let gets = 0;
-            \\let values = new Proxy(target, {
-            \\  get: function (object, key) { gets = gets + 1; return object[key]; }
+            \\let gets = 0;
+            \\let values = new Proxy([], {
+            \\  get: function (object, key) { gets = gets + 1; return 9; }
             \\});
             \\values[1000000]; gets
         )).asNum());
@@ -22418,19 +22433,22 @@ test "vm: quickens numeric sparse array stores" {
     for ([_]bool{ false, true }) |parallel| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         const sparse_before = quick_sparse_array_store_hits.load(.monotonic);
+        const creates_before = quick_sparse_array_create_hits.load(.monotonic);
         try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
             \\let values = []; values[1000000] = 1; values[1000000] = 7;
             \\values[1000000]
         )).asNum());
         try std.testing.expect(quick_sparse_array_store_hits.load(.monotonic) > sparse_before);
+        try std.testing.expect(quick_sparse_array_create_hits.load(.monotonic) > creates_before);
         const sparse_after = quick_sparse_array_store_hits.load(.monotonic);
+        const creates_after = quick_sparse_array_create_hits.load(.monotonic);
 
-        // Creating a sparse property remains generic; only a later exact-own
-        // writable-data replacement is eligible.
+        // Creation and replacement have separate exact paths and counters.
         try std.testing.expectEqual(@as(f64, 1000001), (try vmRun(allocator,
             \\let values = []; values[1000000] = 7; values.length
         )).asNum());
         try std.testing.expectEqual(sparse_after, quick_sparse_array_store_hits.load(.monotonic));
+        try std.testing.expect(quick_sparse_array_create_hits.load(.monotonic) > creates_after);
 
         // An unrelated sparse property no longer disqualifies a present dense
         // own element from the existing synchronized replacement path.
@@ -22486,6 +22504,90 @@ test "vm: quickens numeric sparse array stores" {
             \\values[-1] + values[1.5]
         )).asNum());
         try std.testing.expectEqual(sparse_after, quick_sparse_array_store_hits.load(.monotonic));
+    }
+}
+
+test "vm: quickens distant sparse array creation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const creates_before = quick_sparse_array_create_hits.load(.monotonic);
+        const stores_before = quick_sparse_array_store_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 1000010), (try vmRun(allocator,
+            \\let values = [];
+            \\values[1000000] = 3;
+            \\values["1000002"] = 4;
+            \\values.length + values[1000000] + values[1000002]
+        )).asNum());
+        try std.testing.expect(quick_sparse_array_create_hits.load(.monotonic) >= creates_before + 2);
+        try std.testing.expectEqual(stores_before, quick_sparse_array_store_hits.load(.monotonic));
+
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = []; values[1000000] = 1; values[1000000] = 7;
+            \\values[1000000]
+        )).asNum());
+        try std.testing.expect(quick_sparse_array_store_hits.load(.monotonic) > stores_before);
+        const creates_after = quick_sparse_array_create_hits.load(.monotonic);
+
+        // Prototype descriptors intercept before own sparse creation.
+        try std.testing.expectEqual(@as(f64, 90), (try vmRun(allocator,
+            \\let seen = 0;
+            \\Object.defineProperty(Array.prototype, "1000000", {
+            \\  set: function (value) { seen = value; }, configurable: true
+            \\});
+            \\let values = []; values[1000000] = 9; seen * 10 + values.length
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 40), (try vmRun(allocator,
+            \\Object.defineProperty(Array.prototype, "1000000", {
+            \\  value: 4, writable: false, configurable: true
+            \\});
+            \\let values = []; values[1000000] = 9; values[1000000] * 10 + values.length
+        )).asNum());
+
+        // Receiver descriptors, frozen length, and non-extensibility retain
+        // ordinary [[Set]] and strict failure behavior.
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\let seen = 0; let values = [];
+            \\Object.defineProperty(values, "1000000", {
+            \\  set: function (value) { seen = value; }, configurable: true
+            \\});
+            \\values[1000000] = 8; seen
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\function store(values) { "use strict"; try { values[1000000] = 7; } catch (error) { return error instanceof TypeError; } return false; }
+            \\let values = []; Object.defineProperty(values, "length", { writable: false });
+            \\(store(values) && values.length === 0) ? 1 : 0
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\function store(values) { "use strict"; try { values[1000000] = 7; } catch (error) { return error instanceof TypeError; } return false; }
+            \\let values = []; Object.preventExtensions(values);
+            \\(store(values) && values.length === 0) ? 1 : 0
+        )).asNum());
+
+        // Proxies and observable/non-canonical keys remain generic. A nearby
+        // index belongs to the distinct dense-creation path.
+        try std.testing.expectEqual(@as(f64, 5), (try vmRun(allocator,
+            \\let seen = 0; let values = new Proxy([], {
+            \\  set: function (target, key, value) { seen = value; return true; }
+            \\});
+            \\values[1000000] = 5; seen
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1000009), (try vmRun(allocator,
+            \\let coercions = 0; let values = [];
+            \\let key = { toString: function () { coercions = coercions + 1; return "1000000"; } };
+            \\values[key] = 7; coercions + values.length + values[1000000]
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = []; values["01000000"] = 7; values["01000000"] + values.length
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\let values = []; values[0] = 7; values[0] + values.length
+        )).asNum());
+        try std.testing.expectEqual(creates_after, quick_sparse_array_create_hits.load(.monotonic));
     }
 }
 
@@ -22664,6 +22766,65 @@ test "vm: numeric sparse array stores enforce restriction ownership" {
     );
     try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
     try std.testing.expectEqual(@as(f64, 7), array.asObj().getOwn("1000000").?.asNum());
+}
+
+test "vm: sparse array creation enforces restriction ownership" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\let prototype = {};
+        \\let inherited = [];
+        \\Object.setPrototypeOf(inherited, prototype);
+        \\let direct = [];
+        \\[inherited, prototype, direct]
+    );
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const result = try run(&machine, chunk, null);
+    const inherited = result.asObj().denseElement(0).?;
+    const prototype = result.asObj().denseElement(1).?.asObj();
+    const direct = result.asObj().denseElement(2).?;
+    const Claim = struct {
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+
+        fn run(self: *@This()) void {
+            const previous = self.object.claimRestriction(
+                self.allocator,
+                @intCast(std.Thread.getCurrentId()),
+            ) catch unreachable;
+            std.debug.assert(previous == null);
+        }
+    };
+    var prototype_claim = Claim{ .object = prototype, .allocator = allocator };
+    const prototype_owner = try std.Thread.spawn(.{}, Claim.run, .{&prototype_claim});
+    prototype_owner.join();
+
+    try std.testing.expectError(
+        error.Throw,
+        quickSparseArrayCreate(&machine, inherited, Value.num(1000000), Value.num(7)),
+    );
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(@as(usize, 0), inherited.asObj().arrayLength());
+    try std.testing.expect(inherited.asObj().getOwn("1000000") == null);
+
+    var direct_claim = Claim{ .object = direct.asObj(), .allocator = allocator };
+    const direct_owner = try std.Thread.spawn(.{}, Claim.run, .{&direct_claim});
+    direct_owner.join();
+
+    try std.testing.expectError(
+        error.Throw,
+        quickSparseArrayCreate(&machine, direct, Value.num(1000000), Value.num(7)),
+    );
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(@as(usize, 0), direct.asObj().arrayLength());
+    try std.testing.expect(direct.asObj().getOwn("1000000") == null);
 }
 
 test "vm: quickens canonical primitive string array indices" {

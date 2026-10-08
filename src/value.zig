@@ -6673,6 +6673,42 @@ pub const Object = struct {
         return result;
     }
 
+    /// Create one distant Array index as a named own data property while the
+    /// indexed, descriptor, and length representations form one transaction.
+    /// Existing data/accessor properties, descriptor maps, nearby dense slots,
+    /// and non-extensible receivers are refused without mutation.
+    pub fn createSparseArrayOwnData(
+        self: *Object,
+        arena: std.mem.Allocator,
+        root: *Shape,
+        name: []const u8,
+        index: usize,
+        v: Value,
+    ) std.mem.Allocator.Error!bool {
+        const indexed_locked = element_locks_enabled.load(.acquire);
+        if (indexed_locked) self.lockIndexedProperty();
+        defer if (indexed_locked) self.unlockIndexedProperty();
+        self.lockPropertiesFor(.receiver_set);
+        defer self.unlockProperties();
+
+        if (!self.is_array or self.is_arguments or self.accessorsMap() != null or
+            self.attrsMap() != null or !self.isExtensible()) return false;
+        const base = self.shape orelse root;
+        switch (base.lookupState(name)) {
+            .present => return false,
+            .absent, .deleted => {},
+        }
+
+        const elements_locked_42 = self.lockElements();
+        defer self.unlockElements(elements_locked_42);
+        const dense_cap: usize = 1 << 24;
+        if (index < dense_cap and index <= self.elementsItems().len + 1024) return false;
+
+        try self.setArrayLengthFloorUnlocked(arena, index + 1);
+        try self.setOwnUnlocked(arena, root, name, v);
+        return true;
+    }
+
     /// JSC's `putDirectOffset`: replace an existing shape slot without a
     /// property lookup or transition. The caller supplies a proven offset; an
     /// invalid offset is rejected instead of indexing uninitialized storage.

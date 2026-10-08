@@ -11427,6 +11427,19 @@ pub const Interpreter = struct {
         return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
     }
 
+    pub fn createFastArraySparseIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
+        if (!recv.isObject()) return false;
+        const o = recv.asObj();
+        try self.checkRestricted(o);
+        if (!o.is_array or o.is_arguments or o.proxyHandler() != null or o.proxy_revoked)
+            return false;
+        if (self.jit_owner != null and self.jit_owner.?.hasPublishedArtifacts()) return false;
+        if (!try self.arrayProtoChainCleanForIndexedSetChecked(o)) return false;
+        var key_storage: [10]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch return false;
+        return o.createSparseArrayOwnData(self.arena, self.root_shape, key, index, v);
+    }
+
     /// ToPropertyKey: a Symbol key uses its unique internal encoding (so
     /// symbol-keyed properties don't collide with string keys and stay out of
     /// string enumeration); other keys coerce to string.
