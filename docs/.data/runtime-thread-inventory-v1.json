@@ -12,7 +12,7 @@
       "admission": "Process-wide per-resource thread and configured-stack limits; allocation, policy, or OS spawn failure returns OutOfMemory",
       "stack_policy": "Platform default",
       "blocking": "Broadcast, Atomics.wait, agent sleep, and teardown joins publish nested runnable/blocked transitions",
-      "shutdown": "agent.reset interrupts waiters and joins every started agent",
+      "shutdown": "agent.reset interrupts waiters, cancels still-queued initial starts, and joins every started agent before freeing group records",
       "scratch_memory": "Fresh realm plus process-allocator Agent source/report state",
       "coordinator_status": "shared_cpu_slots",
       "scheduler_priority": "foreground"
@@ -101,7 +101,7 @@
     }
   ],
   "test_only_direct_spawns": [
-    { "path": "src/agent.zig", "count": 2 },
+    { "path": "src/agent.zig", "count": 3 },
     { "path": "src/bytecode.zig", "count": 12 },
     { "path": "src/c_api.zig", "count": 11 },
     { "path": "src/context.zig", "count": 35 },

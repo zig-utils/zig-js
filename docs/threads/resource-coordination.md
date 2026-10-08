@@ -136,6 +136,12 @@ its initial safety slot before group teardown joins it. A watchdog that already
 won a slot retains the ordinary deadline, termination-publication, blocked
 sleep, and stop/join behavior.
 
+The test262 host cancels agent starts that are still waiting for their initial
+foreground slot when it resets the process-wide agent group. Cancellation
+publishes terminal agent state and wakes group and Atomics observers without
+executing source. Running agents retain the ordinary broadcast, report,
+waiter, and stop/join protocol.
+
 The runnable limit defaults to `max(1, logical CPUs - 1)`. The reserved lane
 keeps capacity available for the embedder or foreground host mutator, which
 runs outside the typed engine-thread boundary. If host detection fails, the

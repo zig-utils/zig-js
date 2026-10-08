@@ -32,6 +32,7 @@ pub const RunFn = *const fn (src: []const u8) void;
 
 pub const Agent = struct {
     thread: ?std.Thread = null,
+    start_cancellation: runtime_threads.StartCancellation = .{},
     /// Group-owned copy of the agent script.
     src: []const u8,
     /// Below: guarded by the group mutex.
@@ -95,7 +96,15 @@ pub fn start(src: []const u8, run: RunFn) error{OutOfMemory}!void {
         return error.OutOfMemory;
     };
     group.mutex.unlock(io);
-    a.thread = runtime_threads.spawn(.test262_agent, .{}, agentMain, .{ a, run }) catch {
+    a.thread = runtime_threads.spawnCancelable(
+        .test262_agent,
+        .{},
+        &a.start_cancellation,
+        agentMain,
+        .{ a, run },
+        agentStartCanceled,
+        .{a},
+    ) catch {
         // Spawn failure: record the agent as already done so broadcast never
         // waits on it (the record stays in the list for reset to free).
         group.mutex.lockUncancelable(io);
@@ -111,6 +120,14 @@ fn agentMain(a: *Agent, run: RunFn) void {
     _ = live_agents.fetchAdd(1, .monotonic);
     run(a.src);
     _ = live_agents.fetchSub(1, .monotonic);
+    finishAgent(a);
+}
+
+fn agentStartCanceled(a: *Agent) void {
+    finishAgent(a);
+}
+
+fn finishAgent(a: *Agent) void {
     const io = engineIo();
     group.mutex.lockUncancelable(io);
     a.done = true;
@@ -243,6 +260,9 @@ pub fn reset() void {
     group.mutex.unlock(io);
     wakeAllWaiters();
     for (group.agents.items) |a| {
+        if (a.thread != null) _ = a.start_cancellation.cancel();
+    }
+    for (group.agents.items) |a| {
         if (a.thread) |t| {
             var blocking = runtime_threads.beginBlocking();
             defer blocking.end();
@@ -311,6 +331,145 @@ test "test262 agent broadcast park publishes blocked runtime state" {
         after.block_transitions - before.block_transitions,
         after.runnable_transitions - before.runnable_transitions,
     );
+}
+
+test "test262 agent cancellation lets reset exit while a start is scheduler-paused" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    reset();
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    var restored = false;
+    defer if (!restored) {
+        _ = runtime_threads.setSchedulerLimits(previous);
+    };
+
+    const before = runtime_threads.snapshot();
+    var start_requested = std.atomic.Value(bool).init(false);
+    var agent_created = std.atomic.Value(bool).init(false);
+    var reset_requested = std.atomic.Value(bool).init(false);
+    var reset_finished = std.atomic.Value(bool).init(false);
+    const Owner = struct {
+        fn body(_: []const u8) void {}
+        fn run(
+            start_flag: *std.atomic.Value(bool),
+            created_flag: *std.atomic.Value(bool),
+            reset_flag: *std.atomic.Value(bool),
+            finished_flag: *std.atomic.Value(bool),
+        ) void {
+            while (!start_flag.load(.acquire)) std.Thread.yield() catch {};
+            start("", body) catch return;
+            created_flag.store(true, .release);
+            while (!reset_flag.load(.acquire)) std.Thread.yield() catch {};
+            reset();
+            finished_flag.store(true, .release);
+        }
+    };
+    const owner = try std.Thread.spawn(.{}, Owner.run, .{ &start_requested, &agent_created, &reset_requested, &reset_finished });
+    var joined = false;
+    defer if (!joined) {
+        reset_requested.store(true, .release);
+        _ = runtime_threads.setSchedulerLimits(previous);
+        restored = true;
+        owner.join();
+        reset();
+    };
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    start_requested.store(true, .release);
+    const io = engineIo();
+    const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while ((!agent_created.load(.acquire) or runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expect(agent_created.load(.acquire));
+    try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+    reset_requested.store(true, .release);
+
+    const reset_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!reset_finished.load(.acquire) and std.Io.Timestamp.now(io, .awake).nanoseconds < reset_deadline)
+        std.Thread.yield() catch {};
+    const reset_while_paused = reset_finished.load(.acquire);
+    _ = runtime_threads.setSchedulerLimits(previous);
+    restored = true;
+    owner.join();
+    joined = true;
+    try std.testing.expect(reset_while_paused);
+}
+
+var test_agent_body_runs = std.atomic.Value(u64).init(0);
+
+test "test262 agent cancellation balances repeated queued and running agents" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    reset();
+    defer reset();
+    const previous = runtime_threads.setSchedulerLimits(.{});
+    defer _ = runtime_threads.setSchedulerLimits(previous);
+    const before = runtime_threads.snapshot();
+    const resource_before = before.resource(.test262_agent);
+    const io = engineIo();
+    test_agent_body_runs.store(0, .release);
+    const Body = struct {
+        fn run(_: []const u8) void {
+            _ = test_agent_body_runs.fetchAdd(1, .release);
+        }
+    };
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 0 });
+    for (0..8) |iteration| {
+        try start("", Body.run);
+        const queued_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+        while (runtime_threads.snapshot().scheduler.slot_waiters == before.scheduler.slot_waiters and
+            std.Io.Timestamp.now(io, .awake).nanoseconds < queued_deadline)
+            std.Thread.yield() catch {};
+        try std.testing.expectEqual(before.scheduler.slot_waiters + 1, runtime_threads.snapshot().scheduler.slot_waiters);
+        reset();
+
+        const after = runtime_threads.snapshot();
+        const resource_after = after.resource(.test262_agent);
+        try std.testing.expectEqual(resource_before.live, resource_after.live);
+        try std.testing.expectEqual(resource_before.runnable, resource_after.runnable);
+        try std.testing.expectEqual(resource_before.blocked, resource_after.blocked);
+        try std.testing.expectEqual(resource_before.configured_stack_bytes, resource_after.configured_stack_bytes);
+        try std.testing.expectEqual(resource_before.start_cancellations + @as(u64, @intCast(iteration)) + 1, resource_after.start_cancellations);
+        try std.testing.expectEqual(before.scheduler.slot_waiters, after.scheduler.slot_waiters);
+        try std.testing.expectEqual(
+            before.scheduler.priority(.foreground).cancellations + @as(u64, @intCast(iteration)) + 1,
+            after.scheduler.priority(.foreground).cancellations,
+        );
+    }
+    try std.testing.expectEqual(@as(u64, 0), test_agent_body_runs.load(.acquire));
+
+    _ = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = 1 });
+    const Parked = struct {
+        fn run(_: []const u8) void {
+            _ = test_agent_body_runs.fetchAdd(1, .release);
+            _ = parkUntilBroadcast();
+        }
+    };
+    try start("", Parked.run);
+    const parked_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (runtime_threads.snapshot().resource(.test262_agent).blocked == resource_before.blocked and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < parked_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(resource_before.blocked + 1, runtime_threads.snapshot().resource(.test262_agent).blocked);
+    reset();
+    try std.testing.expectEqual(@as(u64, 1), test_agent_body_runs.load(.acquire));
+
+    try start("", Body.run);
+    const completed_deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while ((test_agent_body_runs.load(.acquire) != 2 or
+        runtime_threads.snapshot().resource(.test262_agent).live != resource_before.live) and
+        std.Io.Timestamp.now(io, .awake).nanoseconds < completed_deadline)
+        std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(u64, 2), test_agent_body_runs.load(.acquire));
+    try std.testing.expectEqual(resource_before.live, runtime_threads.snapshot().resource(.test262_agent).live);
+    reset();
+
+    const after_running = runtime_threads.snapshot();
+    try std.testing.expectEqual(resource_before.live, after_running.resource(.test262_agent).live);
+    try std.testing.expectEqual(resource_before.runnable, after_running.resource(.test262_agent).runnable);
+    try std.testing.expectEqual(resource_before.blocked, after_running.resource(.test262_agent).blocked);
+    try std.testing.expectEqual(resource_before.start_cancellations + 8, after_running.resource(.test262_agent).start_cancellations);
+    try std.testing.expectEqual(before.scheduler.slot_waiters, after_running.scheduler.slot_waiters);
 }
 
 var mono_base = std.atomic.Value(i64).init(0);
