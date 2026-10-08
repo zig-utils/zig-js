@@ -11455,7 +11455,7 @@ pub const Interpreter = struct {
 
         const prototype = self.effectiveProto(o) orelse return null;
         try self.checkRestricted(prototype);
-        if (prototype.proxyHandler() != null or prototype.proxy_revoked or prototype.typedArray() != null or
+        if (prototype.proxyHandler() != null or prototype.proxy_revoked or prototype.is_arguments or prototype.typedArray() != null or
             prototype.moduleNs() != null or prototype.hostClassHooks() != null)
             return null;
         return switch (prototype.indexedOwnPropertySnapshot(key, index)) {
@@ -16722,13 +16722,6 @@ pub const Interpreter = struct {
                         // else fall through: hole, accessor, or a sparse named property.
                     }
                 }
-                if (!o.is_array) {
-                    if (arrayElementIndex(key)) |i| {
-                        if (o.getOwn(key) == null and o.getAccessor(key) == null) {
-                            if (o.denseElement(i)) |v| return v;
-                        }
-                    }
-                }
                 // A String-wrapper object exposes `length` and indexed chars as
                 // own integer-keyed properties (`new String("ab").length === 2`,
                 // `[0] === "a"`).
@@ -16786,8 +16779,6 @@ pub const Interpreter = struct {
                             // append/realloc must not race this len/bounds/element read.
                             if (c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
                         }
-                    } else if (arrayElementIndex(key)) |i| {
-                        if (c.getOwn(key) == null and c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
                     }
                     if (c.boxedPrimitive()) |p| {
                         if (p.isString()) {
@@ -59240,6 +59231,26 @@ test "interpreter arguments object and Array/Object statics" {
     // Object.entries / fromEntries
     try std.testing.expectEqual(@as(f64, 2), (try evalSource(a, "Object.entries({ a: 1, b: 2 }).length")).asNum());
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let o = Object.fromEntries([['x', 5]]); o.x")).asNum());
+}
+
+test "interpreter indexed reads keep collection backing elements private" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let map = new Map([["key", 7]]); let values = [];
+        \\Object.setPrototypeOf(values, map);
+        \\let set = new Set([7]); let other = {}; Object.setPrototypeOf(other, set);
+        \\map[0] === undefined && values[0] === undefined &&
+        \\set[0] === undefined && other[0] === undefined
+    )).asBool());
+    try std.testing.expectEqual(@as(f64, 34), (try evalSource(a,
+        \\let map = new Map([["key", 7]]); map[0] = 9;
+        \\let set = new Set([7]); set["0"] = 8;
+        \\let values = []; Object.setPrototypeOf(values, map);
+        \\let other = {}; Object.setPrototypeOf(other, set);
+        \\map[0] + values[0] + set[0] + other["0"]
+    )).asNum());
 }
 
 test "interpreter Map and Set" {

@@ -150,6 +150,8 @@
         {"path": "src/vm.zig", "text": "test \"vm: quickens numeric sparse array reads\""},
         {"path": "src/vm.zig", "text": "test \"vm: numeric sparse array reads enforce restriction ownership\""},
         {"path": "src/vm.zig", "text": "test \"vm: quickens direct prototype indexed data reads\""},
+        {"path": "src/vm.zig", "text": "test \"vm: prototype indexed reads ignore collection backing elements\""},
+        {"path": "src/vm.zig", "text": "test \"vm: prototype indexed reads preserve mapped arguments cells\""},
         {"path": "src/vm.zig", "text": "test \"vm: prototype indexed reads enforce restriction ownership\""},
         {"path": "src/vm.zig", "text": "test \"vm: quickens numeric sparse array stores\""},
         {"path": "src/vm.zig", "text": "test \"vm: quickens distant sparse array creation\""},

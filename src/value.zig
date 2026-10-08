@@ -6272,7 +6272,9 @@ pub const Object = struct {
             .accessor => return .accessor,
             .absent => {},
         }
-        if (self.denseElement(index)) |element| return .{ .data = element };
+        // Ordinary objects may use elements for collection backing storage;
+        // only Array exotic [[GetOwnProperty]] exposes it as indexed data.
+        if (self.is_array) if (self.denseElement(index)) |element| return .{ .data = element };
         return .absent;
     }
 

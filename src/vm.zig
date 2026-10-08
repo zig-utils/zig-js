@@ -22438,6 +22438,64 @@ test "vm: numeric sparse array reads enforce restriction ownership" {
     try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
 }
 
+test "vm: prototype indexed reads ignore collection backing elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const before = quick_array_prototype_index_hits.load(.monotonic);
+        try std.testing.expect((try vmRun(allocator,
+            \\let map = new Map([["key", 7]]); let values = [];
+            \\Object.setPrototypeOf(values, map);
+            \\let set = new Set([7]); let other = []; Object.setPrototypeOf(other, set);
+            \\map[0] === undefined && values[0] === undefined &&
+            \\set[0] === undefined && other[0] === undefined
+        )).toBoolean());
+        try std.testing.expectEqual(before, quick_array_prototype_index_hits.load(.monotonic));
+
+        // Ordinary indexed own properties remain public on collection objects.
+        try std.testing.expectEqual(@as(f64, 34), (try vmRun(allocator,
+            \\let map = new Map([["key", 7]]); map[0] = 9;
+            \\let set = new Set([7]); set["0"] = 8;
+            \\let values = []; Object.setPrototypeOf(values, map);
+            \\let other = []; Object.setPrototypeOf(other, set);
+            \\map[0] + values[0] + set[0] + other["0"]
+        )).asNum());
+        try std.testing.expectEqual(before + 2, quick_array_prototype_index_hits.load(.monotonic));
+    }
+}
+
+test "vm: prototype indexed reads preserve mapped arguments cells" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const before = quick_array_prototype_index_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+            \\function mapped(a) {
+            \\  let values = []; Object.setPrototypeOf(values, arguments);
+            \\  a = 9; return values[0];
+            \\}
+            \\mapped(1)
+        )).asNum());
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\function strict(a) {
+            \\  "use strict";
+            \\  let values = []; Object.setPrototypeOf(values, arguments);
+            \\  a = 9; return values["0"];
+            \\}
+            \\strict(1)
+        )).asNum());
+        try std.testing.expectEqual(before, quick_array_prototype_index_hits.load(.monotonic));
+    }
+}
+
 test "vm: quickens direct prototype indexed data reads" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
