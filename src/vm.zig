@@ -23299,6 +23299,53 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
 }
 
+test "vm: constructor reads preserve real descriptors and misses" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\let factories = [function () { return {}; }, function () { return []; },
+            \\  function () { return new Map(); }, function () { return new Set(); },
+            \\  function () { return new Date(0); }, function () { return /x/; },
+            \\  function () { return new Error("x"); }, function () { return function () {}; }];
+            \\let missing = true;
+            \\for (let factory of factories) {
+            \\  let value = factory(); Object.setPrototypeOf(value, Object.create(null));
+            \\  if (value.constructor !== undefined || "constructor" in value) missing = false;
+            \\}
+            \\let prototype = Object.create(null); let value = [];
+            \\Object.setPrototypeOf(value, prototype);
+            \\let receiver;
+            \\Object.defineProperty(prototype, "constructor", {
+            \\  get: function () { receiver = this; $vm.gc(); return 7; }, configurable: true
+            \\});
+            \\let getter = value.constructor === 7 && receiver === value;
+            \\delete prototype.constructor;
+            \\let removed = value.constructor === undefined && !("constructor" in value);
+            \\prototype.constructor = undefined;
+            \\let present = value.constructor === undefined && ("constructor" in value);
+            \\let calls = 0;
+            \\Object.setPrototypeOf(value, new Proxy(Object.create(null), {
+            \\  get: function () { calls++; return undefined; }
+            \\}));
+            \\let proxy = value.constructor === undefined && calls === 1;
+            \\let standard = ({}).constructor === Object && [].constructor === Array &&
+            \\  new Map().constructor === Map && new Set().constructor === Set &&
+            \\  new Date(0).constructor === Date && /x/.constructor === RegExp &&
+            \\  new Error("x").constructor === Error && (function () {}).constructor === Function;
+            \\missing && getter && removed && present && proxy && standard
+        );
+        try std.testing.expect(result.asBool());
+    }
+}
+
 test "vm: primitive indexed misses use rooted canonical Get" {
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{

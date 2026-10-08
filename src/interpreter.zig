@@ -16815,13 +16815,6 @@ pub const Interpreter = struct {
                 // Accessing a private member the object doesn't carry is a brand
                 // violation — a TypeError, not `undefined`.
                 if (value.isPrivateKey(key)) return self.throwInvalidPrivateAccess(key, .none);
-                // Legacy intrinsic gaps may still use a kind constructor fallback,
-                // but an explicit null prototype must terminate lookup exactly.
-                // Primitive wrappers already carry their complete prototype;
-                // deleting its constructor must leave the property absent.
-                if (std.mem.eql(u8, key, "constructor") and o.boxedPrimitive() == null and !o.protoExplicitNull()) {
-                    if (self.constructorOf(recv)) |ctor| return ctor;
-                }
                 if (found) |slot| slot.* = false;
                 return Value.undef();
             },
@@ -16852,28 +16845,6 @@ pub const Interpreter = struct {
             found,
             null,
         );
-    }
-
-    /// The global constructor for a value's kind (`[].constructor === Array`).
-    /// A fallback used when the prototype chain doesn't supply `constructor`
-    /// (instance prototypes aren't wired yet).
-    fn constructorOf(self: *Interpreter, recv: Value) ?Value {
-        const name: []const u8 = switch (recv.kind()) {
-            .string => "String",
-            .number => "Number",
-            .boolean => "Boolean",
-            .object => blk: {
-                const o = recv.asObj();
-                break :blk if (o.is_array) "Array" else if (o.behavior.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.behavior.is_error) (if (o.errorName().len > 0) o.errorName() else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.behavior.is_date) "Date" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
-                    .number => "Number",
-                    .string => "String",
-                    .boolean => "Boolean",
-                    else => "Object",
-                }) else if (o.isCallableObject()) "Function" else "Object";
-            },
-            else => return null,
-        };
-        return self.env.get(name);
     }
 
     // ---- destructuring ----------------------------------------------------
@@ -58605,6 +58576,69 @@ test "interpreter array literal, index, length, push/pop" {
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let xs = [7, 9]; xs.pop()")).asNum());
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + ['a','b','c']")).asStr());
+}
+
+test "interpreter constructor reads use only actual prototype properties" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let factories = [function () { return {}; }, function () { return []; },
+        \\  function () { return new Map(); }, function () { return new Set(); },
+        \\  function () { return new Date(0); }, function () { return /x/; },
+        \\  function () { return new Error("x"); }, function () { return function () {}; }];
+        \\let correct = true;
+        \\for (let factory of factories) {
+        \\  let value = factory(); Object.setPrototypeOf(value, Object.create(null));
+        \\  if (value.constructor !== undefined || "constructor" in value) correct = false;
+        \\}
+        \\correct
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let value = []; let prototype = Object.create(null);
+        \\Object.setPrototypeOf(value, prototype);
+        \\prototype.constructor = 7; let inherited = value.constructor === 7;
+        \\prototype.constructor = undefined;
+        \\let present = value.constructor === undefined && ("constructor" in value);
+        \\delete prototype.constructor;
+        \\let absent = value.constructor === undefined && !("constructor" in value);
+        \\value.constructor = 9;
+        \\inherited && present && absent && value.constructor === 9 && Object.hasOwn(value, "constructor")
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let calls = 0; let value = {};
+        \\let prototype = new Proxy(Object.create(null), {
+        \\  get: function (target, key, receiver) { calls++; return receiver === value ? undefined : 99; }
+        \\});
+        \\Object.setPrototypeOf(value, prototype);
+        \\value.constructor === undefined && calls === 1
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let objects = [{}, [], new Map(), new Set(), new Date(0), /x/, new Error("x"), function () {}];
+        \\let constructors = [Object, Array, Map, Set, Date, RegExp, Error, Function];
+        \\let correct = true;
+        \\for (let i = 0; i < objects.length; i++) if (objects[i].constructor !== constructors[i]) correct = false;
+        \\correct
+    )).asBool());
+}
+
+test "interpreter missing constructor preserves property-slot absence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    const prototype = try gc_mod.allocObj(a);
+    prototype.* = .{};
+    const object = try gc_mod.allocObj(a);
+    object.* = .{ .is_array = true, .proto = prototype };
+    try std.testing.expect((try machine.getPropertyIfExists(Value.obj(object), "constructor")) == null);
+    try machine.setProp(prototype, "constructor", Value.undef());
+    const present = (try machine.getPropertyIfExists(Value.obj(object), "constructor")) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(present.isUndefined());
 }
 
 test "interpreter primitive indexed misses use canonical prototype Get" {
