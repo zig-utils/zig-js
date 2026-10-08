@@ -33104,7 +33104,7 @@ test "private process rejection and uncaught dispatch preserve pinned events" {
     const wrapped = Bun__wrapUnhandledRejectionErrorForUncaughtException(context, try Probe.encoded(internal, "Object.create({ stack: 'inherited' })"));
     try std.testing.expect(wrapped != .empty);
     const wrapped_value = privateValueFrom(context, wrapped) orelse return error.ValueInitFailed;
-    try internal.env.put("__wrapped_242", wrapped_value);
+    try internal.global_object.setOwn(internal.arena(), internal.root_shape, "__wrapped_242", wrapped_value);
     try std.testing.expect((try internal.evaluate(
         \\__wrapped_242 instanceof Error && __wrapped_242.name === "UnhandledPromiseRejection" &&
         \\__wrapped_242.code === "ERR_UNHANDLED_REJECTION" &&
@@ -33123,7 +33123,7 @@ test "private process rejection and uncaught dispatch preserve pinned events" {
     try std.testing.expect((try internal.evaluate("__lifecycle_242.join(',') === 'before:2,micro,before:3,micro,exit:4' && process._exiting === true")).asBool());
 
     _ = try sibling_internal.evaluate("globalThis.__sibling_uncaught_242 = 0; process.on('uncaughtException', function (error) { if (error === globalThis.__shared_error_242) __sibling_uncaught_242++; });");
-    try sibling_internal.env.put("__shared_error_242", privateValueFrom(sibling, uncaught) orelse return error.ValueInitFailed);
+    try sibling_internal.global_object.setOwn(sibling_internal.arena(), sibling_internal.root_shape, "__shared_error_242", privateValueFrom(sibling, uncaught) orelse return error.ValueInitFailed);
     try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(sibling, uncaught, 0));
     try std.testing.expectEqual(@as(f64, 1), (try sibling_internal.evaluate("__sibling_uncaught_242")).asNum());
 
@@ -33386,7 +33386,7 @@ test "private IPC process events preserve listener gates and identity" {
         \\JSON.stringify(__ipc_events_244) === '[["message",true,true,true,2],["error",true,true,1],["disconnect",true,0]]'
     )).asBool());
 
-    try sibling_internal.env.put("__ipc_shared_244", privateValueFrom(sibling, value_244) orelse return error.ValueInitFailed);
+    try sibling_internal.global_object.setOwn(sibling_internal.arena(), sibling_internal.root_shape, "__ipc_shared_244", privateValueFrom(sibling, value_244) orelse return error.ValueInitFailed);
     _ = try sibling_internal.evaluate("globalThis.__ipc_sibling_244 = 0; process.on('message', function (value) { if (value === __ipc_shared_244) __ipc_sibling_244++; });");
     Process__emitMessageEvent(sibling, value_244, handle_244);
     try std.testing.expect(!JSGlobalObject__hasException(sibling));
