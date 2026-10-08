@@ -41451,24 +41451,34 @@ test "parallel_js: multi-age cooperative nursery retains old-owner graph" {
     const parks_before = ctx.gc_cooperative_peer_parks.load(.monotonic);
     const promoted_before = heap.promoted_cells;
 
-    const result = try ctx.evaluate(
-        \\multiAgeShared.child = { value: 41 };
-        \\function multiAgeChurn(lane) {
-        \\  const ring = [];
-        \\  for (let i = 0; i < 64; i++) ring.push({ value: i, lane });
-        \\  for (let i = 0; i < 6000; i++) {
-        \\    const index = i & 63;
-        \\    ring[index] = { value: ring[index].value + i + lane, lane };
-        \\    if ((i & 255) === 0 && multiAgeShared.child.value !== 41)
-        \\      throw new Error("multi-age child changed");
+    _ = try ctx.evaluate("multiAgeShared.child = { value: 41 }");
+    const batch_source =
+        \\(() => {
+        \\  function multiAgeChurn(lane) {
+        \\    const ring = [];
+        \\    for (let i = 0; i < 64; i++) ring.push({ value: i, lane });
+        \\    for (let i = 0; i < 6000; i++) {
+        \\      const index = i & 63;
+        \\      ring[index] = { value: ring[index].value + i + lane, lane };
+        \\      if ((i & 255) === 0 && multiAgeShared.child.value !== 41)
+        \\        throw new Error("multi-age child changed");
+        \\    }
+        \\    return 100 + lane;
         \\  }
-        \\  return 100 + lane;
-        \\}
-        \\const first = new Thread(multiAgeChurn, 0);
-        \\const second = new Thread(multiAgeChurn, 1);
-        \\multiAgeShared.child.value + first.join() + second.join();
-    );
-    try std.testing.expectEqual(@as(f64, 242), result.asNum());
+        \\  const first = new Thread(multiAgeChurn, 0);
+        \\  const second = new Thread(multiAgeChurn, 1);
+        \\  return multiAgeShared.child.value + first.join() + second.join();
+        \\})()
+    ;
+    // A loaded shard can legitimately turn a bounded rendezvous into a timeout.
+    // Drive another identical batch until the graph has crossed the configured
+    // number of successful nursery collections, with a finite failure bound.
+    for (0..runtime_gc_tenuring_age * 2) |_| {
+        const result = try ctx.evaluate(batch_source);
+        try std.testing.expectEqual(@as(f64, 242), result.asNum());
+        if (ctx.gc_cooperative_collections.load(.monotonic) - collections_before >= runtime_gc_tenuring_age)
+            break;
+    }
     const collections = ctx.gc_cooperative_collections.load(.monotonic) - collections_before;
     const attempts = ctx.gc_cooperative_attempts.load(.monotonic) - attempts_before;
     const timeouts = ctx.gc_cooperative_timeouts.load(.monotonic) - timeouts_before;
