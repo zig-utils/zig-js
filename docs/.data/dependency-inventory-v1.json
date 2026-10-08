@@ -223,7 +223,7 @@
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".ts", "count": 71, "edge": "home-tool-runtime" }
+      { "extension": ".ts", "count": 72, "edge": "home-tool-runtime" }
     ],
     "network_capable_scripts": [
       { "path": "tools/wasm-spec/fetch.ts", "edge": "pinned-conformance-corpora" }
