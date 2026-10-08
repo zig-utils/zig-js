@@ -22881,6 +22881,113 @@ test "vm: quickens distant sparse array creation" {
     }
 }
 
+test "vm: String exotic ancestors preserve indexed write semantics" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\function check(key, strict) {
+            \\  var values = []; Object.setPrototypeOf(values, new String('abc'));
+            \\  var threw = false, rhsCalls = 0, coercions = 0;
+            \\  var rhs = { valueOf: function () { coercions++; return 9; } };
+            \\  function value() { rhsCalls++; return rhs; }
+            \\  try {
+            \\    if (strict) (function () { 'use strict'; values[key] = value(); })();
+            \\    else values[key] = value();
+            \\  } catch (error) { threw = error instanceof TypeError; }
+            \\  return values[0] === 'a' && !Object.hasOwn(values, '0') &&
+            \\    values.length === 0 && threw === strict && rhsCalls === 1 && coercions === 0;
+            \\}
+            \\var checks = check(0, false) && check('0', false) && check(0, true) && check('0', true);
+            \\var astral = new String('\uD83D\uDE00'), values = [];
+            \\Object.setPrototypeOf(values, Object.create(astral));
+            \\values[0] = 8; values['1'] = 9; values[2] = 10; values['01'] = 11;
+            \\checks = checks && values[0].charCodeAt(0) === 55357 && values[1].charCodeAt(0) === 56832 &&
+            \\  !Object.hasOwn(values, '0') && !Object.hasOwn(values, '1') &&
+            \\  values[2] === 10 && values['01'] === 11 && values.length === 3;
+            \\var keyCalls = 0, blocked = [];
+            \\Object.setPrototypeOf(blocked, new String('abc'));
+            \\blocked[{ toString: function () { keyCalls++; $vm.gc(); return '0'; } }] = 7;
+            \\checks = checks && keyCalls === 1 && blocked[0] === 'a' && blocked.length === 0;
+            \\var seen = 0, higher = {};
+            \\Object.defineProperty(higher, '0', { set: function () { seen++; } });
+            \\Object.defineProperty(higher, '3', { set: function (value) { if (this === blocked) seen += value; } });
+            \\var text = new String('abc'); Object.setPrototypeOf(text, higher);
+            \\Object.setPrototypeOf(blocked, text); blocked[0] = 1; blocked[3] = 4;
+            \\checks = checks && seen === 4 && !Object.hasOwn(blocked, '0') && !Object.hasOwn(blocked, '3');
+            \\var own = [1]; Object.setPrototypeOf(own, new String('abc')); own[0] = 5;
+            \\checks = checks && own[0] === 5 && own.length === 1;
+            \\Object.setPrototypeOf(blocked, {}); blocked[0] = 6;
+            \\checks = checks && blocked[0] === 6 && blocked.length === 1;
+            \\var pushed = [], threw = false;
+            \\Object.setPrototypeOf(pushed, new String('abc'));
+            \\try { Array.prototype.push.call(pushed, 9); } catch (error) { threw = error instanceof TypeError; }
+            \\checks && threw && pushed[0] === 'a' && !Object.hasOwn(pushed, '0') && pushed.length === 0
+        )).asBool());
+    }
+}
+
+test "vm: String exotic ancestors refuse indexed creation and vector exposure gates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    var parser = try Parser.init(allocator,
+        \\var values = []; Object.setPrototypeOf(values, new String('abc')); values
+    );
+    const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    const values = try run(&machine, chunk, null);
+    try std.testing.expect(!machine.canExposeContiguousArray(values.asObj()));
+    try std.testing.expect(!machine.arrayProtoChainCleanForDenseAppend(values.asObj()));
+    try std.testing.expect(!try machine.setFastArrayNumericIndex(values, 0, Value.num(9)));
+    try std.testing.expect(!try machine.createFastArraySparseIndex(values, 0, Value.num(9)));
+    try std.testing.expectEqual(@as(usize, 0), values.asObj().arrayLength());
+    try std.testing.expectEqualStrings("a", (try machine.getProperty(values, "0")).asStr());
+}
+
+test "vm: String exotic ancestors preserve writes across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate(
+        \\globalThis.sharedStringPrototype = new String('abc');
+        \\function stringLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  for (var round = 0; round < 32; round++) {
+        \\    var values = []; Object.setPrototypeOf(values, sharedStringPrototype);
+        \\    values[0] = 8; values['1'] = 9;
+        \\    var threw = false;
+        \\    try { Array.prototype.push.call(values, 9); } catch (error) { threw = error instanceof TypeError; }
+        \\    if (!threw || values[0] !== 'a' || values[1] !== 'b' ||
+        \\        Object.hasOwn(values, '0') || Object.hasOwn(values, '1') || values.length !== 0)
+        \\      throw new Error('String ancestor write mismatch');
+        \\    values[3] = round;
+        \\    if (values[3] !== round || values.length !== 4) throw new Error('ordinary creation mismatch');
+        \\  }
+        \\  return 1;
+        \\}
+        \\var threads = [];
+        \\for (var lane = 0; lane < 4; lane++) threads.push(new Thread(stringLane));
+        \\var total = 0;
+        \\for (var lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
 test "vm: quickens guarded dense array creation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

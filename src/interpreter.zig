@@ -11311,12 +11311,20 @@ pub const Interpreter = struct {
         return @intFromFloat(n);
     }
 
+    fn arrayPrototypeMayInterceptIndexedSet(o: *value.Object) bool {
+        if (o.proxyHandler() != null or o.proxy_revoked or o.typedArray() != null or
+            o.has_indexed_property.load(.monotonic) or o.indexed_own_seen.load(.acquire))
+            return true;
+        // ECMA-262 10.4.3.5 StringGetOwnProperty supplies virtual non-writable UTF-16 character
+        // descriptors that are absent from both Shape and dense storage.
+        if (o.boxedPrimitive()) |primitive| if (primitive.isString()) return true;
+        return false;
+    }
+
     fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
-                return false;
-            if (c.indexed_own_seen.load(.acquire)) return false;
+            if (arrayPrototypeMayInterceptIndexedSet(c)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -11326,9 +11334,7 @@ pub const Interpreter = struct {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
             try self.checkRestricted(c);
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
-                return false;
-            if (c.indexed_own_seen.load(.acquire)) return false;
+            if (arrayPrototypeMayInterceptIndexedSet(c)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -11337,9 +11343,7 @@ pub const Interpreter = struct {
     pub fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
-                return false;
-            if (c.indexed_own_seen.load(.acquire)) return false;
+            if (arrayPrototypeMayInterceptIndexedSet(c)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
