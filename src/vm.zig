@@ -1041,13 +1041,6 @@ const QuickPropertyPlan = struct {
     resolved_target_slot: u32,
 };
 
-const QuickPackedArraySumLoop = struct {
-    index_local: u32,
-    array_local: u32,
-    total_local: u32,
-    increment: f64,
-};
-
 const max_quick_array_expression_ops = 16;
 const max_quick_array_expression_stack = 8;
 
@@ -1132,7 +1125,6 @@ const QuickObjectAllocationLoop = struct {
 
 const QuickArrayPlan = union(enum) {
     unsupported,
-    packed_sum: QuickPackedArraySumLoop,
     packed_push: QuickPackedArrayPushLoop,
     polymorphic_property: QuickPolymorphicPropertyLoop,
     object_allocation: QuickObjectAllocationLoop,
@@ -1255,7 +1247,6 @@ var quick_arguments_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
-var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
@@ -1905,39 +1896,7 @@ fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
     if (compileQuickPolymorphicPropertyLoop(chunk, start)) |property|
         return .{ .polymorphic_property = property };
     if (compileQuickPackedArrayPushLoop(chunk, start)) |push| return .{ .packed_push = push };
-    const code = chunk.code.items;
-    if (start + 18 > code.len) return .unsupported;
-    const index_local = code[start].a;
-    const array_local = code[start + 1].a;
-    const total_local = code[start + 5].a;
-    if (code[start].op != .load_local or
-        code[start + 1].op != .load_local or
-        code[start + 2].op != .get_prop or code[start + 2].a >= chunk.names.items.len or
-        !std.mem.eql(u8, chunk.names.items[code[start + 2].a], "length") or
-        code[start + 3].op != .lt or
-        code[start + 4].op != .jump_if_false or code[start + 4].a != start + 18 or
-        code[start + 5].op != .load_local or
-        code[start + 6].op != .load_local or code[start + 6].a != array_local or
-        code[start + 7].op != .load_local or code[start + 7].a != index_local or
-        code[start + 8].op != .get_index or
-        code[start + 9].op != .add or
-        code[start + 10].op != .store_local or code[start + 10].a != total_local or
-        code[start + 11].op != .pop or
-        code[start + 12].op != .load_local or code[start + 12].a != index_local or
-        code[start + 13].op != .load_const or code[start + 13].a >= chunk.consts.items.len or
-        code[start + 14].op != .add or
-        code[start + 15].op != .store_local or code[start + 15].a != index_local or
-        code[start + 16].op != .pop or
-        code[start + 17].op != .jump or code[start + 17].a != start)
-        return .unsupported;
-    const increment = chunk.consts.items[code[start + 13].a];
-    if (!increment.isNumber()) return .unsupported;
-    return .{ .packed_sum = .{
-        .index_local = index_local,
-        .array_local = array_local,
-        .total_local = total_local,
-        .increment = increment.asNum(),
-    } };
+    return .unsupported;
 }
 
 fn quickArrayPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickArrayPlan {
@@ -3261,43 +3220,6 @@ fn tryQuickArrayLoop(
                 .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
                 .next_ip = if (completed) property.exit_ip else start,
             };
-        },
-        .packed_sum => |sum| quick: {
-            const max_iterations = (max_extra_steps + 1) / 18;
-            if (max_iterations == 0) break :quick null;
-            const index_slot: usize = @intCast(sum.index_local);
-            const array_slot: usize = @intCast(sum.array_local);
-            const total_slot: usize = @intCast(sum.total_local);
-            if (index_slot >= frame.slots.len or array_slot >= frame.slots.len or total_slot >= frame.slots.len)
-                break :quick null;
-            const array_value = frame.slots[array_slot];
-            if (!array_value.isObject()) break :quick null;
-            const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked)
-                break :quick null;
-            const elements_locked = if (parallel_sync) array.lockElements() else false;
-            defer array.unlockElements(elements_locked);
-            // claimRestriction takes this same lock before publishing an
-            // owner, so the entire numeric read batch precedes that claim.
-            if (!quickPropertyAccessAllowed(array)) break :quick null;
-            if (array.accessorsMap() != null or array.holesMap() != null or array.arrayLengthFloor() > array.elementsItems().len)
-                break :quick null;
-            var index_value = frame.slots[index_slot];
-            var total_value = frame.slots[total_slot];
-            if (!total_value.isNumber()) break :quick null;
-            var iterations: u64 = 0;
-            while (iterations < max_iterations) : (iterations += 1) {
-                const index = quickArrayIndex(index_value) orelse break;
-                if (index >= array.elementsItems().len) break;
-                const element = array.elementsItems()[index];
-                if (!element.isNumber()) break;
-                total_value = Value.num(total_value.asNum() + element.asNum());
-                index_value = Value.num(index_value.asNum() + sum.increment);
-            }
-            if (iterations == 0) break :quick null;
-            frame.slots[total_slot] = total_value;
-            frame.slots[index_slot] = index_value;
-            break :quick .{ .extra_steps = iterations * 18 - 1, .next_ip = start };
         },
         .packed_push => |*push| quick: {
             const executed: u64 = push.executed;
@@ -8494,7 +8416,6 @@ fn runChunk(
                                     _ = quick_object_allocation_checkpoint_crossings.fetchAdd(1, .monotonic);
                             }
                             if (builtin.is_test) switch (plan.*) {
-                                .packed_sum => _ = quick_packed_array_sum_loop_hits.fetchAdd(1, .monotonic),
                                 .packed_push => |push| {
                                     _ = quick_packed_array_push_loop_hits.fetchAdd(1, .monotonic);
                                     switch (push.specialization) {
@@ -13809,6 +13730,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         .{ .entry = .initial, .name = "activationLegacy", .argument = 3, .expected = 3 },
         .{ .entry = .initial, .name = "activationRecursive", .argument = 8, .expected = 21 },
         .{ .entry = .initial, .name = "activationPropertyLoop", .argument = 8, .expected = 28093728 },
+        .{ .entry = .initial, .name = "activationArraySum", .argument = 8, .expected = 36 },
         .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
         .{ .entry = .inline_, .name = "activationLegacy", .argument = 4, .expected = 4 },
         .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
@@ -13827,6 +13749,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         \\function activationLeaf(v){return v+1;}
         \\function activationRecursive(n){return n<2?n:activationRecursive(n-1)+activationRecursive(n-2);}
         \\function activationPropertyLoop(limit){const object={a:0,b:1,c:2,d:3};let i=0;while(i<limit){object.a=(object.a+i)%1000003;object.b=object.b+1;object.c=object.a+object.b;object.d=object.c-object.b;i=i+1;}return object.a*1000000+object.b*10000+object.c*100+object.d;}
+        \\function activationArraySum(){const values=[1,2,3,4,5,6,7,8];let total=0;for(let i=0;i<values.length;i=i+1)total=total+values[i];return total;}
         \\function activationLegacy(v){return activationLegacy.arguments[0];}
         \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
         \\function activationNestedB(v){return activationNestedA(v);}
@@ -21844,7 +21767,6 @@ test "vm: quickens packed dense numeric array reads" {
     const lengths_before = quick_array_length_hits.load(.monotonic);
     const prototype_data_before = quick_array_prototype_data_hits.load(.monotonic);
     const pushes_before = quick_array_push_hits.load(.monotonic);
-    const sum_loops_before = quick_packed_array_sum_loop_hits.load(.monotonic);
     const push_loops_before = quick_packed_array_push_loop_hits.load(.monotonic);
     const specialized_expressions_before = quick_packed_array_specialized_expression_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
@@ -21865,8 +21787,6 @@ test "vm: quickens packed dense numeric array reads" {
     try std.testing.expect(quick_dense_array_store_hits.load(.monotonic) > stores_before);
     const stores_after = quick_dense_array_store_hits.load(.monotonic);
     try std.testing.expect(quick_array_length_hits.load(.monotonic) > lengths_before);
-    try std.testing.expect(quick_packed_array_sum_loop_hits.load(.monotonic) > sum_loops_before);
-    const sum_loops_after = quick_packed_array_sum_loop_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 2), (try vmRun(allocator,
         \\let values = []; values.push(1); values.push(2); values.length
@@ -21909,7 +21829,6 @@ test "vm: quickens packed dense numeric array reads" {
         \\}
         \\let values = [1]; Object.defineProperty(values, "0", { get: function () { return 7; } }); sum(values)
     )).asNum());
-    try std.testing.expectEqual(sum_loops_after, quick_packed_array_sum_loop_hits.load(.monotonic));
 
     // Accessors, descriptors, holes, and Proxies retain ordinary [[Set]].
     try std.testing.expectEqual(@as(f64, 71), (try vmRun(allocator,
@@ -24405,7 +24324,202 @@ test "vm: shared array fast paths retain observable overrides" {
     )).asNum());
 }
 
-test "vm: packed array sum quickening preserves bytecode steps" {
+test "vm: packed array sum execution runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 144), (try ctx.evaluate(
+        \\function sumLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  const values = [1, 2, 3, 4, 5, 6, 7, 8]; let total = 0;
+        \\  for (let i = 0; i < values.length; i = i + 1) total = total + values[i];
+        \\  return total;
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(sumLane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
+test "vm: packed array sum execution preserves aliased counter assignments" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 5), (try ctx.evaluate(
+            \\function aliasedSum(values) {
+            \\  let i = 0;
+            \\  while (i < values.length) {
+            \\    i = i + values[i];
+            \\    i = i + 1;
+            \\  }
+            \\  return i;
+            \\}
+            \\aliasedSum([4, 4, 4])
+        )).asNum());
+    }
+}
+
+test "vm: packed array sum execution preserves observable indexed reads" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\function sum(values) {
+        \\  let total = 0;
+        \\  for (let i = 0; i < values.length; i = i + 1) total = total + values[i];
+        \\  return total;
+        \\}
+        \\let trace = '';
+        \\const proxy = new Proxy([1, 2, 3], {
+        \\  get(target, key) { trace += key + ','; $vm.gc(); return Reflect.get(target, key); }
+        \\});
+        \\const proxyResult = sum(proxy);
+        \\let inheritedGets = 0; const holey = [1, , 3], proto = Object.create(Array.prototype);
+        \\Object.defineProperty(proto, '1', { get() { inheritedGets++; $vm.gc(); return 9; } });
+        \\Object.setPrototypeOf(holey, proto);
+        \\const inheritedResult = sum(holey);
+        \\let coercions = 0;
+        \\const grow = [{ valueOf() { coercions++; $vm.gc(); grow.push(4); return 2; } }, 1];
+        \\const growResult = sum(grow);
+        \\const shrink = [1, 2, 3];
+        \\Object.defineProperty(shrink, '0', { get() { shrink.length = 1; $vm.gc(); return 5; } });
+        \\const shrinkResult = sum(shrink);
+        \\const marker = {}, throws = [1]; let caught = false;
+        \\Object.defineProperty(throws, '0', { get() { $vm.gc(); throw marker; } });
+        \\try { sum(throws); } catch (error) { caught = error === marker; }
+        \\proxyResult === 6 && trace === 'length,0,length,1,length,2,length,' &&
+        \\  inheritedResult === 13 && inheritedGets === 1 && growResult === 7 && coercions === 1 &&
+        \\  shrinkResult === 5 && caught && sum([1, '2', 3]) === '123' &&
+        \\  Number.isNaN(sum([1, , 3])) && sum(new Int32Array([1, 2, 3])) === 6
+    )).asBool());
+}
+
+test "vm: packed array sum execution survives moving GC" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+    const array = try ctx.evaluate(
+        \\globalThis.sumMoveDiscard = [];
+        \\for (let i = 0; i < 4096; i++) sumMoveDiscard.push({ dead: i, child: { value: i } });
+        \\globalThis.sumMoveArray = [1, 2, 3, 4, 5, 6, 7, 8];
+        \\function warmedSum(values) {
+        \\  let total = 0;
+        \\  for (let i = 0; i < values.length; i = i + 1) total = total + values[i];
+        \\  return total;
+        \\}
+        \\for (let i = 0; i < 4; i++) if (warmedSum(sumMoveArray) !== 36) throw new Error('sum');
+        \\sumMoveArray
+    );
+    const handle = try ctx.protectValue(array);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const old_address = @intFromPtr(handle.get().asObj());
+    _ = try ctx.evaluate("sumMoveDiscard = null");
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0);
+    try std.testing.expect(old_address != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 36), (try ctx.evaluate("warmedSum(sumMoveArray)")).asNum());
+    try std.testing.expectEqual(@as(f64, 72), (try ctx.evaluate("sumMoveArray[3] = 40; warmedSum(sumMoveArray)")).asNum());
+}
+
+test "vm: packed array sum execution retains budget and stop checkpoints" {
+    for ([_]bool{ false, true }) |stop_at_checkpoint| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator,
+            \\function sum() {
+            \\  const values = new Array(100).fill(1); let total = 0;
+            \\  for (let i = 0; i < values.length; i = i + 1) total = total + values[i];
+            \\  return total;
+            \\}
+            \\sum()
+        );
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var stop: std.atomic.Value(bool) = .init(stop_at_checkpoint);
+        var machine = try initTestInterpreter(.{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .stop_flag = &stop,
+            .step_budget = 1024,
+        });
+        try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+        try std.testing.expectEqual(@as(u64, if (stop_at_checkpoint) 1024 else 1025), machine.steps);
+        try std.testing.expectEqualStrings(if (stop_at_checkpoint) "Error" else "RangeError", machine.exception.asObj().errorName());
+    }
+}
+
+test "vm: packed array sum execution preserves source hooks" {
+    const Capture = struct {
+        additions: usize = 0,
+        fn profile(raw: *anyopaque, _: *Interpreter, location: interp.DebugStatementLocation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (location.location.line == 5) self.additions += 1;
+        }
+        fn debug(raw: *anyopaque, machine: *Interpreter, location: interp.DebugStatementLocation) EvalError!void {
+            profile(raw, machine, location);
+        }
+    };
+    for ([_]bool{ false, true }) |debug| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = if (debug) .tree_walker else .required,
+        });
+        defer ctx.destroy();
+        var capture = Capture{};
+        if (debug) {
+            ctx.debug_statement_ctx = &capture;
+            ctx.debug_statement_hook = Capture.debug;
+        } else {
+            ctx.profile_statement_ctx = &capture;
+            ctx.profile_statement_hook = Capture.profile;
+        }
+        try std.testing.expectEqual(@as(f64, 36), (try ctx.evaluate(
+            \\function sum(values) {
+            \\  let total = 0;
+            \\  let i = 0;
+            \\  while (i < values.length) {
+            \\    total = total + values[i];
+            \\    i = i + 1;
+            \\  }
+            \\  return total;
+            \\}
+            \\sum([1, 2, 3, 4, 5, 6, 7, 8])
+        )).asNum());
+        try std.testing.expectEqual(@as(usize, 8), capture.additions);
+    }
+}
+
+test "vm: packed array sum execution preserves bytecode steps" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -24425,7 +24539,6 @@ test "vm: packed array sum quickening preserves bytecode steps" {
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     var steps: [2]u64 = undefined;
-    var sum_hits = quick_packed_array_sum_loop_hits.load(.monotonic);
     var push_hits = quick_packed_array_push_loop_hits.load(.monotonic);
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
@@ -24438,13 +24551,11 @@ test "vm: packed array sum quickening preserves bytecode steps" {
         var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         try std.testing.expectEqual(@as(f64, 36), (try run(&machine, chunk, null)).asNum());
         steps[run_index] = machine.steps;
-        const next_sum_hits = quick_packed_array_sum_loop_hits.load(.monotonic);
         const next_push_hits = quick_packed_array_push_loop_hits.load(.monotonic);
-        try std.testing.expect(next_sum_hits > sum_hits);
         try std.testing.expect(next_push_hits > push_hits);
-        sum_hits = next_sum_hits;
         push_hits = next_push_hits;
     }
+    try std.testing.expectEqual(@as(u64, 316), steps[0]);
     try std.testing.expectEqual(steps[1], steps[0]);
 }
 

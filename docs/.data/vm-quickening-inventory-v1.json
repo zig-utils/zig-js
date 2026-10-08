@@ -156,27 +156,6 @@
       "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_dense_array_create_hits", "quick_sparse_array_index_hits", "quick_sparse_array_store_hits", "quick_sparse_array_create_hits", "quick_array_prototype_index_hits", "quick_typed_array_index_hits", "quick_typed_array_store_hits", "quick_arguments_index_hits", "quick_arguments_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
     },
     {
-      "id": "packed-array-sum-loop",
-      "title": "Packed-array sum loop kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact eighteen-bytecode counted loop summing dense numeric elements"],
-      "guards": ["exact opcode sequence and backedge", "numeric index/total/increment", "present dense numeric elements", "loop remains inside step/checkpoint allowance"],
-      "miss_behavior": ["resume at the ordinary loop head", "unsupported structural plans remain explicit"],
-      "metadata_lifetime": "An instruction-indexed QuickArrayPlan allocated in the Chunk arena stores the decoded loop or unsupported tag.",
-      "no_gil_synchronization": "The plan pointer is acquire/release published; frame slots and shared array elements use their owned synchronization during execution.",
-      "observable_steps_debugger": "Fused iterations reproduce the exact bytecode step count, stop at budget/checkpoint boundaries, and do not enter while debugging.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickPackedArraySumLoop = struct {"},
-        {"path": "src/vm.zig", "text": "fn compileQuickArrayPlan("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: packed array sum quickening preserves bytecode steps\""}
-      ],
-      "metrics": ["quick_packed_array_sum_loop_hits"]
-    },
-    {
       "id": "packed-array-push-loop",
       "title": "Packed-array push loop kernel",
       "classification": "legacy_narrow",
@@ -395,7 +374,7 @@
       "QuickArrayNumericOp": ["constant", "local", "add", "sub", "mul", "div", "mod", "bit_and"],
       "QuickArrayBound": ["constant", "local"],
       "QuickArrayExpressionSpecialization": ["generic", "add3_bit_and"],
-      "QuickArrayPlan": ["unsupported", "packed_sum", "packed_push", "polymorphic_property", "object_allocation"],
+      "QuickArrayPlan": ["unsupported", "packed_push", "polymorphic_property", "object_allocation"],
       "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
       "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
       "QuickLeafPlan": ["unsupported", "numeric"],
@@ -437,7 +416,6 @@
       "quick_array_length_hits",
       "quick_array_prototype_data_hits",
       "quick_array_push_hits",
-      "quick_packed_array_sum_loop_hits",
       "quick_packed_array_push_loop_hits",
       "quick_packed_array_specialized_expression_hits",
       "quick_polymorphic_property_loop_hits",
