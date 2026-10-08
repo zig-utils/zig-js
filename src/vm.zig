@@ -9448,7 +9448,11 @@ fn runChunk(
                                 try vm.checkRestricted(o);
                                 const element = if (parallel_sync)
                                     o.denseElement(index)
-                                else if (o.accessorsMap() == null and o.holesMap() == null and index < o.elementsItems().len)
+                                else if (o.accessorsMap() != null)
+                                    null
+                                else if (o.holesMap() != null)
+                                    o.denseElement(index)
+                                else if (index < o.elementsItems().len)
                                     o.elementsItems()[index]
                                 else
                                     null;
@@ -22195,6 +22199,52 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = []; values.push(7); seen * 10 + values.length
     )).asNum());
     try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
+}
+
+test "vm: quickens present numeric reads from holey arrays" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const before = quick_dense_array_index_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 4), (try vmRun(allocator,
+            \\let values = [1, , 3]; values[0] + values[2]
+        )).asNum());
+        try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > before);
+        const after_present = quick_dense_array_index_hits.load(.monotonic);
+
+        // A hole still runs ordinary [[Get]], including the prototype walk.
+        try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+            \\let values = [1, , 3]; Array.prototype[1] = 9; values[1]
+        )).asNum());
+        try std.testing.expectEqual(after_present, quick_dense_array_index_hits.load(.monotonic));
+
+        // An indexed accessor keeps the entire array on generic dispatch.
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = [1, , 3];
+            \\Object.defineProperty(values, "2", { get: function () { return 7; } });
+            \\values[2]
+        )).asNum());
+        try std.testing.expectEqual(after_present, quick_dense_array_index_hits.load(.monotonic));
+
+        // A distant index is stored as a sparse named property. It remains on
+        // generic dispatch until sparse-array storage gets its own exact path.
+        try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+            \\let values = []; values[1000000] = 7; values[1000000]
+        )).asNum());
+        try std.testing.expectEqual(after_present, quick_dense_array_index_hits.load(.monotonic));
+
+        // Number -0 is index zero. Negative and fractional Numbers are named
+        // keys and retain the generic ToPropertyKey/property path.
+        try std.testing.expectEqual(@as(f64, 12), (try vmRun(allocator,
+            \\let values = [1, , 3]; values[-1] = 5; values[1.5] = 6;
+            \\values[-0] + values[-1] + values[1.5]
+        )).asNum());
+        try std.testing.expectEqual(after_present + 1, quick_dense_array_index_hits.load(.monotonic));
+    }
 }
 
 test "vm: computed numeric typed array reads preserve integer-indexed semantics" {
