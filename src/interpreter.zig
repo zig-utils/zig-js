@@ -19190,7 +19190,8 @@ pub const Interpreter = struct {
     fn arrIndexGet(self: *Interpreter, o: *value.Object, i: usize) EvalError!Value {
         // Dense fast path mirrors `arrIndexPresent`; a hole goes through [[Get]]
         // so an inherited index (accessor or value) on the prototype resolves.
-        if (o.is_array and o.accessorsMap() == null) {
+        // Arguments [[Get]] must read its live parameter map, not the dense mirror.
+        if (o.is_array and !o.is_arguments and o.accessorsMap() == null) {
             if (o.denseElement(i)) |v| return v;
         }
         var key_storage: [32]u8 = undefined;

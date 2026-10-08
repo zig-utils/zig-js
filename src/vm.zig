@@ -22881,6 +22881,74 @@ test "vm: quickens distant sparse array creation" {
     }
 }
 
+test "vm: borrowed Array methods read live mapped arguments" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\function mapped(a, b) {
+            \\  a = 9; b = 8; var args = arguments;
+            \\  var checks = Array.prototype.indexOf.call(args, 9) === 0 &&
+            \\    Array.prototype.lastIndexOf.call(args, 8) === 1 && Array.prototype.includes.call(args, 9) &&
+            \\    Array.prototype.join.call(args, ',') === '9,8' &&
+            \\    Array.prototype.slice.call(args).join(',') === '9,8' &&
+            \\    Array.prototype.map.call(args, function (value) { $vm.gc(); return value + 1; }).join(',') === '10,9' &&
+            \\    Array.prototype.reduce.call(args, function (total, value) { return total + value; }, 0) === 17;
+            \\  var seen = [];
+            \\  Array.prototype.forEach.call(args, function (value, index) { seen.push(value); if (index === 0) b = 10; });
+            \\  checks = checks && seen.join(',') === '9,10';
+            \\  args[0] = 12;
+            \\  checks = checks && a === 12 && Array.prototype.join.call(args) === '12,10';
+            \\  Object.defineProperty(args, '0', { value: 7, writable: false, configurable: true });
+            \\  a = 6;
+            \\  checks = checks && Array.prototype.join.call(args) === '7,10';
+            \\  delete args[1]; Object.setPrototypeOf(args, { 1: 17 }); b = 18;
+            \\  checks = checks && Array.prototype.join.call(args) === '7,17';
+            \\  Object.defineProperty(args, '0', { get: function () { $vm.gc(); return a; }, configurable: true });
+            \\  return checks && Array.prototype.slice.call(args).join(',') === '6,17';
+            \\}
+            \\function unmapped(a) { 'use strict'; a = 9; return Array.prototype.join.call(arguments) === '1'; }
+            \\mapped(1, 2) && unmapped(1)
+        )).asBool());
+    }
+}
+
+test "vm: borrowed Array methods read mapped arguments across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate(
+        \\function mappedLane(a) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  var args = arguments;
+        \\  for (var round = 0; round < 16; round++) {
+        \\    a = round + 10;
+        \\    if (Array.prototype.indexOf.call(args, a) !== 0 ||
+        \\        !Array.prototype.includes.call(args, a) ||
+        \\        Array.prototype.slice.call(args)[0] !== a)
+        \\      throw new Error('mapped Array read mismatch');
+        \\  }
+        \\  return 1;
+        \\}
+        \\var threads = [];
+        \\for (var lane = 0; lane < 4; lane++) threads.push(new Thread(mappedLane, lane));
+        \\var total = 0;
+        \\for (var lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+}
+
 test "vm: String exotic ancestors preserve indexed write semantics" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
