@@ -119,11 +119,11 @@
       "classification": "general_adaptive",
       "implementation_kind": "opcode_fast_path",
       "coverage_status": "covered_guarded",
-      "surfaces": ["present dense get_index, including present elements in holey array storage", "primitive Number and canonical String sparse own-data get_index, replacement, and distant creation", "ordinary prototype indexed dense or named-data get_index at arbitrary ancestor depth", "existing dense set_index, including arrays with unrelated sparse data", "guarded dense append, hole fill, and bounded gap growth", "primitive Number and canonical numeric String TypedArray get_index and set_index", "primitive Number and canonical String mapped and unmapped arguments get_index and set_index", "Array length read", "Array.prototype data read", "intrinsic Array.prototype.push call"],
-      "guards": ["real Array, direct TypedArray, or direct arguments receiver", "primitive Number or representation-specific canonical String key", "live arguments mapping or synchronized dense arguments storage", "coherent sparse named-own data descriptor, writable for replacements", "absent exact own property, extensible Array, clean prototype chain, and distant index for sparse creation", "no relevant proxy/revocation/accessor/attribute/indexed override", "requested dense reads must be present even when unrelated holes exist", "present packed/dense storage as required", "extensible Array and clean prototype chain for dense creation", "restriction-owned receiver and prototype chain", "every nearer ancestor is ordinary and has no exact data/accessor; String, arguments, TypedArray, module, host, and Proxy boundaries remain generic", "TypedArray String negative zero stays invalid; stores coerce before buffer revalidation", "live in-bounds TypedArray view for element reads", "clean prototype chain for append", "exact intrinsic push identity"],
+      "surfaces": ["present dense get_index, including present elements in holey array storage", "primitive Number and canonical String sparse own-data get_index, replacement, and distant creation", "ordinary prototype indexed dense or named-data get_index at arbitrary ancestor depth", "existing dense set_index, including arrays with unrelated sparse data", "guarded dense append, hole fill, and bounded gap growth", "dense/sparse Array own-index creation through ordinary inherited writable data", "primitive Number and canonical numeric String TypedArray get_index and set_index", "primitive Number and canonical String mapped and unmapped arguments get_index and set_index", "Array length read", "Array.prototype data read", "intrinsic Array.prototype.push call"],
+      "guards": ["real Array, direct TypedArray, or direct arguments receiver", "primitive Number or representation-specific canonical String key", "live arguments mapping or synchronized dense arguments storage", "coherent sparse named-own data descriptor, writable for replacements", "absent exact own property, extensible Array, exact-key prototype permission, and distant index for sparse creation", "no relevant proxy/revocation/accessor/attribute/indexed override", "requested dense reads must be present even when unrelated holes exist", "present packed/dense storage as required", "extensible Array and exact-key prototype permission for dense creation", "restriction-owned receiver and prototype chain", "every nearer ancestor is ordinary and has no exact data/accessor; String, arguments, TypedArray, module, host, and Proxy boundaries remain generic", "TypedArray String negative zero stays invalid; stores coerce before buffer revalidation", "live in-bounds TypedArray view for element reads", "clean prototype chain for append", "exact intrinsic push identity", "nearest ordinary indexed data is writable; readonly/accessor/exotic holders retain canonical Set"],
       "miss_behavior": ["run ToPropertyKey and generic property/index semantics", "dispatch the ordinary callable", "never treat a hole or inherited indexed property as dense data"],
       "metadata_lifetime": "Array, TypedArray, and arguments index/length/push checks allocate no plan; prototype data reads use the instruction InlineCache for the Chunk lifetime.",
-      "no_gil_synchronization": "Shared reads use element/property snapshots, including indexed transactions across receiver/prototype dense and named state; TypedArray backing-store locks and atomic arguments mapping cells cover their exotics; stores, dense/sparse creation, and appends use the corresponding object synchronization, and named prototype observations use the IC seqlock.",
+      "no_gil_synchronization": "Shared reads use element/property snapshots, including indexed transactions across receiver/prototype dense and named state; inherited creation permission snapshots writability in indexed/property/element lock order; TypedArray backing-store locks and atomic arguments mapping cells cover their exotics; stores, dense/sparse creation, and appends use the corresponding object synchronization, and named prototype observations use the IC seqlock.",
       "observable_steps_debugger": "Each shortcut remains within its already-counted opcode/call dispatch; observable coercion, proxy, accessor, and overridden-call cases miss before effects.",
       "source_anchors": [
         {"path": "src/vm.zig", "text": "inline fn quickPropertyArrayIndex("},
@@ -140,7 +140,8 @@
         {"path": "src/vm.zig", "text": "inline fn quickArgumentsStore("},
         {"path": "src/interpreter.zig", "text": "pub fn taStore("},
         {"path": "src/vm.zig", "text": "if (quickPropertyArrayIndex(key)) |index| {"},
-        {"path": "src/interpreter.zig", "text": "pub fn tryFastArrayPush("}
+        {"path": "src/interpreter.zig", "text": "pub fn tryFastArrayPush("},
+        {"path": "src/interpreter.zig", "text": "fn arrayPrototypeAllowsIndexedOwnCreation("}
       ],
       "test_anchors": [
         {"path": "src/vm.zig", "text": "test \"vm: quickens packed dense numeric array reads\""},
@@ -166,6 +167,9 @@
         {"path": "src/vm.zig", "text": "test \"vm: sparse array creation enforces restriction ownership\""},
         {"path": "src/vm.zig", "text": "test \"vm: quickens guarded dense array creation\""},
         {"path": "src/vm.zig", "text": "test \"vm: dense array creation enforces restriction ownership\""},
+        {"path": "src/vm.zig", "text": "test \"vm: inherited indexed creation uses writable prototype data\""},
+        {"path": "src/vm.zig", "text": "test \"vm: inherited indexed creation preserves nearest descriptor and receiver rules\""},
+        {"path": "src/vm.zig", "text": "test \"vm: inherited indexed creation runs across no-GIL workers\""},
         {"path": "src/vm.zig", "text": "test \"vm: numeric sparse array stores enforce restriction ownership\""},
         {"path": "src/vm.zig", "text": "test \"vm: quickens canonical primitive string array indices\""},
         {"path": "src/vm.zig", "text": "test \"vm: shared array fast paths retain observable overrides\""}
@@ -416,7 +420,7 @@
       "id": "index-dispatch",
       "status": "unsupported",
       "covered_by": [],
-      "remaining": ["prototype-indexed accessors, Proxies, exotic ancestors, and inherited writes", "non-canonical String, Symbol, and object ToPropertyKey plus proxy/accessor cases"],
+      "remaining": ["prototype-indexed accessors, Proxies, and exotic ancestors; inherited indexed receiver cases beyond guarded Array own creation", "non-canonical String, Symbol, and object ToPropertyKey plus proxy/accessor cases"],
       "fallback": "ordinary get_index/set_index bytecode with full ToPropertyKey and property semantics"
     },
     {

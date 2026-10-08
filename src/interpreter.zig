@@ -11331,11 +11331,28 @@ pub const Interpreter = struct {
         return true;
     }
 
-    fn arrayProtoChainCleanForIndexedSetChecked(self: *Interpreter, o: *value.Object) EvalError!bool {
+    fn arrayPrototypeAllowsIndexedOwnCreation(self: *Interpreter, o: *value.Object, provided_key: ?[]const u8, index: usize) EvalError!bool {
+        var key_storage: [10]u8 = undefined;
+        var key = provided_key;
         var cur = self.effectiveProto(o);
         while (cur) |c| {
             try self.checkRestricted(c);
-            if (arrayPrototypeMayHaveIndexedProperties(c)) return false;
+            if (c.proxyHandler() != null or c.proxy_revoked or c.is_arguments or c.typedArray() != null or
+                c.moduleNs() != null or c.hostClassHooks() != null) return false;
+            if (c.boxedPrimitive()) |primitive| if (primitive.isString()) return false;
+            if (c.has_indexed_property.load(.monotonic) or c.indexed_own_seen.load(.acquire)) {
+                // Clean chains keep the existing numeric path's zero formatting
+                // cost; format only when an exact indexed descriptor is needed.
+                const property = key orelse blk: {
+                    const formatted = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch return false;
+                    key = formatted;
+                    break :blk formatted;
+                };
+                // OrdinarySetWithOwnDescriptor stops at the nearest descriptor:
+                // writable data permits Receiver creation without visiting any
+                // farther setter/readonly holder (ECMA-262 10.1.9.2).
+                if (c.indexedOwnDataWritableSnapshot(property, index)) |writable| return writable;
+            }
             cur = self.effectiveProto(c);
         }
         return true;
@@ -11416,8 +11433,9 @@ pub const Interpreter = struct {
         const o = recv.asObj();
         try self.checkRestricted(o);
         if (!o.is_array or o.is_arguments or o.accessorsMap() != null or o.attrsMap() != null or
-            o.has_indexed_property.load(.monotonic) or !o.isExtensible() or !try self.arrayProtoChainCleanForIndexedSetChecked(o))
+            o.has_indexed_property.load(.monotonic) or !o.isExtensible())
             return false;
+        if (!try self.arrayPrototypeAllowsIndexedOwnCreation(o, null, index)) return false;
         const dense_cap: usize = 1 << 24;
         return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
     }
@@ -11429,9 +11447,9 @@ pub const Interpreter = struct {
         if (!o.is_array or o.is_arguments or o.proxyHandler() != null or o.proxy_revoked)
             return false;
         if (self.jit_owner != null and self.jit_owner.?.hasPublishedArtifacts()) return false;
-        if (!try self.arrayProtoChainCleanForIndexedSetChecked(o)) return false;
         var key_storage: [10]u8 = undefined;
         const key = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch return false;
+        if (!try self.arrayPrototypeAllowsIndexedOwnCreation(o, key, index)) return false;
         return o.createSparseArrayOwnData(self.arena, self.root_shape, key, index, v);
     }
 

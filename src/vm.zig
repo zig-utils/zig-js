@@ -1544,8 +1544,8 @@ inline fn quickSparseArrayStore(vm: *Interpreter, receiver: Value, key: Value, s
     return stored;
 }
 
-/// Create a distant sparse Array data property after the interpreter proves a
-/// clean prototype chain. The Object helper rechecks and publishes the exact
+/// Create a distant sparse Array data property after the interpreter proves
+/// exact-key prototype permission. The Object helper rechecks and publishes the
 /// descriptor/length transaction; every observable or already-present case
 /// remains on ordinary [[Set]].
 inline fn quickSparseArrayCreate(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!bool {
@@ -23290,6 +23290,109 @@ test "vm: String exotic ancestors preserve writes across no-GIL workers" {
     )).asNum());
 }
 
+test "vm: inherited indexed creation uses writable prototype data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const dense_before = quick_dense_array_create_hits.load(.monotonic);
+    const sparse_before = quick_sparse_array_create_hits.load(.monotonic);
+    try std.testing.expect((try vmRun(allocator,
+        \\let holder = { 1: 1, 2: 2, 1000000: 3, 1000001: 4 };
+        \\let values = []; Object.setPrototypeOf(values, Object.create(Object.create(holder)));
+        \\values[1] = 8; values['2'] = 9; values[1000000] = 10; values['1000001'] = 11;
+        \\values[1] + values[2] + values[1000000] + values[1000001] === 38 &&
+        \\  holder[1] + holder[2] + holder[1000000] + holder[1000001] === 10 && values.length === 1000002
+    )).asBool());
+    const dense = quick_dense_array_create_hits.load(.monotonic) - dense_before;
+    const sparse = quick_sparse_array_create_hits.load(.monotonic) - sparse_before;
+    try std.testing.expectEqual(@as(u64, 2), dense);
+    try std.testing.expectEqual(@as(u64, 2), sparse);
+}
+
+test "vm: inherited indexed creation preserves nearest descriptor and receiver rules" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\let seen = 0, farther = {};
+            \\Object.defineProperty(farther, '1', { set(value) { seen += value; }, configurable: true });
+            \\Object.defineProperty(farther, '1000000', { value: 1, writable: false, configurable: true });
+            \\let nearer = Object.create(farther); nearer[2] = 2;
+            \\Object.defineProperty(nearer, '1', { value: 7, writable: true, configurable: true });
+            \\Object.defineProperty(nearer, '1000000', { value: 8, writable: true, configurable: true });
+            \\let values = []; Object.setPrototypeOf(values, Object.create(nearer));
+            \\let rhsCalls = 0, coercions = 0, rhs = { valueOf() { coercions++; return 11; } };
+            \\function value() { rhsCalls++; $vm.gc(); return rhs; }
+            \\values[1] = value(); values['1000000'] = rhs;
+            \\let checks = values[1] === rhs && values[1000000] === rhs && seen === 0 &&
+            \\  nearer[1] === 7 && nearer[1000000] === 8 && rhsCalls === 1 && coercions === 0;
+            \\let dense = [3], next = []; Object.setPrototypeOf(next, Object.create(dense));
+            \\next[0] = 4; checks = checks && next[0] === 4 && dense[0] === 3 && next.length === 1;
+            \\Object.defineProperty(dense, '0', { writable: false });
+            \\let blocked = []; Object.setPrototypeOf(blocked, Object.create(dense));
+            \\blocked[0] = 5;
+            \\checks = checks && blocked[0] === 3 && !Object.hasOwn(blocked, '0') && blocked.length === 0;
+            \\function strictWrite(object, key) { 'use strict'; try { object[key] = 9; } catch (error) { return error instanceof TypeError; } return false; }
+            \\checks = checks && strictWrite(blocked, 0);
+            \\delete nearer[1]; let setterTarget = []; Object.setPrototypeOf(setterTarget, nearer);
+            \\setterTarget[1] = 6; checks = checks && seen === 6 && !Object.hasOwn(setterTarget, '1');
+            \\Object.defineProperty(nearer, '1', { value: 12, writable: true, configurable: true });
+            \\let frozenLength = []; Object.setPrototypeOf(frozenLength, nearer);
+            \\Object.defineProperty(frozenLength, 'length', { writable: false });
+            \\checks = checks && strictWrite(frozenLength, 1) && frozenLength.length === 0;
+            \\let closed = []; Object.setPrototypeOf(closed, nearer); Object.preventExtensions(closed);
+            \\checks = checks && strictWrite(closed, '1000000') && !Object.hasOwn(closed, '1000000');
+            \\let keyCalls = 0, keyed = []; Object.setPrototypeOf(keyed, nearer);
+            \\let key = { toString() { keyCalls++; $vm.gc(); return '1'; } }; keyed[key] = 13;
+            \\checks = checks && keyed[1] === 13 && keyCalls === 1;
+            \\Object.defineProperty(nearer, '1000000', { writable: false });
+            \\let readonly = []; Object.setPrototypeOf(readonly, nearer);
+            \\checks && strictWrite(readonly, 1000000) && readonly.length === 0 && nearer[1000000] === 8
+        )).asBool());
+    }
+}
+
+test "vm: inherited indexed creation runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const dense = quick_dense_array_create_hits.load(.monotonic);
+    const sparse = quick_sparse_array_create_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate(
+        \\globalThis.writableIndexedPrototype = Object.create(Object.create({ 1: 7, 1000000: 14 }));
+        \\function indexedCreationLane(lane) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  for (let round = 0; round < 16; round++) {
+        \\    let values = []; Object.setPrototypeOf(values, writableIndexedPrototype);
+        \\    values[1] = round + lane; values['1000000'] = round + lane + 1;
+        \\    if (!Object.hasOwn(values, '1') || !Object.hasOwn(values, '1000000') ||
+        \\        values[1] !== round + lane || values[1000000] !== round + lane + 1 || values.length !== 1000001)
+        \\      throw new Error('inherited creation mismatch');
+        \\  }
+        \\  return 1;
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(indexedCreationLane, lane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\if (writableIndexedPrototype[1] !== 7 || writableIndexedPrototype[1000000] !== 14) throw new Error('prototype changed');
+        \\total
+    )).asNum());
+    try std.testing.expect(quick_dense_array_create_hits.load(.monotonic) >= dense + 64);
+    try std.testing.expect(quick_sparse_array_create_hits.load(.monotonic) >= sparse + 64);
+}
+
 test "vm: quickens guarded dense array creation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -23379,9 +23482,9 @@ test "vm: dense array creation enforces restriction ownership" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var parser = try Parser.init(allocator,
-        \\let prototype = {};
+        \\let prototype = { 1: 9 };
         \\let inherited = [];
-        \\Object.setPrototypeOf(inherited, prototype);
+        \\Object.setPrototypeOf(inherited, Object.create(Object.create(prototype)));
         \\let direct = [];
         \\[inherited, prototype, direct]
     );
@@ -23473,9 +23576,9 @@ test "vm: sparse array creation enforces restriction ownership" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var parser = try Parser.init(allocator,
-        \\let prototype = {};
+        \\let prototype = { 1000000: 9 };
         \\let inherited = [];
-        \\Object.setPrototypeOf(inherited, prototype);
+        \\Object.setPrototypeOf(inherited, Object.create(Object.create(prototype)));
         \\let direct = [];
         \\[inherited, prototype, direct]
     );

@@ -6278,6 +6278,23 @@ pub const Object = struct {
         return .absent;
     }
 
+    /// null means absent; true means writable data; false leaves an accessor
+    /// or readonly descriptor on canonical Set. Keep attributes and presence
+    /// in the indexed -> property -> element lock order used for publication.
+    pub fn indexedOwnDataWritableSnapshot(self: *const Object, name: []const u8, index: usize) ?bool {
+        const indexed_locked = element_locks_enabled.load(.acquire);
+        if (indexed_locked) self.lockIndexedProperty();
+        defer if (indexed_locked) self.unlockIndexedProperty();
+        self.lockPropertiesFor(.named_snapshot);
+        defer self.unlockProperties();
+        if (self.getAccessorUnlocked(name) != null) return false;
+        if (self.shape) |shape| if ((@constCast(shape)).lookup(name) != null)
+            return self.getAttrUnlocked(name).writable;
+        if (self.is_array and self.denseElementPresent(index))
+            return self.getAttrUnlocked(name).writable;
+        return null;
+    }
+
     /// One insertion-ordered key from an all-data Shape, carrying the exact
     /// slot that Shape assigned it. The Shape is immutable; callers must still
     /// revalidate that the Object publishes this same Shape before loading the
