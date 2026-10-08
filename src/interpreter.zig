@@ -11448,15 +11448,22 @@ pub const Interpreter = struct {
             .data, .accessor => return null,
         }
 
-        const prototype = self.effectiveProto(o) orelse return null;
-        try self.checkRestricted(prototype);
-        if (prototype.proxyHandler() != null or prototype.proxy_revoked or prototype.is_arguments or prototype.typedArray() != null or
-            prototype.moduleNs() != null or prototype.hostClassHooks() != null)
-            return null;
-        return switch (prototype.indexedOwnPropertySnapshot(key, index)) {
-            .data => |data| data,
-            .absent, .accessor => null,
-        };
+        var current = self.effectiveProto(o);
+        while (current) |prototype| {
+            try self.checkRestricted(prototype);
+            if (prototype.proxyHandler() != null or prototype.proxy_revoked or prototype.is_arguments or prototype.typedArray() != null or
+                prototype.moduleNs() != null or prototype.hostClassHooks() != null)
+                return null;
+            // StringGetOwnProperty can supply a nearer virtual character that
+            // ordinary storage snapshots do not contain (ECMA-262 10.4.3.5).
+            if (prototype.boxedPrimitive()) |primitive| if (primitive.isString()) return null;
+            switch (prototype.indexedOwnPropertySnapshot(key, index)) {
+                .data => |data| return data,
+                .accessor => return null,
+                .absent => current = self.effectiveProto(prototype),
+            }
+        }
+        return null;
     }
 
     /// ToPropertyKey: a Symbol key uses its unique internal encoding (so

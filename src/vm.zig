@@ -1553,9 +1553,9 @@ inline fn quickSparseArrayCreate(vm: *Interpreter, receiver: Value, key: Value, 
     return vm.createFastArraySparseIndex(receiver, index, stored);
 }
 
-/// Resolve one direct prototype indexed data property after proving the Array
-/// receiver has no exact own property. Accessors, Proxies, exotics, and deeper
-/// chain walks retain ordinary [[Get]].
+/// Resolve indexed data through ordinary ancestors after proving the Array
+/// receiver has no exact own property. Accessors, Proxies, and exotics retain
+/// ordinary [[Get]] with the original receiver.
 inline fn quickArrayPrototypeIndexLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
     const index = quickPropertyArrayIndex(key) orelse return null;
     return vm.loadFastArrayPrototypeIndex(receiver, index);
@@ -9482,8 +9482,7 @@ fn runChunk(
                                 }
                             }
                         }
-                        // own miss → fall through to full [[Get]] (prototype walk
-                        // + `.constructor` fallback), not a bare undefined.
+                        // An own miss needs the full [[Get]] prototype walk.
                     }
                     var inherited_observation: ?interp.InheritedPropertyObservation = null;
                     result = try vm.getPropertyObserved(obj, name, &inherited_observation); // arrays, strings, proto chain, null/undefined
@@ -22561,6 +22560,114 @@ test "vm: prototype indexed reads preserve mapped arguments cells" {
     }
 }
 
+test "vm: prototype indexed data path covers ordinary ancestor depth" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const before = quick_array_prototype_index_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 42), (try vmRun(allocator,
+            \\let holder = { 1: 7, 1000000: 14 };
+            \\let middle = Object.create(holder), nearer = Object.create(middle);
+            \\let values = []; Object.setPrototypeOf(values, nearer);
+            \\values[1] + values['1'] + values[1000000] + values['1000000']
+        )).asNum());
+        const hits = quick_array_prototype_index_hits.load(.monotonic) - before;
+        try std.testing.expectEqual(@as(u64, 4), hits);
+    }
+}
+
+test "vm: prototype indexed data path follows live descriptors and chain edits" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const before = quick_array_prototype_index_hits.load(.monotonic);
+    try std.testing.expect((try ctx.evaluate(
+        \\let holder = { 1: 7 }, nearer = Object.create(Object.create(holder));
+        \\let values = []; Object.setPrototypeOf(values, nearer);
+        \\function read() { return values[1]; }
+        \\let checks = read() === 7;
+        \\nearer[1] = undefined; checks = checks && read() === undefined;
+        \\delete nearer[1]; holder[1] = 8; checks = checks && read() === 8;
+        \\let gets = 0;
+        \\Object.defineProperty(nearer, '1', { get() { gets++; $vm.gc(); return this === values ? 9 : -1; }, configurable: true });
+        \\checks = checks && read() === 9 && gets === 1;
+        \\Object.defineProperty(nearer, '1', { get() { $vm.gc(); throw new Error('indexed'); }, configurable: true });
+        \\let threw = false; try { read(); } catch (error) { threw = error.message === 'indexed'; }
+        \\Object.defineProperty(nearer, '1', { value: 11, writable: true, configurable: true });
+        \\checks = checks && threw && read() === 11;
+        \\delete nearer[1]; Object.setPrototypeOf(nearer, { 1: 13 });
+        \\checks = checks && read() === 13;
+        \\let dense = [17]; Object.setPrototypeOf(values, Object.create(Object.create(dense)));
+        \\checks = checks && values[0] === 17;
+        \\Object.setPrototypeOf(values, Object.create(Object.create({ 1: 19 })));
+        \\let keyCalls = 0;
+        \\let key = { toString() { keyCalls++; $vm.gc(); return '1'; } };
+        \\checks && values[key] === 19 && keyCalls === 1
+    )).asBool());
+    try std.testing.expect(quick_array_prototype_index_hits.load(.monotonic) >= before + 6);
+}
+
+test "vm: prototype indexed data path stops at virtual and observable ancestors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const before = quick_array_prototype_index_hits.load(.monotonic);
+    try std.testing.expect((try vmRun(allocator,
+        \\let text = new String('abc'); Object.setPrototypeOf(text, { 0: 'wrong' });
+        \\let values = []; Object.setPrototypeOf(values, Object.create(Object.create(text)));
+        \\let checks = values[0] === 'a';
+        \\let typed = new Uint8Array([5]); Object.setPrototypeOf(typed, { 1: 99 });
+        \\Object.setPrototypeOf(values, Object.create(Object.create(typed)));
+        \\checks = checks && values[0] === 5 && values[1] === undefined;
+        \\function mapped(a) {
+        \\  let inherited = []; Object.setPrototypeOf(inherited, Object.create(Object.create(arguments)));
+        \\  a = 9; return inherited[0] === 9;
+        \\}
+        \\let gets = 0;
+        \\let proxy = new Proxy({ 1: 7 }, { get(target, key, receiver) { gets++; return receiver === values ? 23 : -1; } });
+        \\Object.setPrototypeOf(values, Object.create(Object.create(proxy)));
+        \\checks && mapped(1) && values[1] === 23 && gets === 1
+    )).asBool());
+    try std.testing.expectEqual(before, quick_array_prototype_index_hits.load(.monotonic));
+}
+
+test "vm: prototype indexed data path runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const before = quick_array_prototype_index_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate(
+        \\globalThis.indexedChain = Object.create(Object.create({ 1: 7, 1000000: 14 }));
+        \\function indexedLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  let values = []; Object.setPrototypeOf(values, indexedChain);
+        \\  for (let round = 0; round < 32; round++)
+        \\    if (values[1] !== 7 || values['1000000'] !== 14) throw new Error('ancestor data mismatch');
+        \\  return 1;
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(indexedLane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    )).asNum());
+    try std.testing.expect(quick_array_prototype_index_hits.load(.monotonic) >= before + 256);
+}
+
 test "vm: quickens direct prototype indexed data reads" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -22578,7 +22685,11 @@ test "vm: quickens direct prototype indexed data reads" {
             \\let values = []; Object.setPrototypeOf(values, prototype);
             \\values["1000000"]
         )).asNum());
-        try std.testing.expect(quick_array_prototype_index_hits.load(.monotonic) >= before + 2);
+        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
+            \\let grand = { 1: 8 }; let prototype = Object.create(grand);
+            \\let values = []; Object.setPrototypeOf(values, prototype); values[1]
+        )).asNum());
+        try std.testing.expect(quick_array_prototype_index_hits.load(.monotonic) >= before + 3);
         const after = quick_array_prototype_index_hits.load(.monotonic);
 
         // Exact receiver data wins before the prototype shortcut.
@@ -22591,7 +22702,7 @@ test "vm: quickens direct prototype indexed data reads" {
             \\Object.setPrototypeOf(values, prototype); values[1000000]
         )).asNum());
 
-        // Receiver/prototype accessors, deeper chains, and a Proxy prototype
+        // Receiver/prototype accessors and a Proxy prototype
         // retain the complete [[Get]] algorithm.
         try std.testing.expectEqual(@as(f64, 5), (try vmRun(allocator,
             \\let values = [];
@@ -22601,10 +22712,6 @@ test "vm: quickens direct prototype indexed data reads" {
         try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
             \\let prototype = {};
             \\Object.defineProperty(prototype, "1", { get: function () { return 6; } });
-            \\let values = []; Object.setPrototypeOf(values, prototype); values[1]
-        )).asNum());
-        try std.testing.expectEqual(@as(f64, 8), (try vmRun(allocator,
-            \\let grand = { 1: 8 }; let prototype = Object.create(grand);
             \\let values = []; Object.setPrototypeOf(values, prototype); values[1]
         )).asNum());
         try std.testing.expectEqual(@as(f64, 10), (try vmRun(allocator,
@@ -22638,7 +22745,7 @@ test "vm: prototype indexed reads enforce restriction ownership" {
     var parser = try Parser.init(allocator,
         \\let prototype = { 1: 9 };
         \\let inherited = [];
-        \\Object.setPrototypeOf(inherited, prototype);
+        \\Object.setPrototypeOf(inherited, Object.create(Object.create(prototype)));
         \\let direct = [];
         \\[inherited, prototype, direct]
     );
