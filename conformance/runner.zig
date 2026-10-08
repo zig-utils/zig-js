@@ -99,7 +99,7 @@ fn runCase(case: Case) bool {
     return !failed;
 }
 
-pub fn main() void {
+pub fn main() !void {
     var passed: usize = 0;
     std.debug.print("zig-js conformance suite\n========================\n", .{});
     for (cases) |case| {
@@ -113,4 +113,5 @@ pub fn main() void {
     const total = cases.len;
     const pct = @as(f64, @floatFromInt(passed)) / @as(f64, @floatFromInt(total)) * 100.0;
     std.debug.print("------------------------\n{d}/{d} passed ({d:.1}%)\n", .{ passed, total, pct });
+    if (passed != total) return error.ConformanceFailed;
 }
