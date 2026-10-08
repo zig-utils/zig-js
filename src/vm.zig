@@ -17317,6 +17317,18 @@ test "vm: native call deopts before tree-walk callee catches VM runtime throw" {
     try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
 }
 
+fn occupyInlineGlobalSlotsForNativeBindingTest(
+    allocator: std.mem.Allocator,
+    global: *value.Object,
+    root_shape: *Shape,
+) !void {
+    var name_buffer: [32]u8 = undefined;
+    for (0..value.Object.inline_slot_capacity) |index| {
+        const name = std.fmt.bufPrint(&name_buffer, "__native_global_pad_{d}", .{index}) catch unreachable;
+        try global.setOwn(allocator, root_shape, name, Value.undef());
+    }
+}
+
 test "vm: optimizer executes a global environment load natively" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
@@ -17343,9 +17355,14 @@ test "vm: optimizer executes a global environment load natively" {
     try interp.installGlobals(&env, root_shape);
     const global = try gc_mod.allocObj(allocator);
     global.* = .{};
+    // Global bindings may be mirrored in hash-table order. Occupy the inline
+    // object storage first so this external-slot cache witness cannot randomly
+    // select an intentionally unsupported inline `Number` slot.
+    try occupyInlineGlobalSlotsForNativeBindingTest(allocator, global, root_shape);
     env.realm_global = global;
     try env.put("globalThis", Value.obj(global));
     try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    try std.testing.expect(global.shape.?.lookup("Number").? >= value.Object.inline_slot_capacity);
     var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
@@ -17427,9 +17444,13 @@ test "vm: optimizer global binding cache stays cold in shared mode" {
     try interp.installGlobals(&env, root_shape);
     const global = try gc_mod.allocObj(allocator);
     global.* = .{};
+    // Keep `Number` otherwise eligible for the same external-slot proof; the
+    // shared-mode guard must be the reason this cache remains cold.
+    try occupyInlineGlobalSlotsForNativeBindingTest(allocator, global, root_shape);
     env.realm_global = global;
     try env.put("globalThis", Value.obj(global));
     try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    try std.testing.expect(global.shape.?.lookup("Number").? >= value.Object.inline_slot_capacity);
     var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
