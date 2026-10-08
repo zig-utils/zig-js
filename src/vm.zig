@@ -1561,43 +1561,51 @@ inline fn quickArrayPrototypeIndexLoad(vm: *Interpreter, receiver: Value, key: V
     return vm.loadFastArrayPrototypeIndex(receiver, index);
 }
 
-/// A primitive Number key has no observable ToPropertyKey hook. Resolve the
-/// Integer-Indexed Exotic read here so `get_index` does not allocate its string
-/// form and re-enter the generic property walker. Other key kinds retain the
-/// canonical coercion path, including the distinct string key `"-0"`.
+/// Number ToPropertyKey maps negative zero to "0", while a literal String
+/// "-0" stays negative zero under CanonicalNumericIndexString and is invalid.
+inline fn quickTypedArrayNumericKey(key: Value) ?f64 {
+    if (key.isNumber()) {
+        const number = key.asNum();
+        return if (number == 0) 0 else number;
+    }
+    if (key.isString()) return interp.canonicalNumericIndexString(key.asStr());
+    return null;
+}
+
+/// Primitive Number and canonical numeric String keys need no observable
+/// ToPropertyKey hook. Other key kinds retain the canonical coercion path.
 inline fn quickTypedArrayLoad(vm: *Interpreter, receiver: Value, key: Value) EvalError!?Value {
-    if (!key.isNumber()) return null;
     if (!receiver.isObject()) return null;
     const object = receiver.asObj();
     const typed_array = object.typedArray() orelse return null;
+    const number = quickTypedArrayNumericKey(key) orelse return null;
     try vm.checkRestricted(object);
-    const number = key.asNum();
-    if (!std.math.isFinite(number) or number < 0 or @trunc(number) != number)
+    if (!std.math.isFinite(number) or number < 0 or @trunc(number) != number or
+        (number == 0 and std.math.signbit(number)))
         return Value.undef();
     const length = typed_array.currentLength() orelse return Value.undef();
     if (number >= @as(f64, @floatFromInt(length))) return Value.undef();
-    // ToPropertyKey(-0) is the string "0", so a Number negative zero reads
-    // element zero even though a literal string key "-0" is invalid.
-    const index: usize = if (number == 0) 0 else @intFromFloat(number);
+    const index: usize = @intFromFloat(number);
     return try vm.taLoad(typed_array, index);
 }
 
 /// IntegerIndexedElementSet coerces the RHS before it revalidates the index and
 /// backing buffer. Delegate that whole sequence to Interpreter.taStore; this
-/// shortcut removes only the unobservable Number-to-string property-key work.
+/// shortcut removes only unobservable primitive property-key dispatch.
 inline fn quickTypedArrayStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!?Value {
-    if (!key.isNumber() or !receiver.isObject()) return null;
+    if (!receiver.isObject()) return null;
     if (receiver.asObj().typedArray() == null) return null;
+    const number = quickTypedArrayNumericKey(key) orelse return null;
     const receiver_root = try vm.pushTempRoot(receiver);
     defer vm.restoreTempRoots(receiver_root);
     const stored_root = try vm.pushTempRoot(stored);
     const object = vm.tempRoot(receiver_root, receiver).asObj();
     const typed_array = object.typedArray() orelse return null;
     try vm.checkRestricted(object);
-    const number = key.asNum();
     const max_index: f64 = @floatFromInt(std.math.maxInt(usize));
     const index: usize = if (std.math.isFinite(number) and number >= 0 and
-        @trunc(number) == number and number < max_index)
+        @trunc(number) == number and number < max_index and
+        !(number == 0 and std.math.signbit(number)))
         if (number == 0) 0 else @intFromFloat(number)
     else
         std.math.maxInt(usize);
@@ -23138,11 +23146,11 @@ test "vm: quickens canonical primitive string array indices" {
             \\values[key] + values[symbol] + coercions
         )).asNum());
 
-        // TypedArrays keep their separate Integer-Indexed string-key path.
+        // TypedArrays use their separate CanonicalNumericIndexString rules.
         try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
             \\let values = new Uint8Array([7]); values["0"]
         )).asNum());
-        try std.testing.expectEqual(typed_reads, quick_typed_array_index_hits.load(.monotonic));
+        try std.testing.expectEqual(typed_reads + 1, quick_typed_array_index_hits.load(.monotonic));
         try std.testing.expectEqual(eligible_dense_reads, quick_dense_array_index_hits.load(.monotonic));
         try std.testing.expectEqual(eligible_dense_stores, quick_dense_array_store_hits.load(.monotonic));
         try std.testing.expectEqual(eligible_sparse_reads, quick_sparse_array_index_hits.load(.monotonic));
@@ -23177,6 +23185,124 @@ test "vm: computed numeric typed array reads preserve integer-indexed semantics"
         \\ values[objectKey] === 8 && coercions === 1) ? 1 : 0
     )).asNum());
     try std.testing.expect(quick_typed_array_index_hits.load(.monotonic) > before);
+}
+
+test "vm: quickens canonical typed array strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        const reads = quick_typed_array_index_hits.load(.monotonic);
+        const stores = quick_typed_array_store_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+            \\let values = new Uint8Array([1, 2]); values["1"] = 8;
+            \\values["0"] + values["1"]
+        )).asNum());
+        try std.testing.expect(quick_typed_array_index_hits.load(.monotonic) >= reads + 2);
+        try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
+    }
+}
+
+test "vm: canonical typed array strings preserve integer-indexed effects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let coercions = 0;
+            \\function numberValue(value) {
+            \\  return { valueOf: function () { coercions = coercions + 1; return value; } };
+            \\}
+            \\let values = new Uint8Array([0, 0]); values["0"] = 7;
+            \\values["-0"] = numberValue(10); values["1.5"] = numberValue(10);
+            \\values["-1"] = numberValue(10); values["NaN"] = numberValue(10);
+            \\values["Infinity"] = numberValue(10); values["4294967295"] = numberValue(10);
+            \\values["1"] = numberValue(9);
+            \\let named = numberValue(10); values["01"] = named; values["1.0"] = 5;
+            \\values["9007199254740993"] = named; values["1000000000000000000000"] = named;
+            \\let keyCoercions = 0;
+            \\let key = { toString: function () { keyCoercions = keyCoercions + 1; return "1"; } };
+            \\values[key] = 11;
+            \\let growBuffer = new ArrayBuffer(0, { maxByteLength: 2 });
+            \\let grow = new Uint8Array(growBuffer);
+            \\grow["0"] = { valueOf: function () { coercions = coercions + 1; growBuffer.resize(1); return 6; } };
+            \\let detachedBuffer = new ArrayBuffer(1); let detached = new Uint8Array(detachedBuffer);
+            \\detached["0"] = { valueOf: function () { coercions = coercions + 1; detachedBuffer.transfer(); return 7; } };
+            \\let shrinkBuffer = new ArrayBuffer(1, { maxByteLength: 2 });
+            \\let shrink = new Uint8Array(shrinkBuffer);
+            \\shrink["0"] = { valueOf: function () { coercions = coercions + 1; shrinkBuffer.resize(0); return 8; } };
+            \\let big = new BigInt64Array(1);
+            \\big["0"] = { valueOf: function () { coercions = coercions + 1; return 12n; } };
+            \\let wrongType = false;
+            \\try { big["NaN"] = 1; } catch (error) { wrongType = error instanceof TypeError; }
+            \\let sharedBuffer = new SharedArrayBuffer(1, { maxByteLength: 2 });
+            \\let shared = new Uint8Array(sharedBuffer); shared["0"] = 5;
+            \\sharedBuffer.grow(2); shared["1"] = 6;
+            \\(values["0"] === 7 && values[-0] === 7 && values["-0"] === undefined &&
+            \\ values["1"] === 11 && values["1.5"] === undefined && values["NaN"] === undefined &&
+            \\ values["01"] === named && values["1.0"] === 5 &&
+            \\ values["9007199254740993"] === named && values["1000000000000000000000"] === named &&
+            \\ coercions === 11 && keyCoercions === 1 &&
+            \\ grow["0"] === 6 && detached["0"] === undefined && shrink["0"] === undefined &&
+            \\ big["0"] === 12n && wrongType && shared["0"] === 5 && shared["1"] === 6) ? 1 : 0
+        )).asNum());
+        const reads = quick_typed_array_index_hits.load(.monotonic);
+        const stores = quick_typed_array_store_hits.load(.monotonic);
+        try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+            \\let values = new Uint8Array([7]); let seen = 0;
+            \\values["01"] = 4; let symbol = Symbol(); values[symbol] = 5;
+            \\let proxy = new Proxy(values, {
+            \\  get: function () { return 8; },
+            \\  set: function (target, key, value) { seen = value; return true; }
+            \\});
+            \\proxy["0"] = 9;
+            \\(values["01"] === 4 && values[symbol] === 5 && proxy["0"] === 8 && seen === 9) ? 1 : 0
+        )).asNum());
+        try std.testing.expectEqual(reads, quick_typed_array_index_hits.load(.monotonic));
+        try std.testing.expectEqual(stores, quick_typed_array_store_hits.load(.monotonic));
+    }
+}
+
+test "vm: canonical typed array String operations run across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const reads = quick_typed_array_index_hits.load(.monotonic);
+    const stores = quick_typed_array_store_hits.load(.monotonic);
+    const result = try ctx.evaluate(
+        \\globalThis.sharedTyped = new Uint32Array(new SharedArrayBuffer(16));
+        \\function stringLane(lane) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error("worker holds GIL");
+        \\  const key = String(lane);
+        \\  for (let round = 0; round < 64; round++) {
+        \\    sharedTyped[key] = round + lane;
+        \\    if (sharedTyped[key] !== round + lane) throw new Error("indexed value mismatch");
+        \\    sharedTyped["-0"] = 99;
+        \\  }
+        \\  return sharedTyped[key];
+        \\}
+        \\let threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(stringLane, lane));
+        \\let total = 0;
+        \\for (let lane = 0; lane < 4; lane++) total += threads[lane].join();
+        \\total
+    );
+    try std.testing.expectEqual(@as(f64, 258), result.asNum());
+    try std.testing.expect(quick_typed_array_index_hits.load(.monotonic) > reads);
+    try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
 }
 
 test "vm: computed numeric typed array reads enforce restriction ownership" {
@@ -23215,6 +23341,14 @@ test "vm: computed numeric typed array reads enforce restriction ownership" {
         error.Throw,
         quickTypedArrayStore(&machine, typed_array, Value.num(0), Value.num(8)),
     );
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(@as(f64, 7), value.taRead(typed_array.asObj().typedArray().?, 0).asNum());
+    const string_key = Value.str("0");
+    machine.exception = Value.undef();
+    try std.testing.expectError(error.Throw, quickTypedArrayLoad(&machine, typed_array, string_key));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    machine.exception = Value.undef();
+    try std.testing.expectError(error.Throw, quickTypedArrayStore(&machine, typed_array, string_key, Value.num(8)));
     try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
     try std.testing.expectEqual(@as(f64, 7), value.taRead(typed_array.asObj().typedArray().?, 0).asNum());
 }

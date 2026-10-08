@@ -45,8 +45,8 @@
     },
     {
       "path": "advanced/vm-quickening/index.html",
-      "bytes": 226064,
-      "sha256": "ade7136a06c079b458b292c683bede76c0f67e936d96bb4b616a95f88dab9880"
+      "bytes": 226092,
+      "sha256": "881792ad8d403010bc774a977d2ec8158d61e321cb71e3101e26c108e41e276c"
     },
     {
       "path": "api/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "bcefd1bc07a0f6e43861c6e4c464ff4dc6f701a0300c08c18397258c34f89873"
+  "tree_sha256": "8ca9d261bd887e2ba9420daf5cfb38d93200790bedefb522784517ca4a2e4dca"
 }
