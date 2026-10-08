@@ -14788,9 +14788,21 @@ pub const Interpreter = struct {
     /// disambiguation rule: the earlier instant in an overlap and the later
     /// instant across a gap.
     fn dateUtcFromLocal(self: *Interpreter, local_ms: f64) EvalError!f64 {
-        if (!std.math.isFinite(local_ms) or @abs(local_ms) > 8.64e15) return std.math.nan(f64);
+        // UTC(t) step 1 precedes the system-zone lookup, including its lock
+        // and possible first-use discovery on an invalid Date input.
+        if (!std.math.isFinite(local_ms)) return std.math.nan(f64);
+        return self.dateUtcFromLocalInZone(local_ms, nowTimeZone());
+    }
+
+    fn dateUtcFromLocalInZone(self: *Interpreter, local_ms: f64, tz: TimeZone) EvalError!f64 {
+        // ECMA-262 UTC(t) must allow local wall times beyond the TimeClip
+        // boundary. Supported offsets are less than one day; only inputs
+        // farther away cannot survive the caller's final TimeClip. This also
+        // bounds the integer conversion for arbitrary finite Date components.
+        const local_limit = 8.64e15 + @as(f64, @floatFromInt(ms_per_day));
+        if (!std.math.isFinite(local_ms) or @abs(local_ms) > local_limit) return std.math.nan(f64);
         const local_ns = @as(i128, @intFromFloat(@trunc(local_ms))) * 1_000_000;
-        const offset_ns = try zdtOffsetForLocalDisambiguation(self, nowTimeZone(), local_ns, .compatible);
+        const offset_ns = try zdtOffsetForLocalDisambiguation(self, tz, local_ns, .compatible);
         return local_ms - @as(f64, @floatFromInt(offset_ns)) / 1_000_000.0;
     }
 
@@ -15029,10 +15041,17 @@ pub const Interpreter = struct {
         return Value.strOwned(allocator, try allocator.dupe(u8, buffer[0..len]));
     }
 
-    /// Compute a Date's epoch-ms from constructor arguments.
+    /// Compute Date.UTC's clipped time from already-coerced components.
     pub fn dateTimeFromArgs(args: []const Value) f64 {
-        if (args.len == 0) return 0; // (a real clock isn't wired; epoch is deterministic)
-        if (args.len == 1) return dateTimeClip(args[0].toNumber());
+        return dateTimeClip(dateMakeFromArgs(args));
+    }
+
+    /// MakeDate(MakeDay(...), MakeTime(...)) produces an unclipped wall time.
+    /// Local constructors must perform UTC conversion before TimeClip; UTC
+    /// constructors can clip this value directly.
+    fn dateMakeFromArgs(args: []const Value) f64 {
+        if (args.len == 0) return 0;
+        if (args.len == 1) return args[0].toNumber();
         const nan = std.math.nan(f64);
         const fields = [_]f64{
             args[0].toNumber(),
@@ -15059,7 +15078,8 @@ pub const Interpreter = struct {
         const month_start: f64 = @floatFromInt(daysFromCivil(y, mo + 1, 1));
         const day = month_start + d_f - 1;
         const time = ((h * 3_600_000 + mi * 60_000) + s * 1000) + millis;
-        return dateTimeClip(day * @as(f64, @floatFromInt(ms_per_day)) + time);
+        const result = day * @as(f64, @floatFromInt(ms_per_day)) + time;
+        return if (std.math.isFinite(result)) result else nan;
     }
 
     /// Build a `Map`, optionally populated from an iterable of `[k,v]` pairs.
@@ -56317,7 +56337,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         for (args, 0..) |av, i| buf[i] = Value.num(try self.toNumberV(av));
         const yi = @trunc(buf[0].asNum());
         if (yi >= 0 and yi <= 99) buf[0] = Value.num(yi + 1900);
-        return self.makeDate(try self.dateUtcFromLocal(Interpreter.dateTimeFromArgs(buf)));
+        return self.makeDate(try self.dateUtcFromLocal(Interpreter.dateMakeFromArgs(buf)));
     }
     if (args.len == 1) {
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
@@ -58576,6 +58596,43 @@ test "interpreter array literal, index, length, push/pop" {
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let xs = [7, 9]; xs.pop()")).asNum());
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + ['a','b','c']")).asStr());
+}
+
+test "interpreter Date local conversion precedes TimeClip at both boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    for ([_]i64{ -8, 0, 9 }) |hours| {
+        const tz = TimeZone{
+            .name = if (hours < 0) "-08:00" else if (hours > 0) "+09:00" else "UTC",
+            .offset_ns = hours * 3_600_000_000_000,
+        };
+        for ([_]f64{ -8.64e15, 8.64e15 }) |boundary| {
+            const local = boundary + @as(f64, @floatFromInt(hours * 3_600_000));
+            const utc = try machine.dateUtcFromLocalInZone(local, tz);
+            try std.testing.expectEqual(boundary, Interpreter.dateTimeClip(utc));
+            const inward: f64 = if (boundary < 0) 1 else -1;
+            try std.testing.expectEqual(boundary + inward, Interpreter.dateTimeClip(
+                try machine.dateUtcFromLocalInZone(local + inward, tz),
+            ));
+            try std.testing.expect(std.math.isNan(Interpreter.dateTimeClip(
+                try machine.dateUtcFromLocalInZone(local - inward, tz),
+            )));
+        }
+    }
+    const components = [_]Value{ Value.num(-271821), Value.num(3), Value.num(20), Value.num(-8), Value.num(0), Value.num(0), Value.num(0) };
+    try std.testing.expectEqual(@as(f64, -8.64e15 - 28_800_000), Interpreter.dateMakeFromArgs(&components));
+    try std.testing.expect(std.math.isNan(Interpreter.dateTimeFromArgs(&components)));
+    try std.testing.expect(std.math.isNan(try machine.dateUtcFromLocalInZone(1e308, .{ .name = "UTC", .offset_ns = 0 })));
+    try std.testing.expect(std.math.isNan(try machine.dateUtcFromLocalInZone(std.math.inf(f64), .{ .name = "UTC", .offset_ns = 0 })));
+    const new_york = TimeZone{ .name = "America/New_York", .offset_ns = -18_000_000_000_000 };
+    const overlap = [_]Value{ Value.num(2017), Value.num(10), Value.num(5), Value.num(1), Value.num(30), Value.num(0), Value.num(0) };
+    const gap = [_]Value{ Value.num(2017), Value.num(2), Value.num(12), Value.num(2), Value.num(30), Value.num(0), Value.num(0) };
+    try std.testing.expectEqual(@as(f64, 1509859800000), try machine.dateUtcFromLocalInZone(Interpreter.dateMakeFromArgs(&overlap), new_york));
+    try std.testing.expectEqual(@as(f64, 1489303800000), try machine.dateUtcFromLocalInZone(Interpreter.dateMakeFromArgs(&gap), new_york));
 }
 
 test "interpreter constructor reads use only actual prototype properties" {

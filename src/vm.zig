@@ -23299,6 +23299,36 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
 }
 
+test "vm: Date local constructors and setters clip after UTC conversion" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\let offset = -new Date(0).getTimezoneOffset();
+            \\let lower = new Date(1970, 0, -99999999, 0, offset + 60, 0, 0);
+            \\let lowerMs = new Date(1970, 0, -99999999, 0, offset + 60, 0, 1);
+            \\let constructors = !Number.isNaN(lower.getTime()) && !Number.isNaN(lowerMs.getTime()) &&
+            \\  lower.toISOString().endsWith("Z") && lowerMs.toISOString().endsWith("Z");
+            \\let lowerSetter = new Date(-8.64e15 + 3600000);
+            \\let upperSetter = new Date(8.64e15 - 3600000);
+            \\let setters = lowerSetter.setMilliseconds(1) === -8.64e15 + 3600001 &&
+            \\  upperSetter.setMilliseconds(1) === 8.64e15 - 3599999;
+            \\let clipped = Number.isNaN(new Date(-8.64e15 - 1).getTime()) &&
+            \\  Number.isNaN(Date.UTC(1970, 0, -99999999, 0, -1)) &&
+            \\  Number.isNaN(new Date(1e308, 0).getTime());
+            \\constructors && setters && clipped
+        );
+        try std.testing.expect(result.asBool());
+    }
+}
+
 test "vm: constructor reads preserve real descriptors and misses" {
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
