@@ -260,8 +260,8 @@
     },
     {
       "path": "threads/testing/index.html",
-      "bytes": 362555,
-      "sha256": "89e8c5c725832df1c2874e1f5b782e1e8363606d5d7707f2d2505a0ef2dab809"
+      "bytes": 364372,
+      "sha256": "862c7ea839c06a40fe664f2314d09ea9f25e57307c2e88d7ca13e17f34b0e597"
     },
     {
       "path": "timers/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "597933e7ce1bd78ad92f9303c796fd3d175449c5a01c95498c91387884a5435c"
+  "tree_sha256": "45e0e70c8f52a5d53db68d2cbfed3387f2da32c9137ee82ef296195720322cdf"
 }

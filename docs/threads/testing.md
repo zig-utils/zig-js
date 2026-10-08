@@ -392,6 +392,21 @@ The full isolated TSan replay remains:
 zig build threadfuzz -Dtsan=true -Dfuzz-amplify=true -Dfuzz-iters=1 -Dfuzz-seed=107
 ```
 
+The focused bounded-scheduler lifecycle replay forces one runnable engine slot
+and runs the termination storm, script/module Worker overlap, module import
+graph/fanout, and script/module Worker termination/finalization cases:
+
+```sh
+zig build threadfuzz-bin
+zig-out/bin/threadfuzz boundedlifecycle 20 1
+```
+
+Each cross-resource rendezvous parks through a coordinator-aware wait while it
+depends on a queued peer. Termination Workers still publish atomic progress and
+remain live until explicit `terminate()`. These focused cases also publish their
+active Context to the per-case watchdog, so a future timeout requests
+cooperative termination before the bounded teardown grace expires.
+
 On the July 16, 2026 Apple M3 Pro investigation it completed without a race or
 functional failure in 177,219 ms of fuzzer wall time, establishing sanitizer
 workload slowness rather than deadlock/livelock. The same seed without TSan

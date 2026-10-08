@@ -430,7 +430,7 @@ const ModuleCloseTerminateFuzzHost = struct {
             \\  if (cmd === 'spin') {
             \\    Atomics.add(v, 1, 1);
             \\    Atomics.notify(v, 1);
-            \\    for (;;) {}
+            \\    for (;;) Atomics.wait(v, 1, 1, 1);
             \\  }
             \\  Atomics.add(v, 0, 1);
             \\  return { ack: id, cmd, module: true };
@@ -842,7 +842,10 @@ const ModuleTerminateFuzzHost = struct {
             .path = "spin.js",
             .source =
             \\export function spin(v) {
-            \\  for (;;) Atomics.add(v, 1, 1);
+            \\  for (;;) {
+            \\    const expected = Atomics.add(v, 1, 1) + 1;
+            \\    Atomics.wait(v, 1, expected, 1);
+            \\  }
             \\}
             ,
         },
@@ -1300,7 +1303,7 @@ fn genTerminationStorm(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem
             else =>
             \\ts.push(new Thread(function(){
             \\  ready();
-            \\  for (;;) {}
+            \\  for (;;) Atomics.wait(gate, 'go', 0, 10000);
             \\}));
             \\
             ,
@@ -1329,6 +1332,8 @@ fn runTerminationStorm(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     defer ctx.destroy();
+    armSeedContext(ctx);
+    defer disarmSeedContext();
 
     if (ctx.evaluate(buf.items)) |_| {
         std.debug.print("seed {d}: termination storm returned normally\n", .{seed});
@@ -1355,9 +1360,11 @@ fn runWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     defer ctx.destroy();
+    armSeedContext(ctx);
+    defer disarmSeedContext();
     var machine = ctx.interpreter();
 
-    const msg = ctx.evaluate("globalThis.__msg = { sab: new SharedArrayBuffer(16) }; globalThis.__msg") catch |err| {
+    const msg = ctx.evaluate("globalThis.__msg = { sab: new SharedArrayBuffer(16), start: 0 }; globalThis.__msg") catch |err| {
         std.debug.print("seed {d}: cannot create lifecycle SAB: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
@@ -1410,20 +1417,22 @@ fn runWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\const v = new Int32Array(globalThis.__msg.sab);
         \\const ts = [];
         \\for (let t = 0; t < {d}; t++) {{
-        \\  ts.push(new Thread(function(){{
+        \\  ts.push(new Thread(function(gate){{
         \\    const local = new Int32Array(globalThis.__msg.sab);
-        \\    while (Atomics.load(local, 1) === 0)
-        \\      ;
+        \\    while (Atomics.load(gate, 'start') === 0)
+        \\      Atomics.wait(gate, 'start', 0, 100);
         \\    for (let i = 0; i < {d}; i++)
         \\      Atomics.add(local, 0, 1);
         \\    return 1;
-        \\  }}));
+        \\  }}, globalThis.__msg));
         \\}}
         \\let spins = 0;
         \\while (Atomics.load(v, 2) < {d} && spins++ < 10000000)
         \\  ;
         \\if (Atomics.load(v, 2) < {d})
         \\  throw new Error('workers not ready for overlap');
+        \\Atomics.store(globalThis.__msg, 'start', 1);
+        \\Atomics.notify(globalThis.__msg, 'start', {d});
         \\Atomics.store(v, 1, 1);
         \\Atomics.notify(v, 1, {d});
         \\let joined = 0;
@@ -1431,7 +1440,7 @@ fn runWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\joined;
         \\
     ,
-        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+        .{ nthreads, thread_iters, nworkers, nworkers, nthreads, nworkers + nthreads + 4 },
     );
     defer gpa.free(js_src);
 
@@ -1497,11 +1506,13 @@ fn runModuleWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     defer ctx.destroy();
+    armSeedContext(ctx);
+    defer disarmSeedContext();
     var machine = ctx.interpreter();
 
     const msg_src = try std.fmt.allocPrint(
         gpa,
-        "globalThis.__moduleMsg = {{ sab: new SharedArrayBuffer(16), iters: {d} }}; globalThis.__moduleMsg",
+        "globalThis.__moduleMsg = {{ sab: new SharedArrayBuffer(16), iters: {d}, start: 0 }}; globalThis.__moduleMsg",
         .{worker_iters},
     );
     defer gpa.free(msg_src);
@@ -1539,16 +1550,19 @@ fn runModuleWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\const mv = new Int32Array(globalThis.__moduleMsg.sab);
         \\const mts = [];
         \\for (let t = 0; t < {d}; t++) {{
-        \\  mts.push(new Thread(function(){{
+        \\  mts.push(new Thread(function(gate){{
         \\    const local = new Int32Array(globalThis.__moduleMsg.sab);
-        \\    while (Atomics.load(local, 1) === 0) ;
+        \\    while (Atomics.load(gate, 'start') === 0)
+        \\      Atomics.wait(gate, 'start', 0, 100);
         \\    for (let i = 0; i < {d}; i++) Atomics.add(local, 0, 1);
         \\    return 1;
-        \\  }}));
+        \\  }}, globalThis.__moduleMsg));
         \\}}
         \\let spins = 0;
         \\while (Atomics.load(mv, 2) < {d} && spins++ < 10000000) ;
         \\if (Atomics.load(mv, 2) < {d}) throw new Error('module workers not ready');
+        \\Atomics.store(globalThis.__moduleMsg, 'start', 1);
+        \\Atomics.notify(globalThis.__moduleMsg, 'start', {d});
         \\Atomics.store(mv, 1, 1);
         \\Atomics.notify(mv, 1, {d});
         \\let joined = 0;
@@ -1556,7 +1570,7 @@ fn runModuleWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\joined;
         \\
     ,
-        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+        .{ nthreads, thread_iters, nworkers, nworkers, nthreads, nworkers + nthreads + 4 },
     );
     defer gpa.free(js_src);
 
@@ -1622,11 +1636,13 @@ fn runModuleWorkerGraphOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     defer ctx.destroy();
+    armSeedContext(ctx);
+    defer disarmSeedContext();
     var machine = ctx.interpreter();
 
     const msg_src = try std.fmt.allocPrint(
         gpa,
-        "globalThis.__moduleGraphMsg = {{ sab: new SharedArrayBuffer(16), iters: {d} }}; globalThis.__moduleGraphMsg",
+        "globalThis.__moduleGraphMsg = {{ sab: new SharedArrayBuffer(16), iters: {d}, start: 0 }}; globalThis.__moduleGraphMsg",
         .{worker_iters},
     );
     defer gpa.free(msg_src);
@@ -1664,16 +1680,19 @@ fn runModuleWorkerGraphOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\const gv = new Int32Array(globalThis.__moduleGraphMsg.sab);
         \\const gts = [];
         \\for (let t = 0; t < {d}; t++) {{
-        \\  gts.push(new Thread(function(){{
+        \\  gts.push(new Thread(function(gate){{
         \\    const local = new Int32Array(globalThis.__moduleGraphMsg.sab);
-        \\    while (Atomics.load(local, 1) === 0) ;
+        \\    while (Atomics.load(gate, 'start') === 0)
+        \\      Atomics.wait(gate, 'start', 0, 100);
         \\    for (let i = 0; i < {d}; i++) Atomics.add(local, 0, 1);
         \\    return 1;
-        \\  }}));
+        \\  }}, globalThis.__moduleGraphMsg));
         \\}}
         \\let spins = 0;
         \\while (Atomics.load(gv, 2) < {d} && spins++ < 10000000) ;
         \\if (Atomics.load(gv, 2) < {d}) throw new Error('graph module workers not ready');
+        \\Atomics.store(globalThis.__moduleGraphMsg, 'start', 1);
+        \\Atomics.notify(globalThis.__moduleGraphMsg, 'start', {d});
         \\Atomics.store(gv, 1, 1);
         \\Atomics.notify(gv, 1, {d});
         \\let joined = 0;
@@ -1681,7 +1700,7 @@ fn runModuleWorkerGraphOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\joined;
         \\
     ,
-        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+        .{ nthreads, thread_iters, nworkers, nworkers, nthreads, nworkers + nthreads + 4 },
     );
     defer gpa.free(js_src);
 
@@ -1774,11 +1793,13 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     defer ctx.destroy();
+    armSeedContext(ctx);
+    defer disarmSeedContext();
     var machine = ctx.interpreter();
 
     const msg_src = try std.fmt.allocPrint(
         gpa,
-        "globalThis.__moduleFanoutMsg = {{ sab: new SharedArrayBuffer(24), iters: {d} }}; globalThis.__moduleFanoutMsg",
+        "globalThis.__moduleFanoutMsg = {{ sab: new SharedArrayBuffer(24), iters: {d}, start: 0 }}; globalThis.__moduleFanoutMsg",
         .{worker_iters},
     );
     defer gpa.free(msg_src);
@@ -1816,9 +1837,10 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\const fv = new Int32Array(globalThis.__moduleFanoutMsg.sab);
         \\const parents = [];
         \\for (let p = 0; p < {d}; p++) {{
-        \\  const parent = new Thread(function(p, childCount, iters){{
+        \\  const parent = new Thread(function(p, childCount, iters, gate){{
         \\    const local = new Int32Array(globalThis.__moduleFanoutMsg.sab);
-        \\    while (Atomics.load(local, 1) === 0) ;
+        \\    while (Atomics.load(gate, 'start') === 0)
+        \\      Atomics.wait(gate, 'start', 0, 100);
         \\    const children = [];
         \\    for (let c = 0; c < childCount; c++) {{
         \\      const marker = p * 100 + c + 1;
@@ -1835,7 +1857,7 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    let childSum = 0;
         \\    for (const child of children) childSum += child.join();
         \\    return childSum;
-        \\  }}, p, {d}, {d});
+        \\  }}, p, {d}, {d}, globalThis.__moduleFanoutMsg);
         \\  parent.asyncJoin().then(
         \\    (value) => Atomics.add(fv, 5, value),
         \\    () => Atomics.store(fv, 5, -1000000));
@@ -1844,6 +1866,8 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\let spins = 0;
         \\while (Atomics.load(fv, 2) < {d} && spins++ < 10000000) ;
         \\if (Atomics.load(fv, 2) < {d}) throw new Error('fanout module workers not ready');
+        \\Atomics.store(globalThis.__moduleFanoutMsg, 'start', 1);
+        \\Atomics.notify(globalThis.__moduleFanoutMsg, 'start', {d});
         \\Atomics.store(fv, 1, 1);
         \\Atomics.notify(fv, 1, {d});
         \\let joined = 0;
@@ -1851,7 +1875,7 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\joined;
         \\
     ,
-        .{ nparents, children_per_parent, thread_iters, nworkers, nworkers, nworkers + nparents + 4 },
+        .{ nparents, children_per_parent, thread_iters, nworkers, nworkers, nparents, nworkers + nparents + 4 },
     );
     defer gpa.free(js_src);
 
@@ -1972,7 +1996,7 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  if (e.data.cmd === 'spin') {
         \\    Atomics.add(v, 1, 1);
         \\    Atomics.notify(v, 1);
-        \\    for (;;) {}
+        \\    for (;;) Atomics.wait(v, 1, 1, 1);
         \\  }
         \\  Atomics.add(v, 0, 1);
         \\  postMessage({ ack: e.data.id, cmd: e.data.cmd });
@@ -3353,6 +3377,8 @@ fn runWorkerTerminateFinalizationInterleavingKind(
         return false;
     };
     defer ctx.destroy();
+    armSeedContext(ctx);
+    defer disarmSeedContext();
     var machine = ctx.interpreter();
 
     const msg = ctx.evaluate(
@@ -3368,9 +3394,10 @@ fn runWorkerTerminateFinalizationInterleavingKind(
         \\  const v = new Int32Array(e.data.sab);
         \\  Atomics.add(v, 0, 1);
         \\  Atomics.notify(v, 0);
-        \\  for (;;) {
-        \\    Atomics.add(v, 4, 1);
-        \\  }
+        \\  for (;;) {{
+        \\    const expected = Atomics.add(v, 4, 1) + 1;
+        \\    Atomics.wait(v, 4, expected, 1);
+        \\  }}
         \\};
     ;
 
@@ -3715,9 +3742,10 @@ fn runWorkerTerminateThreadTeardownInterleavingKind(
         \\  const v = new Int32Array(e.data.sab);
         \\  Atomics.add(v, 0, 1);
         \\  Atomics.notify(v, 0);
-        \\  for (;;) {
-        \\    Atomics.add(v, 1, 1);
-        \\  }
+        \\  for (;;) {{
+        \\    const expected = Atomics.add(v, 1, 1) + 1;
+        \\    Atomics.wait(v, 1, expected, 1);
+        \\  }}
         \\};
     ;
 
@@ -4065,9 +4093,10 @@ fn runWorkerTerminateConditionAsyncCleanupInterleavingKind(
         \\  const v = new Int32Array(e.data.sab);
         \\  Atomics.add(v, 0, 1);
         \\  Atomics.notify(v, 0);
-        \\  for (;;) {
-        \\    Atomics.add(v, 1, 1);
-        \\  }
+        \\  for (;;) {{
+        \\    const expected = Atomics.add(v, 1, 1) + 1;
+        \\    Atomics.wait(v, 1, expected, 1);
+        \\  }}
         \\};
     ;
 
@@ -4445,9 +4474,10 @@ fn runWorkerTerminateWaitAsyncCleanupInterleavingKind(
         \\  const v = new Int32Array(e.data.sab);
         \\  Atomics.add(v, 0, 1);
         \\  Atomics.notify(v, 0);
-        \\  for (;;) {
-        \\    Atomics.add(v, 1, 1);
-        \\  }
+        \\  for (;;) {{
+        \\    const expected = Atomics.add(v, 1, 1) + 1;
+        \\    Atomics.wait(v, 1, expected, 1);
+        \\  }}
         \\};
     ;
 
@@ -12439,9 +12469,10 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\  const v = new Int32Array(e.data.sab);
         \\  Atomics.add(v, 0, 1);
         \\  Atomics.notify(v, 0);
-        \\  for (;;) {
-        \\    Atomics.add(v, 1, 1);
-        \\  }
+        \\  for (;;) {{
+        \\    const expected = Atomics.add(v, 1, 1) + 1;
+        \\    Atomics.wait(v, 1, expected, 1);
+        \\  }}
         \\};
     ;
 
@@ -17825,7 +17856,7 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         \\  if (e.data.cmd === 'spin') {
         \\    Atomics.add(v, 1, 1);
         \\    Atomics.notify(v, 1);
-        \\    for (;;) {}
+        \\    for (;;) Atomics.wait(v, 1, 1, 1);
         \\  }
         \\  Atomics.add(v, 0, 1);
         \\  postMessage({ ack: e.data.id, cmd: e.data.cmd });
@@ -20657,6 +20688,33 @@ pub fn main(init: std.process.Init) !void {
     // foreign access, survive through owner-thread execution, and then deliver
     // exact cleanup after the owner exits; module Worker termination must compose
     // with the same shared-realm teardown/reaction/cleanup oracle.
+    // `threadfuzz boundedlifecycle <iters> <seed>`: run the Worker/Thread
+    // lifecycle cases that cross admission classes with one runnable slot.
+    // This makes bounded-scheduler liveness independent of host CPU count.
+    if (first) |a| if (std.mem.eql(u8, a, "boundedlifecycle")) {
+        iters = 20;
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        const previous_scheduler = js.setRuntimeThreadSchedulerLimits(.{ .max_runnable_threads = 1 });
+        defer _ = js.setRuntimeThreadSchedulerLimits(previous_scheduler);
+        var blfail: usize = 0;
+        var bli: usize = 0;
+        while (bli < iters) : (bli += 1) {
+            const seed = base_seed +% bli;
+            inline for (.{
+                .{ "termination-storm", runTerminationStorm },
+                .{ "worker-thread-overlap", runWorkerThreadOverlap },
+                .{ "module-worker-thread-overlap", runModuleWorkerThreadOverlap },
+                .{ "module-worker-graph-overlap", runModuleWorkerGraphOverlap },
+                .{ "module-worker-fanout-overlap", runModuleWorkerFanoutOverlap },
+                .{ "worker-terminate-finalization", runWorkerTerminateFinalizationInterleaving },
+                .{ "module-worker-terminate-finalization", runModuleWorkerTerminateFinalizationInterleaving },
+            }) |case| try runWatchedSeedCase(.lifecycle, case[0], case[1], gpa, seed, &blfail);
+        }
+        printProfileSummary("boundedlifecycle", iters * 7, base_seed, blfail, run_started_ms);
+        if (blfail != 0) std.process.exit(1);
+        return;
+    };
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
