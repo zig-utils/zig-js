@@ -9511,11 +9511,14 @@ pub const Context = struct {
             if (c != machine) self.publishParallelRoots(machine);
             return;
         }
-        // No collection running. Start one only under heap pressure. After an
-        // abort-safe fallback, briefly avoid immediate re-election churn; a
-        // quiescent full collection remains the reclaim fallback.
-        if (self.shouldDeferParallelGcRetry()) return;
-        if (!h.shouldCollect()) return;
+        // No collection running. Opportunistic attempts require heap pressure
+        // and briefly avoid immediate re-election churn after an abort-safe
+        // fallback. An explicit shell/host request has stronger semantics: it
+        // remains pending until a sweep finishes, so neither gate may consume
+        // its only eligible checkpoint (#1038).
+        const explicit_request = self.gc_requested.load(.acquire);
+        if (!explicit_request and self.shouldDeferParallelGcRetry()) return;
+        if (!explicit_request and !h.shouldCollect()) return;
         if (!self.tryEnterJitGcConductor()) return;
         defer self.leaveJitGcConductor();
         if (self.jitGcConductor().exclusive_phase.cmpxchgStrong(
@@ -9786,6 +9789,11 @@ pub const Context = struct {
                 if (swept) {
                     _ = self.gc_par_collections.fetchAdd(1, .monotonic);
                     self.gc_par_retry_after_ns.store(0, .release);
+                    // Explicit requests and collector-scratch recovery remain
+                    // pending across aborts. A stable finishing sweep satisfies
+                    // either source, including a request published while this
+                    // attempt was already running.
+                    self.gc_requested.store(false, .release);
                     return true;
                 }
                 if (self.abortParallelMarkWorkAttempt(h)) return false;
@@ -41681,6 +41689,45 @@ test "parallel_js (M3): abort backoff is bounded and yields to a quieter topolog
     try std.testing.expect(!ctx.shouldDeferParallelGcRetry());
     try std.testing.expectEqual(@as(u64, 1), ctx.gc_par_topology_retry_bypasses.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_retry_after_ns.load(.acquire));
+}
+
+test "parallel_js (M3): explicit collection bypasses retry cooldown and heap threshold" {
+    if (!stack_scan.supported) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    const h = ctx.gc.?;
+    ctx.collectGarbage();
+    try std.testing.expect(!h.shouldCollect());
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const ss_saved = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss_saved);
+    var collector = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&collector);
+    defer ctx.popActiveInterpreter(&collector);
+    const ai_saved = gc_mod.setActiveInterpreter(&collector);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+    ctx.deferParallelGcRetry();
+    ctx.gc_par_retry_after_ns.store(std.math.maxInt(u64), .release);
+    ctx.requestGarbageCollection();
+    const attempts_before = ctx.gc_par_attempts.load(.monotonic);
+    const collections_before = ctx.gc_par_collections.load(.monotonic);
+
+    ctx.serviceParallelGc(h, &collector);
+
+    try std.testing.expectEqual(attempts_before + 1, ctx.gc_par_attempts.load(.monotonic));
+    try std.testing.expectEqual(collections_before + 1, ctx.gc_par_collections.load(.monotonic));
+    try std.testing.expect(!ctx.gc_requested.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_retry_after_ns.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_backoff_skips.load(.monotonic));
 }
 
 test "parallel_js (M3): publication generations skip idle zero at wrap" {

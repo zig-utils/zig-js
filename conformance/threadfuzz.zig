@@ -20749,6 +20749,24 @@ pub fn main(init: std.process.Init) !void {
         if (mffail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcrestrict <iters> <seed>`: focused reproduction for the
+    // Thread.restrict lifecycle collection-progress witness. Keep this on the
+    // exact full-profile case so retries exercise its real allocation tail,
+    // explicit `gc()` request, nested joins, and completion oracle (#1038).
+    if (first) |a| if (std.mem.eql(u8, a, "midgcrestrict")) {
+        iters = 20;
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mrfail: usize = 0;
+        var mri: usize = 0;
+        while (mri < iters) : (mri += 1) {
+            const seed = base_seed +% mri;
+            try runWatchedSeedCase(.midgc, "thread-restrict-lifecycle", runMidScriptThreadRestrictLifecycleGc, gpa, seed, &mrfail);
+        }
+        printProfileSummary("midgcrestrict", iters, base_seed, mrfail, run_started_ms);
+        if (mrfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgc <iters> <seed>`: targeted mid-script parallel-GC
     // profile. Each seed blocks peers in property `Atomics.wait`,
     // `Condition.wait`, and contended `Lock` acquisition while allocation
