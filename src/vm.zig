@@ -17672,6 +17672,68 @@ test "vm: optimizer executes a global environment load natively" {
     );
 }
 
+test "vm: optimizer global proofs miss after deletion and prototype mutation" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source =
+        \\Math.flag = 1;
+        \\function hotGlobal() { return Math.flag; }
+        \\let total = 0; for (let i = 0; i < 12; i++) total += hotGlobal(); total
+    ;
+    var parser = try Parser.init(a, source);
+    const root = try Compiler.compileProgram(a, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try Shape.createRoot(a);
+    try interp.installGlobals(&env, root_shape);
+    const global = try gc_mod.allocObj(a);
+    global.* = .{};
+    try occupyInlineGlobalSlotsForNativeBindingTest(a, global, root_shape);
+    env.realm_global = global;
+    try env.put("globalThis", Value.obj(global));
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = a, .env = &env, .root_shape = root_shape, .global_object = global, .jit_owner = &owner });
+    try std.testing.expectEqual(@as(f64, 12), (try run(&machine, root, null)).asNum());
+    const hot_chunk = root.fns.items[0].chunk.?;
+    const artifact = hot_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    const hot = env.get("hotGlobal").?;
+    try std.testing.expectEqual(@as(f64, 1), (try callValue(&machine, hot, &.{}, Value.undef(), .none)).asNum());
+    var proved = false;
+    for (operations.descriptors, 0..) |descriptor, id| {
+        if (descriptor.bytecode_op != @backingInt(bc.Op.load_var)) continue;
+        const cache = operations.globalBindingCacheFor(id) orelse continue;
+        if (cache.environment_token.load(.acquire) != 0) proved = true;
+    }
+    try std.testing.expect(proved);
+    try std.testing.expect(try machine.deleteOwn(global, "Math"));
+    try std.testing.expectError(error.Throw, callValue(&machine, hot, &.{}, Value.undef(), .none));
+    try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+    machine.exception = Value.undef();
+    const math = (try machine.newObject()).asObj();
+    try machine.setProp(math, "flag", Value.num(9));
+    const prototype = (try machine.newObject()).asObj();
+    try machine.setProp(prototype, "Math", Value.obj(math));
+    global.setProtoAtomic(prototype);
+    try std.testing.expectEqual(@as(f64, 9), (try callValue(&machine, hot, &.{}, Value.undef(), .none)).asNum());
+    try machine.setProp(global, "Math", Value.obj(math));
+    try std.testing.expectEqual(@as(f64, 9), (try callValue(&machine, hot, &.{}, Value.undef(), .none)).asNum());
+    try machine.globalDefine("replacementMath", Value.obj(math));
+    var descriptor_parser = try Parser.init(a,
+        \\Object.defineProperty(globalThis, "Math", {
+        \\  get: function () { return replacementMath; }, configurable: true
+        \\})
+    );
+    const descriptor_chunk = try Compiler.compileProgram(a, try descriptor_parser.parseProgram());
+    _ = try run(&machine, descriptor_chunk, null);
+    try std.testing.expectEqual(@as(f64, 9), (try callValue(&machine, hot, &.{}, Value.undef(), .none)).asNum());
+}
+
 test "vm: optimizer global binding cache stays cold in shared mode" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const original_parallel = bc.ic_seqlock_enabled.swap(true, .monotonic);
@@ -21967,6 +22029,7 @@ test "vm: sloppy recursive calls retain their function realm global" {
     const global = try gc_mod.allocObj(allocator);
     global.* = .{};
     try env.put("globalThis", Value.obj(global));
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
     var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
@@ -23297,6 +23360,123 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expectEqual(@as(f64, 258), result.asNum());
     try std.testing.expect(quick_typed_array_index_hits.load(.monotonic) > reads);
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
+}
+
+test "vm: global references follow live object bindings" {
+    const configurations = [_]struct { mode: interp.BytecodeExecutionMode, parallel: bool = false }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel = true },
+    };
+    for (configurations) |configuration| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = configuration.parallel,
+            .parallel_gc = configuration.parallel,
+            .parallel_js = configuration.parallel,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\delete globalThis.Math;
+            \\let result = [typeof Math === "undefined"];
+            \\let readError = false; try { Math; } catch (error) { readError = error instanceof ReferenceError; }
+            \\result.push(readError);
+            \\function strictStore() { "use strict"; try { Math = 7; } catch (error) { return error instanceof ReferenceError; } return false; }
+            \\result.push(strictStore());
+            \\Math = 9; result.push(globalThis.Math === 9);
+            \\result.push(delete Math);
+            \\Object.setPrototypeOf(globalThis, { Math: 11 }); result.push(Math === 11);
+            \\globalThis.lexicalDeleteProbe = 1; let lexicalDeleteProbe = 2;
+            \\result.push(delete lexicalDeleteProbe === false && globalThis.lexicalDeleteProbe === 1 && lexicalDeleteProbe === 2);
+            \\result.every(function (value) { return value; })
+        );
+        try std.testing.expect(result.asBool());
+        try std.testing.expect((try ctx.evaluate(
+            \\eval("var cachedGlobal = 1");
+            \\function readCached() { return cachedGlobal; }
+            \\let first = 0; for (let i = 0; i < 20; i++) first += readCached();
+            \\delete globalThis.cachedGlobal;
+            \\let gone = false; try { readCached(); } catch (error) { gone = error instanceof ReferenceError; }
+            \\let calls = 0;
+            \\Object.defineProperty(globalThis, "cachedGlobal", {
+            \\  get: function () { calls++; $vm.gc(); return 7; }, configurable: true
+            \\});
+            \\let getter = readCached() === 7 && calls === 1;
+            \\delete globalThis.cachedGlobal;
+            \\Object.setPrototypeOf(globalThis, { cachedGlobal: 9 });
+            \\first === 20 && gone && getter && readCached() === 9
+        )).asBool());
+        try std.testing.expect((try ctx.evaluate(
+            \\eval("var retainedGlobal = 3");
+            \\function removeForStore() { delete globalThis.retainedGlobal; $vm.gc(); return { value: 4 }; }
+            \\retainedGlobal = removeForStore();
+            \\let retained = globalThis.retainedGlobal.value === 4;
+            \\let hiddenConst = 5; const protectedConst = 6;
+            \\globalThis.hiddenConst = 9; globalThis.protectedConst = 10;
+            \\let immutable = false; try { protectedConst = 7; } catch (error) { immutable = error instanceof TypeError; }
+            \\retained && immutable && hiddenConst === 5 && protectedConst === 6 &&
+            \\  delete hiddenConst === false && delete protectedConst === false &&
+            \\  globalThis.hiddenConst === 9 && globalThis.protectedConst === 10
+        )).asBool());
+    }
+}
+
+test "vm: global references observe coordinated no-GIL binding changes" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\globalThis.bindingGate = { ready: 0, phase: 0 };
+        \\function bindingReader() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error("reader holds GIL");
+        \\  Atomics.store(bindingGate, "ready", 1); Atomics.notify(bindingGate, "ready");
+        \\  while (Atomics.load(bindingGate, "phase") === 0) Atomics.wait(bindingGate, "phase", 0, 100);
+        \\  let missing = typeof Math === "undefined";
+        \\  let thrown = false; try { Math; } catch (error) { thrown = error instanceof ReferenceError; }
+        \\  Atomics.store(bindingGate, "phase", 2); Atomics.notify(bindingGate, "phase");
+        \\  while (Atomics.load(bindingGate, "phase") === 2) Atomics.wait(bindingGate, "phase", 2, 100);
+        \\  return missing && thrown && Math === 9;
+        \\}
+        \\let reader = new Thread(bindingReader);
+        \\while (Atomics.load(bindingGate, "ready") === 0) Atomics.wait(bindingGate, "ready", 0, 100);
+        \\delete globalThis.Math;
+        \\Atomics.store(bindingGate, "phase", 1); Atomics.notify(bindingGate, "phase");
+        \\while (Atomics.load(bindingGate, "phase") === 1) Atomics.wait(bindingGate, "phase", 1, 100);
+        \\Object.setPrototypeOf(globalThis, { Math: 9 });
+        \\Atomics.store(bindingGate, "phase", 3); Atomics.notify(bindingGate, "phase");
+        \\reader.join()
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "vm: direct named stores retain canonical global reference rules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try Shape.createRoot(a);
+    try interp.installGlobals(&env, root_shape);
+    const global = try gc_mod.allocObj(a);
+    global.* = .{};
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = a, .env = &env, .root_shape = root_shape, .global_object = global });
+    try std.testing.expect(try machine.deleteOwn(global, "Math"));
+    machine.strict = true;
+    try std.testing.expectError(error.Throw, machine.assignVarVM("Math", Value.num(7)));
+    try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+    machine.strict = false;
+    machine.exception = Value.undef();
+    try machine.assignVarVM("Math", Value.num(9));
+    try std.testing.expectEqual(@as(f64, 9), global.getOwn("Math").?.asNum());
 }
 
 test "vm: global object Get excludes declarative bindings across evaluations" {

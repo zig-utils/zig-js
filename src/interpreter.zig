@@ -5303,8 +5303,13 @@ pub const Interpreter = struct {
     /// accessor properties, not just data ones.
     pub fn globalProp(self: *Interpreter, name: []const u8) EvalError!?Value {
         const g = self.currentGlobalObject() orelse return null;
-        if (try self.hasPropertyResult(g, name))
-            return try self.getPropertyWithReceiver(Value.obj(g), name, Value.obj(g));
+        const fallback = Value.obj(g);
+        const root = try self.pushTempRoot(fallback);
+        defer self.restoreTempRoots(root);
+        if (try self.hasPropertyResult(self.tempRoot(root, fallback).asObj(), name)) {
+            const global = self.tempRoot(root, fallback);
+            return try self.getPropertyWithReceiver(global, name, global);
+        }
         return null;
     }
 
@@ -5320,26 +5325,6 @@ pub const Interpreter = struct {
         if (!callee.isObject()) return false;
         const intrinsic = rootEnv(self.env).get("\x00evalIntrinsic") orelse return false;
         return intrinsic.isObject() and intrinsic.asObj() == callee.asObj();
-    }
-
-    fn globalBindingObject(self: *Interpreter, name: []const u8) ?*value.Object {
-        const g = self.currentGlobalObject() orelse return null;
-        var env: ?*Environment = self.env;
-        while (env) |e| {
-            if (e.activationBinding(name) != null) return null;
-            const record = e.mutableBindingRecord();
-            // Read `vars` under the binding lock: a peer thread's put/getOrPut on
-            // this scope can rehash it concurrently (no-GIL Environment race,
-            // Linux tsan-threadfuzz: globalDefine put vs this contains). Only a
-            // proven-private activation may elide this read lock.
-            const locked = record.lockBindingsForRead();
-            const has = record.vars.contains(record.bindingHashContext(), name);
-            record.unlockBindingsForRead(locked);
-            if (has)
-                return if (e.parent == null and objectHasOwn(g, name)) g else null;
-            env = e.parent;
-        }
-        return null;
     }
 
     /// ToObject(v): an ordinary object is returned as-is, a primitive is boxed
@@ -5420,8 +5405,11 @@ pub const Interpreter = struct {
             if (alias) |a| return .{ .value = a.env.get(a.name) orelse return null };
             if (found_var) |v| {
                 if (global_shadowable) {
-                    const g = self.currentGlobalObject() orelse return .{ .value = v };
-                    if (objectHasOwn(g, name)) return .{ .value = try self.getProperty(Value.obj(g), name) };
+                    // Root mirror entries are declaration bookkeeping, not a
+                    // fallback value after property deletion. The caller's
+                    // globalProp resolves the live Object Environment Record,
+                    // including inherited properties, exactly once.
+                    if (self.currentGlobalObject() != null) return null;
                 }
                 return .{ .value = v };
             }
@@ -5470,34 +5458,6 @@ pub const Interpreter = struct {
         return if (try self.lookupIdentValue(name)) |resolved| resolved.value else null;
     }
 
-    /// Resolve an identifier *for assignment*: a `with` object that provides the
-    /// binding takes the write (returns true); otherwise the caller assigns to
-    /// the lexical/global binding. Stops at the first scope (binding or `with`)
-    /// that owns `name`.
-    /// The declarative environment that currently holds `name` (a `var`/`let`/
-    /// `const` binding), searching outward from `start`. Used to capture an
-    /// assignment's target binding BEFORE its right-hand side runs, so a direct
-    /// eval in the RHS that introduces a closer binding can't retarget the write
-    /// (PutValue uses the initially-created Reference). Returns null when no
-    /// declarative binding exists (the target is a `with`/global/new binding).
-    fn bindingEnvOf(start: *Environment, name: []const u8) ?*Environment {
-        var env: ?*Environment = start;
-        while (env) |e| {
-            if (e.activationBinding(name) != null) return e;
-            const record = e.mutableBindingRecord();
-            // Existence check under the binding lock (same no-GIL race class as
-            // lookupIdent); the `getPtr` result is not escaped, only its
-            // presence, so nothing dangles after unlock.
-            const locked = record.lockBindingsForRead();
-            const context = record.bindingHashContext();
-            const owns = record.vars.getPtr(context, name) != null or record.aliases.get(context, name) != null;
-            record.unlockBindingsForRead(locked);
-            if (owns) return e;
-            env = e.parent;
-        }
-        return null;
-    }
-
     pub fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
@@ -5541,8 +5501,15 @@ pub const Interpreter = struct {
                 !record.lexicals.contains(context, name) and !record.consts.contains(context, name);
             record.unlockBindingsForRead(locked);
             if (owns) {
-                if (root_object_candidate) if (self.currentGlobalObject()) |global|
-                    if (objectHasOwn(global, name)) return .{ .global_object = global };
+                if (root_object_candidate) if (self.currentGlobalObject()) |global| {
+                    const fallback = Value.obj(global);
+                    const root = try self.pushTempRoot(fallback);
+                    defer self.restoreTempRoots(root);
+                    return if (try self.hasPropertyResult(self.tempRoot(root, fallback).asObj(), name))
+                        .{ .global_object = self.tempRoot(root, fallback).asObj() }
+                    else
+                        .unresolvable;
+                };
                 return .{ .environment = e };
             }
             if (record.with_object) |object| {
@@ -5589,27 +5556,32 @@ pub const Interpreter = struct {
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
             const context = record.bindingHashContext();
-            const owns = record.vars.contains(context, name) or record.aliases.get(context, name) != null;
+            const owns_alias = record.aliases.contains(context, name);
+            const owns_var = record.vars.contains(context, name);
+            const owns = owns_var or owns_alias;
             const deletable = owns and record.deletable.contains(context, name);
-            const is_global = e.parent == null;
+            const root_object_binding = owns_var and !owns_alias and e.parent == null and
+                !record.lexicals.contains(context, name) and name.len != 0 and name[0] != 0;
             record.unlockBindingsForRead(locked);
             if (owns) {
-                // A sloppy eval-created binding is removed from the declaring
-                // Environment. Global variable bindings instead mirror their
-                // configurable state on the global object's own property.
+                if (root_object_binding) if (self.currentGlobalObject()) |global| {
+                    const environment_root = try self.pushTempEnvRoot(e);
+                    defer self.restoreTempEnvRoots(environment_root);
+                    const fallback = Value.obj(global);
+                    const root = try self.pushTempRoot(fallback);
+                    defer self.restoreTempRoots(root);
+                    if (!try self.hasPropertyResult(self.tempRoot(root, fallback).asObj(), name)) return true;
+                    const deleted = try self.deleteOwn(self.tempRoot(root, fallback).asObj(), name);
+                    if (deleted) _ = self.tempEnvRoot(environment_root, e).removeVar(name);
+                    if (!deleted and strict) return self.throwError("TypeError", "Unable to delete property.");
+                    return deleted;
+                };
+                // Deletable sloppy-eval declarative bindings are removed from
+                // their record. Lexical bindings stay non-deletable regardless
+                // of any same-named global-object property.
                 if (deletable) {
                     _ = e.removeVar(name);
                     return true;
-                }
-                if (is_global) {
-                    if (self.global_object) |global| {
-                        if (objectHasOwn(global, name)) {
-                            const deleted = try self.deleteOwn(global, name);
-                            if (deleted) _ = e.removeVar(name);
-                            if (!deleted and strict) return self.throwError("TypeError", "Unable to delete property.");
-                            return deleted;
-                        }
-                    }
                 }
                 if (strict) return self.throwError("TypeError", "Cannot delete binding");
                 return false;
@@ -5627,9 +5599,12 @@ pub const Interpreter = struct {
         // A bounded search reaching the chain tail still falls back to the
         // statically known non-deletable slot rather than an unresolvable name.
         if (environment_limit != null) return false;
-        if (self.global_object) |global| {
-            if (objectHasOwn(global, name)) {
-                const deleted = try self.deleteOwn(global, name);
+        if (self.currentGlobalObject()) |global| {
+            const fallback = Value.obj(global);
+            const root = try self.pushTempRoot(fallback);
+            defer self.restoreTempRoots(root);
+            if (try self.hasPropertyResult(self.tempRoot(root, fallback).asObj(), name)) {
+                const deleted = try self.deleteOwn(self.tempRoot(root, fallback).asObj(), name);
                 if (!deleted and strict) return self.throwError("TypeError", "Unable to delete property.");
                 return deleted;
             }
@@ -17307,39 +17282,16 @@ pub const Interpreter = struct {
     /// them): a `const` reassignment throws; a function-expression name throws in
     /// strict code and is a no-op in sloppy code.
     pub fn assignVarVM(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
-        // A `with` object that provides this name takes the write (its
-        // SetMutableBinding: HasProperty re-check, then Set) — the VM store path
-        // must consult it just like the tree-walker's assignTo, or the write
-        // wrongly falls through to a fresh global.
-        if (try self.assignWithObject(name)) |o| {
-            const still = try self.hasPropertyResult(o, name); // SetMutableBinding step 2
-            if (!still and self.strict) return self.throwNotDefined(name);
-            return self.setMember(Value.obj(o), name, v);
-        }
-        // SetMutableBinding observes an uninitialized declarative binding before
-        // its mutability. In particular `const x = (x = 1)` is a ReferenceError,
-        // not the TypeError used for assignment after initialization.
-        if (self.env.get(name)) |current|
-            if (self.isTdz(current)) return self.throwUninitializedBinding(name);
-        if (self.env.isAlias(name)) return self.throwError("TypeError", "Attempted to assign to readonly property.");
-        if (self.env.isConst(name)) |c| {
-            if (c) return self.throwError("TypeError", "Attempted to assign to readonly property.");
-        }
-        if (self.env.isFnName(name)) {
-            if (self.strict) return self.throwError("TypeError", "Attempted to assign to readonly property.");
-            return;
-        }
-        if (self.env.get(name) == null) {
-            if (self.strict and !try self.globalHasBinding(name))
-                return self.throwNotDefined(name);
-            if (self.currentGlobalObject()) |g| return self.setMember(Value.obj(g), name, v);
-        }
-        if (self.globalBindingObject(name)) |g| {
-            try self.setMember(Value.obj(g), name, v);
-            if (g.getOwn(name)) |nv| try self.env.assign(name, nv);
-            return;
-        }
-        try self.env.assign(name, v);
+        const value_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(value_root);
+        const reference = try self.captureBindingReference(name, null);
+        const reference_root = try self.pushTempBindingReferenceRoot(reference);
+        defer self.restoreTempBindingReferenceRoots(reference_root);
+        return self.storeCapturedBindingReference(
+            self.tempBindingReferenceRoot(reference_root, reference),
+            name,
+            self.tempRoot(value_root, v),
+        );
     }
 
     /// GetValue for a dynamically captured identifier Reference. Static
