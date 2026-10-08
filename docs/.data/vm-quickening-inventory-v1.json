@@ -324,48 +324,6 @@
       "metrics": ["quick_reusable_immediate_closure_hits"]
     },
     {
-      "id": "numeric-recurrence",
-      "title": "Pure additive recurrence kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact pure two-branch additive self-recurrence bytecode body"],
-      "guards": ["exact chunk length/opcodes", "two parameters/two locals", "u16 threshold/deltas", "exact self callee binding", "numeric input"],
-      "miss_behavior": ["perform the ordinary recursive JS call", "cache an explicit unsupported recurrence plan"],
-      "metadata_lifetime": "One QuickRecurrencePlan lives in the callee Chunk arena for the Chunk lifetime.",
-      "no_gil_synchronization": "Plan publication uses acquire/release compare-exchange; exact binding lookup follows Environment synchronization.",
-      "observable_steps_debugger": "A saturated recurrence step table enforces the same budget/checkpoint boundary; debugger/host statement hooks refuse entry.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickAddRecurrence = struct {"},
-        {"path": "src/vm.zig", "text": "fn tryQuickNumericRecurrence("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: quickens guarded pure numeric recurrence\""}
-      ],
-      "metrics": ["quick_numeric_recurrence_hits"]
-    },
-    {
-      "id": "observable-numeric-recurrence",
-      "title": "Observable additive recurrence kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact additive self-recurrence with an observable counter property update"],
-      "guards": ["exact 28-bytecode body", "u16 thresholds/deltas", "exact recursive binding observations", "plain counter state and numeric value"],
-      "miss_behavior": ["perform ordinary recursive calls/property operations", "unsupported shapes use the explicit recurrence-plan tag"],
-      "metadata_lifetime": "The observable variant shares the callee Chunk-arena QuickRecurrencePlan lifetime.",
-      "no_gil_synchronization": "Plan publication is atomic; shared execution resolves/locks the observable counter property instead of reusing isolated raw slots.",
-      "observable_steps_debugger": "Recursive calls are not elided from the semantic accounting: each property/call/branch step advances through checkpoint-aware helpers; statement hooks refuse the kernel.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickObservableAddRecurrence = struct {"},
-        {"path": "src/vm.zig", "text": "fn runQuickObservableRecurrenceParallel("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: compiles observable numeric recurrence without eliding calls\""}
-      ],
-      "metrics": ["quick_observable_recurrence_hits"]
-    },
-    {
       "id": "binary-arithmetic-site",
       "title": "Adaptive Number binary dispatch",
       "classification": "general_adaptive",
@@ -451,8 +409,7 @@
       "QuickPropertyKernelPlan",
       "QuickArrayPlan",
       "QuickLeafPlan",
-      "QuickCallLoopPlan",
-      "QuickRecurrencePlan"
+      "QuickCallLoopPlan"
     ],
     "tagged_types": {
       "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
@@ -467,8 +424,7 @@
       "QuickLeafPlan": ["unsupported", "numeric"],
       "QuickCallCallee": ["global_instruction", "local", "method", "closure_template"],
       "QuickCallLoopPlan": ["unsupported", "numeric_leaf"],
-      "QuickGlobalBinding": ["object", "environment"],
-      "QuickRecurrencePlan": ["unsupported", "add", "observable_add"]
+      "QuickGlobalBinding": ["object", "environment"]
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
@@ -477,7 +433,6 @@
       "quick_call_plans",
       "quick_loop_candidates",
       "quick_global_bindings",
-      "quick_recurrence_plan",
       "quick_leaf_plan"
     ],
     "structural_candidate_flags": [
@@ -524,9 +479,7 @@
       "quick_numeric_arguments_direct_call_hits",
       "quick_numeric_closure_call_loop_hits",
       "quick_reusable_immediate_closure_hits",
-      "quick_numeric_method_call_loop_hits",
-      "quick_numeric_recurrence_hits",
-      "quick_observable_recurrence_hits"
+      "quick_numeric_method_call_loop_hits"
     ]
   }
 }

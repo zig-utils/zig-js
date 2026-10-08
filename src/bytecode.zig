@@ -1025,9 +1025,6 @@ pub const Chunk = struct {
     /// type-erased to avoid importing interpreter/value types here and are
     /// guarded by their exact closure environment, global object, and shape.
     quick_global_bindings: []?*anyopaque = &.{},
-    /// Lazily decoded pure numeric self-recurrence plan for this function
-    /// chunk. The VM owns the type and caches an explicit unsupported plan too.
-    quick_recurrence_plan: ?*anyopaque = null,
     /// Lazily decoded straight-line numeric leaf expression for guarded call
     /// inlining. Kept per callee chunk so rebinding a call site naturally
     /// selects or rejects the replacement function's own plan.

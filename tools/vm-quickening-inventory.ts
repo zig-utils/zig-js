@@ -23,8 +23,6 @@ const ENTRY_IDS = [
   "numeric-leaf-call",
   "numeric-call-loop",
   "reusable-immediate-closure",
-  "numeric-recurrence",
-  "observable-numeric-recurrence",
   "binary-arithmetic-site",
   "native-direct-call",
 ];
@@ -43,8 +41,6 @@ const LEGACY_ENTRY_IDS = [
   "fixed-shape-object-allocation-loop",
   "numeric-call-loop",
   "reusable-immediate-closure",
-  "numeric-recurrence",
-  "observable-numeric-recurrence",
 ];
 const CLASSIFICATIONS = [
   "general_adaptive",
@@ -303,6 +299,8 @@ function renderMarkdown(data: any): string {
   lines.push(
     "",
     "Every legacy pattern above remains labeled `legacy_narrow`; none is used as evidence that its broader property, index, call, arithmetic, control, or allocation family is covered.",
+    "",
+    "The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.",
     "",
     "## Explicitly unsupported broad families",
     "",

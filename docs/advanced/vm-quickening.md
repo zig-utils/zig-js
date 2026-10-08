@@ -17,7 +17,7 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 | --- | --- | ---: |
 | `general_adaptive` | Site/opcode behavior selected from runtime identity, shape, or representation guards rather than a whole benchmark-shaped body. | 6 |
 | `bounded_structural` | A bounded expression/trace decoder with explicit accepted operations and size limits. | 2 |
-| `legacy_narrow` | An exact bytecode-pattern kernel. It is useful implementation history, not broad dispatch-family coverage. | 9 |
+| `legacy_narrow` | An exact bytecode-pattern kernel. It is useful implementation history, not broad dispatch-family coverage. | 7 |
 
 ## Implemented guarded families
 
@@ -36,12 +36,12 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 | `numeric-leaf-call` | `bounded_structural` | straight-line numeric bytecode leaves; non-arrow static arguments[index] numeric expressions; captured scalar and receiver-property variants | perform the ordinary JS call; cache unsupported bytecode leaves explicitly; AST arguments leaves are revalidated for each exact call arity |
 | `numeric-call-loop` | `legacy_narrow` | exact counted loops calling a direct, method, closure-template, or arguments numeric leaf | resume ordinary bytecode at the loop head; publish an explicit unsupported call-loop plan |
 | `reusable-immediate-closure` | `legacy_narrow` | checkpoint-spanning fallback iterations of the exact closure-template numeric call loop | allocate a fresh closure through makeClosure; never reuse when identity could escape or be observed |
-| `numeric-recurrence` | `legacy_narrow` | one exact pure two-branch additive self-recurrence bytecode body | perform the ordinary recursive JS call; cache an explicit unsupported recurrence plan |
-| `observable-numeric-recurrence` | `legacy_narrow` | one exact additive self-recurrence with an observable counter property update | perform ordinary recursive calls/property operations; unsupported shapes use the explicit recurrence-plan tag |
 | `binary-arithmetic-site` | `general_adaptive` | add/subtract/multiply/divide/remainder/power; relational and equality comparisons; bitwise operations and shifts | record both changed operand kinds; atomically publish terminal generic state; execute the canonical operation exactly once without replaying coercion or exceptions |
 | `native-direct-call` | `general_adaptive` | ordinary call of a ready baseline/optimizing numeric leaf without heap activation construction | build/run the ordinary VM activation or generic call; a managed native miss/deoptimization never becomes a completed direct call |
 
 Every legacy pattern above remains labeled `legacy_narrow`; none is used as evidence that its broader property, index, call, arithmetic, control, or allocation family is covered.
+
+The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.
 
 ## Explicitly unsupported broad families
 
@@ -55,4 +55,4 @@ Every legacy pattern above remains labeled `legacy_narrow`; none is used as evid
 
 ## Drift gate
 
-The validator binds this inventory to 6 plan types, 14 tagged quickening types, 8 chunk metadata fields, 2 structural-candidate flags, and 42 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
+The validator binds this inventory to 5 plan types, 13 tagged quickening types, 7 chunk metadata fields, 2 structural-candidate flags, and 40 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.

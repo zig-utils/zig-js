@@ -167,9 +167,12 @@ GC stress, termination, recursion, and shared-realm tests are required **before*
 a path may enter native code. A speedup is not accepted if checksums, supported
 rows, or execution accounting differ.
 
-The current evidence boundary for native coverage is the
-[dispatch profile](https://github.com/zig-utils/zig-js/blob/main/docs/.data/baseline-jit-profile-2026-07-16.md):
-arithmetic spends 93.3% of collapsed leaf samples in generated `MAP_JIT` code,
-and recursive Fibonacci 96.6% in the guarded observable-recurrence kernel, while
-arrays remain primarily residual dispatch. Extending coverage means moving that
-boundary with new evidence.
+The historical July 16, 2026
+[dispatch profile](https://github.com/zig-utils/zig-js/blob/main/docs/.data/baseline-jit-profile-2026-07-16.md)
+reported arithmetic at 93.3% of collapsed leaf samples in generated `MAP_JIT`
+code and recursive Fibonacci at 96.6% in the then-present observable-recurrence
+kernel, with arrays primarily in residual dispatch. These samples describe that
+revision. The exact recurrence kernels were removed in
+[issue #1074](https://github.com/zig-utils/zig-js/issues/1074); recursion now uses
+general VM calls and activations. Current coverage or performance claims require
+new evidence from the current execution paths.
