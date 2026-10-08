@@ -23299,6 +23299,73 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
 }
 
+test "vm: global object Get excludes declarative bindings across evaluations" {
+    const configurations = [_]struct { mode: interp.BytecodeExecutionMode, parallel: bool = false }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel = true },
+    };
+    for (configurations) |configuration| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = configuration.parallel,
+            .parallel_gc = configuration.parallel,
+            .parallel_js = configuration.parallel,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\let lexicalValue = 7; const lexicalConst = 8; class LexicalClass {}
+            \\var publicValue = 9; function publicFunction() { return 10; }
+        );
+        try std.testing.expect((try ctx.evaluate(
+            \\globalThis.lexicalValue === undefined && globalThis.lexicalConst === undefined &&
+            \\globalThis.LexicalClass === undefined && !("lexicalValue" in globalThis) &&
+            \\lexicalValue === 7 && lexicalConst === 8 && typeof LexicalClass === "function" &&
+            \\globalThis.publicValue === 9 && globalThis.publicFunction === publicFunction &&
+            \\typeof globalThis.Math === "object" && typeof globalThis.parseInt === "function"
+        )).asBool());
+        try std.testing.expect((try ctx.evaluate(
+            \\delete globalThis.Math;
+            \\let beforeInit = globalThis.beforeInit;
+            \\function shadow() { let parseInt = 9; return typeof globalThis.parseInt === "function"; }
+            \\globalThis.Math === undefined && !("Math" in globalThis) &&
+            \\beforeInit === undefined && shadow()
+        )).asBool());
+        try std.testing.expect((try ctx.evaluate(
+            \\eval("var evaluatedGlobal = 11");
+            \\globalThis.evaluatedGlobal === 11 && evaluatedGlobal === 11
+        )).asBool());
+        try std.testing.expect((try ctx.evaluate(
+            \\let calls = 0;
+            \\Object.defineProperty(globalThis, "lexicalValue", {
+            \\  get: function () { calls++; $vm.gc(); return 12; }, configurable: true
+            \\});
+            \\globalThis.lexicalValue === 12 && lexicalValue === 7 && calls === 1
+        )).asBool());
+    }
+}
+
+test "vm: global object missing property preserves slot absence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try Shape.createRoot(a);
+    try interp.installGlobals(&env, root_shape);
+    const global = try gc_mod.allocObj(a);
+    global.* = .{};
+    try interp.mirrorGlobalsOnto(&env, global, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = a, .env = &env, .root_shape = root_shape, .global_object = global });
+    try env.put("lexicalOnly", Value.num(7));
+    try env.markLexical("lexicalOnly");
+    try std.testing.expect((try machine.getPropertyIfExists(Value.obj(global), "lexicalOnly")) == null);
+    try global.setOwn(a, root_shape, "lexicalOnly", Value.undef());
+    const present = (try machine.getPropertyIfExists(Value.obj(global), "lexicalOnly")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(present.isUndefined());
+}
+
 test "vm: Date component conversion ignores extra values across GC" {
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{

@@ -16826,12 +16826,6 @@ pub const Interpreter = struct {
                     cur = self.effectiveProto(c);
                     prototype_depth += 1;
                 }
-                // On the global object, an absent own property falls back to the
-                // global lexical bindings, so `globalThis.Math`, `this.parseInt`,
-                // etc. resolve to the installed globals.
-                if (self.global_object != null and o == self.global_object.?) {
-                    if (rootEnv(self.env).get(key)) |v| return v;
-                }
                 // Accessing a private member the object doesn't carry is a brand
                 // violation — a TypeError, not `undefined`.
                 if (value.isPrivateKey(key)) return self.throwInvalidPrivateAccess(key, .none);
