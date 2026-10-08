@@ -1580,13 +1580,7 @@ inline fn quickTypedArrayLoad(vm: *Interpreter, receiver: Value, key: Value) Eva
     const typed_array = object.typedArray() orelse return null;
     const number = quickTypedArrayNumericKey(key) orelse return null;
     try vm.checkRestricted(object);
-    if (!std.math.isFinite(number) or number < 0 or @trunc(number) != number or
-        (number == 0 and std.math.signbit(number)))
-        return Value.undef();
-    const length = typed_array.currentLength() orelse return Value.undef();
-    if (number >= @as(f64, @floatFromInt(length))) return Value.undef();
-    const index: usize = @intFromFloat(number);
-    return try vm.taLoad(typed_array, index);
+    return try vm.integerIndexedElementGet(typed_array, number, null);
 }
 
 /// IntegerIndexedElementSet coerces the RHS before it revalidates the index and
@@ -23303,6 +23297,85 @@ test "vm: canonical typed array String operations run across no-GIL workers" {
     try std.testing.expectEqual(@as(f64, 258), result.asNum());
     try std.testing.expect(quick_typed_array_index_hits.load(.monotonic) > reads);
     try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > stores);
+}
+
+test "vm: inherited typed array Get and HasProperty preserve exotic boundaries" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\let prototype = new Uint8Array([7]);
+            \\let values = []; Object.setPrototypeOf(values, prototype);
+            \\let ordinary = Object.create(Object.create(prototype));
+            \\let valid = values[0] === 7 && ordinary["0"] === 7 && ("0" in values);
+            \\let big = Object.create(new BigInt64Array([9n]));
+            \\let bigint = big["0"] === 9n;
+            \\let calls = 0;
+            \\let parent = new Proxy({ "01": 8 }, {
+            \\  get: function (target, key, receiver) { calls++; return Reflect.get(target, key, receiver); },
+            \\  has: function (target, key) { calls++; return Reflect.has(target, key); }
+            \\});
+            \\Object.setPrototypeOf(prototype, parent);
+            \\let invalid = values["-0"] === undefined && values[1] === undefined &&
+            \\  !Reflect.has(values, "-0") && !("1" in values) && calls === 0;
+            \\let named = values["01"] === 8 && Reflect.has(values, "01") && calls === 2;
+            \\values[0] = 3; let own = values[0] === 3;
+            \\let receiver = {};
+            \\let getterPrototype = new Uint8Array(1);
+            \\Object.defineProperty(getterPrototype, "ordinary", { get: function () { return this === receiver; } });
+            \\let getters = Reflect.get(Object.create(getterPrototype), "ordinary", receiver);
+            \\let primitivePrototype = new Uint8Array([7]);
+            \\Object.setPrototypeOf(Number.prototype, primitivePrototype);
+            \\Object.setPrototypeOf(Boolean.prototype, primitivePrototype);
+            \\Object.setPrototypeOf(Symbol.prototype, primitivePrototype);
+            \\Object.setPrototypeOf(BigInt.prototype, primitivePrototype);
+            \\let primitives = (1)[0] === 7 && true["0"] === 7 && Symbol()[0] === 7 && (1n)[0] === 7;
+            \\valid && bigint && invalid && named && own && getters && primitives
+        );
+        try std.testing.expect(result.asBool());
+    }
+}
+
+test "vm: inherited typed array access enforces prototype restriction ownership" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\let prototype = new Uint8Array([7]); let values = [];
+        \\Object.setPrototypeOf(values, prototype); [values, prototype]
+    );
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const result = try run(&machine, chunk, null);
+    const receiver = result.asObj().denseElement(0).?;
+    const prototype = result.asObj().denseElement(1).?.asObj();
+    const Claim = struct {
+        object: *value.Object,
+        allocator: std.mem.Allocator,
+        fn run(self: *@This()) void {
+            _ = self.object.claimRestriction(self.allocator, @intCast(std.Thread.getCurrentId())) catch unreachable;
+        }
+    };
+    var claim = Claim{ .object = prototype, .allocator = allocator };
+    const owner = try std.Thread.spawn(.{}, Claim.run, .{&claim});
+    owner.join();
+    try std.testing.expectError(error.Throw, machine.getProperty(receiver, "0"));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    machine.exception = Value.undef();
+    try std.testing.expectError(error.Throw, machine.hasPropertyResult(receiver.asObj(), "0"));
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
 }
 
 test "vm: computed numeric typed array reads enforce restriction ownership" {

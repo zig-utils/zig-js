@@ -16680,13 +16680,7 @@ pub const Interpreter = struct {
                     if (std.mem.eql(u8, key, "buffer") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.obj(ta.buffer);
                     if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.num(@floatFromInt(ta.kind.byteSize()));
                     if (canonicalNumericIndexString(key)) |n| {
-                        if (!isValidIntegerIndex(ta, n)) {
-                            if (found) |slot| slot.* = false;
-                            return Value.undef();
-                        }
-                        const i: usize = @intFromFloat(n);
-                        if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
-                        return value.taRead(ta, i);
+                        return self.integerIndexedElementGet(ta, n, found);
                     }
                     // other keys (methods, constructor, @@toStringTag) fall through.
                 }
@@ -16748,6 +16742,15 @@ pub const Interpreter = struct {
                         }
                         return moduleNsGet(self, ns, key);
                     }
+                    // OrdinaryGet delegates to the ancestor's [[Get]]. An
+                    // Integer-Indexed Exotic ancestor resolves canonical
+                    // numeric keys itself, including an invalid-index miss;
+                    // no getter further up the chain may observe that miss.
+                    if (c != o) if (c.typedArray()) |ta| {
+                        if (canonicalNumericIndexString(key)) |n| {
+                            return self.integerIndexedElementGet(ta, n, found);
+                        }
+                    };
                     if (c.is_array and std.mem.eql(u8, key, "length")) {
                         // arguments `length` is an ordinary own property (absent
                         // once deleted); a real Array's is the exotic length.
@@ -16841,6 +16844,10 @@ pub const Interpreter = struct {
             try self.checkRestricted(c);
             if (c.proxyHandler() != null or c.proxy_revoked)
                 return self.proxyGet(c, key, recv);
+            if (c.typedArray()) |ta| {
+                if (canonicalNumericIndexString(key)) |n|
+                    return self.integerIndexedElementGet(ta, n, null);
+            }
             if (c.getAccessor(key)) |acc| {
                 if (acc.get) |g| {
                     if (!g.isUndefined()) return self.callValueWithThis(g, &.{}, recv);
@@ -18627,6 +18634,17 @@ pub const Interpreter = struct {
     pub fn taLoad(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) EvalError!Value {
         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
         return value.taRead(ta, i);
+    }
+
+    /// IntegerIndexedElementGet handles canonical numeric keys at the lookup
+    /// target, including when OrdinaryGet delegates from a child or primitive
+    /// wrapper. An invalid index is a terminal miss, never a prototype walk.
+    pub fn integerIndexedElementGet(self: *Interpreter, ta: *const value.TypedArrayData, n: f64, found: ?*bool) EvalError!Value {
+        if (!isValidIntegerIndex(ta, n)) {
+            if (found) |slot| slot.* = false;
+            return Value.undef();
+        }
+        return self.taLoad(ta, @intFromFloat(n));
     }
 
     /// `taLoad` but yielding `undefined` for an index at/past the current length
@@ -22968,11 +22986,6 @@ pub const Interpreter = struct {
     /// Proxy `has` traps at whichever object in the chain provides them.
     pub fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
         try self.checkRestricted(o);
-        // Integer-Indexed Exotic [[HasProperty]]: a canonical numeric key resolves
-        // purely to index validity — it never consults the prototype chain.
-        if (o.typedArray()) |ta| {
-            if (canonicalNumericIndexString(key)) |n| return isValidIntegerIndex(ta, n);
-        }
         var cur: ?*value.Object = o;
         while (cur) |c| {
             if (c != o) try self.checkRestricted(c);
@@ -22980,6 +22993,11 @@ pub const Interpreter = struct {
             if (moduleNsOf(c)) |ns| {
                 try triggerDeferIfString(self, ns, key);
                 return moduleNsHas(ns, key);
+            }
+            // Delegated Integer-Indexed [[HasProperty]] ends the walk even
+            // when the canonical numeric index is invalid at this ancestor.
+            if (c.typedArray()) |ta| {
+                if (canonicalNumericIndexString(key)) |n| return isValidIntegerIndex(ta, n);
             }
             if (objectHasOwn(c, key)) return true;
             if (c.hostClassHooks()) |hooks| if (hooks.has) |has| {
@@ -56551,13 +56569,15 @@ fn rootEnv(env: *Environment) *Environment {
 pub fn hasProperty(o: *value.Object, name: []const u8) bool {
     var cur: ?*value.Object = o;
     while (cur) |c| {
+        if (c.typedArray()) |ta| {
+            if (canonicalNumericIndexString(name)) |n| return isValidIntegerIndex(ta, n);
+        }
         if (c.getOwn(name) != null or c.getAccessor(name) != null) return true;
-        // Dense array / typed-array / String-wrapper indices live outside the
+        // Dense array / String-wrapper indices live outside the
         // slot store, so [[HasProperty]] must consult them on each chain object
         // (an inherited array element makes the index present on the receiver).
         if (value.canonicalIndex(name)) |idx| {
             if (c.is_array and c.denseElementPresent(idx)) return true;
-            if (c.typedArray()) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
             if (c.boxedPrimitive()) |p| if (p.isString() and idx < Interpreter.utf16LenOfValue(p)) return true;
         }
         cur = c.protoAtomic();
@@ -58594,6 +58614,63 @@ test "interpreter array literal, index, length, push/pop" {
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let xs = [7, 9]; xs.pop()")).asNum());
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + ['a','b','c']")).asStr());
+}
+
+test "interpreter inherited TypedArray indices honor exotic Get and HasProperty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let prototype = new Uint8Array([7]);
+        \\let values = []; Object.setPrototypeOf(values, prototype);
+        \\let ordinary = {}; Object.setPrototypeOf(ordinary, prototype);
+        \\let deep = Object.create(Object.create(prototype));
+        \\let big = new BigInt64Array([9n]); let bigChild = Object.create(big);
+        \\values[0] === 7 && ordinary["0"] === 7 && deep[0] === 7 &&
+        \\Reflect.get(prototype, "0", {}) === 7 && bigChild["0"] === 9n &&
+        \\("0" in values) && Reflect.has(ordinary, "0")
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let prototype = new Uint8Array([7]);
+        \\Object.setPrototypeOf(Number.prototype, prototype);
+        \\Object.setPrototypeOf(Boolean.prototype, prototype);
+        \\Object.setPrototypeOf(Symbol.prototype, prototype);
+        \\Object.setPrototypeOf(BigInt.prototype, prototype);
+        \\(1)[0] === 7 && true["0"] === 7 && Symbol()[0] === 7 && (1n)[0] === 7
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let calls = 0;
+        \\let parent = new Proxy({}, {
+        \\  get: function () { calls++; return 99; },
+        \\  has: function () { calls++; return true; }
+        \\});
+        \\let prototype = new Uint8Array([7]); Object.setPrototypeOf(prototype, parent);
+        \\let values = []; Object.setPrototypeOf(values, prototype);
+        \\let keys = ["-0", "1", "-1", "1.5", "NaN", "Infinity", "4294967295"];
+        \\let correct = true;
+        \\for (let i = 0; i < keys.length; i++) {
+        \\  if (values[keys[i]] !== undefined || Reflect.has(values, keys[i])) correct = false;
+        \\}
+        \\correct && calls === 0
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let prototype = new Uint8Array([7]); let parent = { "01": 8, "9007199254740993": 9 };
+        \\Object.setPrototypeOf(prototype, parent);
+        \\let values = [3]; Object.setPrototypeOf(values, prototype);
+        \\values[0] === 3 && values["01"] === 8 && values["9007199254740993"] === 9 &&
+        \\Reflect.has(values, "01") && Reflect.has(values, "9007199254740993")
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let buffer = new ArrayBuffer(2, { maxByteLength: 4 });
+        \\let prototype = new Uint8Array(buffer); prototype[0] = 7;
+        \\let values = []; Object.setPrototypeOf(values, prototype);
+        \\buffer.resize(0);
+        \\let shrunk = values[0] === undefined && !("0" in values);
+        \\buffer.resize(2); prototype[0] = 8;
+        \\let grown = values[0] === 8 && ("0" in values);
+        \\buffer.transfer();
+        \\shrunk && grown && values[0] === undefined && !("0" in values)
+    )).asBool());
 }
 
 test "interpreter TypedArray rounded decimal keys remain ordinary names" {
