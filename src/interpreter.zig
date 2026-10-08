@@ -62681,6 +62681,79 @@ test "interpreter getters and setters" {
     )).asBool());
 }
 
+test "ordinary data writes after accessor deletion discard old descriptor attributes" {
+    const Context = @import("context.zig").Context;
+    const modes = [_]BytecodeExecutionMode{ .tree_walker, .required };
+    for ([_]bool{ false, true }) |parallel| {
+        for (modes) |mode| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .enable_threads = parallel,
+                .parallel_gc = parallel,
+                .parallel_js = parallel,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(
+                \\function recreate() {
+                \\  'use strict';
+                \\  const object = {first:1};
+                \\  Object.defineProperty(object, 'value', {
+                \\    configurable: true,
+                \\    get() { return 1; },
+                \\    set(value) { delete object.value; Object.setPrototypeOf(object, {value:50}); }
+                \\  });
+                \\  object.last = 2;
+                \\  object.value = 1;
+                \\  object.value = 54;
+                \\  object.value = 59;
+                \\  const descriptor = Object.getOwnPropertyDescriptor(object, 'value');
+                \\  return object.value === 59 && descriptor.value === 59 && descriptor.writable &&
+                \\    descriptor.enumerable && descriptor.configurable && Object.getPrototypeOf(object).value === 50 &&
+                \\    Object.keys(object).join(',') === 'first,last,value';
+                \\}
+                \\recreate()
+            )).asBool());
+        }
+    }
+}
+
+test "ordinary data writes after accessor deletion run across no-GIL workers" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\function recreateLane() {
+        \\  'use strict';
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  const object = {};
+        \\  Object.defineProperty(object, 'value', {
+        \\    configurable: true,
+        \\    get() { return 1; },
+        \\    set(value) { delete object.value; Object.setPrototypeOf(object, {value:50}); }
+        \\  });
+        \\  object.value = 1;
+        \\  object.value = 54;
+        \\  object.value = 59;
+        \\  const descriptor = Object.getOwnPropertyDescriptor(object, 'value');
+        \\  return object.value === 59 && descriptor.value === 59 && descriptor.writable &&
+        \\    descriptor.enumerable && descriptor.configurable && Object.getPrototypeOf(object).value === 50;
+        \\}
+        \\let threads = [], valid = true;
+        \\for (let i = 0; i < 4; i++) threads.push(new Thread(recreateLane));
+        \\for (let i = 0; i < 4; i++) { const result = threads[i].join(); valid = valid && result; }
+        \\valid
+    )).asBool());
+}
+
 test "ordinary property fused set and delete preserve receiver descriptors" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

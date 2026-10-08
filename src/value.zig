@@ -6828,6 +6828,10 @@ pub const Object = struct {
             pending_order_key = null;
         }
         const result: AccessorDeleteResult = if (self.getOwnUnlocked(key) == null) .deleted else .removed_continue;
+        // Ordinary [[Delete]] (ECMA-262 10.1.10) removes the complete
+        // descriptor. Representation conversion retains its attributes until
+        // the replacement is defined; a surviving data slot retains them too.
+        if (!preserve_order and result == .deleted) self.deleteAttrUnlocked(key);
         self.maybeCompactKeyOrderUnlocked(arena);
         return result;
     }
@@ -8615,6 +8619,38 @@ test "ordinary named mutation validates and publishes under one property lock" {
         try object.setOrdinaryOwnData(arena, root, "missing", Value.num(4)),
     );
     try std.testing.expect(object.getOwn("missing") == null);
+}
+
+test "accessor-only deletion clears attributes before ordinary data recreation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{ .shape = root };
+    try object.setOwn(arena, root, "first", Value.num(1));
+    try object.setAccessor(arena, "field", Value.num(7), Value.num(8));
+    try object.setAttr(arena, "field", .{ .writable = false, .enumerable = false, .configurable = true });
+    try object.setOwn(arena, root, "last", Value.num(2));
+    try std.testing.expect(try object.deleteOrdinaryNamedOwn(arena, root, "field"));
+    try std.testing.expect(object.getAccessor("field") == null);
+    try std.testing.expect(object.getOwn("field") == null);
+    try std.testing.expect(object.getAttr("field").writable);
+    try std.testing.expect(object.getAttr("field").enumerable);
+    try std.testing.expectEqual(Object.OrdinaryOwnDataSetResult.created, try object.setOrdinaryOwnData(arena, root, "field", Value.num(54)));
+    try std.testing.expectEqual(Object.OrdinaryOwnDataSetResult.updated, try object.setOrdinaryOwnData(arena, root, "field", Value.num(59)));
+    try std.testing.expectEqual(@as(f64, 59), object.getOwn("field").?.asNum());
+    const keys = try object.ownKeys(arena);
+    try std.testing.expectEqual(@as(usize, 3), keys.len);
+    try std.testing.expectEqualStrings("first", keys[0]);
+    try std.testing.expectEqualStrings("last", keys[1]);
+    try std.testing.expectEqualStrings("field", keys[2]);
+
+    var conversion = Object{ .shape = root };
+    try conversion.setAccessor(arena, "field", Value.num(7), Value.num(8));
+    try conversion.setAttr(arena, "field", .{ .writable = false, .enumerable = false, .configurable = true });
+    try std.testing.expectEqual(Object.AccessorDeleteResult.deleted, try conversion.deleteAccessorOwnPreserveOrder(arena, "field"));
+    try std.testing.expect(!conversion.getAttr("field").writable);
+    try std.testing.expect(!conversion.getAttr("field").enumerable);
 }
 
 test "ordinary object keeps four named property values inline before migrating" {
