@@ -1290,6 +1290,7 @@ var quick_property_plan_decode_attempts: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_typed_array_index_hits: std.atomic.Value(u64) = .init(0);
+var quick_typed_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
@@ -1500,6 +1501,29 @@ inline fn quickTypedArrayLoad(vm: *Interpreter, receiver: Value, key: Value) Eva
     // element zero even though a literal string key "-0" is invalid.
     const index: usize = if (number == 0) 0 else @intFromFloat(number);
     return try vm.taLoad(typed_array, index);
+}
+
+/// IntegerIndexedElementSet coerces the RHS before it revalidates the index and
+/// backing buffer. Delegate that whole sequence to Interpreter.taStore; this
+/// shortcut removes only the unobservable Number-to-string property-key work.
+inline fn quickTypedArrayStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!?Value {
+    if (!key.isNumber() or !receiver.isObject()) return null;
+    if (receiver.asObj().typedArray() == null) return null;
+    const receiver_root = try vm.pushTempRoot(receiver);
+    defer vm.restoreTempRoots(receiver_root);
+    const stored_root = try vm.pushTempRoot(stored);
+    const object = vm.tempRoot(receiver_root, receiver).asObj();
+    const typed_array = object.typedArray() orelse return null;
+    try vm.checkRestricted(object);
+    const number = key.asNum();
+    const max_index: f64 = @floatFromInt(std.math.maxInt(usize));
+    const index: usize = if (std.math.isFinite(number) and number >= 0 and
+        @trunc(number) == number and number < max_index)
+        if (number == 0) 0 else @intFromFloat(number)
+    else
+        std.math.maxInt(usize);
+    try vm.taStore(typed_array, index, vm.tempRoot(stored_root, stored));
+    return vm.tempRoot(stored_root, stored);
 }
 
 fn specializeQuickArrayExpression(ops: []const QuickArrayNumericOp) QuickArrayExpressionSpecialization {
@@ -9623,6 +9647,11 @@ fn runChunk(
                 // evaluated); `null[k] = v` throws before the key's `toString` runs.
                 if (obj.isNull() or obj.isUndefined())
                     return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
+                if (try quickTypedArrayStore(vm, obj, key, v)) |stored| {
+                    try stack.append(stack_alloc, stored);
+                    if (builtin.is_test) _ = quick_typed_array_store_hits.fetchAdd(1, .monotonic);
+                    continue;
+                }
                 if (try quickDenseArrayStore(vm, obj, key, v)) {
                     if (builtin.is_test) _ = quick_dense_array_store_hits.fetchAdd(1, .monotonic);
                     try stack.append(stack_alloc, v);
@@ -22176,6 +22205,52 @@ test "vm: computed numeric typed array reads enforce restriction ownership" {
 
     try std.testing.expectError(error.Throw, quickTypedArrayLoad(&machine, typed_array, Value.num(0)));
     try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    machine.exception = Value.undef();
+    try std.testing.expectError(
+        error.Throw,
+        quickTypedArrayStore(&machine, typed_array, Value.num(0), Value.num(8)),
+    );
+    try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(@as(f64, 7), value.taRead(typed_array.asObj().typedArray().?, 0).asNum());
+}
+
+test "vm: computed numeric typed array stores preserve coercion and buffer revalidation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const before = quick_typed_array_store_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+        \\let coercions = 0;
+        \\function numberValue(value) {
+        \\  return { valueOf: function () { coercions = coercions + 1; return value; } };
+        \\}
+        \\let values = new Uint8Array([0, 0]);
+        \\values[0] = 7; values[-0] = 8; values[1] = numberValue(9);
+        \\values[2] = numberValue(10); values[-1] = numberValue(10);
+        \\values[1.5] = numberValue(10); values[NaN] = numberValue(10);
+        \\values[Infinity] = numberValue(10); values[4294967295] = numberValue(10);
+        \\values["-0"] = numberValue(10);
+        \\let keyCoercions = 0;
+        \\let objectKey = { toString: function () { keyCoercions = keyCoercions + 1; return "1"; } };
+        \\values[objectKey] = 11;
+        \\let shrinkBuffer = new ArrayBuffer(1, { maxByteLength: 2 });
+        \\let shrink = new Uint8Array(shrinkBuffer);
+        \\shrink[0] = { valueOf: function () { coercions = coercions + 1; shrinkBuffer.resize(0); return 5; } };
+        \\let growBuffer = new ArrayBuffer(0, { maxByteLength: 2 });
+        \\let grow = new Uint8Array(growBuffer);
+        \\grow[0] = { valueOf: function () { coercions = coercions + 1; growBuffer.resize(1); return 6; } };
+        \\let detachedBuffer = new ArrayBuffer(1);
+        \\let detached = new Uint8Array(detachedBuffer);
+        \\detached[0] = { valueOf: function () { coercions = coercions + 1; detachedBuffer.transfer(); return 7; } };
+        \\let big = new BigInt64Array(1);
+        \\big[0] = { valueOf: function () { coercions = coercions + 1; return 12n; } };
+        \\let wrongBigIntType = false;
+        \\try { big[0] = 1; } catch (error) { wrongBigIntType = error instanceof TypeError; }
+        \\(values[0] === 8 && values[1] === 11 && coercions === 12 && keyCoercions === 1 &&
+        \\ shrink[0] === undefined && grow[0] === 6 && detached[0] === undefined &&
+        \\ big[0] === 12n && wrongBigIntType) ? 1 : 0
+    )).asNum());
+    try std.testing.expect(quick_typed_array_store_hits.load(.monotonic) > before);
 }
 
 test "vm: quickens isolated polymorphic own-data property loops with exact steps" {

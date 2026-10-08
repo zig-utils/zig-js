@@ -18585,7 +18585,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn taStore(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value) EvalError!void {
+    pub fn taStore(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value) EvalError!void {
         return self.taStoreInternal(ta, i, v, false);
     }
 
