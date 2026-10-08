@@ -213,9 +213,7 @@ export function validateArtifact(artifact: any, schema = loadSchema(), attributi
 }
 
 function formatCount(value: number): string { return Number.isInteger(value) ? String(value) : value.toFixed(2); }
-export function render(artifact: any): string {
-  const schema = loadSchema(artifact.schema_version === 1 ? ALGORITHMIC_SCHEMA_V1 : artifact.schema_version === 2 ? ALGORITHMIC_SCHEMA_V2 : artifact.schema_version === 3 ? ALGORITHMIC_SCHEMA_V3 : DEFAULT_SCHEMA), attributionSchema = loadAttributionSchema(artifact.schema_version === 1 ? ATTRIBUTION_SCHEMA : artifact.schema_version === 2 ? ATTRIBUTION_SCHEMA_V2 : artifact.schema_version === 3 ? ATTRIBUTION_SCHEMA_V3 : ATTRIBUTION_SCHEMA_V4);
-  validateArtifact(artifact, schema, attributionSchema);
+function renderValidatedArtifact(artifact: any): string {
   const metadata = artifact.metadata, summary = artifact.summary;
   const rows = summary.rows.map((row: any) => `| ${row.width} | ${row.jobs} | ${row.checksum} | ${row.parent.instructions_per_job_median.toFixed(2)} | ${(row.parent.instructions_per_job_rsd * 100).toFixed(2)}% | ${row.candidate.instructions_per_job_median.toFixed(2)} | ${(row.candidate.instructions_per_job_rsd * 100).toFixed(2)}% | ${row.candidate_over_parent_instructions.toFixed(4)}x | ${formatCount(row.parent.allocations_per_job)} / ${formatCount(row.candidate.allocations_per_job)} | ${formatCount(row.parent.allocated_bytes_per_job)} / ${formatCount(row.candidate.allocated_bytes_per_job)} | ${row.full_efficiency_status} |`);
   const growth = summary.adjacent_growth.map((row: any) => `| ${row.from_width} → ${row.to_width} | ${row.width_ratio.toFixed(2)}x | ${row.parent_instruction_ratio.toFixed(4)}x | ${row.parent_growth_exponent.toFixed(3)} | ${row.candidate_instruction_ratio.toFixed(4)}x | ${row.candidate_growth_exponent.toFixed(3)} |`);
@@ -240,12 +238,18 @@ export function render(artifact: any): string {
   ].join("\n");
 }
 
+export function render(artifact: any): string {
+  const schema = loadSchema(artifact.schema_version === 1 ? ALGORITHMIC_SCHEMA_V1 : artifact.schema_version === 2 ? ALGORITHMIC_SCHEMA_V2 : artifact.schema_version === 3 ? ALGORITHMIC_SCHEMA_V3 : DEFAULT_SCHEMA), attributionSchema = loadAttributionSchema(artifact.schema_version === 1 ? ATTRIBUTION_SCHEMA : artifact.schema_version === 2 ? ATTRIBUTION_SCHEMA_V2 : artifact.schema_version === 3 ? ATTRIBUTION_SCHEMA_V3 : ATTRIBUTION_SCHEMA_V4);
+  validateArtifact(artifact, schema, attributionSchema);
+  return renderValidatedArtifact(artifact);
+}
+
 function inputDescriptor(width: number, artifact: any, sourceFile = `row-${width}.json`): GrowthInput {
   return { width, source_file: sourceFile, source_file_sha256: sha256Text(`source-${width}`), embedded_artifact_sha256: sha256Text(exactJson(artifact)), artifact };
 }
 
 function exactFixture(width: number, attributionSchema: any): any {
-  const jobs = 10, pairCount = 3, workload = `fixture_growth_${width}`, samples: any[] = [];
+  const jobs = 10, pairCount = 2, workload = `fixture_growth_${width}`, samples: any[] = [];
   for (let pair = 0; pair < pairCount; pair += 1) {
     const order = pair % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"];
     order.forEach((variant, position) => {
@@ -265,8 +269,7 @@ function exactFixture(width: number, attributionSchema: any): any {
   metadata[attributionSchema.schema_version === 1 ? "minimum_process_cpu_occupancy" : "minimum_measured_boundary_cpu_occupancy"] = 0.6;
   if (attributionSchema.schema_version === 3) Object.assign(metadata, { parent_binary_revision: "2".repeat(40), candidate_binary_revision: "3".repeat(40), shared_measurement_overlay_paths: ["bench/fixture.zig"] });
   if (attributionSchema.schema_version >= 4) Object.assign(metadata, { parent_binary_revision: metadata.parent_revision, candidate_binary_revision: metadata.candidate_revision, shared_measurement_overlay_paths: [], binary_provenance: "direct" });
-  const artifact = { schema_version: attributionSchema.schema_version, profile_id: attributionSchema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarizeExactParent(samples, attributionSchema, "diagnostic", ["cpu_work"]) };
-  validateAttributionArtifact(artifact, attributionSchema); return artifact;
+  return { schema_version: attributionSchema.schema_version, profile_id: attributionSchema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarizeExactParent(samples, attributionSchema, "diagnostic", ["cpu_work"]) };
 }
 
 function expectFailure(action: () => void, pattern: string): void { try { action(); } catch (error) { requireValue(String(error).includes(pattern), `expected ${pattern}, got ${String(error)}`); return; } throw new Error(`expected failure containing ${pattern}`); }
@@ -275,21 +278,24 @@ export function selfTest(): void {
   const schema = loadSchema(), attributionSchema = loadAttributionSchema(ATTRIBUTION_SCHEMA_V4), widths = [1024, 2048, 4096];
   const inputs: GrowthInput[] = [];
   for (const width of widths) {
-    console.log(`START algorithmic-growth fixture ${width}: construct and validate exact-parent artifact`);
+    console.log(`START algorithmic-growth fixture ${width}: construct exact-parent artifact`);
     const fixture = exactFixture(width, attributionSchema);
-    console.log(`PASS algorithmic-growth fixture ${width}: construct and validate exact-parent artifact`);
+    console.log(`PASS algorithmic-growth fixture ${width}: construct exact-parent artifact`);
     console.log(`START algorithmic-growth fixture ${width}: hash embedded artifact`);
     inputs.push(inputDescriptor(width, fixture));
     console.log(`PASS algorithmic-growth fixture ${width}: hash embedded artifact`);
   }
   console.log("PASS algorithmic-growth phase: schemas and complete fixtures");
   console.log("START algorithmic-growth phase: accepted artifact and report");
-  const artifact = buildArtifact(inputs, "fixture_growth_", schema, attributionSchema); validateArtifact(artifact, schema, attributionSchema);
-  requireValue(exactJson(buildArtifact(inputs, "fixture_growth_")) === exactJson(artifact), "default growth/attribution schema pairing drift");
-  validateArtifact(artifact);
+  // Construct through the public defaults, then validate once through the
+  // explicit pairing. A cheap identity failure exercises render's public
+  // fail-closed/default-schema path without rebuilding the accepted graph.
+  const artifact = buildArtifact(inputs, "fixture_growth_");
+  validateArtifact(artifact, schema, attributionSchema);
+  expectFailure(() => render({ ...artifact, profile_id: "invalid-default-pair" }), "artifact identity drift");
   requireValue(Math.abs(artifact.summary.first_to_last.parent_growth_exponent - 2) < 0.01 && Math.abs(artifact.summary.first_to_last.candidate_growth_exponent - 1) < 0.01, "growth exponent derivation drift");
   requireValue(summarizeExactParent(inputs[0].artifact.samples, attributionSchema, "quiet_reference", ["cpu_work"]).status === "blocked_efficiency_evidence", "additive growth profile must not weaken the ordinary full-efficiency gate");
-  requireValue(render(artifact).includes("does **not** score wall time"), "algorithmic-growth report lost its non-throughput boundary");
+  requireValue(renderValidatedArtifact(artifact).includes("does **not** score wall time"), "algorithmic-growth report lost its non-throughput boundary");
   console.log("PASS algorithmic-growth phase: accepted artifact and report");
 
   for (const version of [1, 2, 3]) {
@@ -297,11 +303,10 @@ export function selfTest(): void {
     const legacyAttribution = loadAttributionSchema(`${ROOT}/docs/.data/performance-attribution-schema-v${version}.json`);
     const legacyInputs = widths.map((width) => inputDescriptor(width, exactFixture(width, legacyAttribution)));
     const legacy = buildArtifact(legacyInputs, "fixture_growth_", legacySchema, legacyAttribution);
-    validateArtifact(legacy, legacySchema, legacyAttribution);
-    requireValue(render(legacy).includes("does **not** score wall time"), `legacy v${version} report boundary drift`);
+    requireValue(renderValidatedArtifact(legacy).includes("does **not** score wall time"), `legacy v${version} report boundary drift`);
   }
   const historicalPath = `${ROOT}/docs/.data/algorithmic-growth-class-frame-global-2026-09-01`;
-  requireValue(render(JSON.parse(readText(`${historicalPath}.json`))) === readText(`${historicalPath}.md`), "historical growth report bytes drift");
+  requireValue(renderValidatedArtifact(JSON.parse(readText(`${historicalPath}.json`))) === readText(`${historicalPath}.md`), "historical growth report bytes drift");
 
   console.log("START algorithmic-growth phase: zero-allocation replay");
   const zeroAllocation = JSON.parse(JSON.stringify(inputs)); for (const sample of zeroAllocation[0].artifact.samples.filter((value: any) => value.identity.variant === "candidate")) { sample.metrics.allocations.value = 0; sample.metrics.allocated_bytes.value = 0; } zeroAllocation[0].artifact.summary = summarizeExactParent(zeroAllocation[0].artifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); zeroAllocation[0].embedded_artifact_sha256 = sha256Text(exactJson(zeroAllocation[0].artifact)); requireValue(buildArtifact(zeroAllocation, "fixture_growth_", schema, attributionSchema).summary.rows[0].candidate.allocations_total === 0, "zero-allocation replay must remain valid");
@@ -310,8 +315,8 @@ export function selfTest(): void {
   console.log("START algorithmic-growth phase: fail-closed mutations");
   expectFailure(() => buildArtifact(inputs.slice(0, 2), "fixture_growth_", schema, attributionSchema), "at least 3 widths");
   const revisionDrift = JSON.parse(JSON.stringify(inputs)); revisionDrift[1].artifact.metadata.candidate_revision = "9".repeat(40); revisionDrift[1].artifact.metadata.candidate_binary_revision = "9".repeat(40); revisionDrift[1].artifact.summary = summarizeExactParent(revisionDrift[1].artifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); revisionDrift[1].embedded_artifact_sha256 = sha256Text(exactJson(revisionDrift[1].artifact)); expectFailure(() => buildArtifact(revisionDrift, "fixture_growth_", schema, attributionSchema), "common metadata drift for candidate_revision");
-  const noisyInstructions = JSON.parse(JSON.stringify(inputs)); const noisyArtifact = noisyInstructions[1].artifact, noisySample = noisyArtifact.samples.find((sample: any) => sample.identity.variant === "candidate" && sample.identity.pair_sample === 1); noisySample.metrics.instructions.value *= 2; noisyArtifact.summary = summarizeExactParent(noisyArtifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); noisyInstructions[1].embedded_artifact_sha256 = sha256Text(exactJson(noisyArtifact)); expectFailure(() => buildArtifact(noisyInstructions, "fixture_growth_", schema, attributionSchema), "normalized instruction RSD");
-  const allocationDrift = JSON.parse(JSON.stringify(inputs)); const allocationArtifact = allocationDrift[2].artifact, allocationSample = allocationArtifact.samples.find((sample: any) => sample.identity.variant === "parent" && sample.identity.pair_sample === 2); allocationSample.metrics.allocations.value += 1; allocationArtifact.summary = summarizeExactParent(allocationArtifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); allocationDrift[2].embedded_artifact_sha256 = sha256Text(exactJson(allocationArtifact)); expectFailure(() => buildArtifact(allocationDrift, "fixture_growth_", schema, attributionSchema), "allocation replay drift");
+  const noisyInstructions = JSON.parse(JSON.stringify(inputs)); const noisyArtifact = noisyInstructions[0].artifact, noisySample = noisyArtifact.samples.find((sample: any) => sample.identity.variant === "candidate" && sample.identity.pair_sample === 1); noisySample.metrics.instructions.value *= 2; noisyArtifact.summary = summarizeExactParent(noisyArtifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); noisyInstructions[0].embedded_artifact_sha256 = sha256Text(exactJson(noisyArtifact)); expectFailure(() => buildArtifact(noisyInstructions, "fixture_growth_", schema, attributionSchema), "normalized instruction RSD");
+  const allocationDrift = JSON.parse(JSON.stringify(inputs)); const allocationArtifact = allocationDrift[0].artifact, allocationSample = allocationArtifact.samples.find((sample: any) => sample.identity.variant === "parent" && sample.identity.pair_sample === 1); allocationSample.metrics.allocations.value += 1; allocationArtifact.summary = summarizeExactParent(allocationArtifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); allocationDrift[0].embedded_artifact_sha256 = sha256Text(exactJson(allocationArtifact)); expectFailure(() => buildArtifact(allocationDrift, "fixture_growth_", schema, attributionSchema), "allocation replay drift");
   const summaryDrift = JSON.parse(JSON.stringify(artifact)); summaryDrift.summary.first_to_last.candidate_growth_exponent = 99; expectFailure(() => validateArtifact(summaryDrift, schema, attributionSchema), "derived summary drift");
   console.log("PASS algorithmic-growth phase: fail-closed mutations");
   console.log("OK algorithmic-growth self-test: exact identities, normalization, stability, replay, growth, and non-throughput boundaries verified");

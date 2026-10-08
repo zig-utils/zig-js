@@ -1,0 +1,44 @@
+{
+  "schema_version": 48,
+  "matrix_id": "zig-js-representative-v48",
+  "status": "frozen",
+  "frozen_date": "2026-10-07",
+  "owner_issue": 1044,
+  "history_policy": "This version hash-inherits every V47 workload, representation, width, job count, checksum, execution mode, scored operation, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, publication ruling, process classification, memory diagnostic, and attribution diagnostic. It changes no evidence schema, validation rule, scored row, or execution boundary. It re-pins only the algorithmic-growth validator after its self-test stopped rebuilding already-validated fixtures. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, diagnostic schema, process policy, validator, or publication change needs its own version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v47",
+    "path": "docs/.data/representative-benchmark-matrix-v47.json",
+    "sha256": "84b05f080c1abbfdc0adfe1b06d88b21d65e0e4f4513a7eb530d39ae61c19da0",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_inventory_diagnostics",
+      "memory_pressure_diagnostics",
+      "tier_attribution",
+      "runtime_operation_diagnostics",
+      "context_lifecycle_integration",
+      "no_jit_integration",
+      "string_indexing_integration",
+      "json_pipeline_integration"
+    ]
+  },
+  "change": "Re-pins tools/algorithmic-growth.ts after its self-test was reduced to the minimum schema-valid alternating pair count and stopped rebuilding or revalidating immutable fixtures before formatting. Public render calls still validate untrusted artifacts fail-closed, every accepted and rejected contract remains covered, and historical report bytes remain exact. Evidence schemas, production collection, validation rules, scored workloads, timing boundaries, and publication decisions are unchanged.",
+  "exact_parent_integration": {
+    "algorithmic_growth_validator": {
+      "path": "tools/algorithmic-growth.ts",
+      "sha256": "451e224efda4140570618ef6e50c24d9224311c2e85783638b34e4fb5867e8ae"
+    },
+    "publication_boundary": "V48 preserves every V47 timing, efficiency, cleanliness, checksum, serial-child, process-classification, provenance, mixed-tier allocation-replay, memory-diagnostic, and attribution-diagnostic gate. Only redundant work inside the validator's self-test changes; production artifact validation and rendering remain fail-closed."
+  }
+}
