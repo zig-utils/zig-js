@@ -6154,6 +6154,11 @@ pub const Parser = struct {
                     const saved_async = self.in_async;
                     self.in_async = false;
                     defer self.in_async = saved_async;
+                    // ClassFieldDefinitionEvaluation creates an initializer
+                    // function. NewTarget is valid there and in its arrows;
+                    // computed names above retain the enclosing context.
+                    self.new_target_depth += 1;
+                    defer self.new_target_depth -= 1;
                     break :blk try self.parseAssignment();
                 } else null;
                 // A FieldDefinition must be terminated by `;`, the closing `}`, or
@@ -10667,5 +10672,41 @@ test "parser retains escaped strict literal and regexp flag diagnostics" {
         try std.testing.expectEqual(case.reason, parser.last_error_reason.?);
         try std.testing.expectEqual(std.mem.indexOf(u8, case.source, case.marker).?, parser.errorLocation().byte_offset);
         try std.testing.expectEqualStrings(case.message, try parser.diagnosticMessage(arena.allocator(), case.reason));
+    }
+}
+
+test "parser class field NewTarget contexts admit arrows without leaking to computed names" {
+    const accepted = [_][]const u8{
+        "class C { value = new.target; }",
+        "class C { static value = new.target; }",
+        "class C { #value = new.target; static #other = () => new.target; }",
+        "class C { value = () => new.target; }",
+        "() => class { value = new.target; };",
+        "class C { value = class { [new.target] = new.target; }; }",
+        "function f() { return class { [new.target] = new.target; }; }",
+    };
+    for (accepted) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+        try std.testing.expectEqual(@as(u32, 0), parser.new_target_depth);
+    }
+    const rejected = [_][]const u8{
+        "class C { [new.target] = 0; }",
+        "class C { value = new.target; [new.target] = 0; }",
+        "class C { value = new.target; } new.target;",
+        "class C { value = () => new.target; } () => new.target;",
+        "class C { value = (new.target + ); }",
+        "class C { value = arguments; }",
+        "class C { value = super(); }",
+        "class C { value = (() => { return new.target; })(); } return 1;",
+    };
+    for (rejected) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+        try std.testing.expectEqual(@as(u32, 0), parser.new_target_depth);
     }
 }

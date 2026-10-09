@@ -63862,3 +63862,36 @@ test "shared-buffer waitAsync harvest boundary retains every outcome under alloc
         try std.testing.expectEqualStrings("ok", dependent.value.asStr());
     }
 }
+
+test "class field NewTarget reads are undefined across tree and required VM" {
+    const Context = @import("context.zig").Context;
+    const configurations = [_]struct { mode: BytecodeExecutionMode, native: bool }{
+        .{ .mode = .tree_walker, .native = false },
+        .{ .mode = .required, .native = false },
+        .{ .mode = .required, .native = true },
+    };
+    for (configurations) |configuration| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = configuration.native,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\class Box {
+            \\  target = new.target;
+            \\  arrow = () => new.target;
+            \\  #privateTarget = new.target;
+            \\  read() { return this.#privateTarget; }
+            \\  static target = new.target;
+            \\  static arrow = () => new.target;
+            \\}
+            \\function Factory() { return class { target = new.target; arrow = () => new.target; }; }
+            \\var Nested = new Factory(), box = new Box(), nested = new Nested();
+            \\box.target === undefined && box.arrow() === undefined && box.read() === undefined &&
+            \\  Box.target === undefined && Box.arrow() === undefined &&
+            \\  nested.target === undefined && nested.arrow() === undefined;
+        )).asBool());
+        ctx.collectGarbage();
+    }
+}
