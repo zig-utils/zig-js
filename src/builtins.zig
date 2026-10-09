@@ -877,7 +877,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             if (arrayIndexOf(k)) |idx| if (idx < Interpreter.utf16LenOfValue(o.boxedPrimitive().?))
                 break :blk true;
             break :blk try self.enumerableOwnPropertyResult(o, k);
-        } else if ((o.is_array or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
+        } else if (((o.is_array and !o.is_arguments) or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
         else
@@ -968,7 +968,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
                 (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfValue(from.boxedPrimitive().?))
-            else if ((from.is_array or from.typedArray() != null) and std.mem.eql(u8, k, "length"))
+            else if (((from.is_array and !from.is_arguments) or from.typedArray() != null) and std.mem.eql(u8, k, "length"))
                 false
             else
                 ((interpreter.objectHasOwn(from, k) or (if (from.is_array) blk: {

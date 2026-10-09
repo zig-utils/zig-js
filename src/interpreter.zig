@@ -16299,7 +16299,9 @@ pub const Interpreter = struct {
             sortUniqueCanonicalIndexKeys(&indices);
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             try list.appendSlice(self.arena, indices.items);
-            try list.append(self.arena, "length");
+            // Arguments use dense storage but OrdinaryOwnPropertyKeys (10.1.11.1):
+            // their length is an ordinary named property, including deletion.
+            if (!t.is_arguments) try list.append(self.arena, "length");
             try list.appendSlice(self.arena, strings.items);
             try list.appendSlice(self.arena, symbols.items);
             return list.items;
@@ -16750,15 +16752,9 @@ pub const Interpreter = struct {
                     // other keys (methods, constructor, @@toStringTag) fall through.
                 }
                 if (o.is_array) {
-                    // An arguments object's `length` is an ordinary own data
-                    // property (deletable / redefinable), not the Array exotic
-                    // length — once deleted it is simply absent (fall through to
-                    // the prototype lookup), with no element-count fallback.
-                    if (o.is_arguments) {
-                        if (std.mem.eql(u8, key, "length")) {
-                            if (o.getOwn("length")) |l| return l;
-                        }
-                    } else if (std.mem.eql(u8, key, "length"))
+                    // Arguments length uses ordinary data/accessor/prototype
+                    // lookup below; only a real Array has an exotic length.
+                    if (!o.is_arguments and std.mem.eql(u8, key, "length"))
                         return Value.num(@floatFromInt(o.arrayLength()));
                     // An accessor defined on an index (via defineProperty) wins
                     // over the dense element store, so the getter is invoked.
@@ -16816,13 +16812,10 @@ pub const Interpreter = struct {
                             return self.integerIndexedElementGet(ta, n, found);
                         }
                     };
-                    if (c.is_array and std.mem.eql(u8, key, "length")) {
-                        // arguments `length` is an ordinary own property (absent
-                        // once deleted); a real Array's is the exotic length.
-                        if (c.is_arguments) {
-                            if (c.getOwn("length")) |l| return l;
-                        } else return Value.num(@floatFromInt(c.arrayLength())); // locked length read (grow-vs-read)
-                    }
+                    // Arguments length uses the ordinary snapshot below so an
+                    // accessor replacement runs its getter and deletion inherits.
+                    if (c.is_array and !c.is_arguments and std.mem.eql(u8, key, "length"))
+                        return Value.num(@floatFromInt(c.arrayLength())); // locked length read (grow-vs-read)
                     const named_own = c.namedOwnPropertySnapshot(key);
                     if (named_own == .accessor) {
                         const acc = named_own.accessor;
@@ -18935,7 +18928,7 @@ pub const Interpreter = struct {
             _ = try has(@ptrCast(self), o, key);
         };
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
-            !(o.is_array and std.mem.eql(u8, key, "length"));
+            !(o.is_array and !o.is_arguments and std.mem.eql(u8, key, "length"));
     }
 
     pub fn propertyIsEnumerableResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
@@ -18944,7 +18937,7 @@ pub const Interpreter = struct {
 
     pub fn enumerableOwnPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
         if (objectHasOwn(o, key)) return o.getAttr(key).enumerable and
-            !(o.is_array and std.mem.eql(u8, key, "length"));
+            !(o.is_array and !o.is_arguments and std.mem.eql(u8, key, "length"));
         if (o.hostClassHooks()) |hooks| if (hooks.attributes) |attributes| {
             self.recordExecutionTier(.host_callbacks);
             return if (try attributes(@ptrCast(self), o, key)) |attr| attr.enumerable else false;
@@ -63892,6 +63885,54 @@ test "class field NewTarget reads are undefined across tree and required VM" {
             \\  Box.target === undefined && Box.arrow() === undefined &&
             \\  nested.target === undefined && nested.arrow() === undefined;
         )).asBool());
+        ctx.collectGarbage();
+    }
+}
+
+test "arguments own keys list ordinary length once in creation order" {
+    const Context = @import("context.zig").Context;
+    const configurations = [_]struct { mode: BytecodeExecutionMode, native: bool }{
+        .{ .mode = .tree_walker, .native = false },
+        .{ .mode = .required, .native = false },
+        .{ .mode = .required, .native = true },
+    };
+    for (configurations) |configuration| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = configuration.native,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("0,length,callee,iterator|0,length,callee,iterator", (try ctx.evaluate(
+            \\function sloppy(a) { return Reflect.ownKeys(arguments).map(k => typeof k === 'symbol' ? 'iterator' : k).join(','); }
+            \\function strict(a) { 'use strict'; return Reflect.ownKeys(arguments).map(k => typeof k === 'symbol' ? 'iterator' : k).join(','); }
+            \\sloppy(4) + '|' + strict(4);
+        )).asStr());
+        try std.testing.expectEqualStrings(
+            "[[\"0,1,2,10,length,callee,tail,iterator,marker\",\"0,1,2,10,callee,tail,iterator,marker\",\"0,1,2,10,callee,tail,length,iterator,marker\",\"0,1,2,10,callee,tail,length\",\"0,1,2,10,tail,length\",9],\"0,1,length,tail\",false]",
+            (try ctx.evaluate(
+                \\function exercise(a,b) {
+                \\  var arg=arguments, marker=Symbol('marker');
+                \\  arg.tail=3; arg[10]=10; arg[2]=2; arg[marker]=4;
+                \\  function keys() { return Reflect.ownKeys(arg).map(k => k === Symbol.iterator ? 'iterator' : k === marker ? 'marker' : k).join(','); }
+                \\  var initial=keys(); delete arg.length; var removed=keys(); arg.length=99; var restored=keys();
+                \\  var proxy = new Proxy(arg, { ownKeys: function(target) { return Reflect.ownKeys(target); } });
+                \\  return [initial,removed,restored,Object.getOwnPropertyNames(arg).join(','),Object.keys(arg).join(','),Reflect.ownKeys(proxy).length];
+                \\}
+                \\var ordinary=[0,1]; ordinary.tail=3;
+                \\JSON.stringify([exercise(0,1),Reflect.ownKeys(ordinary).join(','),delete ordinary.length]);
+            )).asStr(),
+        );
+        try std.testing.expectEqualStrings("[\"0,length\",true,0,\"4,7\",\"0:4,length:7\",7,3]", (try ctx.evaluate(
+            \\function enumerateLength(a) {
+            \\  var arg=arguments, calls=0;
+            \\  Object.defineProperty(arg,'length',{enumerable:true,configurable:true,get:function(){calls++;return 7;}});
+            \\  var keys=Object.keys(arg), enumerable=arg.propertyIsEnumerable('length');
+            \\  var before=calls, values=Object.values(arg), entries=Object.entries(arg), copied=Object.assign({},arg);
+            \\  return [keys.join(','),enumerable,before,values.join(','),entries.map(x => x.join(':')).join(','),copied.length,calls];
+            \\}
+            \\JSON.stringify(enumerateLength(4));
+        )).asStr());
         ctx.collectGarbage();
     }
 }
