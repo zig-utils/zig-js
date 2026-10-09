@@ -22369,6 +22369,44 @@ test "real agents: broadcast rendezvous, blocking wait, notify, report" {
     );
 }
 
+test "real agents: installed globals survive a real-GC bytecode rendezvous" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    defer @import("agent.zig").reset();
+    try std.testing.expect((try ctx.evaluate(
+        \\globalThis.agentGlobalsSAB = new SharedArrayBuffer(8);
+        \\const view = new Int32Array(agentGlobalsSAB);
+        \\$262.agent.start(`
+        \\  let valid = $262.global === globalThis;
+        \\  const names = ['$262','Atomics','SharedArrayBuffer','Int32Array','Object','Reflect','Math','Promise','globalThis'];
+        \\  for (const name of names) {
+        \\    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+        \\    valid = valid && descriptor !== undefined && descriptor.writable && !descriptor.enumerable && descriptor.configurable;
+        \\  }
+        \\  for (const name of ['undefined','NaN','Infinity']) {
+        \\    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+        \\    valid = valid && descriptor !== undefined && !descriptor.writable && !descriptor.enumerable && !descriptor.configurable;
+        \\  }
+        \\  $262.agent.receiveBroadcast(function(sab) {
+        \\    const v = new Int32Array(sab);
+        \\    Atomics.store(v, 1, valid && Math.sqrt(1764) === 42 ? 42 : -1);
+        \\    Atomics.store(v, 0, 1);
+        \\    Atomics.notify(v, 0, 1);
+        \\    $262.agent.leaving();
+        \\  });
+        \\`);
+        \\$262.agent.broadcast(agentGlobalsSAB);
+        \\const waited = Atomics.wait(view, 0, 0, 5000);
+        \\(waited === 'ok' || waited === 'not-equal') && Atomics.load(view, 1) === 42
+    )).asBool());
+    ctx.collectGarbage();
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("Atomics.load(new Int32Array(agentGlobalsSAB), 1)")).asNum());
+}
+
 test "SharedArrayBuffer resolves newTarget prototype before data allocation" {
     try std.testing.expect((try evalIn(
         \\function MarkerError() {}

@@ -38073,6 +38073,20 @@ pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.
     return o;
 }
 
+fn makeAgentRealmGlobal(env: *Environment, root_shape: *Shape) EvalError!*value.Object {
+    const global_obj = try gc_mod.allocObj(env.arena);
+    global_obj.* = .{};
+    env.realm_global = global_obj;
+    try env.put("globalThis", Value.obj(global_obj));
+    // VM global lookup and reflection use the actual realm object. Publish
+    // all installed bindings with ordinary Context attributes before execution.
+    try mirrorGlobalsOnto(env, global_obj, root_shape);
+    if (env.get("$262")) |d| if (d.isObject()) {
+        try d.asObj().setOwn(env.arena, root_shape, "global", Value.obj(global_obj));
+    };
+    return global_obj;
+}
+
 /// An agent's thread main: run `src` in a fresh realm on this (new) thread.
 /// Matches `agent.RunFn`; src/agent.zig sets the thread's agent identity
 /// before calling, so the `$262` install below skips the group reset.
@@ -38084,13 +38098,7 @@ fn agentThreadRun(src: []const u8) void {
     const root_shape = Shape.createRoot(a) catch return;
     env.useRealmHashKeys(root_shape);
     installGlobals(&env, root_shape) catch return;
-    const global_obj = gc_mod.allocObj(a) catch return;
-    global_obj.* = .{};
-    env.realm_global = global_obj;
-    env.put("globalThis", Value.obj(global_obj)) catch {};
-    if (env.get("$262")) |d| if (d.isObject()) {
-        d.asObj().setOwn(a, root_shape, "global", Value.obj(global_obj)) catch {};
-    };
+    const global_obj = makeAgentRealmGlobal(&env, root_shape) catch return;
     const tdz = gc_mod.allocObj(a) catch return;
     tdz.* = .{};
     var microtasks = promise.MicrotaskQueue{};
@@ -62679,6 +62687,31 @@ test "interpreter getters and setters" {
         \\let f = function inner() { return inner === f; };
         \\f()
     )).asBool());
+}
+
+test "agent realm globals are own properties before VM execution" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env = Environment{ .arena = arena, .fn_scope = true };
+    const root_shape = try Shape.createRoot(arena);
+    env.useRealmHashKeys(root_shape);
+    try installGlobals(&env, root_shape);
+    defer agent.reset();
+    const global = try makeAgentRealmGlobal(&env, root_shape);
+    try std.testing.expectEqual(global, env.realm_global.?);
+    try std.testing.expectEqual(global, global.getOwn("globalThis").?.asObj());
+    for ([_][]const u8{ "$262", "Atomics", "SharedArrayBuffer", "Int32Array", "Object", "Reflect", "Math", "Promise", "globalThis" }) |name| {
+        try std.testing.expectEqual(env.get(name).?.rawBits(), global.getOwn(name).?.rawBits());
+        const attr = global.getAttr(name);
+        try std.testing.expect(attr.writable and !attr.enumerable and attr.configurable);
+    }
+    for ([_][]const u8{ "undefined", "NaN", "Infinity" }) |name| {
+        try std.testing.expectEqual(env.get(name).?.rawBits(), global.getOwn(name).?.rawBits());
+        const attr = global.getAttr(name);
+        try std.testing.expect(!attr.writable and !attr.enumerable and !attr.configurable);
+    }
+    try std.testing.expectEqual(global, global.getOwn("$262").?.asObj().getOwn("global").?.asObj());
 }
 
 test "ordinary data writes after accessor deletion discard old descriptor attributes" {
