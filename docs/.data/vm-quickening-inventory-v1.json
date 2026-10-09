@@ -162,7 +162,7 @@
       "implementation_kind": "bounded_trace_plan",
       "coverage_status": "covered_guarded",
       "surfaces": ["straight-line numeric bytecode leaves", "non-arrow static arguments[index] numeric expressions", "captured scalar and receiver-property variants"],
-      "guards": ["at most sixteen ops/eight stack values", "accepted numeric operations only", "exact arity/parameter layout", "numeric argument/capture/property values", "no observable arguments mutation or escape"],
+      "guards": ["at most sixteen ops/eight stack values", "accepted numeric operations only", "exact arity/parameter layout", "numeric argument/capture/property values", "no observable arguments mutation or escape", "arguments-AST leaves require that no formal parameter binds arguments"],
       "miss_behavior": ["perform the ordinary JS call", "cache unsupported bytecode leaves explicitly", "AST arguments leaves are revalidated for each exact call arity"],
       "metadata_lifetime": "QuickLeafPlan is lazily arena allocated per callee Chunk; the arguments-AST leaf is a bounded stack-local plan for one call.",
       "no_gil_synchronization": "Callee plan publication uses acquire/release compare-exchange; captured frames and receiver properties use their owned synchronization.",
@@ -172,7 +172,9 @@
         {"path": "src/vm.zig", "text": "fn tryQuickArgumentsCall("}
       ],
       "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: call and closure execution preserves guards and exact steps\""}
+        {"path": "src/vm.zig", "text": "test \"vm: call and closure execution preserves guards and exact steps\""},
+        {"path": "src/vm.zig", "text": "test \"vm: arguments leaf specialization respects formal binding ownership\""},
+        {"path": "src/vm.zig", "text": "test \"vm: arguments formal binding ownership runs across no-GIL workers\""}
       ],
       "metrics": ["quick_numeric_arguments_direct_call_hits"]
     },

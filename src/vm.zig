@@ -1730,7 +1730,11 @@ fn appendQuickArgumentsExpression(
 fn compileQuickArgumentsLeaf(function: *const Function, argument_count: usize) ?QuickNumericLeaf {
     if (!function.uses_arguments or function.is_arrow or function.params.len != argument_count) return null;
     for (function.params) |parameter|
-        if (parameter.default != null or parameter.is_rest or parameter.pattern != null) return null;
+        // FunctionDeclarationInstantiation omits the arguments-object binding
+        // when a formal parameter binds `arguments`; its indexed reads belong
+        // to the incoming value instead of the scalar-replaced exotic object.
+        if (parameter.default != null or parameter.is_rest or parameter.pattern != null or
+            std.mem.eql(u8, parameter.name, "arguments")) return null;
 
     var executed: usize = 0;
     const expression = if (function.is_expr_body) function.body else expression: {
@@ -19819,6 +19823,82 @@ test "vm: call and closure execution preserves source hooks" {
         )).asNum());
         try std.testing.expectEqual(@as(usize, 10), capture.calls);
     }
+}
+
+test "vm: arguments leaf specialization respects formal binding ownership" {
+    const Context = @import("context.zig").Context;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const before = quick_numeric_arguments_direct_call_hits.load(.monotonic);
+        try std.testing.expect((try ctx.evaluate(
+            \\function single(arguments) { return arguments[0]; }
+            \\function pair(arguments, other) { return arguments[0] + arguments[1]; }
+            \\function later(first, arguments) { return arguments[0] + arguments[1]; }
+            \\function duplicate(arguments, arguments) { return arguments[0]; }
+            \\let log = '', marker = {};
+            \\const box = {
+            \\  get 0() { log += '0'; $vm.gc(); return { valueOf() { log += 'v'; return 7; } }; },
+            \\  get 1() { log += '1'; return 8; }
+            \\};
+            \\const numeric = single(3) === undefined && Number.isNaN(pair(2, 3)) &&
+            \\  Number.isNaN(later(2, 3)) && duplicate(2, 3) === undefined;
+            \\const observed = pair(box, 2) === 15 && log === '01v';
+            \\const throws = { get 0() { $vm.gc(); throw marker; } };
+            \\let caught = false, nullish = false;
+            \\try { single(throws); } catch (error) { caught = error === marker; }
+            \\try { single(undefined); } catch (error) { nullish = error instanceof TypeError; }
+            \\Number.prototype[0] = 17;
+            \\let inherited;
+            \\try { inherited = single(3) === 17; } finally { delete Number.prototype[0]; }
+            \\numeric && observed && caught && nullish && inherited && single('xy') === 'x'
+        )).asBool());
+        try std.testing.expectEqual(before, quick_numeric_arguments_direct_call_hits.load(.monotonic));
+        try std.testing.expect((try ctx.evaluate(
+            \\function ordinary(first, second) { return arguments[0] + arguments[1]; }
+            \\function repeated(value, value) { return arguments[0] + arguments[1]; }
+            \\ordinary(2, 3) === 5 && repeated(2, 3) === 5
+        )).asBool());
+        if (mode == .required) {
+            try std.testing.expect(quick_numeric_arguments_direct_call_hits.load(.monotonic) >= before + 2);
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "vm: arguments formal binding ownership runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 52), (try ctx.evaluate(
+        \\function lane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  function single(arguments) { return arguments[0]; }
+        \\  function pair(arguments, other) { return arguments[0] + arguments[1]; }
+        \\  function duplicate(arguments, arguments) { return arguments[0]; }
+        \\  function ordinary(first, second) { return arguments[0] + arguments[1]; }
+        \\  if (single(3) !== undefined || !Number.isNaN(pair(2, 3)) ||
+        \\      duplicate(2, 3) !== undefined || ordinary(2, 3) !== 5) throw new Error('binding mismatch');
+        \\  return 13;
+        \\}
+        \\let threads = [];
+        \\for (let i = 0; i < 4; i++) threads.push(new Thread(lane));
+        \\let total = 0;
+        \\for (let i = 0; i < 4; i++) total += threads[i].join();
+        \\total
+    )).asNum());
+    ctx.collectGarbage();
 }
 
 test "vm: call and closure execution preserves guards and exact steps" {
