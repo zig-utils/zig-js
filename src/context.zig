@@ -26376,13 +26376,27 @@ test "GC requested compaction rewrites active Promise job native roots" {
     try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
 }
 
-fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void {
+fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions, activation: bool) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
     defer ctx.destroy();
 
-    _ = try ctx.evaluate(
+    const activation_source =
+        \\globalThis.optimizerCompactDiscard = [];
+        \\for (var i = 0; i < 4096; i = i + 1)
+        \\  optimizerCompactDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\function optimizerCompactKeep(n) {
+        \\  var held = null, cursor = 0;
+        \\  while (cursor < n) { held = this; cursor = cursor + 1; }
+        \\  return held.marker;
+        \\}
+        \\globalThis.optimizerCompactWitness = { marker: 362 };
+        \\for (var warm = 0; warm < 10; warm = warm + 1)
+        \\  optimizerCompactKeep.call(optimizerCompactWitness, 6);
+        \\optimizerCompactDiscard = null;
+    ;
+    _ = try ctx.evaluate(if (activation) activation_source else
         \\globalThis.optimizerCompactDiscard = [];
         \\for (var i = 0; i < 4096; i = i + 1)
         \\  optimizerCompactDiscard.push({ dead: i, child: { value: i + 1 } });
@@ -26403,6 +26417,14 @@ fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
+    if (activation) {
+        try std.testing.expect(artifact.requires_activation_context);
+        var found = false;
+        for (artifact.native_operations.?.descriptors) |descriptor| {
+            if (descriptor.bytecode_op == @backingInt(bc.Op.load_this) and descriptor.step_delta != 0) found = true;
+        }
+        try std.testing.expect(found);
+    }
     try std.testing.expect(!artifact.entry_enabled and artifact.has_side_exits);
     try std.testing.expectEqual(@as(u64, 0b101), artifact.required_numeric_slots);
     const osr = artifact.osr orelse return error.TestUnexpectedResult;
@@ -26413,7 +26435,10 @@ fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void
     try std.testing.expectEqual(@as(u16, 1), held_import.source_index);
     const entry_map = artifact.stack_maps.?.forDeopt(0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), entry_map.frame_pointer_slots);
-    try std.testing.expectEqual(@as(u128, 1) << @intCast(held_import.destination), entry_map.scratch_pointer_slots);
+    const held_recovery = artifact.deopt.?.values[artifact.deopt.?.points[entry_map.deopt_index].first_value + 1];
+    try std.testing.expectEqual(jit.RecoverySource.scratch_slot, held_recovery.source);
+    if (!activation) try std.testing.expectEqual(held_import.destination, held_recovery.index);
+    try std.testing.expectEqual(@as(u128, 1) << @intCast(held_recovery.index), entry_map.scratch_pointer_slots);
 
     const handle = try ctx.protectValue(ctx.global_object.getOwn("optimizerCompactWitness").?);
     defer std.debug.assert(ctx.unprotectValue(handle));
@@ -26424,7 +26449,10 @@ fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void
     const compactions_before = ctx.gc_moving_safepoint_compactions.load(.monotonic);
 
     try std.testing.expect(ctx.requestGarbageCompaction());
-    const result = try ctx.evaluate("optimizerCompactKeep(20000, optimizerCompactWitness)");
+    const result = try ctx.evaluate(if (activation)
+        "optimizerCompactKeep.call(optimizerCompactWitness, 20000)"
+    else
+        "optimizerCompactKeep(20000, optimizerCompactWitness)");
     try std.testing.expectEqual(@as(f64, 362), result.asNum());
     try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
     try std.testing.expectEqual(compactions_before + 1, ctx.gc_moving_safepoint_compactions.load(.monotonic));
@@ -26921,7 +26949,7 @@ test "parallel_js: optimizer seeded source differential covers IR guards and deo
 }
 
 test "optimizer live safepoint relocates a recovery-only object local" {
-    try verifyOptimizerLiveSafepointRelocation(.{ .enable_gc = true, .enable_jit = true });
+    try verifyOptimizerLiveSafepointRelocation(.{ .enable_gc = true, .enable_jit = true }, false);
 }
 
 test "parallel_js: optimizer live safepoint relocates a recovery-only object local" {
@@ -26932,7 +26960,7 @@ test "parallel_js: optimizer live safepoint relocates a recovery-only object loc
         .enable_jit = true,
         .parallel_gc = true,
         .parallel_js = true,
-    });
+    }, false);
 }
 
 test "optimizer packed index and property regions match bytecode and survive a moving GC checkpoint" {
@@ -46805,4 +46833,24 @@ test "finalization cleanup races ready publication without losing or duplicating
     try std.testing.expect(host.ordered);
     try std.testing.expectEqual(@as(usize, 128), host.calls);
     try std.testing.expectEqual(@as(usize, 0), ctx.finalization_cleanup_jobs.items.len);
+}
+
+test "optimizer activation reads survive actual relocation in a native loop" {
+    try verifyOptimizerLiveSafepointRelocation(.{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    }, true);
+}
+
+test "parallel_js: optimizer activation reads survive actual relocation in a native loop" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try verifyOptimizerLiveSafepointRelocation(.{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    }, true);
 }

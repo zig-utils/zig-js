@@ -124,7 +124,7 @@ pub fn verify(program: *const compiler.Program) Error!void {
             descriptor.step_delta > std.math.maxInt(u12)) return error.InvalidDescriptor;
         if (descriptor.flags & ~(jit.NativeOperationDescriptor.numeric_result | jit.NativeOperationDescriptor.literal_function_method |
             jit.NativeOperationDescriptor.literal_function_anonymous) != 0) return error.InvalidDescriptor;
-        if (op == .load_var and descriptor.input_count != 0) return error.InvalidDescriptor;
+        if ((op == .load_var or op == .load_this or op == .load_new_target) and descriptor.input_count != 0) return error.InvalidDescriptor;
     }
     for (program.operations) |operation| {
         try slot(program, operation.destination);

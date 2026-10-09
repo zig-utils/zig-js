@@ -722,7 +722,7 @@ fn stageNativeOperationDescriptors(
                 inst.op == .tail_call_with_this or inst.op == .tail_call_spread or
                 inst.op == .tail_call_with_this_spread)
                 break :runtime operation.lhs;
-            if (inst.op == .load_var or
+            if (inst.op == .load_var or inst.op == .load_this or inst.op == .load_new_target or
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
                 inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
                 inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
@@ -955,7 +955,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     for (graph.nodes) |node| switch (node.kind) {
         .block_argument => {},
         // A value from an interpreter-owned operation the graph does not model
-        // (`this`, `new.target`, a regex literal). There is no data flow to
+        // (a regex literal or a managed constant). There is no data flow to
         // lower, so refuse the chunk rather than speculate on an opaque value.
         // Global-scope identifier reads used to land here, which kept every
         // global-rooted function — the whole of `return typeof String.raw;` —
@@ -1125,7 +1125,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .load_var, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .load_var, .load_this, .load_new_target, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -2847,7 +2847,7 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
-            .load_var => {
+            .load_var, .load_this, .load_new_target => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -3737,10 +3737,20 @@ fn compileAarch64WithAllocator(
         null;
     errdefer if (osr) |metadata| metadata.destroy();
 
+    var requires_activation_context = false;
+    for (program.native_operations) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.load_this) or
+            descriptor.bytecode_op == @backingInt(bc.Op.load_new_target))
+        {
+            requires_activation_context = true;
+            break;
+        }
+    }
     return .{
         .memory = memory,
         .entry = @ptrCast(@alignCast(memory.executableBytes().ptr)),
         .kind = .optimizer,
+        .requires_activation_context = requires_activation_context,
         .bytecode_steps = program.bytecode_steps,
         .frame_slots = program.frame_slots,
         .required_numeric_slots = program.required_numeric_slots,
@@ -6406,8 +6416,6 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         // runtime operation, covered below.
         .{ .op = .load_var_or_undef },
         .{ .op = .load_upval },
-        .{ .op = .load_this },
-        .{ .op = .load_new_target },
         .{ .op = .super_get },
         .{ .op = .enter_block },
         .{ .op = .exit_block },
@@ -8161,4 +8169,44 @@ test "optimizer compaction preserves irreducible two-entry rejection" {
     try std.testing.expect(plan.graph.nodes.len > jit.numeric_scratch_capacity);
     try std.testing.expectError(error.UnsupportedChunk, compactSelectedLoopPlan(&plan, std.testing.allocator, false));
     try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
+}
+
+fn lowerActivationReadForTest(allocator: std.mem.Allocator, op: bc.Op) !Program {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    _ = try chunk.emit(op, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, allocator);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.graph.nodes.len);
+    try std.testing.expect(plan.graph.nodes[0].may_have_effect);
+    return lower(&chunk, &plan, allocator);
+}
+
+test "optimizer activation reads lower as rooted zero-input effects with OOM cleanup" {
+    for ([_]bc.Op{ .load_this, .load_new_target }) |op| {
+        var program = try lowerActivationReadForTest(std.testing.allocator, op);
+        defer program.deinit();
+        try program.verify();
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const descriptor = program.native_operations[0];
+        try std.testing.expectEqual(@as(u16, @backingInt(op)), descriptor.bytecode_op);
+        try std.testing.expectEqual(@as(u16, 0), descriptor.input_count);
+        try std.testing.expectEqual(@as(u16, 1), descriptor.step_delta);
+        const exit = program.deopt_points[program.deopt_points.len - 1];
+        try std.testing.expectEqual(@as(u16, 1), exit.stack_count);
+        const recovered = program.deopt_values[exit.first_value + exit.local_count];
+        try std.testing.expectEqual(jit.RecoverySource.scratch_slot, recovered.source);
+        try std.testing.expect(program.stack_maps[program.stack_maps.len - 1].scratch_pointer_slots &
+            (@as(u128, 1) << @intCast(recovered.index)) != 0);
+        const Probe = struct {
+            fn run(allocator: std.mem.Allocator, operation: bc.Op) !void {
+                var lowered = try lowerActivationReadForTest(allocator, operation);
+                defer lowered.deinit();
+            }
+        };
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{op});
+    }
 }

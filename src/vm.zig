@@ -4607,6 +4607,12 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             applyBinaryEffect(vm, op, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
     }
+    // ECMA-262 GetThisBinding and GetNewTarget use the current activation,
+    // including a lexical arrow's live shared this cell and initializer rules.
+    if (descriptor.bytecode_op == @backingInt(bc.Op.load_this) and inputs.len == 0)
+        return finishNativeOperation(frame, vm, operation_id, initializedThis(vm));
+    if (descriptor.bytecode_op == @backingInt(bc.Op.load_new_target) and inputs.len == 0)
+        return finishNativeOperation(frame, vm, operation_id, if (vm.in_field_initializer) Value.undef() else vm.new_target);
     if (descriptor.bytecode_op == @backingInt(bc.Op.load_var) and inputs.len == 0) {
         const name = metadata.nameFor(operation_id) orelse
             return @backingInt(jit.NativeOperationStatus.host_trap);
@@ -6377,7 +6383,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const baseline_artifact = chunk.tier.loadCode();
     if (!nativeExecutionPermitted(vm, owner)) return null;
     if (optimizer_artifact == null and baseline_artifact == null) return null;
-    if (optimizer_artifact) |artifact| if (artifact.has_side_exits) return null;
+    if (optimizer_artifact) |artifact| if (artifact.has_side_exits or artifact.requires_activation_context) return null;
 
     const legacy_allowed = interp.Interpreter.legacyCallerArgumentsAllowed(func);
     const restricted_tail = !func.is_arrow and !legacy_allowed and chunkHasTailCall(chunk);
@@ -6429,7 +6435,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 
     const native = baseline_artifact orelse return null;
     if (native.frame_slots != slot_count) return null;
-    if (native.has_side_exits) return null;
+    if (native.has_side_exits or native.requires_activation_context) return null;
     const result = if (native.manages_steps) managed: {
         const outcome = try tryRunManagedNativeWithProfileContext(vm, native, slots[0..slot_count], null, chunk);
         break :managed switch (outcome) {
@@ -24459,4 +24465,242 @@ test "vm: compiler lowers try/catch" {
         \\try { throw 3; } catch (e) { x = e; }
         \\x
     )).asNum());
+}
+
+test "vm: optimizer activation reads preserve exact values initialization and steps" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const object = try machine.newObject();
+    for ([_]bc.Op{ .load_this, .load_new_target }) |op| {
+        var chunk = bc.Chunk.init(allocator);
+        _ = try chunk.emit(op, 0);
+        _ = try chunk.emit(.ret, 0);
+        var compiled = try optimizer_compiler.compile(&chunk);
+        defer compiled.deinit();
+        try std.testing.expect(compiled.requires_activation_context);
+        for ([_]Value{ Value.undef(), Value.nul(), Value.num(7), object }) |expected| {
+            machine.this_value = expected;
+            machine.this_initialized = true;
+            machine.new_target = expected;
+            const before = machine.steps;
+            const outcome = try tryRunManagedNative(&machine, &compiled, &.{}, null);
+            try std.testing.expect(outcome == .complete);
+            try std.testing.expectEqual(expected.rawBits(), outcome.complete.rawBits());
+            try std.testing.expectEqual(before + 2, machine.steps);
+        }
+        if (op == .load_this) {
+            machine.this_initialized = false;
+            const throw_steps = machine.steps;
+            try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &compiled, &.{}, null));
+            try std.testing.expectEqual(throw_steps + 1, machine.steps);
+            try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+            machine.exception = Value.undef();
+            // A lexical cell's live state overrides the stale ambient snapshot.
+            var cell = interp.ThisCell.init(Value.undef(), false);
+            machine.this_cell = &cell;
+            machine.this_initialized = true;
+            try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &compiled, &.{}, null));
+            try std.testing.expect(cell.bind(object));
+            machine.this_value = Value.nul();
+            machine.this_initialized = false;
+            const outcome = try tryRunManagedNative(&machine, &compiled, &.{}, null);
+            try std.testing.expect(outcome == .complete);
+            try std.testing.expectEqual(object.rawBits(), outcome.complete.rawBits());
+            machine.this_cell = null;
+        } else {
+            machine.in_field_initializer = true;
+            const outcome = try tryRunManagedNative(&machine, &compiled, &.{}, null);
+            try std.testing.expect(outcome == .complete and outcome.complete.isUndefined());
+            machine.in_field_initializer = false;
+        }
+    }
+}
+
+test "vm: optimizer activation entry refuses direct elision before callbacks" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var activationCalls = 0;
+        \\function activationTouch() { activationCalls++; }
+        \\function activationReceiver() { 'use strict'; var unused = activationTouch(); return this; }
+        \\function activationTarget() { 'use strict'; var unused = activationTouch(); return new.target; }
+        \\for (var i = 0; i < 64; i++) { activationReceiver(); activationTarget(); }
+    );
+    var machine = ctx.interpreter();
+    machine.jit_execution_allowed = true;
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_context);
+    for ([_][]const u8{ "activationReceiver", "activationTarget" }) |name| {
+        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+        const chunk = function.chunk.?;
+        const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(artifact.entry_enabled and !artifact.has_side_exits and artifact.requires_activation_context);
+        const calls = ctx.global_object.getOwn("activationCalls").?.asNum();
+        const steps = machine.steps;
+        const attempts = optimizer_native_attempts.load(.monotonic);
+        try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, function, &.{}));
+        try std.testing.expectEqual(steps, machine.steps);
+        try std.testing.expectEqual(attempts, optimizer_native_attempts.load(.monotonic));
+        try std.testing.expectEqual(calls, ctx.global_object.getOwn("activationCalls").?.asNum());
+        const receiver = try machine.newObject();
+        const target = Value.obj(function.obj.?);
+        const hits = optimizer_native_hits.load(.monotonic);
+        const outcome = try runFunction(&machine, function, chunk, &.{}, receiver, target);
+        const expected = if (std.mem.eql(u8, name, "activationReceiver")) receiver else target;
+        try std.testing.expectEqual(expected.rawBits(), outcome.rawBits());
+        try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits);
+        try std.testing.expectEqual(calls + 1, ctx.global_object.getOwn("activationCalls").?.asNum());
+    }
+}
+
+test "vm: optimizer activation reads agree for strict sloppy arrow derived and initializer contexts" {
+    const configurations = [_]struct { mode: interp.BytecodeExecutionMode, native: bool }{
+        .{ .mode = .tree_walker, .native = false },
+        .{ .mode = .required, .native = false },
+        .{ .mode = .required, .native = true },
+    };
+    for (configurations) |configuration| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = configuration.native,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\function strictReceiver() { 'use strict'; return this; }
+            \\function sloppyReceiver() { return this; }
+            \\function target() { return new.target; }
+            \\function lexicalTarget() { return (() => new.target)(); }
+            \\function lexicalReceiver() { return () => this; }
+            \\var object = { marker: 37 }, other = { marker: 91 };
+            \\var captured = lexicalReceiver.call(object);
+            \\class Base {}
+            \\class Derived extends Base {
+            \\  constructor() {
+            \\    var read = () => this, before = false;
+            \\    try { read(); } catch (e) { before = e instanceof ReferenceError; }
+            \\    super(); this.good = before && read() === this;
+            \\  }
+            \\}
+            \\class Fields { target = new.target; read = () => this; }
+            \\var good = true;
+            \\for (var i = 0; i < 64; i++) {
+            \\  var fields = new Fields();
+            \\  good = good && strictReceiver.call(null) === null && strictReceiver.call(i) === i &&
+            \\    sloppyReceiver.call(null) === globalThis && sloppyReceiver.call(i).valueOf() === i &&
+            \\    target() === undefined && new target() === target && lexicalTarget() === undefined &&
+            \\    new lexicalTarget() === lexicalTarget && captured.call(other) === object &&
+            \\    new Derived().good && fields.target === undefined && fields.read() === fields;
+            \\}
+            \\good;
+        )).asBool());
+        ctx.collectGarbage();
+    }
+}
+
+test "vm: optimizer activation reads isolate four no-GIL worker activations" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 148), (try ctx.evaluate(
+        \\function lane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  function receiver() { 'use strict'; return this; }
+        \\  function target() { return new.target; }
+        \\  function lexical() { return () => this; }
+        \\  var held = { marker: 37 }, captured = lexical.call(held);
+        \\  for (var i = 0; i < 64; i++) {
+        \\    if (receiver.call(held) !== held || captured() !== held ||
+        \\        target() !== undefined || new target() !== target) throw new Error('activation mismatch');
+        \\  }
+        \\  $vm.gc(); return held.marker;
+        \\}
+        \\var workers = [];
+        \\for (var i = 0; i < 4; i++) workers.push(new Thread(lane));
+        \\var total = 0;
+        \\for (var i = 0; i < 4; i++) total += workers[i].join();
+        \\total;
+    )).asNum());
+    ctx.collectGarbage();
+}
+
+test "vm: optimizer seeded activation reads preserve coercion GC and result order" {
+    const Context = @import("context.zig").Context;
+    const original_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var seed: u64 = 0x6163_7469_7661_7465;
+    for (0..8) |_| {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const bias = (seed >> 32) % 97 + 1;
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const delta = (seed >> 32) % 31 + 1;
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\var activationEffects = 0;
+            \\function seededReceiver(n) {{ 'use strict'; return this.marker + n; }}
+            \\function seededTarget() {{ return new.target; }}
+            \\function seededLexical() {{ return () => this; }}
+            \\function seededRaw(n) {{ 'use strict'; return this + n; }}
+            \\function seededConstruction() {{ return {{ absent: new.target === undefined }}; }}
+            \\var subject = {{ marker: {d} }};
+            \\var capture = seededLexical.call(subject);
+            \\for (var warm = 0; warm < 64; warm++) {{
+            \\  seededReceiver.call(subject, warm); seededTarget(); capture(); seededRaw.call(3, warm); seededConstruction();
+            \\}}
+            \\var first = seededReceiver.call(subject, {d});
+            \\subject.marker = {{ valueOf: function() {{ activationEffects++; $vm.gc(); return {d}; }} }};
+            \\var second = seededReceiver.call(subject, {d});
+            \\var rawNumber = seededRaw.call({d}, {d}), rawText = seededRaw.call('x', {d});
+            \\var rawObject = seededRaw.call({{ valueOf: function() {{ activationEffects++; $vm.gc(); return {d}; }} }}, {d});
+            \\var mixed = false;
+            \\try {{ seededRaw.call(1n, {d}); }} catch (e) {{ mixed = e instanceof TypeError; }}
+            \\JSON.stringify([first, second, activationEffects, seededTarget() === undefined,
+            \\  new seededTarget() === seededTarget, capture.call(null) === subject,
+            \\  rawNumber, rawText, rawObject, mixed, seededConstruction().absent, new seededConstruction().absent]);
+        , .{ bias, delta, bias * 2, delta, bias, delta, delta, bias * 3, delta, delta });
+        defer std.testing.allocator.free(source);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "[{d},{d},2,true,true,true,{d},\"x{d}\",{d},true,true,false]", .{ bias + delta, bias * 2 + delta, bias + delta, delta, bias * 3 + delta });
+        defer std.testing.allocator.free(expected);
+        for ([_]bool{ false, true }) |parallel| {
+            for ([_]bool{ false, true }) |native| {
+                const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                    .enable_gc = true,
+                    .enable_jit = native,
+                    .enable_threads = parallel,
+                    .parallel_gc = parallel,
+                    .parallel_js = parallel,
+                    .bytecode_execution_mode = .required,
+                });
+                defer ctx.destroy();
+                const result = try ctx.evaluate(source);
+                try std.testing.expectEqualStrings(expected, result.asStr());
+                if (native and jit.optimizer_supported) {
+                    for ([_][]const u8{ "seededReceiver", "seededTarget", "seededRaw", "seededConstruction" }) |name| {
+                        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+                        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                        try std.testing.expect(artifact.entry_enabled and artifact.requires_activation_context);
+                    }
+                }
+            }
+        }
+    }
 }

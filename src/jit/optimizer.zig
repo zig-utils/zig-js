@@ -101,8 +101,10 @@ pub const ValueKind = enum {
     /// which is why it carries an effect frame state and an exceptional target
     /// rather than being treated as a pure leaf.
     load_var,
+    load_this,
+    load_new_target,
     /// A value produced by exact bytecode but deliberately not embedded in the
-    /// graph — `this`, `new.target`, regex literals, and managed constants.
+    /// graph — regex literals and managed constants.
     ///
     /// Those operations used to bump the operand-stack depth without writing
     /// the slot, so the next consumer read an undefined `ValueId` and wired it
@@ -184,8 +186,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .load_upval,
         .store_upval,
         .name_anon,
-        .load_this,
-        .load_new_target,
         .super_get,
         .super_get_index,
         .enter_block,
@@ -651,6 +651,8 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .to_string,
         .to_property_key,
         .load_var,
+        .load_this,
+        .load_new_target,
         .get_prop,
         .get_index,
         .set_prop,
@@ -864,7 +866,8 @@ pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: V
         // operand. Both stay narrowly listed rather than keying on
         // `may_have_effect`, which is already true for any argument operand and
         // would push all argument arithmetic through the runtime ABI.
-        if (nodes[operand].kind == .get_prop or nodes[operand].kind == .load_var) return true;
+        if (nodes[operand].kind == .get_prop or nodes[operand].kind == .load_var or
+            nodes[operand].kind == .load_this or nodes[operand].kind == .load_new_target) return true;
     }
     return false;
 }
@@ -1196,15 +1199,20 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 if (depth == 0) return error.InvalidControlFlow;
                 stack[depth - 1] = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
             },
-            .load_var => {
-                if (inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+            .load_var, .load_this, .load_new_target => {
+                if (inst.op == .load_var and inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
                 try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
                 const result = try builder.appendNode(.{
                     .id = undefined,
                     .block = @intCast(block_id),
                     .origin = @intCast(origin),
-                    .kind = .load_var,
+                    .kind = switch (inst.op) {
+                        .load_var => .load_var,
+                        .load_this => .load_this,
+                        .load_new_target => .load_new_target,
+                        else => unreachable,
+                    },
                     .immediate = inst.a,
                     .may_have_effect = true,
                 });
@@ -1792,6 +1800,8 @@ fn supports(op: bc.Op) bool {
         .to_string,
         .to_property_key,
         .load_var,
+        .load_this,
+        .load_new_target,
         .get_prop,
         .get_index,
         .set_prop,

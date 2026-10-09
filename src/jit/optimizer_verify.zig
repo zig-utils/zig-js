@@ -63,6 +63,8 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .new_object,
         .new_array,
         .load_var,
+        .load_this,
+        .load_new_target,
         .interpreter_value,
         => 0,
         .to_numeric,

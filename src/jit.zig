@@ -1376,6 +1376,9 @@ pub const CompiledCode = struct {
     stack_maps: ?*StackMapMetadata = null,
     osr: ?*OsrMetadata = null,
     native_operations: ?*NativeOperationMetadata = null,
+    /// Immutable admission ruling: activation-eliding entry has no callee
+    /// receiver/new-target context and must refuse before executing any effect.
+    requires_activation_context: bool = false,
     /// Machine-frame facts emitted by codegen and consumed only by an opt-in
     /// external publisher. `.none` adds no publication work on the default path.
     unwind: native_observability.UnwindPlan = .none,

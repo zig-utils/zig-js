@@ -165,8 +165,8 @@
     },
     {
       "path": "optimizing-jit/index.html",
-      "bytes": 279132,
-      "sha256": "114188e32d69ace4a5fbecaa0ab8301372496e0f94445276480613759e3a9c4b"
+      "bytes": 280352,
+      "sha256": "1f3363cdaa86034709f17a7ab81b77b165446304e04227f975adf3fb5b865df3"
     },
     {
       "path": "platforms/index.html",
@@ -181,7 +181,7 @@
     {
       "path": "search-index.json",
       "bytes": 274478,
-      "sha256": "b3dd56c5d11635845bbd8c1eb508037b0b7de0cb515b0431eb3756464d9c228d"
+      "sha256": "cbc6d498d322f93a172caeb16860060f68833f4804d455d1b66e01787b14187d"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "e898063c19565dfb8bd4902ad9aabd38cb33d609219aedbbed01908d3686b363"
+  "tree_sha256": "af9b34b4676ba0c35f49345635c907ecc1d5a0e24d6018d055043bb717e3acf8"
 }
