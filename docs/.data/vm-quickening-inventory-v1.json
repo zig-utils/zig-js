@@ -207,16 +207,20 @@
       "implementation_kind": "native_tier_entry",
       "coverage_status": "covered_guarded",
       "surfaces": ["ordinary call of a ready baseline/optimizing numeric leaf without heap activation construction"],
-      "guards": ["native execution permitted", "no class constructor or arguments object", "no lexical slots", "at most 64 exact frame slots", "published artifact has matching frame layout and no side exits"],
+      "guards": ["native execution permitted", "no class constructor or arguments object", "no lexical slots", "at most 64 exact frame slots", "published artifact has matching frame layout and no side exits", "nested-call legacy frame elision requires copied Number arguments and no captured or receiver-property inputs"],
       "miss_behavior": ["build/run the ordinary VM activation or generic call", "a managed native miss/deoptimization never becomes a completed direct call"],
       "metadata_lifetime": "It consumes the callee Chunk native-tier artifacts; the temporary bounded slot array lives only for the call. QuickLeafPlan is a stack-local bounded bytecode decoder result used by the native legacy-frame safety proof, not a per-callee VM cache.",
       "no_gil_synchronization": "Native tier artifacts use their own atomic publication/invalidation contract; the call copies arguments into private stack storage and rechecks execution permission.",
       "observable_steps_debugger": "Statement hooks forbid direct entry; managed artifacts own exact step/trap accounting and unmanaged artifacts are admitted only under the existing native observability contract.",
       "source_anchors": [
-        {"path": "src/vm.zig", "text": "fn tryRunNativeDirectCall("}
+        {"path": "src/vm.zig", "text": "fn tryRunNativeDirectCall("},
+        {"path": "src/vm.zig", "text": "fn nativeDirectCalleeIsLegacySafe("}
       ],
       "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: call and closure execution preserves guards and exact steps\""}
+        {"path": "src/vm.zig", "text": "test \"vm: call and closure execution preserves guards and exact steps\""},
+        {"path": "src/vm.zig", "text": "test \"vm: native caller frames survive captured and receiver coercion\""},
+        {"path": "src/vm.zig", "text": "test \"vm: explicit native caller entry misses before reentrant leaf effects\""},
+        {"path": "src/vm.zig", "text": "test \"vm: native caller frames survive coercion across no-GIL workers\""}
       ],
       "metrics": ["quick_native_direct_call_hits"]
     }

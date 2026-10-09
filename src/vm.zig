@@ -4425,7 +4425,7 @@ fn chunkDirectlyObservesLegacyFrame(chunk: *const Chunk) bool {
     return false;
 }
 
-fn nativeDirectCalleeIsLegacySafe(callee: Value, args: []const Value, this_value: ?Value) bool {
+fn nativeDirectCalleeIsLegacySafe(callee: Value, args: []const Value) bool {
     const function = jsChunkFn(callee) orelse return false;
     const chunk = function.chunk orelse return false;
     if (function.uses_arguments or chunkDirectlyObservesLegacyFrame(chunk)) return false;
@@ -4433,18 +4433,12 @@ fn nativeDirectCalleeIsLegacySafe(callee: Value, args: []const Value, this_value
         .numeric => |plan| plan,
         .unsupported => return false,
     };
+    // Numeric bytecode is not a no-reentry proof for mutable captured or
+    // receiver values: ToPrimitive can call JS and observe the elided caller's
+    // arguments. Even a Number snapshot can change before the callee reads it.
+    // Only copied numeric arguments establish this call's complete input proof.
+    if (plan.captured_local != null or plan.receiver_property_instruction != null) return false;
     for (args) |argument| if (!argument.isNumber()) return false;
-    if (plan.receiver_property_instruction) |instruction_index| {
-        const receiver = this_value orelse return false;
-        if (instruction_index >= chunk.code.items.len) return false;
-        const instruction = chunk.code.items[instruction_index];
-        if (instruction.op != .get_prop or instruction.a >= chunk.names.items.len) return false;
-        if (!nativeDirectNamedReadIsData(
-            null,
-            receiver,
-            chunk.names.items[instruction.a],
-        )) return false;
-    }
     return true;
 }
 
@@ -4514,8 +4508,8 @@ fn nativeOperationCanElideLegacyFrame(
             return nativeDirectNamedWriteIsData(metadata.propertyCacheFor(operation_id), values[0], values[1].asStr());
         },
         .new_object, .new_array, .init_prop, .array_append, .array_append_hole => return true,
-        .call, .tail_call, .new_call => return values.len >= 1 and nativeDirectCalleeIsLegacySafe(values[0], values[1..], null),
-        .call_with_this, .tail_call_with_this => return values.len >= 2 and nativeDirectCalleeIsLegacySafe(values[0], values[2..], values[1]),
+        .call, .tail_call, .new_call => return values.len >= 1 and nativeDirectCalleeIsLegacySafe(values[0], values[1..]),
+        .call_with_this, .tail_call_with_this => return values.len >= 2 and nativeDirectCalleeIsLegacySafe(values[0], values[2..]),
         else => return false,
     }
 }
@@ -19867,6 +19861,139 @@ test "vm: arguments formal binding ownership runs across no-GIL workers" {
         \\for (let i = 0; i < 4; i++) total += threads[i].join();
         \\total
     )).asNum());
+    ctx.collectGarbage();
+}
+
+test "vm: native caller frames survive captured and receiver coercion" {
+    const Context = @import("context.zig").Context;
+    const configurations = [_]struct { mode: interp.BytecodeExecutionMode, native: bool }{
+        .{ .mode = .tree_walker, .native = false },
+        .{ .mode = .required, .native = false },
+        .{ .mode = .required, .native = true },
+    };
+    for (configurations) |configuration| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = configuration.native,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\var capturedLeaf, replaceCapture;
+            \\function makeLeaf() {
+            \\  var captured = 1;
+            \\  capturedLeaf = function(delta) { return captured + delta; };
+            \\  replaceCapture = function(value) { captured = value; };
+            \\}
+            \\makeLeaf();
+            \\var receiver = { bias: 1, leaf: function(delta) { return this.bias + delta; } };
+            \\function callerCapture(delta) { var result = capturedLeaf(delta); return result; }
+            \\function callerReceiver(delta) { var result = receiver.leaf(delta); return result; }
+            \\function callerAlias(delta) { var result = capturedLeaf(delta); return result + delta * 1000; }
+            \\for (var i = 0; i < 64; i++) { callerCapture(7); callerReceiver(7); callerAlias(7); }
+            \\var calls = 0;
+            \\replaceCapture({ valueOf: function() { calls++; var incoming = callerCapture.arguments[0]; $vm.gc(); return incoming + 100; } });
+            \\receiver.bias = { valueOf: function() { calls++; var incoming = callerReceiver.arguments[0]; $vm.gc(); return incoming + 100; } };
+            \\var captureResult = callerCapture(7), receiverResult = callerReceiver(7);
+            \\replaceCapture({ valueOf: function() {
+            \\  calls++; var incoming = callerAlias.arguments[0]; callerAlias.arguments[0] = incoming + 1;
+            \\  $vm.gc(); return incoming + 100;
+            \\} });
+            \\var aliasResult = callerAlias(7), marker = {}, caught = false;
+            \\replaceCapture({ valueOf: function() { calls++; if (callerCapture.arguments[0] !== 9) throw new Error('arguments'); $vm.gc(); throw marker; } });
+            \\try { callerCapture(9); } catch (error) { caught = error === marker; }
+            \\captureResult === 114 && receiverResult === 114 && aliasResult === 8114 && caught && calls === 4
+        )).asBool());
+    }
+}
+
+test "vm: explicit native caller entry misses before reentrant leaf effects" {
+    if (!jit.supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var capturedLeaf, replaceCapture;
+        \\function makeLeaf() {
+        \\  var captured = 1;
+        \\  capturedLeaf = function(delta) { return captured + delta; };
+        \\  replaceCapture = function(value) { captured = value; };
+        \\}
+        \\makeLeaf();
+        \\var receiver = { bias: 1, leaf: function(delta) { return this.bias + delta; } };
+        \\function callerCapture(delta) { var result = capturedLeaf(delta); return result; }
+        \\function callerReceiver(delta) { var result = receiver.leaf(delta); return result; }
+        \\function pure(delta) { return delta + 1; }
+        \\for (var i = 0; i < 64; i++) { callerCapture(7); callerReceiver(7); pure(7); }
+        \\var calls = 0;
+        \\replaceCapture({ valueOf: function() { calls++; return callerCapture.arguments[0] + 100; } });
+        \\receiver.bias = { valueOf: function() { calls++; return callerReceiver.arguments[0] + 100; } };
+    );
+    var machine = ctx.interpreter();
+    machine.jit_execution_allowed = true;
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_context);
+    const arguments = [_]Value{Value.num(7)};
+    const pure = Interpreter.funcOf(ctx.global_object.getOwn("pure").?).?;
+    const hits_before = quick_native_direct_call_hits.load(.monotonic);
+    const pure_result = (try tryRunNativeDirectCall(&machine, pure, &arguments)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 8), pure_result.asNum());
+    try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > hits_before);
+    for ([_][]const u8{ "callerCapture", "callerReceiver" }) |name| {
+        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(artifact.entry_enabled and !artifact.has_side_exits);
+        const attempts_before = optimizer_native_attempts.load(.monotonic);
+        try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, function, &arguments));
+        try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+    }
+    try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate("calls")).asNum());
+    try std.testing.expect((try ctx.evaluate("callerCapture(7) === 114 && callerReceiver(7) === 114 && calls === 2")).asBool());
+}
+
+test "vm: native caller frames survive coercion across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\var capturedLeaf, replaceCapture;
+        \\function makeLeaf() {
+        \\  var captured = 1;
+        \\  capturedLeaf = function(delta) { return captured + delta; };
+        \\  replaceCapture = function(value) { captured = value; };
+        \\}
+        \\makeLeaf();
+        \\var receiver = { bias: 1, leaf: function(delta) { return this.bias + delta; } };
+        \\function callerCapture(delta) { var result = capturedLeaf(delta); return result; }
+        \\function callerReceiver(delta) { var result = receiver.leaf(delta); return result; }
+        \\for (var i = 0; i < 64; i++) { callerCapture(7); callerReceiver(7); }
+        \\var counts = new Int32Array(new SharedArrayBuffer(8));
+        \\replaceCapture({ valueOf: function() { Atomics.add(counts, 0, 1); return callerCapture.arguments[0] + 100; } });
+        \\receiver.bias = { valueOf: function() { Atomics.add(counts, 1, 1); return callerReceiver.arguments[0] + 100; } };
+        \\function lane(index) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 8; i++) sum += callerCapture(index + i) + callerReceiver(index + i);
+        \\  return sum;
+        \\}
+        \\var threads = [], sum = 0;
+        \\for (var i = 0; i < 4; i++) threads.push(new Thread(lane, i));
+        \\for (var i = 0; i < 4; i++) sum += threads[i].join();
+        \\sum === 7040 && Atomics.load(counts, 0) === 32 && Atomics.load(counts, 1) === 32
+    )).asBool());
     ctx.collectGarbage();
 }
 
