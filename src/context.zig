@@ -41787,7 +41787,7 @@ test "threads: WebAssembly compiles and executes in shared-realm workers" {
     }
 }
 
-test "GC precise fixed-shape checkpoints preserve materialized roots" {
+test "GC ordinary allocation checkpoints preserve materialized roots" {
     const source =
         \\function runAllocationLane(lane) {
         \\  var items = [
@@ -41809,34 +41809,65 @@ test "GC precise fixed-shape checkpoints preserve materialized roots" {
         \\  }
         \\  for (var i = 0; i < items.length; i = i + 1)
         \\    total = total + items[i].seed * 3 + items[i].mark * 5 + items[i].prior * 7;
+        \\  globalThis.allocationCheckpointItems = items;
+        \\  globalThis.allocationCheckpointFirst = items[0];
         \\  return total;
         \\}
         \\runAllocationLane(2);
     ;
 
-    const arena_ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
-    defer arena_ctx.destroy();
-    const expected = try arena_ctx.evaluate(source);
+    const survivor_signature =
+        \\var signature = 0;
+        \\for (var i = 0; i < allocationCheckpointItems.length; i++) {
+        \\  var item = allocationCheckpointItems[i];
+        \\  signature += item.seed * 3 + item.mark * 5 + item.prior * 7;
+        \\}
+        \\signature;
+    ;
+    var tier_result: ?u64 = null;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const arena_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer arena_ctx.destroy();
+        const expected = try arena_ctx.evaluate(source);
+        try std.testing.expectEqual(@as(f64, 99_722), expected.asNum());
+        const expected_signature = try arena_ctx.evaluate(survivor_signature);
+        if (tier_result) |bits| try std.testing.expectEqual(bits, expected.rawBits());
+        tier_result = expected.rawBits();
 
-    const gc_ctx = try Context.createWith(std.testing.allocator, .{
-        .enable_gc = true,
-        .enable_jit = false,
-    });
-    defer gc_ctx.destroy();
-    const heap = gc_ctx.gc.?;
-    heap.threshold_bytes = std.math.maxInt(usize);
-    heap.nursery_threshold_bytes = 1;
-    const minor_before = heap.minor_collections;
-    const precise_before = gc_ctx.gc_precise_safepoints.load(.monotonic);
-    const actual = try gc_ctx.evaluate(source);
-    try std.testing.expectEqual(expected.rawBits(), actual.rawBits());
-    try std.testing.expect(heap.minor_collections > minor_before);
-    try std.testing.expect(gc_ctx.gc_precise_safepoints.load(.monotonic) > precise_before);
+        const gc_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer gc_ctx.destroy();
+        const heap = gc_ctx.gc.?;
+        heap.threshold_bytes = std.math.maxInt(usize);
+        heap.nursery_threshold_bytes = 1;
+        const minor_before = heap.minor_collections;
+        const precise_before = gc_ctx.gc_precise_safepoints.load(.monotonic);
+        const actual = try gc_ctx.evaluate(source);
+        try std.testing.expectEqual(expected.rawBits(), actual.rawBits());
+        try std.testing.expect(heap.minor_collections > minor_before);
+        // Ordinary execution retains its generic root-tracing contract; only
+        // explicitly mapped native/activation boundaries may declare precision.
+        try std.testing.expectEqual(precise_before, gc_ctx.gc_precise_safepoints.load(.monotonic));
+        if (mode == .required) {
+            const inventory = gc_ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
+            try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_plain_compiled));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
 
-    const precise_after = gc_ctx.gc_precise_safepoints.load(.monotonic);
-    const generic = try gc_ctx.evaluate("var genericTotal = 0; for (var i = 0; i < 5000; i = i + 1) genericTotal = genericTotal + i; genericTotal;");
-    try std.testing.expectEqual(@as(f64, 12_497_500), generic.asNum());
-    try std.testing.expectEqual(precise_after, gc_ctx.gc_precise_safepoints.load(.monotonic));
+        gc_ctx.collectGarbage();
+        try std.testing.expectEqual(expected_signature.rawBits(), (try gc_ctx.evaluate(survivor_signature)).rawBits());
+        try std.testing.expect((try gc_ctx.evaluate("allocationCheckpointItems.length === 8 && allocationCheckpointItems[0] === allocationCheckpointFirst")).asBool());
+        const generic = try gc_ctx.evaluate("var genericTotal = 0; for (var i = 0; i < 5000; i = i + 1) genericTotal = genericTotal + i; genericTotal;");
+        try std.testing.expectEqual(@as(f64, 12_497_500), generic.asNum());
+        try std.testing.expectEqual(precise_before, gc_ctx.gc_precise_safepoints.load(.monotonic));
+    }
 }
 
 fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
