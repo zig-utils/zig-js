@@ -156,28 +156,6 @@
       "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_dense_array_create_hits", "quick_sparse_array_index_hits", "quick_sparse_array_store_hits", "quick_sparse_array_create_hits", "quick_array_prototype_index_hits", "quick_typed_array_index_hits", "quick_typed_array_store_hits", "quick_arguments_index_hits", "quick_arguments_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
     },
     {
-      "id": "fixed-shape-object-allocation-loop",
-      "title": "Fixed-shape object-allocation loop kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["one exact selector/replacement loop allocating a three-property literal"],
-      "guards": ["exact opcode/constants/backedge", "packed array and selected object state", "three exact literal shape transitions", "restricted receiver check", "managed allocation reserve and GC checkpoint contract"],
-      "miss_behavior": ["return to the loop head before fused mutation", "fall back after materializing state at GC/checkpoint boundaries", "invalidate prepared shape state when the realm root Shape differs"],
-      "metadata_lifetime": "The QuickArrayPlan lives in the Chunk arena; isolated prepared literal descriptors are keyed by the exact realm root Shape.",
-      "no_gil_synchronization": "Plan publication is atomic; shared execution locks frame/object/array state and crosses GC only from registered precise storage with the declared moving-safepoint protocol.",
-      "observable_steps_debugger": "The kernel preserves exact steps, termination checks, allocation failures, restricted-object errors, GC barriers, and statement-debugger exclusion.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickObjectAllocationLoop = struct {"},
-        {"path": "src/vm.zig", "text": "fn tryQuickObjectAllocationLoopMode("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: quickens fixed-shape object allocation loops with exact steps and guarded fallback\""},
-        {"path": "src/context.zig", "text": "test \"parallel_js: fixed-shape object allocation quickens across shared Thread workers\""}
-      ],
-      "metrics": ["quick_object_allocation_loop_hits", "quick_object_allocation_checkpoint_crossings", "quick_object_allocation_first_entry_steps", "quick_object_literal_shape_preparations", "quick_object_allocation_reserve_refills"]
-    },
-    {
       "id": "numeric-leaf-call",
       "title": "Bounded numeric leaf-call specialization",
       "classification": "bounded_structural",
@@ -322,7 +300,6 @@
   "runtime_contract": {
     "plan_types": [
       "QuickPropertyPlan",
-      "QuickArrayPlan",
       "QuickLeafPlan",
       "QuickCallLoopPlan"
     ],
@@ -330,7 +307,6 @@
       "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
       "QuickPropertySpecialization": ["generic", "property_local_add_mod", "property_add_constant", "property_pair_add", "property_pair_sub"],
       "QuickArrayBound": ["constant", "local"],
-      "QuickArrayPlan": ["unsupported", "object_allocation"],
       "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
       "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
       "QuickLeafPlan": ["unsupported", "numeric"],
@@ -340,15 +316,13 @@
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
-      "quick_array_plans",
       "quick_call_plans",
       "quick_loop_candidates",
       "quick_global_bindings",
       "quick_leaf_plan"
     ],
     "structural_candidate_flags": [
-      "quick_call_loop_candidate",
-      "quick_array_loop_candidate"
+      "quick_call_loop_candidate"
     ],
     "observability_counters": [
       "quick_binary_number_hits",
@@ -372,11 +346,6 @@
       "quick_array_length_hits",
       "quick_array_prototype_data_hits",
       "quick_array_push_hits",
-      "quick_object_allocation_loop_hits",
-      "quick_object_allocation_checkpoint_crossings",
-      "quick_object_allocation_first_entry_steps",
-      "quick_object_literal_shape_preparations",
-      "quick_object_allocation_reserve_refills",
       "quick_global_binding_hits",
       "quick_literal_transition_hits",
       "quick_native_direct_call_hits",

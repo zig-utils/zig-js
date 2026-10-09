@@ -733,23 +733,6 @@ pub const QuickBinaryState = struct {
 };
 
 pub const quick_call_loop_candidate: u8 = 1 << 0;
-pub const quick_array_loop_candidate: u8 = 1 << 1;
-
-fn mayStartQuickArrayLoop(code: []const Inst, start: usize) bool {
-    const object_allocation = start + 11 < code.len and
-        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
-        code[start + 2].op == .lt and
-        code[start + 3].op == .jump_if_false and
-        code[start + 4].op == .load_local and
-        code[start + 5].op == .load_const and
-        code[start + 6].op == .bit_and and
-        code[start + 7].op == .store_local and
-        code[start + 8].op == .pop and
-        code[start + 9].op == .load_local and
-        code[start + 10].op == .load_local and
-        code[start + 11].op == .get_index;
-    return object_allocation;
-}
 
 fn mayStartQuickCallLoop(code: []const Inst, start: usize) bool {
     if (start + 7 >= code.len or
@@ -983,11 +966,6 @@ pub const Chunk = struct {
     /// Isolated execution publishes a plan only after fully decoding it and may
     /// cache its monomorphic slots; parallel mode does not consume this table.
     quick_property_plans: []?*anyopaque = &.{},
-    /// Lazily decoded packed-array loop plans, indexed by loop-head bytecode.
-    /// The slot table is allocated with the bytecode so shared execution can
-    /// atomically publish a fully decoded plan without racing lazy table setup.
-    /// Unsupported structural shapes are cached too.
-    quick_array_plans: []?*anyopaque = &.{},
     /// Lazily decoded counted loops whose body is one monomorphic numeric leaf
     /// call. The VM owns the plan type; slots are indexed by loop-head bytecode.
     quick_call_plans: []?*anyopaque = &.{},
@@ -1021,15 +999,12 @@ pub const Chunk = struct {
         @memset(self.ics, .{});
         self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
         @memset(self.optimizer_binary_profiles, .{});
-        self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
-        @memset(self.quick_array_plans, null);
         self.quick_call_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
         @memset(self.quick_call_plans, null);
         self.quick_loop_candidates = try self.arena.alloc(u8, self.code.items.len);
         for (self.quick_loop_candidates, 0..) |*candidate, instruction| {
             var mask: u8 = 0;
             if (mayStartQuickCallLoop(self.code.items, instruction)) mask |= quick_call_loop_candidate;
-            if (mayStartQuickArrayLoop(self.code.items, instruction)) mask |= quick_array_loop_candidate;
             candidate.* = mask;
         }
         if (self.debug_sites.items.len > 0) {

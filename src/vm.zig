@@ -1046,35 +1046,6 @@ const QuickArrayBound = union(enum) {
     local: u32,
 };
 
-const QuickObjectAllocationLoop = struct {
-    counter_local: u32,
-    array_local: u32,
-    index_local: u32,
-    displaced_local: u32,
-    value_local: u32,
-    fresh_local: u32,
-    total_local: u32,
-    extra_local: u32,
-    bound: QuickArrayBound,
-    selector_mask: i32,
-    stamp_mask: i32,
-    checksum_mask: i32,
-    modulus: f64,
-    increment: u32,
-    displaced_property_instruction: u32,
-    literal_instructions: [3]u32,
-    exit_ip: u32,
-    /// Isolated-mode cache of the immutable validated literal descriptor. A
-    /// Chunk can cross realm entry, so the root shape is the exact cache key.
-    prepared_root_shape: ?*Shape = null,
-    prepared_literal_shape: ?value.PreparedInlineLiteralShape = null,
-};
-
-const QuickArrayPlan = union(enum) {
-    unsupported,
-    object_allocation: QuickObjectAllocationLoop,
-};
-
 const max_quick_leaf_ops = 16;
 const max_quick_leaf_stack = 8;
 
@@ -1192,22 +1163,6 @@ var quick_arguments_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
-var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
-var quick_object_allocation_checkpoint_crossings: std.atomic.Value(u64) = .init(0);
-var quick_object_allocation_first_entry_steps: std.atomic.Value(u64) = .init(std.math.maxInt(u64));
-var quick_object_literal_shape_preparations: std.atomic.Value(u64) = .init(0);
-var quick_object_allocation_reserve_refills: std.atomic.Value(u64) = .init(0);
-
-pub fn quickObjectAllocationLoopHitsForTesting() u64 {
-    std.debug.assert(builtin.is_test);
-    return quick_object_allocation_loop_hits.load(.monotonic);
-}
-
-pub fn quickObjectAllocationReserveRefillsForTesting() u64 {
-    std.debug.assert(builtin.is_test);
-    return quick_object_allocation_reserve_refills.load(.monotonic);
-}
-
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
@@ -1529,136 +1484,6 @@ inline fn quickArgumentsStore(vm: *Interpreter, receiver: Value, key: Value, sto
     if (!object.setDenseElement(index, stored)) return null;
     return stored;
 }
-
-fn compileQuickObjectAllocationLoop(chunk: *Chunk, start: usize) ?QuickObjectAllocationLoop {
-    const code = chunk.code.items;
-    const expected = [_]bc.Op{
-        .load_local, .load_const, .lt,          .jump_if_false, .load_local,  .load_const,  .bit_and,     .store_local,
-        .pop,        .load_local, .load_local,  .get_index,     .store_local, .pop,         .load_local,  .get_prop,
-        .load_local, .add,        .load_local,  .add,           .load_const,  .mod,         .store_local, .pop,
-        .new_object, .load_local, .init_prop,   .load_local,    .load_const,  .bit_and,     .init_prop,   .load_local,
-        .get_prop,   .init_prop,  .store_local, .pop,           .load_local,  .load_local,  .load_local,  .set_index,
-        .pop,        .load_local, .load_local,  .get_prop,      .load_local,  .get_prop,    .add,         .load_local,
-        .get_prop,   .add,        .load_const,  .bit_and,       .add,         .store_local, .pop,         .load_local,
-        .load_const, .add,        .store_local, .pop,           .jump,
-    };
-    if (start + expected.len > code.len) return null;
-    for (expected, 0..) |op, offset|
-        if (offset != 1 and code[start + offset].op != op) return null;
-
-    const counter_local = code[start].a;
-    const index_local = code[start + 7].a;
-    const array_local = code[start + 9].a;
-    const displaced_local = code[start + 12].a;
-    const extra_local = code[start + 18].a;
-    const value_local = code[start + 22].a;
-    const fresh_local = code[start + 34].a;
-    const total_local = code[start + 41].a;
-    const locals = [_]u32{
-        counter_local, index_local, array_local, displaced_local,
-        extra_local,   value_local, fresh_local, total_local,
-    };
-    for (locals, 0..) |local, left|
-        for (locals[left + 1 ..]) |other| if (local == other) return null;
-
-    if (code[start + 3].a != start + expected.len or
-        code[start + 4].a != counter_local or code[start + 10].a != index_local or
-        code[start + 14].a != displaced_local or code[start + 16].a != counter_local or
-        code[start + 25].a != value_local or code[start + 27].a != counter_local or
-        code[start + 31].a != displaced_local or code[start + 36].a != array_local or
-        code[start + 37].a != index_local or code[start + 38].a != fresh_local or
-        code[start + 42].a != fresh_local or code[start + 44].a != fresh_local or
-        code[start + 47].a != fresh_local or code[start + 53].a != total_local or
-        code[start + 55].a != counter_local or code[start + 58].a != counter_local or
-        code[start + 60].a != start)
-        return null;
-    if (!propertyNamesMatch(chunk, &.{ start + 15, start + 32 }) or
-        !propertyNamesMatch(chunk, &.{ start + 26, start + 43 }) or
-        !propertyNamesMatch(chunk, &.{ start + 30, start + 45 }) or
-        !propertyNamesMatch(chunk, &.{ start + 33, start + 48 }))
-        return null;
-
-    const literal_name_instructions = [_]usize{ start + 26, start + 30, start + 33 };
-    for (literal_name_instructions, 0..) |instruction, left| {
-        if (code[instruction].a >= chunk.names.items.len) return null;
-        const name = chunk.names.items[code[instruction].a];
-        for (literal_name_instructions[left + 1 ..]) |other_instruction| {
-            if (code[other_instruction].a >= chunk.names.items.len or
-                std.mem.eql(u8, name, chunk.names.items[code[other_instruction].a])) return null;
-        }
-    }
-
-    const bound: QuickArrayBound = switch (code[start + 1].op) {
-        .load_local => .{ .local = code[start + 1].a },
-        .load_const => constant: {
-            if (code[start + 1].a >= chunk.consts.items.len) return null;
-            const value_ = chunk.consts.items[code[start + 1].a];
-            if (!value_.isNumber()) return null;
-            break :constant .{ .constant = value_.asNum() };
-        },
-        else => return null,
-    };
-    switch (bound) {
-        .local => |local| for (locals) |modified| {
-            if (local == modified and local != extra_local) return null;
-        },
-        .constant => {},
-    }
-
-    const constant_instructions = [_]usize{ start + 5, start + 20, start + 28, start + 50, start + 56 };
-    var constants: [constant_instructions.len]f64 = undefined;
-    for (constant_instructions, 0..) |instruction, index| {
-        const constant_index = code[instruction].a;
-        if (constant_index >= chunk.consts.items.len or !chunk.consts.items[constant_index].isNumber()) return null;
-        constants[index] = chunk.consts.items[constant_index].asNum();
-    }
-    return .{
-        .counter_local = counter_local,
-        .array_local = array_local,
-        .index_local = index_local,
-        .displaced_local = displaced_local,
-        .value_local = value_local,
-        .fresh_local = fresh_local,
-        .total_local = total_local,
-        .extra_local = extra_local,
-        .bound = bound,
-        .selector_mask = Value.num(constants[0]).toInt32(),
-        .modulus = constants[1],
-        .stamp_mask = Value.num(constants[2]).toInt32(),
-        .checksum_mask = Value.num(constants[3]).toInt32(),
-        .increment = exactNonNegativeU32(constants[4], false) orelse return null,
-        .displaced_property_instruction = @intCast(start + 15),
-        .literal_instructions = .{ @intCast(start + 26), @intCast(start + 30), @intCast(start + 33) },
-        .exit_ip = @intCast(start + expected.len),
-    };
-}
-
-fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
-    if (compileQuickObjectAllocationLoop(chunk, start)) |allocation|
-        return .{ .object_allocation = allocation };
-    return .unsupported;
-}
-
-fn quickArrayPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickArrayPlan {
-    if (start >= chunk.quick_array_plans.len) return null;
-    const slot = &chunk.quick_array_plans[start];
-    if (if (parallel_sync) @atomicLoad(?*anyopaque, slot, .acquire) else slot.*) |raw|
-        return @ptrCast(@alignCast(raw));
-    const plan = chunk.arena.create(QuickArrayPlan) catch return null;
-    plan.* = compileQuickArrayPlan(chunk, start);
-    if (parallel_sync) {
-        if (@cmpxchgStrong(?*anyopaque, slot, null, plan, .acq_rel, .acquire)) |published|
-            return @ptrCast(@alignCast(published));
-    } else {
-        slot.* = plan;
-    }
-    return plan;
-}
-
-const QuickArrayLoopUpdate = struct {
-    extra_steps: u64,
-    next_ip: usize,
-};
 
 fn quickArrayBoundValue(bound: QuickArrayBound, frame: *Frame) ?Value {
     return switch (bound) {
@@ -2575,288 +2400,6 @@ inline fn advanceQuickObservableSteps(vm: *Interpreter, requested: u64) EvalErro
     return advanceQuickSteps(vm, requested);
 }
 
-fn tryQuickObjectAllocationLoopMode(
-    vm: *Interpreter,
-    chunk: *Chunk,
-    allocation: *QuickObjectAllocationLoop,
-    frame: *Frame,
-    start: usize,
-    max_extra_steps: u64,
-    comptime parallel_sync: bool,
-) EvalError!?QuickArrayLoopUpdate {
-    if (frame.escaped.load(.monotonic)) return null;
-    const counter_slot: usize = @intCast(allocation.counter_local);
-    const array_slot: usize = @intCast(allocation.array_local);
-    const index_slot: usize = @intCast(allocation.index_local);
-    const displaced_slot: usize = @intCast(allocation.displaced_local);
-    const value_slot: usize = @intCast(allocation.value_local);
-    const fresh_slot: usize = @intCast(allocation.fresh_local);
-    const total_slot: usize = @intCast(allocation.total_local);
-    const extra_slot: usize = @intCast(allocation.extra_local);
-    for ([_]usize{ counter_slot, array_slot, index_slot, displaced_slot, value_slot, fresh_slot, total_slot, extra_slot }) |slot|
-        if (slot >= frame.slots.len) return null;
-
-    const array_value = frame.slots[array_slot];
-    if (!array_value.isObject()) return null;
-    const array = array_value.asObj();
-    if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
-        array.accessorsMap() != null or array.attrsMap() != null or
-        array.has_indexed_property.load(.monotonic))
-        return null;
-    const elements_locked = if (parallel_sync) array.lockElements() else false;
-    const dense_array = array.holesMap() == null and array.arrayLengthFloor() <= array.elementsItems().len;
-    array.unlockElements(elements_locked);
-    if (!dense_array) return null;
-    if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
-        !frame.slots[extra_slot].isNumber()) return null;
-    const bound_value = quickArrayBoundValue(allocation.bound, frame) orelse return null;
-    var counter_integer = exactNonNegativeU32(frame.slots[counter_slot].asNum(), true) orelse return null;
-    var counter: f64 = @floatFromInt(counter_integer);
-    var total = frame.slots[total_slot].asNum();
-    const extra = frame.slots[extra_slot].asNum();
-    const bound = bound_value.asNum();
-    if (!(counter < bound)) return null;
-
-    for (allocation.literal_instructions) |instruction|
-        if (instruction >= chunk.ics.len) return null;
-    const literal_shape = prepared: {
-        if (!parallel_sync and allocation.prepared_root_shape == vm.root_shape) {
-            if (allocation.prepared_literal_shape) |cached| break :prepared cached;
-        }
-        const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, parallel_sync) orelse return null;
-        const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, parallel_sync) orelse return null;
-        const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, parallel_sync) orelse return null;
-        const resolved = value.Object.prepareInlineLiteralShape(vm.root_shape, third_transition.shape, 3) orelse return null;
-        if (!parallel_sync) {
-            allocation.prepared_literal_shape = resolved;
-            allocation.prepared_root_shape = vm.root_shape;
-            if (builtin.is_test) _ = quick_object_literal_shape_preparations.fetchAdd(1, .monotonic);
-        }
-        break :prepared resolved;
-    };
-
-    const steps_per_iteration: u64 = 61;
-    const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
-    if (max_iterations == 0) return null;
-    // `%Object.prototype%` is a realm intrinsic, not a live lookup through the
-    // user-replaceable global binding. Resolve the realm cache once for this
-    // checkpoint-bounded allocation batch instead of taking the root binding
-    // lock again for every fresh literal below.
-    const object_proto = vm.objectProto();
-    // Seventeen 61-step iterations can straddle one 1,024-step checkpoint.
-    // Reserve up to 1,024 checkpoint tranches at once and keep the unused suffix
-    // in the owning Interpreter's explicit GC roots. This reduces the
-    // shared heap/backing publication rate without delaying a checkpoint or
-    // publishing more objects than this guarded loop can still consume.
-    const max_allocation_batch = 17 * 1024;
-    var fresh_batch: [if (parallel_sync) max_allocation_batch else 0]*value.Object = undefined;
-    var fresh_batch_len: usize = 0;
-    var iterations: u64 = 0;
-    var completed = false;
-    while (iterations < max_iterations and counter < bound) {
-        // This loop publishes each completed iteration. Stop before the next
-        // indexed read if a peer claimed the array between iterations.
-        if (!quickPropertyAccessAllowed(array)) break;
-        const counter_int32: i32 = @bitCast(counter_integer);
-        const selected = counter_int32 & allocation.selector_mask;
-        if (selected < 0) break;
-        const element_index: usize = @intCast(selected);
-        const displaced_value = if (parallel_sync)
-            array.denseElement(element_index) orelse break
-        else if (element_index < array.elementsItems().len)
-            array.elementsItems()[element_index]
-        else
-            break;
-        const previous = if (parallel_sync) previous: {
-            const property = quickOwnDataPropertyValue(
-                chunk,
-                allocation.displaced_property_instruction,
-                displaced_value,
-                true,
-            ) orelse break;
-            if (!property.isNumber()) break;
-            break :previous property.asNum();
-        } else previous: {
-            const displaced = quickPlainObject(displaced_value) orelse break;
-            if (displaced.proxyHandler() != null or displaced.proxy_revoked or displaced.shape == null) break;
-            const displaced_property_slot = quickOwnDataSlot(chunk, allocation.displaced_property_instruction, displaced) orelse break;
-            break :previous quickSlotNumber(displaced, displaced_property_slot) orelse break;
-        };
-        const next = numberRemainder((previous + counter) + extra, allocation.modulus);
-        const stamp: f64 = @floatFromInt(counter_int32 & allocation.stamp_mask);
-        const next_counter_integer = std.math.add(u32, counter_integer, allocation.increment) catch break;
-        const next_counter: f64 = @floatFromInt(next_counter_integer);
-        const completes_loop = !(next_counter < bound);
-        const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
-            (if (completes_loop) @as(u64, 4) else 0);
-        if (completed_extra_steps > max_extra_steps) break;
-
-        const fresh = if (parallel_sync) batched: {
-            if (vm.gc_object_reserve.items.len == 0) {
-                if (builtin.is_test) _ = quick_object_allocation_reserve_refills.fetchAdd(1, .monotonic);
-                const workers = if (vm.parallel_worker_count) |count| count.load(.acquire) else 1;
-                // The first spawned worker is already concurrent with its
-                // creator (or can shortly overlap another worker). Waiting for
-                // a second worker makes the batching decision depend on startup
-                // scheduling and can strand an entire lane on smaller refills.
-                const reserve_limit: usize = if (workers != 0) max_allocation_batch else 17;
-                var wanted: usize = 0;
-                var probe = counter;
-                while (wanted < reserve_limit and probe < bound) : (wanted += 1)
-                    probe += @floatFromInt(allocation.increment);
-                std.debug.assert(wanted != 0);
-                vm.gc_object_reserve.ensureUnusedCapacity(vm.arena, wanted) catch |err| {
-                    frame.slots[index_slot] = Value.num(@floatFromInt(selected));
-                    frame.slots[displaced_slot] = displaced_value;
-                    frame.slots[value_slot] = Value.num(next);
-                    frame.slots[total_slot] = Value.num(total);
-                    frame.slots[counter_slot] = Value.num(counter);
-                    try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 24);
-                    return err;
-                };
-                fresh_batch_len = gc_mod.allocObjectBatch(vm.gc, vm.arena, fresh_batch[0..wanted]) catch |err| {
-                    frame.slots[index_slot] = Value.num(@floatFromInt(selected));
-                    frame.slots[displaced_slot] = displaced_value;
-                    frame.slots[value_slot] = Value.num(next);
-                    frame.slots[total_slot] = Value.num(total);
-                    frame.slots[counter_slot] = Value.num(counter);
-                    try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 24);
-                    return err;
-                };
-                std.debug.assert(fresh_batch_len != 0);
-                for (fresh_batch[0..fresh_batch_len]) |reserved|
-                    vm.gc_object_reserve.appendAssumeCapacity(reserved);
-            }
-            const fresh = vm.gc_object_reserve.pop().?;
-            break :batched fresh;
-        } else gc_mod.allocObject(vm.gc, vm.arena) catch |err| {
-            frame.slots[index_slot] = Value.num(@floatFromInt(selected));
-            frame.slots[displaced_slot] = displaced_value;
-            frame.slots[value_slot] = Value.num(next);
-            frame.slots[total_slot] = Value.num(total);
-            frame.slots[counter_slot] = Value.num(counter);
-            try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 24);
-            return err;
-        };
-        fresh.proto = object_proto;
-        const fresh_value = Value.obj(fresh);
-        if (!fresh.initializePreparedInlineLiteralShape(literal_shape, &.{
-            Value.num(next),
-            Value.num(stamp),
-            Value.num(previous),
-        }))
-            unreachable;
-
-        frame.slots[index_slot] = Value.num(@floatFromInt(selected));
-        frame.slots[displaced_slot] = displaced_value;
-        frame.slots[value_slot] = Value.num(next);
-        frame.slots[fresh_slot] = fresh_value;
-        // Avoid the non-inlined error/TLS path for the overwhelmingly common
-        // unrestricted receiver. Restricted arrays retain the full ownership
-        // check and the exact error-step accounting below.
-        if (array.restrictionOwner() != 0) vm.checkRestricted(array) catch |err| {
-            frame.slots[total_slot] = Value.num(total);
-            frame.slots[counter_slot] = Value.num(counter);
-            try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);
-            return err;
-        };
-        const stored = if (gc_mod.barrierExactManagedCellFrom(@ptrCast(array), @ptrCast(fresh)))
-            if (parallel_sync)
-                array.replaceDenseElementPresentAfterBarrier(element_index, fresh_value)
-            else stored: {
-                array.replaceDenseElementExclusivePresentAfterBarrier(element_index, fresh_value);
-                break :stored true;
-            }
-        else
-            array.replaceDenseElement(element_index, fresh_value);
-        if (!stored) {
-            const key = propKey(vm, Value.num(@floatFromInt(selected))) catch |err| {
-                frame.slots[total_slot] = Value.num(total);
-                frame.slots[counter_slot] = Value.num(counter);
-                try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);
-                return err;
-            };
-            vm.setMember(array_value, key, fresh_value) catch |err| {
-                frame.slots[total_slot] = Value.num(total);
-                frame.slots[counter_slot] = Value.num(counter);
-                try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);
-                return err;
-            };
-        }
-
-        const checksum_value = quickNumberToInt32((next + stamp) + previous) & allocation.checksum_mask;
-        total += @floatFromInt(checksum_value);
-        counter_integer = next_counter_integer;
-        counter = next_counter;
-        iterations += 1;
-        completed = completes_loop;
-        if (completed) break;
-    }
-    if (iterations == 0) return null;
-    frame.slots[total_slot] = Value.num(total);
-    frame.slots[counter_slot] = Value.num(counter);
-    if (builtin.is_test) _ = quick_object_allocation_loop_hits.fetchAdd(iterations, .monotonic);
-    return .{
-        .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
-        .next_ip = if (completed) allocation.exit_ip else start,
-    };
-}
-
-inline fn tryQuickObjectAllocationLoop(
-    vm: *Interpreter,
-    chunk: *Chunk,
-    allocation: *QuickObjectAllocationLoop,
-    frame: *Frame,
-    start: usize,
-    max_extra_steps: u64,
-    parallel_sync: bool,
-) EvalError!?QuickArrayLoopUpdate {
-    return if (parallel_sync)
-        try tryQuickObjectAllocationLoopMode(vm, chunk, allocation, frame, start, max_extra_steps, true)
-    else
-        try tryQuickObjectAllocationLoopMode(vm, chunk, allocation, frame, start, max_extra_steps, false);
-}
-
-fn tryQuickArrayLoop(
-    vm: *Interpreter,
-    chunk: *Chunk,
-    plan: *QuickArrayPlan,
-    frame: *Frame,
-    start: usize,
-    max_extra_steps: u64,
-    parallel_sync: bool,
-) EvalError!?QuickArrayLoopUpdate {
-    return switch (plan.*) {
-        .unsupported => null,
-        .object_allocation => |*allocation| try tryQuickObjectAllocationLoop(
-            vm,
-            chunk,
-            allocation,
-            frame,
-            start,
-            max_extra_steps,
-            parallel_sync,
-        ),
-    };
-}
-
-inline fn quickOwnDataSlot(chunk: *Chunk, raw_instruction: u32, object: *value.Object) ?usize {
-    if (!quickPropertyAccessAllowed(object)) return null;
-    const instruction: usize = @intCast(raw_instruction);
-    if (instruction >= chunk.code.items.len or instruction >= chunk.ics.len) return null;
-    const name_index = chunk.code.items[instruction].a;
-    if (name_index >= chunk.names.items.len) return null;
-    const ic = &chunk.ics[instruction];
-    const slot = ic.lookupSlotMode(object.shape, false) orelse slot: {
-        const shape = object.shape orelse return null;
-        const resolved = shape.lookup(chunk.names.items[name_index]) orelse return null;
-        ic.recordMode(shape, resolved, false);
-        break :slot resolved;
-    };
-    if (slot >= object.slotsItems().len) return null;
-    return slot;
-}
-
 inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Object) ?usize {
     return quickPropertySlotMode(chunk, instruction, object, false);
 }
@@ -2924,19 +2467,6 @@ fn specializeQuickPropertyOps(target_local: u32, ops: []const QuickNumericOp) Qu
         }
     }
     return .generic;
-}
-
-fn propertyNamesMatch(chunk: *Chunk, instructions: []const usize) bool {
-    if (instructions.len == 0) return false;
-    const first = instructions[0];
-    if (first >= chunk.code.items.len or chunk.code.items[first].a >= chunk.names.items.len) return false;
-    const name = chunk.names.items[chunk.code.items[first].a];
-    for (instructions[1..]) |instruction| {
-        if (instruction >= chunk.code.items.len or chunk.code.items[instruction].a >= chunk.names.items.len or
-            !std.mem.eql(u8, name, chunk.names.items[chunk.code.items[instruction].a]))
-            return false;
-    }
-    return true;
 }
 
 fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
@@ -7935,68 +7465,6 @@ fn runChunk(
                             if (execution_inventory != null) vm_quick_kernel_hits += 1;
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
-                            continue;
-                        }
-                    }
-                }
-                if (!debug_execution and stack.items.len == 0 and (quick_loop_candidates & bc.quick_array_loop_candidate) != 0) {
-                    if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
-                        const steps_until_checkpoint = 1024 - (vm.steps & 1023);
-                        const steps_until_budget = vm.step_budget - vm.steps;
-                        // The fixed-shape allocation plan has no observable
-                        // calls inside one guarded iteration. Let it finish at
-                        // most one iteration across the internal checkpoint,
-                        // then service that checkpoint from materialized state
-                        // below instead of falling through one generic loop.
-                        const checkpoint_slack: u64 = switch (plan.*) {
-                            .object_allocation => 60,
-                            else => 0,
-                        };
-                        const max_extra_steps = @min(steps_until_checkpoint - 1 + checkpoint_slack, steps_until_budget);
-                        const quick_entry_steps = vm.steps;
-                        if (checkpoint_slack != 0) {
-                            exec.acc = acc;
-                            exec.ip = start;
-                        }
-                        if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
-                            if (builtin.is_test) switch (plan.*) {
-                                .object_allocation => _ = quick_object_allocation_first_entry_steps.cmpxchgStrong(
-                                    std.math.maxInt(u64),
-                                    quick_entry_steps,
-                                    .monotonic,
-                                    .monotonic,
-                                ),
-                                else => {},
-                            };
-                            ip = quick.next_ip;
-                            if (checkpoint_slack == 0) {
-                                vm.steps += quick.extra_steps;
-                            } else {
-                                const checkpoint_epoch = vm.steps >> 10;
-                                exec.acc = acc;
-                                exec.ip = ip;
-                                if (vm.gil != null) {
-                                    try advanceQuickObservableSteps(vm, quick.extra_steps);
-                                } else {
-                                    // The object-allocation quick helper has
-                                    // returned and every live managed value is
-                                    // now in registered Exec/frame storage.
-                                    // Scope the precise marker to this one
-                                    // checkpoint service; generic/error/threaded
-                                    // paths retain conservative stack tracing.
-                                    const saved_precise = vm.gc_precise_safepoint;
-                                    vm.gc_precise_safepoint = true;
-                                    defer vm.gc_precise_safepoint = saved_precise;
-                                    try advanceQuickObservableSteps(vm, quick.extra_steps);
-                                }
-                                if (builtin.is_test and vm.steps >> 10 != checkpoint_epoch)
-                                    _ = quick_object_allocation_checkpoint_crossings.fetchAdd(1, .monotonic);
-                            }
-                            if (builtin.is_test) switch (plan.*) {
-                                .object_allocation => {},
-                                .unsupported => {},
-                            };
                             continue;
                         }
                     }
@@ -13303,6 +12771,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         .{ .entry = .initial, .name = "activationArraySum", .argument = 8, .expected = 36 },
         .{ .entry = .initial, .name = "activationArrayPush", .argument = 8, .expected = 806 },
         .{ .entry = .initial, .name = "activationPolymorphic", .argument = 32, .expected = 2498 },
+        .{ .entry = .initial, .name = "activationLiteralAllocation", .argument = 96, .expected = 1456 },
         .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
         .{ .entry = .inline_, .name = "activationLegacy", .argument = 4, .expected = 4 },
         .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
@@ -13324,6 +12793,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
         \\function activationArraySum(){const values=[1,2,3,4,5,6,7,8];let total=0;for(let i=0;i<values.length;i=i+1)total=total+values[i];return total;}
         \\function activationArrayPush(limit){let values=[];for(let i=0;i<limit;i=i+1)values.push((i+2+1)&7);return values.length*100+values[3];}
         \\function activationPolymorphic(limit){let objects=[{value:1,a:0},{b:0,value:2},{c:0,d:0,value:3},{e:0,f:0,g:0,value:4}],checksum=0;for(let i=0;i<limit;i=i+1){let object=objects[i&3];let next=(object.value+i+2)%1000003;object.value=next;checksum=checksum+(next&1023);}return checksum+objects[0].value+objects[1].value+objects[2].value+objects[3].value;}
+        \\function activationLiteralAllocation(limit){let items=[{seed:1},{seed:2},{seed:3},{seed:4},{seed:5},{seed:6},{seed:7},{seed:8}],total=0,cursor=0;while(cursor<limit){let selected=cursor&7;let old=items[selected];let next=(old.seed+cursor+2)%1009;let replacement={seed:next,mark:cursor&3,prior:old.seed};items[selected]=replacement;total=total+((replacement.seed+replacement.mark+replacement.prior)&31);cursor=cursor+1;}return total;}
         \\function activationLegacy(v){return activationLegacy.arguments[0];}
         \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
         \\function activationNestedB(v){return activationNestedA(v);}
@@ -23830,7 +23300,146 @@ test "vm: polymorphic property execution preserves exact bytecode steps and effe
     }
 }
 
-test "vm: quickens fixed-shape object allocation loops with exact steps and guarded fallback" {
+test "vm: object allocation execution preserves ordered literal and indexed effects" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\function allocate(items, limit, extra) {
+        \\  let total = 0, cursor = 0;
+        \\  while (cursor < limit) {
+        \\    let selected = cursor & 7;
+        \\    let old = items[selected];
+        \\    let next = (old.seed + cursor + extra) % 1009;
+        \\    let replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\let events = ''; const raw = [{seed:1},{seed:2},{seed:3},{seed:4},{seed:5},{seed:6},{seed:7},{seed:8}];
+        \\const proxy = new Proxy(raw, {
+        \\  get(target, key, receiver) { events += 'g' + key + ','; $vm.gc(); return Reflect.get(target, key, receiver); },
+        \\  set(target, key, value, receiver) { events += 's' + key + ','; $vm.gc(); return Reflect.set(target, key, value, receiver); }
+        \\});
+        \\const proxyResult = allocate(proxy, 2, 2);
+        \\let reads = 0; const accessor = {};
+        \\Object.defineProperty(accessor, 'seed', { get() { if (this !== accessor) throw new Error('receiver'); reads++; $vm.gc(); return reads; } });
+        \\const observed = [accessor];
+        \\const accessorResult = allocate(observed, 1, 2);
+        \\let coercions = 0; const extra = { valueOf() { coercions++; $vm.gc(); return 2; } };
+        \\const coerced = [{seed:1},{seed:2}];
+        \\const coercionResult = allocate(coerced, 2, extra);
+        \\const first = {seed:1}, second = {seed:2}, marker = {}, partial = [first, second]; let caught = false;
+        \\Object.defineProperty(partial, '1', { get() { return second; }, set(value) { $vm.gc(); throw marker; } });
+        \\try { allocate(partial, 2, 2); } catch (error) { caught = error === marker; }
+        \\let setters = 0;
+        \\Object.defineProperty(Object.prototype, 'seed', { configurable:true, set(value) { setters++; } });
+        \\const prototypeItems = [{seed:1}];
+        \\const prototypeResult = allocate(prototypeItems, 1, 2);
+        \\delete Object.prototype.seed;
+        \\proxyResult === 12 && events === 'g0,s0,g1,s1,' && raw[0].seed === 3 && raw[0].prior === 1 &&
+        \\  raw[1].seed === 5 && raw[1].mark === 1 && raw[1].prior === 2 &&
+        \\  accessorResult === 5 && reads === 2 && observed[0].seed === 3 && observed[0].prior === 2 &&
+        \\  coercionResult === 12 && coercions === 2 && caught && partial[0] !== first && partial[0].seed === 3 &&
+        \\  partial[1] === second && prototypeResult === 4 && setters === 0 && Object.hasOwn(prototypeItems[0], 'seed')
+    )).asBool());
+}
+
+test "vm: object allocation execution survives moving GC" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+    const array = try ctx.evaluate(
+        \\globalThis.allocMoveDiscard = [];
+        \\for (let i = 0; i < 4096; i++) allocMoveDiscard.push({dead:i,child:{value:i}});
+        \\globalThis.allocMoveItems = [{seed:1},{seed:2},{seed:3},{seed:4},{seed:5},{seed:6},{seed:7},{seed:8}];
+        \\function warmedAllocate(items, limit, extra) {
+        \\  let total = 0, cursor = 0;
+        \\  while (cursor < limit) {
+        \\    let selected = cursor & 7;
+        \\    let old = items[selected];
+        \\    let next = (old.seed + cursor + extra) % 1009;
+        \\    let replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\if (warmedAllocate(allocMoveItems, 96, 2) !== 1456) throw new Error('allocate');
+        \\allocMoveItems
+    );
+    const handle = try ctx.protectValue(array);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const old_array = @intFromPtr(handle.get().asObj());
+    const old_child = @intFromPtr(handle.get().asObj().denseElement(0).?.asObj());
+    _ = try ctx.evaluate("allocMoveDiscard = null");
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0);
+    try std.testing.expect(old_array != @intFromPtr(handle.get().asObj()));
+    try std.testing.expect(old_child != @intFromPtr(handle.get().asObj().denseElement(0).?.asObj()));
+    try std.testing.expectEqual(@as(f64, 1582), (try ctx.evaluate("warmedAllocate(allocMoveItems, 96, 2)")).asNum());
+}
+
+test "vm: object allocation execution preserves source hooks" {
+    const Capture = struct {
+        allocations: usize = 0,
+        fn profile(raw: *anyopaque, _: *Interpreter, location: interp.DebugStatementLocation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (location.location.line == 8) self.allocations += 1;
+        }
+        fn debug(raw: *anyopaque, machine: *Interpreter, location: interp.DebugStatementLocation) EvalError!void {
+            profile(raw, machine, location);
+        }
+    };
+    for ([_]bool{ false, true }) |debug| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = if (debug) .tree_walker else .required,
+        });
+        defer ctx.destroy();
+        var capture = Capture{};
+        if (debug) {
+            ctx.debug_statement_ctx = &capture;
+            ctx.debug_statement_hook = Capture.debug;
+        } else {
+            ctx.profile_statement_ctx = &capture;
+            ctx.profile_statement_hook = Capture.profile;
+        }
+        try std.testing.expectEqual(@as(f64, 1456), (try ctx.evaluate(
+            \\function allocate(items, limit, extra) {
+            \\  let total = 0;
+            \\  let cursor = 0;
+            \\  while (cursor < limit) {
+            \\    let selected = cursor & 7;
+            \\    let old = items[selected];
+            \\    let next = (old.seed + cursor + extra) % 1009;
+            \\    let replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+            \\    items[selected] = replacement;
+            \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+            \\    cursor = cursor + 1;
+            \\  }
+            \\  return total;
+            \\}
+            \\allocate([{seed:1},{seed:2},{seed:3},{seed:4},{seed:5},{seed:6},{seed:7},{seed:8}], 96, 2)
+        )).asNum());
+        try std.testing.expectEqual(@as(usize, 96), capture.allocations);
+    }
+}
+
+test "vm: object allocation execution preserves exact steps and effects" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -23862,14 +23471,6 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     , .{kernel});
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
-    const hits_before = quick_object_allocation_loop_hits.load(.monotonic);
-    const crossings_before = quick_object_allocation_checkpoint_crossings.load(.monotonic);
-    const preparations_before = quick_object_literal_shape_preparations.load(.monotonic);
-    var hits = hits_before;
-    var crossings = crossings_before;
-    var results: [2]Value = undefined;
-    var steps: [2]u64 = undefined;
-    var first_entries: [2]u64 = undefined;
     const SafepointCounter = struct {
         fn service(raw_count: *anyopaque, raw_machine: *anyopaque) void {
             const count: *u64 = @ptrCast(@alignCast(raw_count));
@@ -23878,100 +23479,38 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
             count.* += 1;
         }
     };
-    for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+    for ([_]bool{ false, true }) |parallel| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
-        quick_object_allocation_first_entry_steps.store(std.math.maxInt(u64), .monotonic);
-        var parser = try Parser.init(allocator, source);
-        const program = try parser.parseProgram();
-        const chunk = try Compiler.compileProgram(allocator, program);
-        var env = Environment{ .arena = allocator, .fn_scope = true };
-        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
-        try interp.installGlobals(&env, root_shape);
-        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
-        var serviced_checkpoints: u64 = 0;
-        machine.gc_safepoint_ctx = &serviced_checkpoints;
-        machine.gc_safepoint_fn = SafepointCounter.service;
-        results[run_index] = try run(&machine, chunk, null);
-        steps[run_index] = machine.steps;
-        first_entries[run_index] = quick_object_allocation_first_entry_steps.load(.monotonic);
-        try std.testing.expect(first_entries[run_index] != std.math.maxInt(u64));
-        try std.testing.expectEqual(machine.steps >> 10, serviced_checkpoints);
-        const next_hits = quick_object_allocation_loop_hits.load(.monotonic);
-        try std.testing.expect(next_hits > hits);
-        if (parallel)
-            try std.testing.expect(next_hits - hits > 16)
-        else
-            // The first iteration installs the literal/index caches; every
-            // subsequent iteration stays specialized across checkpoints.
-            try std.testing.expectEqual(@as(u64, 95), next_hits - hits);
-        const next_crossings = quick_object_allocation_checkpoint_crossings.load(.monotonic);
-        try std.testing.expect(next_crossings > crossings);
-        if (!parallel) {
-            try std.testing.expectEqual(
-                preparations_before + 1,
-                quick_object_literal_shape_preparations.load(.monotonic),
-            );
+        // Include the three checkpoint placements captured by the baseline.
+        for ([_]u64{ 0, 821, 822, 823 }) |initial_steps| {
+            var parser = try Parser.init(allocator, source);
+            const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try Shape.createRoot(allocator);
+            try interp.installGlobals(&env, root_shape);
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .steps = initial_steps });
+            var serviced_checkpoints: u64 = 0;
+            machine.gc_safepoint_ctx = &serviced_checkpoints;
+            machine.gc_safepoint_fn = SafepointCounter.service;
+            try std.testing.expectEqual(@as(f64, 1456), (try run(&machine, chunk, null)).asNum());
+            try std.testing.expectEqual(@as(u64, 5944), machine.steps - initial_steps);
+            try std.testing.expectEqual((machine.steps >> 10) - (initial_steps >> 10), serviced_checkpoints);
         }
-        hits = next_hits;
-        crossings = next_crossings;
     }
-    try std.testing.expectEqual(
-        preparations_before + 1,
-        quick_object_literal_shape_preparations.load(.monotonic),
-    );
-    try std.testing.expectEqual(results[1].rawBits(), results[0].rawBits());
-    try std.testing.expectEqual(steps[1], steps[0]);
-    try std.testing.expectEqual(first_entries[1], first_entries[0]);
-
-    // Place the first successful specialized iteration so its final logical
-    // step lands immediately before, exactly at, and immediately after a
-    // 1,024-step checkpoint. Shared mode must retain the exact result/step
-    // count and service every crossed checkpoint from the materialized state.
-    bc.ic_seqlock_enabled.store(true, .monotonic);
-    const first_entry = first_entries[1];
-    const checkpoint = std.mem.alignForward(u64, first_entry + 61, 1024);
-    for ([_]u64{ checkpoint - 61, checkpoint - 60, checkpoint - 59 }) |target_entry| {
-        const initial_steps = target_entry - first_entry;
-        quick_object_allocation_first_entry_steps.store(std.math.maxInt(u64), .monotonic);
-        var parser = try Parser.init(allocator, source);
-        const program = try parser.parseProgram();
-        const chunk = try Compiler.compileProgram(allocator, program);
-        var env = Environment{ .arena = allocator, .fn_scope = true };
-        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
-        try interp.installGlobals(&env, root_shape);
-        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .steps = initial_steps });
-        var serviced_checkpoints: u64 = 0;
-        machine.gc_safepoint_ctx = &serviced_checkpoints;
-        machine.gc_safepoint_fn = SafepointCounter.service;
-        const result = try run(&machine, chunk, null);
-        try std.testing.expectEqual(results[1].rawBits(), result.rawBits());
-        try std.testing.expectEqual(steps[1], machine.steps - initial_steps);
-        try std.testing.expectEqual(target_entry, quick_object_allocation_first_entry_steps.load(.monotonic));
-        try std.testing.expectEqual((machine.steps >> 10) - (initial_steps >> 10), serviced_checkpoints);
-    }
-
-    // A specialized iteration may end exactly on the evaluation budget, but
-    // the next logical bytecode step must still throw at max_steps + 1.
-    const budget_initial_steps = interp.max_steps - 60 - first_entry;
-    quick_object_allocation_first_entry_steps.store(std.math.maxInt(u64), .monotonic);
     var budget_parser = try Parser.init(allocator, source);
-    const budget_program = try budget_parser.parseProgram();
-    const budget_chunk = try Compiler.compileProgram(allocator, budget_program);
+    const budget_chunk = try Compiler.compileProgram(allocator, try budget_parser.parseProgram());
     var budget_env = Environment{ .arena = allocator, .fn_scope = true };
-    const budget_root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    const budget_root_shape = try Shape.createRoot(allocator);
     try interp.installGlobals(&budget_env, budget_root_shape);
+    // Preserve the baseline near-budget placement through ordinary dispatch.
     var budget_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &budget_env,
         .root_shape = budget_root_shape,
-        .steps = budget_initial_steps,
+        .steps = interp.max_steps - 202,
     });
     try std.testing.expectError(error.Throw, run(&budget_machine, budget_chunk, null));
-    try std.testing.expectEqual(interp.max_steps - 60, quick_object_allocation_first_entry_steps.load(.monotonic));
     try std.testing.expectEqual(interp.max_steps + 1, budget_machine.steps);
-
-    // The observable-step helper used after a crossing must still stop on the
-    // exact checkpoint before it advances any later logical steps.
     var stop_requested: std.atomic.Value(bool) = .init(true);
     var stop_machine = try initTestInterpreter(.{
         .arena = allocator,
@@ -23980,11 +23519,9 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         .steps = 1023,
         .stop_flag = &stop_requested,
     });
-    try std.testing.expectError(error.Throw, advanceQuickObservableSteps(&stop_machine, 2));
+    try std.testing.expectError(error.Throw, run(&stop_machine, budget_chunk, null));
     try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
-
     bc.ic_seqlock_enabled.store(false, .monotonic);
-    const prototype_hits_before = quick_object_allocation_loop_hits.load(.monotonic);
     try std.testing.expect((try vmRun(allocator, try std.fmt.allocPrint(allocator,
         \\{s}
         \\let items = [
@@ -24000,10 +23537,6 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         \\allocate(items, 96, 2);
         \\getPrototypeOf(items[0]) === intrinsic
     , .{kernel}))).asBool());
-    try std.testing.expect(
-        quick_object_allocation_loop_hits.load(.monotonic) > prototype_hits_before,
-    );
-    const fallback_hits = quick_object_allocation_loop_hits.load(.monotonic);
     const guarded_counter_kernel =
         \\function allocateFrom(items, limit, extra, cursor) {
         \\  let total = 0;
@@ -24019,10 +23552,10 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         \\  return total;
         \\}
     ;
-    const guarded_counter_cases = [_]struct { limit: []const u8, start: []const u8 }{
-        .{ .limit = "1.5", .start = "0.5" },
-        .{ .limit = "0", .start = "-1" },
-        .{ .limit = "4294967297", .start = "4294967296" },
+    const guarded_counter_cases = [_]struct { limit: []const u8, start: []const u8, expected: f64 }{
+        .{ .limit = "1.5", .start = "0.5", .expected = 4 },
+        .{ .limit = "0", .start = "-1", .expected = 3 },
+        .{ .limit = "4294967297", .start = "4294967296", .expected = 3 },
     };
     for (guarded_counter_cases) |case| {
         const guarded_result = try vmRun(allocator, try std.fmt.allocPrint(
@@ -24030,8 +23563,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
             "{s}\nallocateFrom([{{ seed: 1, mark: 0, prior: 0 }}], {s}, 2, {s})",
             .{ guarded_counter_kernel, case.limit, case.start },
         ));
-        try std.testing.expect(guarded_result.isNumber());
-        try std.testing.expectEqual(fallback_hits, quick_object_allocation_loop_hits.load(.monotonic));
+        try std.testing.expectEqual(case.expected, guarded_result.asNum());
     }
     try std.testing.expectEqual(@as(f64, 2), (try vmRun(allocator, try std.fmt.allocPrint(allocator,
         \\{s}
@@ -24044,7 +23576,6 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         \\allocate(items, 1, 0);
         \\calls
     , .{kernel}))).asNum());
-    try std.testing.expectEqual(fallback_hits, quick_object_allocation_loop_hits.load(.monotonic));
     try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator, try std.fmt.allocPrint(allocator,
         \\{s}
         \\let stores = 0;
@@ -24054,7 +23585,6 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         \\allocate(items, 1, 0);
         \\stores
     , .{kernel}))).asNum());
-    try std.testing.expectEqual(fallback_hits, quick_object_allocation_loop_hits.load(.monotonic));
 }
 
 test "vm: shared array fast paths retain observable overrides" {

@@ -27561,12 +27561,12 @@ test "parallel_js automatic compaction relocates at a shared moving stop" {
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
 }
 
-test "enable_gc nursery: quick object replacement keeps exact-managed children" {
+test "enable_gc nursery: ordinary object replacement keeps exact-managed children" {
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     bc.ic_seqlock_enabled.store(false, .monotonic);
 
-    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .bytecode_execution_mode = .required });
     defer ctx.destroy();
 
     _ = try ctx.evaluate(
@@ -27581,7 +27581,6 @@ test "enable_gc nursery: quick object replacement keeps exact-managed children" 
     const heap = ctx.gc.?;
     heap.nursery_threshold_bytes = 1;
     const minor_before = heap.minor_collections;
-    const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
 
     const result = try ctx.evaluate(
         \\function allocate(items, limit, extra) {
@@ -27611,7 +27610,6 @@ test "enable_gc nursery: quick object replacement keeps exact-managed children" 
         seeds[selected] = next;
     }
     try std.testing.expectEqual(@as(f64, @floatFromInt(expected)), result.asNum());
-    try std.testing.expect(vm.quickObjectAllocationLoopHitsForTesting() > hits_before);
     try std.testing.expect(heap.minor_collections > minor_before);
 
     heap.collectYoung();
@@ -27619,12 +27617,12 @@ test "enable_gc nursery: quick object replacement keeps exact-managed children" 
     try std.testing.expectEqual(@as(f64, @floatFromInt(seeds[0] + seeds[7])), retained.asNum());
 }
 
-test "quick object replacement checks a restricted receiver before fused mutation" {
+test "ordinary object replacement checks a restricted receiver before mutation" {
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     bc.ic_seqlock_enabled.store(false, .monotonic);
 
-    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .bytecode_execution_mode = .required });
     defer ctx.destroy();
 
     _ = try ctx.evaluate(
@@ -27668,7 +27666,6 @@ test "quick object replacement checks a restricted receiver before fused mutatio
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         // A zero-iteration loop never performs an internal method on the receiver.
         try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate("allocate(items, 0)")).asNum());
-        const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
         try std.testing.expect((try ctx.evaluate(
             \\var restrictedCaught = false;
             \\try { allocate(items, 1); }
@@ -27676,7 +27673,6 @@ test "quick object replacement checks a restricted receiver before fused mutatio
             \\restrictedCaught;
         )).asBool());
         try std.testing.expectEqual(first_before, items.elementAt(0).?.asObj());
-        try std.testing.expectEqual(hits_before, vm.quickObjectAllocationLoopHitsForTesting());
     }
 }
 
@@ -41677,7 +41673,7 @@ test "parallel_js: cooperative stop rejects a stale parked generation" {
     try std.testing.expect(ctx.allCooperativePeersStopped(42, &collector));
 }
 
-test "parallel_js: fixed-shape object allocation quickens across shared Thread workers" {
+test "parallel_js: ordinary object allocation runs across shared Thread workers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
@@ -41685,15 +41681,13 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
         .enable_jit = false,
         .parallel_gc = true,
         .parallel_js = true,
+        .bytecode_execution_mode = .required,
     });
     defer ctx.destroy();
 
-    const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
-    const batch_cells_before = gc_mod.objectBatchCellsForTesting();
-    const reserve_refills_before = vm.quickObjectAllocationReserveRefillsForTesting();
-    const precise_before = ctx.gc_precise_safepoints.load(.monotonic);
     const result = try ctx.evaluate(
         \\function runAllocationLane(lane) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
         \\  var items = [
         \\    { seed: 1, mark: 0, prior: 0 }, { seed: 2, mark: 0, prior: 0 },
         \\    { seed: 3, mark: 0, prior: 0 }, { seed: 4, mark: 0, prior: 0 },
@@ -41724,17 +41718,6 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
         \\exact;
     );
     try std.testing.expect(result.asBool());
-    const quick_hits = vm.quickObjectAllocationLoopHitsForTesting() - hits_before;
-    try std.testing.expect(quick_hits > 3000);
-    const batch_cells = gc_mod.objectBatchCellsForTesting() - batch_cells_before;
-    try std.testing.expect(batch_cells >= 2048);
-    const reserve_refills = vm.quickObjectAllocationReserveRefillsForTesting() - reserve_refills_before;
-    try std.testing.expect(reserve_refills > 0);
-    // The four creator-thread oracle calls intentionally stay on 17-cell
-    // checkpoint batches; the four concurrent worker calls use the larger
-    // reserve, keeping the total far below the ~242 all-small-batch baseline.
-    try std.testing.expectEqual(@as(u64, 128), reserve_refills);
-    try std.testing.expectEqual(precise_before, ctx.gc_precise_safepoints.load(.monotonic));
 }
 
 test "threads: WebAssembly compiles and executes in shared-realm workers" {
