@@ -6,8 +6,8 @@ const { verifyCAPI } = require("./verify-c-api");
 // The imported verifier is the executable gate at tools/verify-c-api.ts.
 const ROOT = __dirname === "tools" ? "." : __dirname.slice(0, __dirname.lastIndexOf("/tools"));
 const join = (left: string, right: string): string => `${left.replace(/\/$/, "")}/${right}`;
-const fixtures = [join(ROOT, "tests/c_api_value_diff.c"), join(ROOT, "tests/c_api_context_group_diff.c")], args = process.argv.slice(2);
-if (args.length !== fixtures.length) throw new Error("usage: c-api-jsc-diff.ts <zig-js value fixture> <zig-js context-group fixture>");
+const fixtures = [join(ROOT, "tests/c_api_value_diff.c"), join(ROOT, "tests/c_api_context_group_diff.c"), join(ROOT, "tests/c_api_inherited_host_get.c")], args = process.argv.slice(2);
+if (args.length !== fixtures.length) throw new Error("usage: c-api-jsc-diff.ts <zig-js value fixture> <zig-js context-group fixture> <zig-js inherited-host-get fixture>");
 if (checked(["uname", "-s"], "detect platform").trim() !== "Darwin") throw new Error("the pinned JavaScriptCore differential gate requires macOS");
 const sdkRoot = checked(["xcrun", "--sdk", "macosx", "--show-sdk-path"], "locate macOS SDK").trim();
 verifyCAPI(sdkRoot);

@@ -13,18 +13,21 @@
       "implementation_kind": "adaptive_inline_cache",
       "coverage_status": "covered_guarded",
       "surfaces": ["get_prop own-data reads", "set_prop existing own-data writes", "one-hop inherited observations"],
-      "guards": ["exact receiver or holder Shape identity", "plain non-array receiver for own slots", "no accessor or attribute override", "slot remains inside live storage"],
+      "guards": ["exact receiver or holder Shape identity", "plain non-array receiver for own slots", "no accessor or attribute override", "slot remains inside live storage", "inherited observations and consumption decline receiver host get hooks"],
       "miss_behavior": ["perform the complete property operation", "record only a valid shape-slot observation", "replace secondary shapes round-robin after four identities"],
       "metadata_lifetime": "One InlineCache per bytecode instruction in the owning Chunk arena; observations remain warm for the Chunk lifetime and are advisory.",
       "no_gil_synchronization": "Shared realms hold the object property lock around shape/slot use and publish cache fields with the InlineCache seqlock; a torn or contended snapshot is a miss.",
       "observable_steps_debugger": "The shortcut stays inside one already-counted get_prop or set_prop dispatch; property quick kernels are disabled while statement debugging is active.",
       "source_anchors": [
         {"path": "src/bytecode.zig", "text": "pub const InlineCache = struct {"},
-        {"path": "src/vm.zig", "text": "const ic = &chunk.ics[ip - 1];"}
+        {"path": "src/vm.zig", "text": "const ic = &chunk.ics[ip - 1];"},
+        {"path": "src/vm.zig", "text": "fn nativeInheritedPropertyCacheValue("}
       ],
       "test_anchors": [
         {"path": "src/bytecode.zig", "text": "test \"InlineCache retains four polymorphic shape-slot pairs\""},
-        {"path": "src/bytecode.zig", "text": "test \"InlineCache seqlock: concurrent writers never tear shape-slot pairs\""}
+        {"path": "src/bytecode.zig", "text": "test \"InlineCache seqlock: concurrent writers never tear shape-slot pairs\""},
+        {"path": "src/vm.zig", "text": "test \"vm: inherited host gets remain observable before cached prototype data\""},
+        {"path": "src/vm.zig", "text": "test \"vm: inherited host callbacks survive precise GC and shared lookup modes\""}
       ],
       "metrics": []
     },

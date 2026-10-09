@@ -16853,7 +16853,10 @@ pub const Interpreter = struct {
                     if (named_own == .data) {
                         const own = named_own.data;
                         if (prototype_depth == 1) if (inherited_observation) |observation| {
-                            observation.* = .{
+                            // A host get on the receiver must run on every own
+                            // miss, even after it previously returned unhandled.
+                            const host_get = if (o.hostClassHooks()) |hooks| hooks.get != null else false;
+                            if (!host_get) observation.* = .{
                                 .receiver_shape = o.shapeSnapshot(),
                                 .holder_shape = own.shape,
                                 .slot = own.slot,

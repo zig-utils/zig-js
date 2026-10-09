@@ -684,6 +684,19 @@ pub fn build(b: *std.Build) void {
     c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);
     c_api_test_step.dependOn(&run_c_api_inspector_smoke.step);
 
+    const c_api_inherited_host_get = b.addExecutable(.{
+        .name = "c-api-inherited-host-get",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
+    });
+    c_api_inherited_host_get.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_inherited_host_get.c") });
+    c_api_inherited_host_get.root_module.addIncludePath(b.path("include"));
+    c_api_inherited_host_get.root_module.linkLibrary(lib);
+    const run_c_api_inherited_host_get = b.addRunArtifact(c_api_inherited_host_get);
+    run_c_api_inherited_host_get.step.dependOn(&c_api_audit_cmd.step);
+    c_api_test_step.dependOn(&run_c_api_inherited_host_get.step);
+    const c_api_inherited_host_get_step = b.step("test-c-api-inherited-host-get", "Verify observable host gets before inherited properties");
+    c_api_inherited_host_get_step.dependOn(&run_c_api_inherited_host_get.step);
+
     const home_public_abi_fixture = b.addExecutable(.{
         .name = "home-public-abi-7ed99c02",
         .root_module = b.createModule(.{
@@ -1403,6 +1416,7 @@ pub fn build(b: *std.Build) void {
     const c_api_jsc_diff_cmd = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/c-api-jsc-diff.ts" });
     c_api_jsc_diff_cmd.addArtifactArg(c_api_value_diff);
     c_api_jsc_diff_cmd.addArtifactArg(c_api_context_group_diff);
+    c_api_jsc_diff_cmd.addArtifactArg(c_api_inherited_host_get);
     const c_api_jsc_diff_step = b.step("c-api-jsc-diff", "Compare the completed value C API against pinned system JSC");
     c_api_jsc_diff_step.dependOn(&c_api_jsc_diff_cmd.step);
 

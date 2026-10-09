@@ -2528,6 +2528,9 @@ fn nativeInheritedPropertyCacheValue(
     receiver: *const value.Object,
     name: []const u8,
 ) ?Value {
+    // A declined host get is still an observable step before the prototype.
+    // Its next result is independent of both receiver and holder shapes.
+    if (receiver.hostClassHooks()) |hooks| if (hooks.get != null) return null;
     const property_cache = cache orelse return null;
     const receiver_shape_token = if (receiver.shape) |shape|
         @intFromPtr(shape)
@@ -16275,6 +16278,135 @@ test "vm: optimizer reads attributed builtin namespace slots directly" {
     try std.testing.expect(outcome.complete.isObject());
     try std.testing.expect(outcome.complete.asObj().native != null);
     try std.testing.expectEqual(callbacks_before, optimizer_native_property_read_callbacks.load(.monotonic));
+}
+
+test "vm: inherited host gets remain observable before cached prototype data" {
+    const Hook = struct {
+        calls: usize = 0,
+        handled: bool = false,
+
+        fn get(_: *anyopaque, object: *value.Object, name: []const u8) value.HostError!value.HostClassGetResult {
+            const state: *@This() = @ptrCast(@alignCast(object.cApiObjectOwner().?.payload.?));
+            if (!std.mem.eql(u8, name, "value")) return .unhandled;
+            state.calls += 1;
+            return if (state.handled) .{ .value = Value.num(99) } else .unhandled;
+        }
+
+        fn finish(_: *value.CApiObjectOwner) void {}
+    };
+    const hooks = value.HostClassHooks{ .get = Hook.get };
+    var state = Hook{};
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var owner = value.CApiObjectOwner{
+        .allocator = allocator,
+        .class_ref = null,
+        .payload = &state,
+        .finish_fn = Hook.finish,
+    };
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const holder = try machine.newObject();
+    try machine.setProp(holder.asObj(), "value", Value.num(7));
+    const receiver = try machine.newObject();
+    receiver.asObj().setProtoAtomic(holder.asObj());
+    try receiver.asObj().setCApiObjectClass(allocator, &owner, &hooks);
+    var observation: ?interp.InheritedPropertyObservation = null;
+    try std.testing.expectEqual(@as(f64, 7), (try machine.getPropertyObserved(receiver, "value", &observation)).asNum());
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(observation == null);
+
+    // A shape-compatible cache learned from an ordinary receiver must also
+    // decline after host behavior is attached without a shape transition.
+    const holder_shape = holder.asObj().shape.?;
+    var cache: jit.NativePropertyCache = .{
+        .inherited_receiver_shape_token = if (receiver.asObj().shape) |shape| @intFromPtr(shape) else jit.NativePropertyCache.empty_receiver_shape_token,
+        .inherited_holder_shape_token = @intFromPtr(holder_shape),
+        .inherited_slot = holder_shape.lookup("value").?,
+    };
+    try std.testing.expect(nativeInheritedPropertyCacheValue(&cache, receiver.asObj(), "value") == null);
+    try std.testing.expect(!nativeDirectNamedReadIsData(&cache, receiver, "value"));
+    state.handled = true;
+    try std.testing.expectEqual(@as(f64, 99), (try nativeGetProperty(&machine, &cache, receiver, "value")).asNum());
+    try std.testing.expectEqual(@as(usize, 2), state.calls);
+    state.handled = false;
+    try std.testing.expectEqual(@as(f64, 7), (try nativeGetProperty(&machine, &cache, receiver, "value")).asNum());
+    try std.testing.expectEqual(@as(usize, 3), state.calls);
+}
+
+test "vm: inherited host callbacks survive precise GC and shared lookup modes" {
+    const Context = @import("context.zig").Context;
+    const Hook = struct {
+        calls: usize = 0,
+        handled: bool = false,
+        throwing: bool = false,
+        finalized: usize = 0,
+
+        fn get(raw: *anyopaque, object: *value.Object, name: []const u8) value.HostError!value.HostClassGetResult {
+            const state: *@This() = @ptrCast(@alignCast(object.cApiObjectOwner().?.payload.?));
+            if (!std.mem.eql(u8, name, "value")) return .unhandled;
+            state.calls += 1;
+            if (state.throwing) {
+                const machine: *Interpreter = @ptrCast(@alignCast(raw));
+                machine.exception = Value.num(123);
+                return error.Throw;
+            }
+            return if (state.handled) .{ .value = Value.num(99) } else .unhandled;
+        }
+
+        fn finish(owner: *value.CApiObjectOwner) void {
+            const state: *@This() = @ptrCast(@alignCast(owner.payload.?));
+            state.finalized += 1;
+        }
+    };
+    const hooks = value.HostClassHooks{ .get = Hook.get };
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        var state = Hook{};
+        {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = true,
+                .enable_threads = parallel,
+                .parallel_gc = parallel,
+                .parallel_js = parallel,
+                .bytecode_execution_mode = .required,
+            });
+            defer ctx.destroy();
+            const previous_context = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(previous_context);
+            var machine = ctx.interpreter();
+            const holder = try machine.newObject();
+            try machine.setProp(holder.asObj(), "value", Value.num(7));
+            const receiver = try machine.newObject();
+            receiver.asObj().setProtoAtomic(holder.asObj());
+            const owner = try ctx.createCApiObjectOwner(@ptrCast(&state), Hook.finish);
+            owner.payload = &state;
+            try receiver.asObj().setCApiObjectClass(ctx.arena(), owner, &hooks);
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "host", receiver);
+            try std.testing.expectEqual(@as(f64, 448), (try ctx.evaluate(
+                \\function read(subject) { return subject.value; }
+                \\var sum = 0; for (var i = 0; i < 64; i++) sum += read(host); sum;
+            )).asNum());
+            try std.testing.expectEqual(@as(usize, 64), state.calls);
+            const collections_before = ctx.runtimeHeapAccounting().full_collections;
+            ctx.collectGarbage();
+            try std.testing.expect(ctx.runtimeHeapAccounting().full_collections > collections_before);
+            try std.testing.expectEqual(@as(usize, 0), state.finalized);
+            state.handled = true;
+            try std.testing.expectEqual(@as(f64, 99), (try ctx.evaluate("read(host)")).asNum());
+            state.throwing = true;
+            try std.testing.expectEqual(@as(f64, 123), (try ctx.evaluate("try { read(host); } catch (error) { error; }")).asNum());
+            state.throwing = false;
+            state.handled = false;
+            try std.testing.expectEqual(@as(f64, 7), (try ctx.evaluate("read(host)")).asNum());
+            try std.testing.expectEqual(@as(usize, 67), state.calls);
+        }
+        try std.testing.expectEqual(@as(usize, 1), state.finalized);
+    }
 }
 
 test "vm: optimizer inherited property cache serves a one-hop prototype read" {
