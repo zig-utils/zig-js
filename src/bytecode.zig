@@ -732,37 +732,6 @@ pub const QuickBinaryState = struct {
     }
 };
 
-pub const quick_call_loop_candidate: u8 = 1 << 0;
-
-fn mayStartQuickCallLoop(code: []const Inst, start: usize) bool {
-    if (start + 7 >= code.len or
-        (code[start + 1].op != .load_const and code[start + 1].op != .load_local) or
-        code[start + 2].op != .lt or
-        code[start + 3].op != .jump_if_false)
-        return false;
-    const direct =
-        (code[start + 4].op == .load_var or code[start + 4].op == .load_local) and
-        code[start + 5].op == .load_local and
-        code[start + 6].op == .load_local and
-        code[start + 7].op == .call;
-    const method = start + 10 < code.len and
-        code[start + 4].op == .load_local and
-        code[start + 5].op == .dup and
-        code[start + 6].op == .get_prop and
-        code[start + 7].op == .swap and
-        code[start + 8].op == .load_local and
-        code[start + 9].op == .load_local and
-        code[start + 10].op == .call_with_this;
-    const closure = start + 9 < code.len and
-        code[start + 4].op == .make_closure and
-        code[start + 5].op == .store_local and
-        code[start + 6].op == .pop and
-        code[start + 7].op == .load_local and
-        code[start + 8].op == .load_local and
-        code[start + 9].op == .call;
-    return direct or method or closure;
-}
-
 /// A compiled function prototype referenced by `make_closure`. Carries the
 /// original AST `body` too, so a Function value remains tree-walk-callable
 /// (the migration fallback) in addition to VM-callable.
@@ -966,13 +935,6 @@ pub const Chunk = struct {
     /// Isolated execution publishes a plan only after fully decoding it and may
     /// cache its monomorphic slots; parallel mode does not consume this table.
     quick_property_plans: []?*anyopaque = &.{},
-    /// Lazily decoded counted loops whose body is one monomorphic numeric leaf
-    /// call. The VM owns the plan type; slots are indexed by loop-head bytecode.
-    quick_call_plans: []?*anyopaque = &.{},
-    /// Immutable structural hints for loop quickeners, indexed by bytecode.
-    /// Finalization pays the bounded lookahead once so ordinary load-local
-    /// dispatch does not repeatedly rescan the same instruction stream.
-    quick_loop_candidates: []u8 = &.{},
     /// Isolated-mode live-slot caches for global `load_var` sites. Entries are
     /// type-erased to avoid importing interpreter/value types here and are
     /// guarded by their exact closure environment, global object, and shape.
@@ -999,14 +961,6 @@ pub const Chunk = struct {
         @memset(self.ics, .{});
         self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
         @memset(self.optimizer_binary_profiles, .{});
-        self.quick_call_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
-        @memset(self.quick_call_plans, null);
-        self.quick_loop_candidates = try self.arena.alloc(u8, self.code.items.len);
-        for (self.quick_loop_candidates, 0..) |*candidate, instruction| {
-            var mask: u8 = 0;
-            if (mayStartQuickCallLoop(self.code.items, instruction)) mask |= quick_call_loop_candidate;
-            candidate.* = mask;
-        }
         if (self.debug_sites.items.len > 0) {
             self.debug_nodes = try self.arena.alloc(?*const ast.Node, self.code.items.len);
             @memset(self.debug_nodes, null);

@@ -1041,11 +1041,6 @@ const QuickPropertyPlan = struct {
     resolved_target_slot: u32,
 };
 
-const QuickArrayBound = union(enum) {
-    constant: f64,
-    local: u32,
-};
-
 const max_quick_leaf_ops = 16;
 const max_quick_leaf_stack = 8;
 
@@ -1097,36 +1092,6 @@ const QuickNumericLeaf = struct {
 const QuickLeafPlan = union(enum) {
     unsupported,
     numeric: QuickNumericLeaf,
-};
-
-const QuickCallCallee = union(enum) {
-    global_instruction: u32,
-    local: u32,
-    method: struct {
-        receiver_local: u32,
-        get_prop_instruction: u32,
-    },
-    closure_template: u32,
-};
-
-const QuickNumericCallLoop = struct {
-    index_local: u32,
-    value_local: u32,
-    bound: QuickArrayBound,
-    increment: f64,
-    callee: QuickCallCallee,
-    caller_steps: u8,
-    exit_ip: u32,
-};
-
-const QuickCallLoopPlan = union(enum) {
-    unsupported,
-    numeric_leaf: QuickNumericCallLoop,
-};
-
-const QuickCallLoopUpdate = struct {
-    extra_steps: u64,
-    next_ip: usize,
 };
 
 const QuickGlobalBinding = union(enum) {
@@ -1250,14 +1215,8 @@ pub fn optimizerOsrEntriesForTesting() u64 {
     return optimizer_osr_entries.load(.monotonic);
 }
 
-var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
-var quick_numeric_arguments_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_direct_call_hits: std.atomic.Value(u64) = .init(0);
-var quick_numeric_closure_call_loop_hits: std.atomic.Value(u64) = .init(0);
-var quick_reusable_immediate_closure_hits: std.atomic.Value(u64) = .init(0);
-var quick_numeric_method_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var fast_number_bitwise_hits: std.atomic.Value(u64) = .init(0);
-var quick_numeric_call_loop_test_enabled: std.atomic.Value(bool) = .init(true);
 
 /// A guard miss resumes the exact property opcode, which constructs the
 /// ConcurrentAccessError outside any held object/frame locks. Never cache this
@@ -1485,17 +1444,6 @@ inline fn quickArgumentsStore(vm: *Interpreter, receiver: Value, key: Value, sto
     return stored;
 }
 
-fn quickArrayBoundValue(bound: QuickArrayBound, frame: *Frame) ?Value {
-    return switch (bound) {
-        .constant => |number| Value.num(number),
-        .local => |raw_local| value_: {
-            const local: usize = @intCast(raw_local);
-            if (local >= frame.slots.len or !frame.slots[local].isNumber()) break :value_ null;
-            break :value_ frame.slots[local];
-        },
-    };
-}
-
 inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interpreter) ?Value {
     if (instruction >= chunk.quick_global_bindings.len) return null;
     const raw = chunk.quick_global_bindings[instruction] orelse return null;
@@ -1594,205 +1542,6 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
     const created = chunk.arena.create(QuickGlobalBinding) catch return;
     created.* = resolved;
     chunk.quick_global_bindings[instruction] = created;
-}
-
-fn quickCallLoopBound(chunk: *Chunk, instruction: usize) ?QuickArrayBound {
-    const code = chunk.code.items;
-    if (instruction >= code.len) return null;
-    return switch (code[instruction].op) {
-        .load_local => .{ .local = code[instruction].a },
-        .load_const => constant: {
-            if (code[instruction].a >= chunk.consts.items.len) return null;
-            const value_ = chunk.consts.items[code[instruction].a];
-            if (!value_.isNumber()) return null;
-            break :constant .{ .constant = value_.asNum() };
-        },
-        else => null,
-    };
-}
-
-fn compileQuickDirectCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
-    const code = chunk.code.items;
-    if (start + 16 > code.len) return .unsupported;
-    const expected = [_]bc.Op{
-        .load_local,  .load_const,  .lt,         .jump_if_false,
-        .load_var,    .load_local,  .load_local, .call,
-        .store_local, .pop,         .load_local, .load_const,
-        .add,         .store_local, .pop,        .jump,
-    };
-    // A local loop bound is equally safe; only the second instruction differs.
-    for (expected, 0..) |op, offset| {
-        if (offset == 1) {
-            if (code[start + offset].op != .load_const and code[start + offset].op != .load_local) return .unsupported;
-        } else if (offset == 4) {
-            if (code[start + offset].op != .load_var and code[start + offset].op != .load_local) return .unsupported;
-        } else if (code[start + offset].op != op) return .unsupported;
-    }
-
-    const index_local = code[start].a;
-    const value_local = code[start + 5].a;
-    if (code[start + 3].a != start + 16 or
-        code[start + 6].a != index_local or
-        code[start + 7].a != 2 or
-        code[start + 8].a != value_local or
-        code[start + 10].a != index_local or
-        code[start + 11].a >= chunk.consts.items.len or
-        code[start + 13].a != index_local or
-        code[start + 15].a != start)
-        return .unsupported;
-    const increment = chunk.consts.items[code[start + 11].a];
-    if (!increment.isNumber()) return .unsupported;
-    const bound = quickCallLoopBound(chunk, start + 1) orelse return .unsupported;
-    const callee: QuickCallCallee = switch (code[start + 4].op) {
-        .load_var => global: {
-            if (code[start + 4].a >= chunk.names.items.len) return .unsupported;
-            break :global .{ .global_instruction = @intCast(start + 4) };
-        },
-        .load_local => local: {
-            if (code[start + 4].a >= chunk.local_count) return .unsupported;
-            break :local .{ .local = code[start + 4].a };
-        },
-        else => unreachable,
-    };
-    return .{ .numeric_leaf = .{
-        .index_local = index_local,
-        .value_local = value_local,
-        .bound = bound,
-        .increment = increment.asNum(),
-        .callee = callee,
-        .caller_steps = 16,
-        .exit_ip = @intCast(start + 16),
-    } };
-}
-
-fn compileQuickMethodCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
-    const code = chunk.code.items;
-    if (start + 19 > code.len) return .unsupported;
-    const expected = [_]bc.Op{
-        .load_local,     .load_const,  .lt,   .jump_if_false, .load_local,
-        .dup,            .get_prop,    .swap, .load_local,    .load_local,
-        .call_with_this, .store_local, .pop,  .load_local,    .load_const,
-        .add,            .store_local, .pop,  .jump,
-    };
-    for (expected, 0..) |op, offset| {
-        if (offset == 1) {
-            if (code[start + offset].op != .load_const and code[start + offset].op != .load_local) return .unsupported;
-        } else if (code[start + offset].op != op) return .unsupported;
-    }
-
-    const index_local = code[start].a;
-    const receiver_local = code[start + 4].a;
-    const value_local = code[start + 8].a;
-    if (code[start + 3].a != start + 19 or
-        receiver_local >= chunk.local_count or
-        code[start + 6].a >= chunk.names.items.len or
-        code[start + 9].a != index_local or
-        code[start + 10].a != 2 or
-        code[start + 11].a != value_local or
-        code[start + 13].a != index_local or
-        code[start + 14].a >= chunk.consts.items.len or
-        code[start + 16].a != index_local or
-        code[start + 18].a != start)
-        return .unsupported;
-    const increment = chunk.consts.items[code[start + 14].a];
-    if (!increment.isNumber()) return .unsupported;
-    const bound = quickCallLoopBound(chunk, start + 1) orelse return .unsupported;
-    return .{ .numeric_leaf = .{
-        .index_local = index_local,
-        .value_local = value_local,
-        .bound = bound,
-        .increment = increment.asNum(),
-        .callee = .{ .method = .{
-            .receiver_local = receiver_local,
-            .get_prop_instruction = @intCast(start + 6),
-        } },
-        .caller_steps = 19,
-        .exit_ip = @intCast(start + 19),
-    } };
-}
-
-fn compileQuickClosureCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
-    const code = chunk.code.items;
-    if (start + 18 > code.len) return .unsupported;
-    var closure_creations: usize = 0;
-    for (code) |instruction| closure_creations += @intFromBool(instruction.op == .make_closure);
-    // An escaped caller frame is safe only when this immediate-call loop is its
-    // sole source of closures. A checkpoint-spanning ordinary iteration may
-    // then mark the frame escaped, but the exact trace below proves that closure
-    // is stored in a local, called once, and never exposed to another thread.
-    if (closure_creations != 1) return .unsupported;
-    const expected = [_]bc.Op{
-        .load_local, .load_const, .lt,         .jump_if_false, .make_closure, .store_local,
-        .pop,        .load_local, .load_local, .call,          .store_local,  .pop,
-        .load_local, .load_const, .add,        .store_local,   .pop,          .jump,
-    };
-    for (expected, 0..) |op, offset| {
-        if (offset == 1) {
-            if (code[start + offset].op != .load_const and code[start + offset].op != .load_local) return .unsupported;
-        } else if (code[start + offset].op != op) return .unsupported;
-    }
-
-    const index_local = code[start].a;
-    const template_index = code[start + 4].a;
-    const closure_local = code[start + 5].a;
-    const value_local = code[start + 10].a;
-    if (code[start + 3].a != start + 18 or
-        template_index >= chunk.fns.items.len or
-        closure_local >= chunk.local_count or
-        code[start + 7].a != closure_local or
-        code[start + 8].a != index_local or
-        code[start + 9].a != 1 or
-        code[start + 12].a != index_local or
-        code[start + 13].a >= chunk.consts.items.len or
-        code[start + 15].a != index_local or
-        code[start + 17].a != start)
-        return .unsupported;
-    const template = chunk.fns.items[template_index];
-    if (template.self_name.len != 0 or template.uses_arguments or template.uses_direct_eval or template.is_generator or template.is_async or
-        template.is_arrow or template.is_method or template.params.len != 1 or template.chunk == null)
-        return .unsupported;
-    const increment = chunk.consts.items[code[start + 13].a];
-    if (!increment.isNumber()) return .unsupported;
-    const bound = quickCallLoopBound(chunk, start + 1) orelse return .unsupported;
-    return .{ .numeric_leaf = .{
-        .index_local = index_local,
-        .value_local = value_local,
-        .bound = bound,
-        .increment = increment.asNum(),
-        .callee = .{ .closure_template = template_index },
-        .caller_steps = 18,
-        .exit_ip = @intCast(start + 18),
-    } };
-}
-
-fn compileQuickCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
-    const direct = compileQuickDirectCallLoopPlan(chunk, start);
-    switch (direct) {
-        .unsupported => {},
-        else => return direct,
-    }
-    const method = compileQuickMethodCallLoopPlan(chunk, start);
-    switch (method) {
-        .unsupported => {},
-        else => return method,
-    }
-    return compileQuickClosureCallLoopPlan(chunk, start);
-}
-
-fn quickCallLoopPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickCallLoopPlan {
-    if (start >= chunk.quick_call_plans.len) return null;
-    const slot = &chunk.quick_call_plans[start];
-    if (if (parallel_sync) @atomicLoad(?*anyopaque, slot, .acquire) else slot.*) |raw|
-        return @ptrCast(@alignCast(raw));
-    const plan = chunk.arena.create(QuickCallLoopPlan) catch return null;
-    plan.* = compileQuickCallLoopPlan(chunk, start);
-    if (parallel_sync) {
-        if (@cmpxchgStrong(?*anyopaque, slot, null, plan, .acq_rel, .acquire)) |published|
-            return @ptrCast(@alignCast(published));
-    } else {
-        slot.* = plan;
-    }
-    return plan;
 }
 
 fn specializeQuickLeaf(ops: []const QuickLeafOp) QuickLeafSpecialization {
@@ -2150,224 +1899,6 @@ fn quickReceiverPropertyNumber(
 ) ?f64 {
     const property = quickOwnDataPropertyValue(chunk, instruction, receiver, parallel_sync) orelse return null;
     return if (property.isNumber()) property.asNum() else null;
-}
-
-fn tryQuickNumericCallLoop(
-    vm: *Interpreter,
-    chunk: *Chunk,
-    plan: *const QuickCallLoopPlan,
-    frame: *Frame,
-    start: usize,
-    max_extra_steps: u64,
-    parallel_sync: bool,
-) EvalError!?QuickCallLoopUpdate {
-    if (builtin.is_test and !quick_numeric_call_loop_test_enabled.load(.monotonic)) return null;
-    const loop = switch (plan.*) {
-        .unsupported => return null,
-        .numeric_leaf => |loop| loop,
-    };
-    const closure_loop = switch (loop.callee) {
-        .closure_template => true,
-        else => false,
-    };
-    if (frame.escaped.load(.monotonic) and !closure_loop) return null;
-    const index_slot: usize = @intCast(loop.index_local);
-    const value_slot: usize = @intCast(loop.value_local);
-    if (index_slot >= frame.slots.len or value_slot >= frame.slots.len) return null;
-    if (!frame.slots[index_slot].isNumber() or !frame.slots[value_slot].isNumber()) return null;
-    const bound = quickArrayBoundValue(loop.bound, frame) orelse return null;
-    var index = frame.slots[index_slot].asNum();
-    var current = frame.slots[value_slot].asNum();
-    if (!(index < bound.asNum())) return null;
-
-    var method_receiver: ?Value = null;
-    var method_get_instruction: ?usize = null;
-    var callee: ?Value = null;
-    var callee_chunk: ?*Chunk = null;
-    var argument_count: usize = 2;
-    var captured_frame: ?*Frame = null;
-    switch (loop.callee) {
-        .local => |raw_slot| {
-            const slot: usize = @intCast(raw_slot);
-            if (slot >= frame.slots.len) return null;
-            callee = frame.slots[slot];
-        },
-        .global_instruction => |raw_instruction| {
-            const instruction: usize = @intCast(raw_instruction);
-            if (instruction >= chunk.code.items.len) return null;
-            const binding_name_index = chunk.code.items[instruction].a;
-            if (binding_name_index >= chunk.names.items.len) return null;
-            callee = if (parallel_sync)
-                quickImmutableLocalBinding(vm, chunk.names.items[binding_name_index]) orelse return null
-            else
-                quickGlobalBindingValue(chunk, instruction, vm) orelse return null;
-        },
-        .method => |method| {
-            const receiver_slot: usize = @intCast(method.receiver_local);
-            if (receiver_slot >= frame.slots.len) return null;
-            const receiver = frame.slots[receiver_slot];
-            const instruction: usize = @intCast(method.get_prop_instruction);
-            callee = quickOwnDataPropertyValue(chunk, instruction, receiver, parallel_sync) orelse return null;
-            method_receiver = receiver;
-            method_get_instruction = instruction;
-        },
-        .closure_template => |raw_template_index| {
-            const template_index: usize = @intCast(raw_template_index);
-            if (template_index >= chunk.fns.items.len) return null;
-            const template = chunk.fns.items[template_index];
-            if (template.self_name.len != 0 or template.uses_arguments or template.uses_direct_eval or template.is_generator or template.is_async or
-                template.is_arrow or template.is_method or template.params.len != 1)
-                return null;
-            callee_chunk = template.chunk orelse return null;
-            argument_count = 1;
-            captured_frame = frame;
-        },
-    }
-    var arguments_leaf: QuickNumericLeaf = undefined;
-    var arguments_leaf_active = false;
-    const leaf: *const QuickNumericLeaf = if (captured_frame != null) leaf: {
-        const compiled = callee_chunk.?;
-        if (compiled.param_count != argument_count) return null;
-        const leaf_plan = quickLeafPlan(compiled, parallel_sync) orelse return null;
-        break :leaf switch (leaf_plan.*) {
-            .unsupported => return null,
-            .numeric => |*numeric| numeric,
-        };
-    } else leaf: {
-        const function = jsPlainFunction(callee.?) orelse return null;
-        if (function.is_class_constructor or function.params.len != argument_count) return null;
-        if (function.uses_arguments) {
-            arguments_leaf = compileQuickArgumentsLeaf(function, argument_count) orelse return null;
-            arguments_leaf_active = true;
-            break :leaf &arguments_leaf;
-        }
-        const compiled = function.chunk orelse return null;
-        if (compiled.param_count != argument_count) return null;
-        callee_chunk = compiled;
-        const leaf_plan = quickLeafPlan(compiled, parallel_sync) orelse return null;
-        break :leaf switch (leaf_plan.*) {
-            .unsupported => return null,
-            .numeric => |*numeric| numeric,
-        };
-    };
-    if (captured_frame != null) {
-        if (leaf.captured_local == null or leaf.receiver_property_instruction != null) return null;
-    } else if (leaf.captured_local != null or (leaf.receiver_property_instruction != null and method_receiver == null)) {
-        return null;
-    }
-    var stable_receiver_property: ?f64 = null;
-    if (!parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
-        stable_receiver_property = quickReceiverPropertyNumber(
-            callee_chunk.?,
-            raw_instruction,
-            method_receiver.?,
-            false,
-        ) orelse return null;
-    };
-    const steps_per_iteration = @as(u64, loop.caller_steps) + @as(u64, leaf.executed);
-    const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
-    if (max_iterations == 0) return null;
-    try vm.stackGuard();
-
-    var iterations: u64 = 0;
-    while (iterations < max_iterations and index < bound.asNum()) : (iterations += 1) {
-        const next_index = index + loop.increment;
-        const completes_loop = !(next_index < bound.asNum());
-        const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
-            (if (completes_loop) @as(u64, 4) else 0);
-        if (completed_extra_steps > max_extra_steps) break;
-        if (parallel_sync) if (method_get_instruction) |instruction| {
-            // Preserve completed iterations if ownership changes between
-            // snapshots; resume the next iteration at its guarded opcode.
-            const live_method = quickOwnDataPropertyValue(chunk, instruction, method_receiver.?, true) orelse break;
-            if (live_method.rawBits() != callee.?.rawBits()) break;
-        };
-        var receiver_property = stable_receiver_property;
-        if (parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
-            receiver_property = quickReceiverPropertyNumber(
-                callee_chunk.?,
-                raw_instruction,
-                method_receiver.?,
-                true,
-            ) orelse break;
-        };
-        var captured_value: ?f64 = null;
-        if (leaf.captured_local) |raw_slot| {
-            const slot: usize = @intCast(raw_slot);
-            if (slot >= captured_frame.?.slots.len) return null;
-            if (slot == value_slot) {
-                captured_value = current;
-            } else {
-                const value_ = captured_frame.?.slots[slot];
-                if (!value_.isNumber()) return null;
-                captured_value = value_.asNum();
-            }
-        }
-        const arguments = [2]f64{ current, index };
-        const argument_slice = if (argument_count == 1) arguments[1..2] else arguments[0..2];
-        current = evaluateQuickLeaf(leaf, argument_slice, captured_value, receiver_property) orelse return null;
-        index = next_index;
-    }
-    if (iterations == 0) return null;
-    const completes_loop = !(index < bound.asNum());
-    frame.slots[value_slot] = Value.num(current);
-    frame.slots[index_slot] = Value.num(index);
-    if (builtin.is_test) {
-        _ = quick_numeric_call_loop_hits.fetchAdd(1, .monotonic);
-        if (arguments_leaf_active) _ = quick_numeric_arguments_call_loop_hits.fetchAdd(1, .monotonic);
-        switch (loop.callee) {
-            .closure_template => _ = quick_numeric_closure_call_loop_hits.fetchAdd(1, .monotonic),
-            .method => _ = quick_numeric_method_call_loop_hits.fetchAdd(1, .monotonic),
-            else => {},
-        }
-    }
-    return .{
-        .extra_steps = iterations * steps_per_iteration - 1 + (if (completes_loop) @as(u64, 4) else 0),
-        .next_ip = if (completes_loop) loop.exit_ip else start,
-    };
-}
-
-/// Reuse the one materialized closure on checkpoint-spanning fallback
-/// iterations of a proved immediate-call loop. The structural plan requires a
-/// single closure site in the caller, and the numeric leaf accepts only the
-/// captured scalar expression, so neither identity nor the function object can
-/// be observed between the local store and call. All other closure creation
-/// retains the ordinary fresh-object path.
-fn quickReusableImmediateClosure(
-    chunk: *Chunk,
-    instruction: usize,
-    frame: *Frame,
-    parallel_sync: bool,
-) ?Value {
-    if (instruction < 4) return null;
-    const start = instruction - 4;
-    const plan = quickCallLoopPlan(chunk, start, parallel_sync) orelse return null;
-    const loop = switch (plan.*) {
-        .unsupported => return null,
-        .numeric_leaf => |loop| loop,
-    };
-    const template_index = switch (loop.callee) {
-        .closure_template => |template_index| template_index,
-        else => return null,
-    };
-    if (template_index >= chunk.fns.items.len or chunk.code.items[instruction].a != template_index) return null;
-    const callee_chunk = chunk.fns.items[template_index].chunk orelse return null;
-    const leaf_plan = quickLeafPlan(callee_chunk, parallel_sync) orelse return null;
-    const leaf = switch (leaf_plan.*) {
-        .unsupported => return null,
-        .numeric => |*leaf| leaf,
-    };
-    if (leaf.captured_local == null or leaf.receiver_property_instruction != null) return null;
-
-    const closure_slot: usize = @intCast(chunk.code.items[start + 5].a);
-    if (closure_slot >= frame.slots.len) return null;
-    const held = frame.lockSlots(parallel_sync);
-    defer frame.unlockSlots(held);
-    const candidate = frame.slots[closure_slot];
-    const function = jsChunkFn(candidate) orelse return null;
-    if (function.frame != @as(?*anyopaque, @ptrCast(frame)) or function.chunk != callee_chunk) return null;
-    if (builtin.is_test) _ = quick_reusable_immediate_closure_hits.fetchAdd(1, .monotonic);
-    return candidate;
 }
 
 fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
@@ -7452,23 +6983,6 @@ fn runChunk(
                     continue;
                 }
                 const start = ip - 1;
-                const quick_loop_candidates = if (start < chunk.quick_loop_candidates.len)
-                    chunk.quick_loop_candidates[start]
-                else
-                    0;
-                if (!debug_execution and stack.items.len == 0 and (quick_loop_candidates & bc.quick_call_loop_candidate) != 0) {
-                    if (quickCallLoopPlan(chunk, start, parallel_sync)) |plan| {
-                        const steps_until_checkpoint = 1024 - (vm.steps & 1023);
-                        const steps_until_budget = vm.step_budget - vm.steps;
-                        const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                        if (try tryQuickNumericCallLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
-                            vm.steps += quick.extra_steps;
-                            ip = quick.next_ip;
-                            continue;
-                        }
-                    }
-                }
                 // A quick property assignment must start with an object-valued
                 // base and then a numeric RHS load. Keep the recognizer call off
                 // ordinary numeric locals (including the arithmetic JIT side
@@ -8342,11 +7856,7 @@ fn runChunk(
             },
 
             .make_closure => {
-                const closure = if (frame) |cf|
-                    quickReusableImmediateClosure(chunk, ip - 1, cf, parallel_sync) orelse
-                        try makeClosure(vm, chunk.fns.items[inst.a], frame)
-                else
-                    try makeClosure(vm, chunk.fns.items[inst.a], frame);
+                const closure = try makeClosure(vm, chunk.fns.items[inst.a], frame);
                 try stack.append(stack_alloc, closure);
             },
             .call => {
@@ -12691,7 +12201,7 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     return run(&machine, chunk, null);
 }
 
-fn expectActivationDriverClean(machine: *Interpreter, caller_environment: *Environment, saved_this: Value, saved_new_target: Value) !void {
+fn expectActivationDriverRestored(machine: *Interpreter, caller_environment: *Environment, saved_this: Value, saved_new_target: Value) !void {
     try std.testing.expectEqual(caller_environment, machine.env);
     try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
     try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
@@ -12707,7 +12217,10 @@ fn expectActivationDriverClean(machine: *Interpreter, caller_environment: *Envir
     try std.testing.expect(machine.active_call_frame == null);
     try std.testing.expect(machine.debug_call_frame == null);
     try std.testing.expect(machine.stack_trace_call_frame == null);
+}
 
+fn expectActivationDriverClean(machine: *Interpreter, caller_environment: *Environment, saved_this: Value, saved_new_target: Value) !void {
+    try expectActivationDriverRestored(machine, caller_environment, saved_this, saved_new_target);
     var free_count: usize = 0;
     var next = machine.vm_activation_free;
     while (next) |raw| {
@@ -12749,6 +12262,73 @@ test "vm: precise exec root admission fails before bytecode execution" {
     try std.testing.expectEqual(@as(f64, 37), (try run(&machine, chunk, null)).asNum());
     try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
     try std.testing.expectEqual(@as(f64, 37), ctx.global_object.getOwn("activationRootEffect").?.asNum());
+}
+
+test "vm: escaped closure allocation failures preserve frame ownership" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate("function escapeActivation(seed){return function(delta){return seed+delta;};}");
+    const function = Interpreter.funcOf(ctx.global_object.getOwn("escapeActivation").?).?;
+    const chunk = function.chunk.?;
+    const saved_active_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_active_context);
+    var completed = false;
+    var induced_failures: usize = 0;
+    for (0..512) |fail_index| {
+        var machine = ctx.interpreter();
+        machine.vm_inline_calls_disabled = true;
+        const saved_this = Value.num(91);
+        const saved_new_target = Value.num(92);
+        machine.this_value = saved_this;
+        machine.new_target = saved_new_target;
+        var failing: std.testing.FailingAllocator = .init(ctx.arena(), .{
+            .fail_index = fail_index,
+            .resize_fail_index = fail_index,
+        });
+        machine.arena = failing.allocator();
+        const result = runFunction(&machine, function, chunk, &.{Value.num(13)}, Value.undef(), Value.undef());
+        machine.arena = ctx.arena();
+        try expectActivationDriverRestored(&machine, &ctx.env, saved_this, saved_new_target);
+
+        var free_count: usize = 0;
+        var next = machine.vm_activation_free;
+        while (next) |raw| {
+            const activation: *Activation = @ptrCast(@alignCast(raw));
+            try std.testing.expect(!activation.frame.escaped.load(.acquire));
+            free_count += 1;
+            next = activation.next_free;
+        }
+        // This function captures one defining frame. That frame is Context-
+        // arena owned and must stay out of the reusable activation pool.
+        try std.testing.expect(free_count <= machine.vm_activation_allocations);
+        try std.testing.expect(machine.vm_activation_allocations - free_count <= 1);
+        if (failing.has_induced_failure) {
+            induced_failures += 1;
+            if (result) |_| {} else |err| {
+                switch (err) {
+                    error.OutOfMemory, error.Throw => {},
+                    else => return err,
+                }
+            }
+            continue;
+        }
+        const closure = try result;
+        const captured = Interpreter.funcOf(closure).?;
+        const frame: *Frame = @ptrCast(@alignCast(captured.frame.?));
+        try std.testing.expect(frame.escaped.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), machine.vm_activation_allocations - free_count);
+        try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "retainedActivation", closure);
+        try std.testing.expectEqual(@as(f64, 20), (try ctx.evaluate("retainedActivation(7)")).asNum());
+        try std.testing.expectEqual(@as(f64, 14), (try ctx.evaluate("retainedActivation(1)")).asNum());
+        completed = true;
+        break;
+    }
+    try std.testing.expect(completed);
+    try std.testing.expect(induced_failures > 0);
 }
 
 test "vm: activation driver allocation failures restore exact ownership" {
@@ -20005,7 +19585,243 @@ test "vm: direct native calls reject non-simple parameter entry" {
     );
 }
 
-test "vm: numeric call-loop quickening preserves guards and exact steps" {
+test "vm: call and closure execution preserves the no-JIT baseline in shared contexts" {
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 23190741181), (try ctx.evaluate(
+            \\function step(a, b) { return (a + b) % 101; }
+            \\function exercise(limit) {
+            \\  var local_step = step;
+            \\  var value = 7;
+            \\  for (var i = 0; i < limit; i = i + 1) value = local_step(value, i);
+            \\  return value;
+            \\}
+            \\var first = exercise(300);
+            \\var mutable = function (a, b) { return a + b; };
+            \\var before = mutable(5, 2) + mutable(6, 3);
+            \\mutable = function (a, b) { return a - b; };
+            \\var after = mutable(-5, 2) + mutable(1.5, 2);
+            \\function methodStep(a, b) { return (this.bias + a + b) % 101; }
+            \\function exerciseMethod(receiver, limit) {
+            \\  var value = 11;
+            \\  for (var i = 0; i < limit; i = i + 1) value = receiver.step(value, i);
+            \\  return value;
+            \\}
+            \\var receiver = { bias: 3, step: methodStep };
+            \\var methodFirst = exerciseMethod(receiver, 300);
+            \\receiver.step = function (a, b) { return this.bias + a - b; };
+            \\var methodSecond = exerciseMethod(receiver, 10);
+            \\function exerciseClosure(limit) {
+            \\  var seed = 13;
+            \\  for (var i = 0; i < limit; i = i + 1) {
+            \\    var closure = function (delta) { return (seed + delta) % 101; };
+            \\    seed = closure(i);
+            \\  }
+            \\  return seed;
+            \\}
+            \\var closureFirst = exerciseClosure(300);
+            \\var closureSecond = exerciseClosure(10);
+            \\function argumentsStep(a, b) { return (arguments[0] + arguments[1]) % 101; }
+            \\function exerciseArguments(limit) {
+            \\  var localStep = argumentsStep;
+            \\  var value = 17;
+            \\  for (var i = 0; i < limit; i = i + 1) value = localStep(value, i);
+            \\  return value;
+            \\}
+            \\var argumentsFirst = exerciseArguments(300);
+            \\var argumentsSecond = exerciseArguments(10);
+            \\first + exercise(10) + before * 1000 + after * 10000 + methodFirst * 100000 + methodSecond + closureFirst * 10000000 + closureSecond + argumentsFirst * 1000000000 + argumentsSecond
+        )).asNum());
+    }
+}
+
+test "vm: call and closure execution runs across no-GIL workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\function callLane(lane) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker holds GIL');
+        \\  function step(a,b) { return (a+b)%101; }
+        \\  let value=7; for(let i=0;i<300;i=i+1)value=step(value,i);
+        \\  const receiver={bias:3,step(a,b){return(this.bias+a+b)%101;}};
+        \\  let method=11; for(let i=0;i<300;i=i+1)method=receiver.step(method,i);
+        \\  let seed=13; for(let i=0;i<300;i=i+1){let closure=function(delta){return(seed+delta)%101;};seed=closure(i);}
+        \\  function mapped(a,b){return(arguments[0]+arguments[1])%101;}
+        \\  let args=17; for(let i=0;i<300;i=i+1)args=mapped(args,i);
+        \\  return value+method+seed+args;
+        \\}
+        \\const expected=callLane(0), threads=[]; let valid=true;
+        \\for(let i=0;i<4;i++)threads.push(new Thread(callLane,i));
+        \\for(let i=0;i<4;i++){const result=threads[i].join();valid=valid&&result===expected;}
+        \\valid
+    )).asBool());
+}
+
+test "vm: call and closure execution preserves live effects and identities" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\let trace = '', calls = 0;
+        \\let localStep = function(a, b) {
+        \\  trace += 'old;'; calls++; $vm.gc();
+        \\  localStep = function(a, b) { trace += 'new;'; $vm.gc(); return a - b; };
+        \\  return a + b;
+        \\};
+        \\function exercise(limit) { let value = 7; for (let i = 0; i < limit; i = i + 1) value = localStep(value, i); return value; }
+        \\const rebound = exercise(3);
+        \\let order = ''; const receiver = {bias:3};
+        \\Object.defineProperty(receiver, 'step', { get() {
+        \\  order += 'get;'; $vm.gc();
+        \\  return function(a, b) { if (this !== receiver) throw new Error('receiver'); order += 'call;'; $vm.gc(); return this.bias + a + b; };
+        \\}});
+        \\function method(limit) { let value = 1; for (let i = 0; i < limit; i = i + 1) value = receiver.step(value, i); return value; }
+        \\const methodResult = method(3);
+        \\function mapped(a, b) { $vm.gc(); arguments[0] = arguments[0] + 1; return a + b; }
+        \\function mappedLoop() { let value = 2; for (let i = 0; i < 3; i = i + 1) value = mapped(value, i); return value; }
+        \\const mappedResult = mappedLoop();
+        \\function identities() {
+        \\  let seed = 0; const kept = [];
+        \\  for (let i = 0; i < 8; i = i + 1) {
+        \\    let closure = function(delta) { return seed + delta; };
+        \\    seed = closure(i); kept.push(closure); $vm.gc();
+        \\  }
+        \\  return new Set(kept).size === 8 && kept.every(function(fn) { return fn(1) === 29; });
+        \\}
+        \\const fresh = identities();
+        \\const marker = {}; let effects = 0, caught = false;
+        \\function risky(a, b) { effects++; $vm.gc(); if (effects === 2) throw marker; return a + b + 1; }
+        \\function throwingLoop() { let value = 0; for (let i = 0; i < 3; i = i + 1) value = risky(value, i); return value; }
+        \\try { throwingLoop(); } catch (error) { caught = error === marker; }
+        \\function capture(limit) { let seed = 13; for (let i = 0; i < limit; i = i + 1) { let closure = function(delta) { $vm.gc(); return (seed + delta) % 101; }; seed = closure(i); } return seed; }
+        \\rebound === 4 && calls === 1 && trace === 'old;new;new;' && methodResult === 13 &&
+        \\  order === 'get;call;get;call;get;call;' && mappedResult === 8 && fresh &&
+        \\  caught && effects === 2 && capture(10) === 58
+    )).asBool());
+}
+
+test "vm: call and closure execution survives moving GC" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+    const function = try ctx.evaluate(
+        \\globalThis.callMoveDiscard = [];
+        \\for (let i = 0; i < 4096; i++) callMoveDiscard.push({dead:i,child:{value:i}});
+        \\function capture(seed) { return function(delta) { return seed + delta; }; }
+        \\globalThis.callMoveClosure = capture(13);
+        \\globalThis.callMoveReceiver = {bias:3, step(a,b) { return this.bias + a + b; }};
+        \\for (let i = 0; i < 8; i++) { callMoveClosure(i); callMoveReceiver.step(i, 1); }
+        \\callMoveClosure
+    );
+    const handle = try ctx.protectValue(function);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const old_function = @intFromPtr(handle.get().asObj());
+    const old_receiver = @intFromPtr(ctx.global_object.getOwn("callMoveReceiver").?.asObj());
+    _ = try ctx.evaluate("callMoveDiscard = null");
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0);
+    try std.testing.expect(old_function != @intFromPtr(handle.get().asObj()));
+    try std.testing.expect(old_receiver != @intFromPtr(ctx.global_object.getOwn("callMoveReceiver").?.asObj()));
+    try std.testing.expect((try ctx.evaluate("callMoveClosure(7) === 20 && callMoveReceiver.step(4,5) === 12")).asBool());
+}
+
+test "vm: call and closure execution retains budget and stop checkpoints" {
+    for ([_]bool{ false, true }) |stop_at_checkpoint| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator,
+            \\function step(a,b) { return (a+b)%101; }
+            \\function exercise(limit) { let value=7; for(let i=0;i<limit;i=i+1)value=step(value,i); return value; }
+            \\exercise(300)
+        );
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var stop: std.atomic.Value(bool) = .init(stop_at_checkpoint);
+        var machine = try initTestInterpreter(.{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .stop_flag = &stop,
+            .step_budget = 1024,
+        });
+        try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+        try std.testing.expectEqual(@as(u64, if (stop_at_checkpoint) 1024 else 1025), machine.steps);
+        try std.testing.expectEqualStrings(if (stop_at_checkpoint) "Error" else "RangeError", machine.exception.asObj().errorName());
+    }
+}
+
+test "vm: call and closure execution preserves source hooks" {
+    const Capture = struct {
+        calls: usize = 0,
+        fn profile(raw: *anyopaque, _: *Interpreter, location: interp.DebugStatementLocation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (location.location.line == 6) self.calls += 1;
+        }
+        fn debug(raw: *anyopaque, machine: *Interpreter, location: interp.DebugStatementLocation) EvalError!void {
+            profile(raw, machine, location);
+        }
+    };
+    for ([_]bool{ false, true }) |debug| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = if (debug) .tree_walker else .required,
+        });
+        defer ctx.destroy();
+        var capture = Capture{};
+        if (debug) {
+            ctx.debug_statement_ctx = &capture;
+            ctx.debug_statement_hook = Capture.debug;
+        } else {
+            ctx.profile_statement_ctx = &capture;
+            ctx.profile_statement_hook = Capture.profile;
+        }
+        try std.testing.expectEqual(@as(f64, 58), (try ctx.evaluate(
+            \\function exercise(limit) {
+            \\  let seed = 13;
+            \\  let i = 0;
+            \\  while (i < limit) {
+            \\    let closure = function(delta) { return (seed + delta) % 101; };
+            \\    seed = closure(i);
+            \\    i = i + 1;
+            \\  }
+            \\  return seed;
+            \\}
+            \\exercise(10)
+        )).asNum());
+        try std.testing.expectEqual(@as(usize, 10), capture.calls);
+    }
+}
+
+test "vm: call and closure execution preserves guards and exact steps" {
     if (!jit.supported or @import("builtin").cpu.arch != .aarch64) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -20058,11 +19874,8 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
     var parser = try Parser.init(allocator, source);
     const program = try parser.parseProgram();
     const chunk = try Compiler.compileProgram(allocator, program);
-    var call_loop_supported = false;
     var leaf_supported = false;
-    var closure_loop_supported = false;
     var captured_leaf_supported = false;
-    var method_loop_supported = false;
     var receiver_leaf_supported = false;
     for (chunk.fns.items) |template| {
         const function_chunk = template.chunk orelse continue;
@@ -20085,36 +19898,14 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
                 .unsupported => {},
             }
         }
-        for (function_chunk.code.items, 0..) |_, instruction| {
-            if (instruction >= function_chunk.quick_loop_candidates.len or
-                (function_chunk.quick_loop_candidates[instruction] & bc.quick_call_loop_candidate) == 0) continue;
-            switch (compileQuickCallLoopPlan(function_chunk, instruction)) {
-                .numeric_leaf => |loop| {
-                    call_loop_supported = true;
-                    switch (loop.callee) {
-                        .closure_template => closure_loop_supported = true,
-                        .method => method_loop_supported = true,
-                        else => {},
-                    }
-                },
-                .unsupported => {},
-            }
-        }
     }
-    try std.testing.expect(call_loop_supported);
     try std.testing.expect(leaf_supported);
-    try std.testing.expect(closure_loop_supported);
     try std.testing.expect(captured_leaf_supported);
-    try std.testing.expect(method_loop_supported);
     try std.testing.expect(receiver_leaf_supported);
 
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     bc.ic_seqlock_enabled.store(true, .monotonic);
-    const old_call_loop_enabled = quick_numeric_call_loop_test_enabled.load(.monotonic);
-    defer quick_numeric_call_loop_test_enabled.store(old_call_loop_enabled, .monotonic);
-    quick_numeric_call_loop_test_enabled.store(true, .monotonic);
-
     var owner = jit.Owner.init(std.testing.allocator);
     defer owner.deinit();
     var fast_env = Environment{ .arena = allocator, .fn_scope = true };
@@ -20133,20 +19924,10 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
         .jit_owner = &owner,
     });
     const hits_before = quick_native_direct_call_hits.load(.monotonic);
-    const loop_hits_before = quick_numeric_call_loop_hits.load(.monotonic);
-    const arguments_loop_hits_before = quick_numeric_arguments_call_loop_hits.load(.monotonic);
     const arguments_direct_hits_before = quick_numeric_arguments_direct_call_hits.load(.monotonic);
-    const closure_loop_hits_before = quick_numeric_closure_call_loop_hits.load(.monotonic);
-    const reusable_closure_hits_before = quick_reusable_immediate_closure_hits.load(.monotonic);
-    const method_loop_hits_before = quick_numeric_method_call_loop_hits.load(.monotonic);
     const fast_result = try run(&fast, chunk, null);
     try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > hits_before);
-    try std.testing.expect(quick_numeric_call_loop_hits.load(.monotonic) > loop_hits_before);
-    try std.testing.expect(quick_numeric_arguments_call_loop_hits.load(.monotonic) > arguments_loop_hits_before);
     try std.testing.expect(quick_numeric_arguments_direct_call_hits.load(.monotonic) > arguments_direct_hits_before);
-    try std.testing.expect(quick_numeric_closure_call_loop_hits.load(.monotonic) > closure_loop_hits_before);
-    try std.testing.expect(quick_reusable_immediate_closure_hits.load(.monotonic) > reusable_closure_hits_before);
-    try std.testing.expect(quick_numeric_method_call_loop_hits.load(.monotonic) > method_loop_hits_before);
 
     // Reuse the exact compiled source with the native tier disabled. The ready
     // code belongs to `owner`, but the VM-level disable switch must still force
@@ -20165,8 +19946,9 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
         .global_object = slow_global,
         .this_value = Value.obj(slow_global),
     });
-    quick_numeric_call_loop_test_enabled.store(false, .monotonic);
     const slow_result = try run(&slow, chunk, null);
+    try std.testing.expectEqual(@as(f64, 23190741181), fast_result.asNum());
+    try std.testing.expectEqual(@as(u64, 31563), fast.steps);
     try std.testing.expectEqual(fast_result.rawBits(), slow_result.rawBits());
     try std.testing.expectEqual(fast.steps, slow.steps);
 }

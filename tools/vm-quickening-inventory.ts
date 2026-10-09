@@ -16,8 +16,6 @@ const ENTRY_IDS = [
   "property-update-trace",
   "array-opcode-fast-paths",
   "numeric-leaf-call",
-  "numeric-call-loop",
-  "reusable-immediate-closure",
   "binary-arithmetic-site",
   "native-direct-call",
 ];
@@ -27,10 +25,6 @@ const UNSUPPORTED_IDS = [
   "call-dispatch",
   "control-dispatch",
   "allocation-dispatch",
-];
-const LEGACY_ENTRY_IDS = [
-  "numeric-call-loop",
-  "reusable-immediate-closure",
 ];
 const CLASSIFICATIONS = [
   "general_adaptive",
@@ -197,12 +191,11 @@ function validateInventory(data: any): any {
     requireValue(CLASSIFICATIONS.includes(entry.classification), `${prefix}: unsupported classification`);
     requireValue(IMPLEMENTATION_KINDS.includes(entry.implementation_kind), `${prefix}: unsupported implementation kind`);
     requireValue(entry.coverage_status === "covered_guarded", `${prefix}: unsupported coverage status`);
-    if (LEGACY_ENTRY_IDS.includes(entry.id)) {
-      requireValue(entry.implementation_kind === "legacy_pattern_kernel", `${prefix}: known legacy identity changed implementation kind`);
+    if (entry.implementation_kind === "legacy_pattern_kernel") {
       requireValue(entry.classification === "legacy_narrow", `${prefix}: legacy kernel must remain legacy_narrow`);
+      requireValue(false, `${prefix}: live legacy pattern kernels are retired`);
     }
-    if (entry.implementation_kind === "legacy_pattern_kernel")
-      requireValue(entry.classification === "legacy_narrow", `${prefix}: legacy kernel must remain legacy_narrow`);
+    requireValue(entry.classification !== "legacy_narrow", `${prefix}: live legacy classifications are retired`);
     strings(entry.surfaces, `${prefix}.surfaces`);
     strings(entry.guards, `${prefix}.guards`);
     strings(entry.miss_behavior, `${prefix}.miss_behavior`);
@@ -258,7 +251,7 @@ function renderMarkdown(data: any): string {
   const lines = [
     "---",
     "title: VM quickening inventory",
-    "description: The guarded bytecode-VM caches and kernels, including the narrow legacy patterns that are not general quickening coverage.",
+    "description: The guarded bytecode-VM caches and bounded traces, with retired legacy patterns recorded as implementation history.",
     "---",
     "",
     "# VM quickening inventory",
@@ -288,9 +281,9 @@ function renderMarkdown(data: any): string {
     );
   lines.push(
     "",
-    "Every legacy pattern above remains labeled `legacy_narrow`; none is used as evidence that its broader property, index, call, arithmetic, control, or allocation family is covered.",
+    "No live family is classified as `legacy_narrow`. The validator rejects reintroduced legacy pattern kernels; retirement does not establish broad property, index, call, arithmetic, control, or allocation dispatch coverage.",
     "",
-    "The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). The exact four-property counted-loop kernel was removed in [issue #1076](https://github.com/zig-utils/zig-js/issues/1076). The exact packed-array sum loop kernel and its compile-time candidate hint were removed in [issue #1077](https://github.com/zig-utils/zig-js/issues/1077). The packed-array push loop kernel, its numeric-expression decoder/specialization, and its candidate hint were removed in [issue #1078](https://github.com/zig-utils/zig-js/issues/1078). The exact polymorphic property loop kernel and its candidate hint were removed in [issue #1079](https://github.com/zig-utils/zig-js/issues/1079). The fixed-shape allocation loop kernel and final array-loop plan/candidate machinery were removed in [issue #1081](https://github.com/zig-utils/zig-js/issues/1081). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.",
+    "The exact numeric recurrence body recognizers and precomputed recurrence result/step table were removed in [issue #1074](https://github.com/zig-utils/zig-js/issues/1074). The exact four-property counted-loop kernel was removed in [issue #1076](https://github.com/zig-utils/zig-js/issues/1076). The exact packed-array sum loop kernel and its compile-time candidate hint were removed in [issue #1077](https://github.com/zig-utils/zig-js/issues/1077). The packed-array push loop kernel, its numeric-expression decoder/specialization, and its candidate hint were removed in [issue #1078](https://github.com/zig-utils/zig-js/issues/1078). The exact polymorphic property loop kernel and its candidate hint were removed in [issue #1079](https://github.com/zig-utils/zig-js/issues/1079). The fixed-shape allocation loop kernel and final array-loop plan/candidate machinery were removed in [issue #1081](https://github.com/zig-utils/zig-js/issues/1081). The exact numeric call-loop kernels, connected immediate-closure reuse, and final call-loop metadata were removed in [issue #1082](https://github.com/zig-utils/zig-js/issues/1082). Recursion uses ordinary VM call/activation dispatch and remains subject to the same live bindings, property operations, source hooks, roots, and checkpoints. Historical benchmark evidence is retained as history; it does not establish performance for the current path.",
     "",
     "## Explicitly unsupported broad families",
     "",
@@ -340,8 +333,14 @@ function selfTest(data: any): void {
   unsupportedStatus.unsupported_families[0].status = "covered_by_fallback";
   expectFailure(unsupportedStatus, "unsupported family has an invalid status");
   const legacy = clone(data);
-  legacy.entries.find((entry: any) => entry.implementation_kind === "legacy_pattern_kernel").classification = "general_adaptive";
+  legacy.entries[0].implementation_kind = "legacy_pattern_kernel";
+  legacy.entries[0].classification = "general_adaptive";
   expectFailure(legacy, "legacy kernel must remain legacy_narrow");
+  legacy.entries[0].classification = "legacy_narrow";
+  expectFailure(legacy, "live legacy pattern kernels are retired");
+  const legacyClass = clone(data);
+  legacyClass.entries[0].classification = "legacy_narrow";
+  expectFailure(legacyClass, "live legacy classifications are retired");
   console.log("vm quickening inventory self-test: fail-closed identity, anchors, status, and legacy labels verified");
 }
 

@@ -172,50 +172,9 @@
         {"path": "src/vm.zig", "text": "fn tryQuickArgumentsCall("}
       ],
       "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
+        {"path": "src/vm.zig", "text": "test \"vm: call and closure execution preserves guards and exact steps\""}
       ],
       "metrics": ["quick_numeric_arguments_direct_call_hits"]
-    },
-    {
-      "id": "numeric-call-loop",
-      "title": "Numeric leaf counted-call loop kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["exact counted loops calling a direct, method, closure-template, or arguments numeric leaf"],
-      "guards": ["finalized structural candidate bit", "exact loop/call sequence", "immutable or exactly guarded callee identity", "numeric leaf plan and values", "bounded step window"],
-      "miss_behavior": ["resume ordinary bytecode at the loop head", "publish an explicit unsupported call-loop plan"],
-      "metadata_lifetime": "Instruction-indexed QuickCallLoopPlan and per-callee QuickLeafPlan records live in their owning Chunk arenas.",
-      "no_gil_synchronization": "Both plans use acquire/release publication; frame, environment, receiver, and IC observations use their structure synchronization.",
-      "observable_steps_debugger": "The kernel calculates exact caller and callee steps, stops before checkpoints/budget, and is disabled when statement debugging is active.",
-      "source_anchors": [
-        {"path": "src/bytecode.zig", "text": "fn mayStartQuickCallLoop("},
-        {"path": "src/vm.zig", "text": "fn tryQuickNumericCallLoop("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
-      ],
-      "metrics": ["quick_numeric_call_loop_hits", "quick_numeric_arguments_call_loop_hits", "quick_numeric_closure_call_loop_hits", "quick_numeric_method_call_loop_hits"]
-    },
-    {
-      "id": "reusable-immediate-closure",
-      "title": "Immediate-call closure reuse kernel",
-      "classification": "legacy_narrow",
-      "implementation_kind": "legacy_pattern_kernel",
-      "coverage_status": "covered_guarded",
-      "surfaces": ["checkpoint-spanning fallback iterations of the exact closure-template numeric call loop"],
-      "guards": ["same structural call-loop plan/template", "single captured scalar leaf", "closure stored in the exact frame slot", "same captured frame and callee Chunk"],
-      "miss_behavior": ["allocate a fresh closure through makeClosure", "never reuse when identity could escape or be observed"],
-      "metadata_lifetime": "No additional metadata; it consumes the Chunk-arena call-loop and leaf plans plus the live frame slot.",
-      "no_gil_synchronization": "Plan publication is atomic and the candidate frame slot is read while holding the frame lock in shared execution.",
-      "observable_steps_debugger": "Reuse occurs only where the exact immediate-call pattern proves closure identity unobservable; all other make_closure dispatches remain ordinary.",
-      "source_anchors": [
-        {"path": "src/vm.zig", "text": "fn quickReusableImmediateClosure("}
-      ],
-      "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
-      ],
-      "metrics": ["quick_reusable_immediate_closure_hits"]
     },
     {
       "id": "binary-arithmetic-site",
@@ -255,7 +214,7 @@
         {"path": "src/vm.zig", "text": "fn tryRunNativeDirectCall("}
       ],
       "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
+        {"path": "src/vm.zig", "text": "test \"vm: call and closure execution preserves guards and exact steps\""}
       ],
       "metrics": ["quick_native_direct_call_hits"]
     }
@@ -300,30 +259,22 @@
   "runtime_contract": {
     "plan_types": [
       "QuickPropertyPlan",
-      "QuickLeafPlan",
-      "QuickCallLoopPlan"
+      "QuickLeafPlan"
     ],
     "tagged_types": {
       "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
       "QuickPropertySpecialization": ["generic", "property_local_add_mod", "property_add_constant", "property_pair_add", "property_pair_sub"],
-      "QuickArrayBound": ["constant", "local"],
       "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
       "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
       "QuickLeafPlan": ["unsupported", "numeric"],
-      "QuickCallCallee": ["global_instruction", "local", "method", "closure_template"],
-      "QuickCallLoopPlan": ["unsupported", "numeric_leaf"],
       "QuickGlobalBinding": ["object", "environment"]
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
-      "quick_call_plans",
-      "quick_loop_candidates",
       "quick_global_bindings",
       "quick_leaf_plan"
     ],
-    "structural_candidate_flags": [
-      "quick_call_loop_candidate"
-    ],
+    "structural_candidate_flags": [],
     "observability_counters": [
       "quick_binary_number_hits",
       "quick_binary_number_misses",
@@ -349,12 +300,7 @@
       "quick_global_binding_hits",
       "quick_literal_transition_hits",
       "quick_native_direct_call_hits",
-      "quick_numeric_call_loop_hits",
-      "quick_numeric_arguments_call_loop_hits",
-      "quick_numeric_arguments_direct_call_hits",
-      "quick_numeric_closure_call_loop_hits",
-      "quick_reusable_immediate_closure_hits",
-      "quick_numeric_method_call_loop_hits"
+      "quick_numeric_arguments_direct_call_hits"
     ]
   }
 }
