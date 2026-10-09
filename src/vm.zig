@@ -1778,37 +1778,6 @@ fn tryQuickArgumentsCall(vm: *Interpreter, function: *const Function, values: []
     return Value.num(result);
 }
 
-fn quickLeafPlan(chunk: *Chunk, parallel_sync: bool) ?*QuickLeafPlan {
-    if (if (parallel_sync) @atomicLoad(?*anyopaque, &chunk.quick_leaf_plan, .acquire) else chunk.quick_leaf_plan) |raw|
-        return @ptrCast(@alignCast(raw));
-    const plan = chunk.arena.create(QuickLeafPlan) catch return null;
-    plan.* = compileQuickLeafPlan(chunk);
-    if (parallel_sync) {
-        if (@cmpxchgStrong(?*anyopaque, &chunk.quick_leaf_plan, null, plan, .acq_rel, .acquire)) |published|
-            return @ptrCast(@alignCast(published));
-    } else {
-        chunk.quick_leaf_plan = plan;
-    }
-    return plan;
-}
-
-fn quickImmutableLocalBinding(vm: *Interpreter, name: []const u8) ?Value {
-    var cursor: ?*Environment = vm.env;
-    while (cursor) |env| : (cursor = env.parent) {
-        if (env.direct_eval_forward_target != null) return null;
-        if (env.with_object != null) return null;
-        const locked = env.lockBindingsForRead();
-        const context = env.bindingHashContext();
-        const alias = env.aliases.contains(context, name);
-        const binding = env.vars.get(context, name);
-        const immutable = binding != null and env.consts.contains(context, name);
-        env.unlockBindingsForRead(locked);
-        if (alias) return null;
-        if (binding) |callee| return if (immutable) callee else null;
-    }
-    return null;
-}
-
 fn evaluateQuickLeaf(
     leaf: *const QuickNumericLeaf,
     arguments: []const f64,

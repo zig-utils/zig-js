@@ -157,18 +157,18 @@
     },
     {
       "id": "numeric-leaf-call",
-      "title": "Bounded numeric leaf-call specialization",
+      "title": "Bounded numeric arguments leaf-call specialization",
       "classification": "bounded_structural",
       "implementation_kind": "bounded_trace_plan",
       "coverage_status": "covered_guarded",
-      "surfaces": ["straight-line numeric bytecode leaves", "non-arrow static arguments[index] numeric expressions", "captured scalar and receiver-property variants"],
-      "guards": ["at most sixteen ops/eight stack values", "accepted numeric operations only", "exact arity/parameter layout", "numeric argument/capture/property values", "no observable arguments mutation or escape", "arguments-AST leaves require that no formal parameter binds arguments"],
-      "miss_behavior": ["perform the ordinary JS call", "cache unsupported bytecode leaves explicitly", "AST arguments leaves are revalidated for each exact call arity"],
-      "metadata_lifetime": "QuickLeafPlan is lazily arena allocated per callee Chunk; the arguments-AST leaf is a bounded stack-local plan for one call.",
-      "no_gil_synchronization": "Callee plan publication uses acquire/release compare-exchange; captured frames and receiver properties use their owned synchronization.",
-      "observable_steps_debugger": "Leaf evaluation is disabled under statement hooks and advanceQuickObservableSteps preserves AST/bytecode steps, termination, GC, and GIL checkpoints.",
+      "surfaces": ["non-arrow static arguments[index] numeric expressions"],
+      "guards": ["at most sixteen ops/eight stack values", "accepted numeric operations only", "exact arity/parameter layout", "numeric incoming argument values", "no observable arguments mutation or escape", "arguments-AST leaves require that no formal parameter binds arguments"],
+      "miss_behavior": ["perform the ordinary JS call", "AST arguments leaves are revalidated for each exact call arity"],
+      "metadata_lifetime": "The arguments-AST leaf is a bounded stack-local plan for one call; no per-callee quick leaf cache is allocated or published.",
+      "no_gil_synchronization": "The arguments leaf plan and numeric input copies are private to one call; there is no shared plan publication.",
+      "observable_steps_debugger": "Arguments leaf evaluation is disabled under statement hooks and advanceQuickObservableSteps preserves AST steps, termination, GC, and GIL checkpoints.",
       "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickLeafPlan = union(enum) {"},
+        {"path": "src/vm.zig", "text": "fn compileQuickArgumentsLeaf("},
         {"path": "src/vm.zig", "text": "fn tryQuickArgumentsCall("}
       ],
       "test_anchors": [
@@ -209,7 +209,7 @@
       "surfaces": ["ordinary call of a ready baseline/optimizing numeric leaf without heap activation construction"],
       "guards": ["native execution permitted", "no class constructor or arguments object", "no lexical slots", "at most 64 exact frame slots", "published artifact has matching frame layout and no side exits"],
       "miss_behavior": ["build/run the ordinary VM activation or generic call", "a managed native miss/deoptimization never becomes a completed direct call"],
-      "metadata_lifetime": "It consumes the callee Chunk native-tier artifacts; the temporary bounded slot array lives only for the call.",
+      "metadata_lifetime": "It consumes the callee Chunk native-tier artifacts; the temporary bounded slot array lives only for the call. QuickLeafPlan is a stack-local bounded bytecode decoder result used by the native legacy-frame safety proof, not a per-callee VM cache.",
       "no_gil_synchronization": "Native tier artifacts use their own atomic publication/invalidation contract; the call copies arguments into private stack storage and rechecks execution permission.",
       "observable_steps_debugger": "Statement hooks forbid direct entry; managed artifacts own exact step/trap accounting and unmanaged artifacts are admitted only under the existing native observability contract.",
       "source_anchors": [
@@ -273,8 +273,7 @@
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
-      "quick_global_bindings",
-      "quick_leaf_plan"
+      "quick_global_bindings"
     ],
     "structural_candidate_flags": [],
     "observability_counters": [
