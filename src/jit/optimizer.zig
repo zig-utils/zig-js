@@ -1,13 +1,12 @@
 //! Architecture-neutral optimizer foundation.
 //!
-//! This first layer turns the currently supported numeric/control bytecode
-//! subset into a deterministic control-flow plan. It deliberately does not
-//! execute the plan yet: baseline native code and the interpreter remain the
-//! only executable tiers until guarded lowering and deoptimization metadata
-//! land. Keeping planning separate prevents baseline publication or shell
-//! counters from being mislabeled as optimizing execution.
+//! Bytecode becomes a deterministic control-flow/SSA plan with explicit
+//! recovery state. Guarded executable lowering lives in optimizer_compiler;
+//! planning alone is never attributed as native execution.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const verification = @import("optimizer_verify.zig");
 const bc = @import("../bytecode.zig");
 const RuntimeValue = @import("../value.zig").Value;
 
@@ -313,6 +312,17 @@ pub const Plan = struct {
     instructions: []Instruction,
     graph: ValueGraph,
 
+    pub fn verify(self: *const Plan, mode: verification.Mode) verification.Error!void {
+        return verification.verify(self, mode);
+    }
+
+    pub fn verifyForTesting(self: *const Plan, mode: verification.Mode) std.mem.Allocator.Error!void {
+        if (builtin.is_test) self.verify(mode) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => std.debug.panic("optimizer IR verification failed: {s}", .{@errorName(err)}),
+        };
+    }
+
     pub fn deinit(self: *Plan) void {
         self.allocator.free(self.blocks);
         self.allocator.free(self.instructions);
@@ -533,12 +543,14 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     errdefer allocator.free(blocks);
     var graph = try buildValueGraph(chunk, blocks, allocator);
     errdefer graph.deinit();
-    return .{
+    const result: Plan = .{
         .allocator = allocator,
         .blocks = blocks,
         .instructions = instructions,
         .graph = graph,
     };
+    if (builtin.is_test) try result.verifyForTesting(.function);
+    return result;
 }
 
 const DepthEffect = struct {

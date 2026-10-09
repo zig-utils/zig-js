@@ -614,7 +614,7 @@ fn compactSelectedLoopPlan(
     errdefer allocator.free(blocks);
     const instructions = try allocator.dupe(optimizer.Instruction, plan.instructions);
     errdefer allocator.free(instructions);
-    return .{
+    const result: optimizer.Plan = .{
         .allocator = allocator,
         .blocks = blocks,
         .instructions = instructions,
@@ -632,6 +632,8 @@ fn compactSelectedLoopPlan(
             .exceptional_targets = owned_exceptional_targets,
         },
     };
+    if (builtin.is_test) try result.verifyForTesting(.region);
+    return result;
 }
 
 const ValueType = enum { number, boolean, other };
