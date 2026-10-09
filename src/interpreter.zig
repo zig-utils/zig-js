@@ -38081,6 +38081,11 @@ fn makeAgentRealmGlobal(env: *Environment, root_shape: *Shape) EvalError!*value.
     global_obj.* = .{};
     env.realm_global = global_obj;
     try env.put("globalThis", Value.obj(global_obj));
+    if (env.get("Object")) |object_ctor| if (object_ctor.isObject()) {
+        if (object_ctor.asObj().getOwn("prototype")) |object_proto| if (object_proto.isObject()) {
+            global_obj.setProtoAtomic(object_proto.asObj());
+        };
+    };
     // VM global lookup and reflection use the actual realm object. Publish
     // all installed bindings with ordinary Context attributes before execution.
     try mirrorGlobalsOnto(env, global_obj, root_shape);
@@ -62704,6 +62709,8 @@ test "agent realm globals are own properties before VM execution" {
     const global = try makeAgentRealmGlobal(&env, root_shape);
     try std.testing.expectEqual(global, env.realm_global.?);
     try std.testing.expectEqual(global, global.getOwn("globalThis").?.asObj());
+    const object_proto = global.getOwn("Object").?.asObj().getOwn("prototype").?.asObj();
+    try std.testing.expectEqual(@as(?*value.Object, object_proto), global.proto);
     for ([_][]const u8{ "$262", "Atomics", "SharedArrayBuffer", "Int32Array", "Object", "Reflect", "Math", "Promise", "globalThis" }) |name| {
         try std.testing.expectEqual(env.get(name).?.rawBits(), global.getOwn(name).?.rawBits());
         const attr = global.getAttr(name);
