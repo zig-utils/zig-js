@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const program_verification = @import("optimizer_program_verify.zig");
 const bc = @import("../bytecode.zig");
 const jit = @import("../jit.zig");
 const optimizer = @import("optimizer.zig");
@@ -189,6 +190,15 @@ pub const Program = struct {
     entry_enabled: bool = true,
     observe_loop_backedges: bool = false,
     deterministic_path: bool = false,
+
+    pub fn verify(self: *const Program) program_verification.Error!void {
+        return program_verification.verify(self);
+    }
+
+    fn verifyForTesting(self: *const Program) void {
+        if (builtin.is_test) self.verify() catch |err|
+            std.debug.panic("optimizer native metadata verification failed: {s}", .{@errorName(err)});
+    }
 
     pub fn deinit(self: *Program) void {
         self.allocator.free(self.operations);
@@ -1409,7 +1419,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     errdefer allocator.free(owned_deopt_values);
     const owned_deopt_handlers = try ownRecoveryHandlers(allocator, graph.handler_states);
     errdefer allocator.free(owned_deopt_handlers);
-    const stack_maps = try recoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values);
+    const stack_maps = try typedRecoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values, &types);
     errdefer allocator.free(stack_maps);
     for (native_operations) |descriptor| {
         if (descriptor.step_delta == 0) continue;
@@ -1431,7 +1441,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
             @as(u128, 1) << (std.math.cast(u7, slot) orelse return error.UnsupportedChunk);
     }
-    return .{
+    const lowered: Program = .{
         .allocator = allocator,
         .operations = owned_operations,
         .result = @intCast(result),
@@ -1456,6 +1466,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .native_evaluation_sites = native_evaluation_sites,
         .deterministic_path = deterministic_path,
     };
+    if (builtin.is_test) lowered.verifyForTesting();
+    return lowered;
 }
 
 const LoopExitArm = struct {
@@ -1839,7 +1851,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     }
     const exit_steps = std.math.cast(u12, plan.blocks[header].instruction_count) orelse return error.UnsupportedChunk;
     const iteration_steps = std.math.cast(u12, true_steps) orelse return error.UnsupportedChunk;
-    return .{
+    const lowered: Program = .{
         .allocator = allocator,
         .operations = owned_operations,
         .result = 0,
@@ -1872,6 +1884,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .execution_block = header,
         .entry_enabled = false,
     };
+    if (builtin.is_test) lowered.verifyForTesting();
+    return lowered;
 }
 
 const RegionEdgeOperations = struct {
@@ -2376,7 +2390,7 @@ fn lowerRegionOsr(
     const header_steps = std.math.cast(u12, plan.blocks[header_block].instruction_count) orelse
         return error.UnsupportedChunk;
     const iteration_steps = std.math.cast(u12, maximum_steps) orelse return error.UnsupportedChunk;
-    return .{
+    const lowered: Program = .{
         .allocator = allocator,
         .operations = owned_operations,
         .result = 0,
@@ -2414,6 +2428,8 @@ fn lowerRegionOsr(
         .execution_block = header_block,
         .entry_enabled = false,
     };
+    if (builtin.is_test) lowered.verifyForTesting();
+    return lowered;
 }
 
 fn lowerGeneralLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
@@ -2441,29 +2457,6 @@ fn primitiveStackMaps(allocator: std.mem.Allocator, deopt_count: usize) ![]jit.S
             return error.UnsupportedChunk;
         },
     };
-    return maps;
-}
-
-fn recoveryStackMaps(
-    allocator: std.mem.Allocator,
-    points: []const jit.DeoptPoint,
-    values: []const jit.RecoveryValue,
-) ![]jit.StackMap {
-    const maps = try primitiveStackMaps(allocator, points.len);
-    errdefer allocator.free(maps);
-    for (points, maps) |point, *map| {
-        const first: usize = point.first_value;
-        const count: usize = point.local_count + point.stack_count;
-        if (first > values.len or count > values.len - first) return error.UnsupportedChunk;
-        for (values[first .. first + count]) |recovery| switch (recovery.source) {
-            .frame_slot => map.frame_pointer_slots |= @as(u64, 1) <<
-                (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk),
-            .scratch_slot, .constant => {},
-        };
-        if (point.accumulator.source == .frame_slot)
-            map.frame_pointer_slots |= @as(u64, 1) <<
-                (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk);
-    }
     return maps;
 }
 
@@ -3382,6 +3375,7 @@ fn compileAarch64WithAllocator(
     native_observability: bool,
     scratch_allocator: std.mem.Allocator,
 ) !jit.CompiledCode {
+    if (builtin.is_test) program.verifyForTesting();
     if (!jit.optimizer_supported) return error.UnsupportedTarget;
     var memory = try jit.CodeMemory.init(
         @as(usize, program.operations.len) * 192 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
