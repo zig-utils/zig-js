@@ -3549,18 +3549,16 @@ pub const LegacyCallFrame = struct {
     func_obj: *value.Object,
     arguments: ?Value = null,
     caller: ?*LegacyCallFrame = null,
-    // For a non-strict function that does NOT reference `arguments`, the exotic
-    // object is built lazily — only if the legacy `fn.arguments` property is ever
-    // read (rare). These hold what `createArgumentsObject` needs; valid for the
-    // call's duration (the frame is popped when the call returns).
+    // Original inputs and live parameter sources for fresh Function.arguments
+    // snapshots. The own arguments binding remains separate in `arguments`;
+    // reading the function property must never create a parameter map.
     lazy_func: ?*Function = null,
     lazy_args: []const Value = &.{},
     lazy_env: ?*Environment = null,
     lazy_args_root: ?usize = null,
-    /// VM activations retain their argument snapshot in activation-owned arena
-    /// storage and publish the live frame separately. Lazy materialization then
-    /// installs the same object-owned mapped cells used by an eager `arguments`
-    /// binding, so later parameter reads/writes preserve aliasing exactly.
+    /// VM inputs remain in activation-owned storage. The frame and immutable
+    /// coordinate map supply current simple-formal values only when the body
+    /// has no materialized arguments binding.
     lazy_vm_frame: ?*vm.Frame = null,
     lazy_vm_mapped_parameter_indices: []const u32 = &.{},
 };
@@ -8647,6 +8645,36 @@ pub const Interpreter = struct {
         return Value.nul();
     }
 
+    fn bodyDeclaresArgumentsFunction(self: *Interpreter, node: *const Node) EvalError!bool {
+        try self.checkNesting();
+        switch (node.*) {
+            .func_decl => |function| return std.mem.eql(u8, function.name, "arguments"),
+            .block, .program => |statements| for (statements) |statement| {
+                if (try self.bodyDeclaresArgumentsFunction(statement)) return true;
+            },
+            .if_stmt => |statement| {
+                if (try self.bodyDeclaresArgumentsFunction(statement.consequent)) return true;
+                if (statement.alternate) |alternate| if (try self.bodyDeclaresArgumentsFunction(alternate)) return true;
+            },
+            .while_stmt => |statement| return self.bodyDeclaresArgumentsFunction(statement.body),
+            .do_while_stmt => |statement| return self.bodyDeclaresArgumentsFunction(statement.body),
+            .for_stmt => |statement| return self.bodyDeclaresArgumentsFunction(statement.body),
+            .for_in => |statement| return self.bodyDeclaresArgumentsFunction(statement.body),
+            .with_stmt => |statement| return self.bodyDeclaresArgumentsFunction(statement.body),
+            .labeled_stmt => |statement| return self.bodyDeclaresArgumentsFunction(statement.body),
+            .try_stmt => |statement| {
+                if (try self.bodyDeclaresArgumentsFunction(statement.block)) return true;
+                if (statement.catch_block) |body| if (try self.bodyDeclaresArgumentsFunction(body)) return true;
+                if (statement.finally_block) |body| if (try self.bodyDeclaresArgumentsFunction(body)) return true;
+            },
+            .switch_stmt => |statement| for (statement.cases) |case| for (case.body) |body| {
+                if (try self.bodyDeclaresArgumentsFunction(body)) return true;
+            },
+            else => {},
+        }
+        return false;
+    }
+
     fn materializeLegacyArguments(self: *Interpreter, frame: *LegacyCallFrame) EvalError!Value {
         if (frame.lazy_func == null) return Value.nul();
 
@@ -8661,39 +8689,69 @@ pub const Interpreter = struct {
             self.restoreTempEnvRoots(caller_environment_root);
         }
         const caller_global = self.global_object;
-        const caller_global_root = try self.pushTempRoot(if (caller_global) |global| Value.obj(global) else Value.undef());
+        const caller_global_value = if (caller_global) |global| Value.obj(global) else Value.undef();
+        const caller_global_root = try self.pushTempRoot(caller_global_value);
         defer {
-            const restored = self.tempRoot(caller_global_root, Value.undef());
+            const restored = self.tempRoot(caller_global_root, caller_global_value);
             self.global_object = if (caller_global != null and restored.isObject()) restored.asObj() else null;
             self.restoreTempRoots(caller_global_root);
         }
         // Root-vector growth above may run allocation recovery. Re-read the
         // precise frame edge after it has been relocated instead of retaining a
         // raw Function pointer across those allocations.
+        const count = frame.lazy_args.len;
+        const roots = self.gc_temp_roots.items.len;
+        try self.gc_temp_roots.ensureUnusedCapacity(self.arena, count + 1);
+        defer self.gc_temp_roots.shrinkRetainingCapacity(roots);
         const func = frame.lazy_func.?;
-        const args = if (frame.lazy_args_root) |root|
-            self.gc_temp_roots.items[root..][0..frame.lazy_args.len]
-        else
-            frame.lazy_args;
-        self.env = frame.lazy_env orelse func.closure;
-        if (func.realm_global) |global| self.global_object = global;
-
-        const object = if (frame.lazy_vm_frame) |activation_frame|
-            try self.createFrameArgumentsObject(
-                func,
-                args,
-                activation_frame.slots,
-                frame.lazy_vm_mapped_parameter_indices,
-            )
-        else
-            try self.createArgumentsObject(func, args, frame.lazy_env.?);
-        frame.arguments = object;
-        if (frame.lazy_vm_frame) |activation_frame| {
-            if (frame.lazy_vm_mapped_parameter_indices.len != 0) {
-                activation_frame.mapped_arguments = object.asObj();
-                activation_frame.mapped_parameter_indices = frame.lazy_vm_mapped_parameter_indices;
+        var simple = true;
+        var shadows_arguments = false;
+        for (func.params) |parameter| {
+            if (parameter.default != null or parameter.is_rest or parameter.pattern != null) simple = false;
+            if (std.mem.eql(u8, parameter.name, "arguments")) shadows_arguments = true;
+        }
+        // JSC freezes original inputs when a body function declaration binds
+        // arguments, including Annex B declarations in unreachable branches.
+        const original = !simple or func.uses_direct_eval or (frame.arguments != null and !shadows_arguments) or
+            try self.bodyDeclaresArgumentsFunction(func.body);
+        for (0..count) |index| {
+            const captured = if (frame.lazy_args_root) |root|
+                self.gc_temp_roots.items[root + index]
+            else
+                frame.lazy_args[index];
+            self.gc_temp_roots.appendAssumeCapacity(captured);
+        }
+        if (!original) {
+            if (frame.lazy_vm_frame) |activation| {
+                for (frame.lazy_vm_mapped_parameter_indices, 0..) |argument_index, slot| {
+                    if (argument_index >= count) continue;
+                    self.gc_temp_roots.items[roots + argument_index] =
+                        activation.readSlot(@intCast(slot), bc.ic_seqlock_enabled.load(.monotonic));
+                }
+            } else if (frame.lazy_env) |env| {
+                var seen: SecureStringMembership = .{};
+                defer seen.deinit(self.arena);
+                // Inspect every formal, including missing actual arguments:
+                // an earlier duplicate never aliases the final formal binding.
+                var index = func.params.len;
+                while (index > 0) {
+                    index -= 1;
+                    const name = func.params[index].name;
+                    if (func.params.len > 1 and try seen.getOrPutSecure(self, self.arena, name)) continue;
+                    if (index < count) {
+                        self.gc_temp_roots.items[roots + index] = env.get(name) orelse
+                            self.gc_temp_roots.items[roots + index];
+                    }
+                }
             }
         }
+        self.env = frame.lazy_env orelse frame.lazy_func.?.closure;
+        if (frame.lazy_func.?.realm_global) |global| self.global_object = global;
+        const object = try self.createArgumentsObjectWithMap(
+            frame.lazy_func.?,
+            self.gc_temp_roots.items[roots..][0..count],
+            .{ .snapshot = roots },
+        );
         return object;
     }
 
@@ -10795,12 +10853,8 @@ pub const Interpreter = struct {
                 if (func.obj != null and fr.func_obj == func.obj.?) fr.arguments = args_obj;
             }
             try call_env.put("arguments", args_obj);
-        } else if (!func.is_arrow and legacyCallerArgumentsAllowed(func)) {
-            // Non-strict function that does NOT name `arguments`: the exotic object
-            // is observable ONLY through the legacy `fn.arguments` property, which
-            // is rarely read. Defer the alloc + element copy + parameter map to
-            // that read (see `.arguments` getter) so the common non-strict call —
-            // e.g. a hot sort comparator — pays nothing per call.
+        }
+        if (!func.is_arrow and legacyCallerArgumentsAllowed(func)) {
             if (self.active_call_frame) |fr| {
                 if (func.obj != null and fr.func_obj == func.obj.?) {
                     fr.lazy_func = func;
@@ -10810,6 +10864,7 @@ pub const Interpreter = struct {
                 }
             }
         }
+
         // A base class initializes its instance elements before parameter
         // default evaluation. A derived class waits until `super()` returns.
         if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
@@ -10951,6 +11006,7 @@ pub const Interpreter = struct {
     }
 
     const ArgumentsMapTarget = union(enum) {
+        snapshot: usize,
         environment: *Environment,
         frame: struct {
             slot_values: []const Value,
@@ -10981,6 +11037,13 @@ pub const Interpreter = struct {
 
     fn createArgumentsObjectWithMap(self: *Interpreter, func: *Function, args: []const Value, map_target: ArgumentsMapTarget) EvalError!Value {
         const args_obj = try self.newArray();
+        // Snapshot inputs occupy reserved precise-root slots. Publish the result
+        // into the remaining slot before side-storage allocation can recover
+        // with a collection. This builder has no moving safepoint or JS call.
+        const result_root = self.gc_temp_roots.items.len;
+        if (map_target == .snapshot and self.gc != null)
+            self.gc_temp_roots.appendAssumeCapacity(args_obj);
+        defer if (map_target == .snapshot) self.restoreTempRoots(result_root);
         args_obj.asObj().is_arguments = true;
         // The arguments exotic object's [[Prototype]] is %Object.prototype%
         // (not Array.prototype): it has no inherited array methods, and
@@ -10997,7 +11060,13 @@ pub const Interpreter = struct {
         };
         try args_obj.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(@floatFromInt(args.len)));
         try args_obj.asObj().setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
-        for (args) |av| try args_obj.asObj().appendElement(self.arena, av);
+        for (args, 0..) |av, index| {
+            const captured = switch (map_target) {
+                .snapshot => |root| self.gc_temp_roots.items[root + index],
+                else => av,
+            };
+            try args_obj.asObj().appendElement(self.arena, captured);
+        }
 
         // Strict mode's `arguments.callee` is a poison-pill accessor whose get
         // and set are both `%ThrowTypeError%`. Non-simple sloppy formals also
@@ -11018,15 +11087,16 @@ pub const Interpreter = struct {
             // A mapped (sloppy, simple-parameter) arguments object's `callee` is
             // an own data property = the callee function itself.
             try args_obj.asObj().setOwn(self.arena, self.root_shape, "callee", Value.obj(fo));
-            try args_obj.asObj().setAttr(self.arena, "callee", .{ .writable = true, .enumerable = false, .configurable = true });
+            try args_obj.asObj().setAttr(self.arena, "callee", .{ .writable = true, .enumerable = map_target == .snapshot, .configurable = true });
         }
 
         // Mapped arguments [[ParameterMap]]: in sloppy mode with simple
         // parameters, each in-range index aliases its parameter binding.
-        if (!func.is_strict and !non_simple_params and func.params.len > 0) {
+        if (map_target != .snapshot and !func.is_strict and !non_simple_params and func.params.len > 0) {
             const n = @min(args.len, func.params.len);
             const cold = try args_obj.asObj().ensureCold(self.arena);
             switch (map_target) {
+                .snapshot => unreachable,
                 .environment => |call_env| {
                     const names_allocator = try args_obj.asObj().argMapNamesAllocator(self.arena);
                     const names = try names_allocator.alloc([]const u8, n);
@@ -16702,9 +16772,8 @@ pub const Interpreter = struct {
                         if (legacyCallerArgumentsAllowed(f)) {
                             const frame = self.legacyCallFrameFor(o) orelse return Value.nul();
                             if (std.mem.eql(u8, key, "caller")) return legacyCallerValue(frame);
-                            if (frame.arguments) |a| return a;
-                            // Legacy-only case: build the exotic object on demand
-                            // (deferred from the call) and cache it for repeat reads.
+                            // JSC returns a fresh detached snapshot for each read;
+                            // the own arguments binding may still be mapped.
                             if (frame.lazy_func != null) return self.materializeLegacyArguments(frame);
                             return Value.nul();
                         }
@@ -63934,5 +64003,142 @@ test "arguments own keys list ordinary length once in creation order" {
             \\JSON.stringify(enumerateLength(4));
         )).asStr());
         ctx.collectGarbage();
+    }
+}
+
+test "Function arguments are fresh detached snapshots across activation modes" {
+    const Context = @import("context.zig").Context;
+    const modes = [_]struct { mode: BytecodeExecutionMode, jit: bool, parallel: bool = false }{
+        .{ .mode = .tree_walker, .jit = false },
+        .{ .mode = .required, .jit = false },
+        .{ .mode = .required, .jit = true },
+        .{ .mode = .tree_walker, .jit = false, .parallel = true },
+        .{ .mode = .required, .jit = false, .parallel = true },
+        .{ .mode = .required, .jit = true, .parallel = true },
+    };
+    for (modes) |configuration| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = configuration.jit,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = configuration.parallel,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[[false,false,22,4,9,9],[false,22,9,9],[1,3,null],[3,9],[4,0,9],[9,5]]", (try ctx.evaluate(
+            \\function bound(a) { var body=arguments, one=bound.arguments; a=9; var two=bound.arguments; one[0]=22; return [one===two,one===body,one[0],two[0],body[0],a]; }
+            \\function fresh(a) { var one=fresh.arguments; a=9; var two=fresh.arguments; one[0]=22; return [one===two,one[0],two[0],a]; }
+            \\function missing(a,a) { a=9; return [missing.arguments.length,missing.arguments[0],missing.arguments[1]]; }
+            \\function duplicate(a,a) { a=9; return [duplicate.arguments[0],duplicate.arguments[1]]; }
+            \\function accessor(a) { var calls=0; Object.defineProperty(arguments,'0',{configurable:true,get:function(){calls++;return 7;}}); a=9; return [accessor.arguments[0],calls,a]; }
+            \\function extra(a) { a=9; return [extra.arguments[0],extra.arguments[1]]; }
+            \\JSON.stringify([bound(4),fresh(4),missing(3),duplicate(3,4),accessor(4),extra(4,5)]);
+        )).asStr());
+
+        try std.testing.expectEqualStrings("[[4,8],[4,8],[4,8],9,4,[4,9,9],[1,4,4]]", (try ctx.evaluate(
+            \\function assigned(a) { arguments[0]=8; return [assigned.arguments[0],a]; }
+            \\function assignedDeleted(a) { arguments[0]=8; delete arguments[0]; return [assignedDeleted.arguments[0],a]; }
+            \\function defined(a) { Object.defineProperty(arguments,'0',{value:8}); return [defined.arguments[0],a]; }
+            \\function formal(arguments) { arguments=9; return formal.arguments[0]; }
+            \\function shadow(a) { function arguments() {} a=9; return shadow.arguments[0]; }
+            \\function evalArgs(a) { var ref=eval('arguments'); a=9; return [evalArgs.arguments[0],ref[0],a]; }
+            \\function shortened(a) { arguments.length=0; arguments[10]=8; return [shortened.arguments.length,shortened.arguments[0],a]; }
+            \\JSON.stringify([assigned(4),assignedDeleted(4),defined(4),formal(4),shadow(4),evalArgs(4),shortened(4)]);
+        )).asStr());
+        try std.testing.expectEqualStrings("[[true,false],[4,5,true],[0,null],[4,9,9,4,4]]", (try ctx.evaluate(
+            \\function non(a=1) { var arg=non.arguments, poison=false; try {arg.callee;} catch(e){poison=e instanceof TypeError;} return [poison,Object.getOwnPropertyDescriptor(arg,'callee').enumerable]; }
+            \\function rest(a,...tail) { a=9; var arg=rest.arguments,poison=false; try {arg.callee;} catch(e){poison=e instanceof TypeError;} return [arg[0],arg[1],poison]; }
+            \\function noArgs(a) { a=9; return [noArgs.arguments.length,noArgs.arguments[0]]; }
+            \\function shadowOne(a){function arguments(){} a=9;return shadowOne.arguments[0]}
+            \\function shadowVar(a){var arguments=1;a=9;return shadowVar.arguments[0]}
+            \\function shadowLet(a){let arguments=1;a=9;return shadowLet.arguments[0]}
+            \\function shadowBlock(a){if(false){function arguments(){}}a=9;return shadowBlock.arguments[0]}
+            \\function shadowFormal(arguments){function arguments(){}arguments=9;return shadowFormal.arguments[0]}
+            \\JSON.stringify([non(4),rest(4,5),noArgs(),[shadowOne(4),shadowVar(4),shadowLet(4),shadowBlock(4),shadowFormal(4)]]);
+        )).asStr());
+        try std.testing.expectEqualStrings("[9,4,4,4,4,4]", (try ctx.evaluate(
+            \\function noEval(arguments){arguments=9;return noEval.arguments[0]}
+            \\function emptyEval(arguments){eval('0');arguments=9;return emptyEval.arguments[0]}
+            \\function readEval(arguments){eval('arguments');arguments=9;return readEval.arguments[0]}
+            \\function varEval(arguments){eval('var arguments');arguments=9;return varEval.arguments[0]}
+            \\function functionEval(arguments){eval('function arguments(){}');arguments=9;return functionEval.arguments[0]}
+            \\function normalEval(a){eval('0');a=9;return normalEval.arguments[0]}
+            \\JSON.stringify([noEval(4),emptyEval(4),readEval(4),varEval(4),functionEval(4),normalEval(4)])
+        )).asStr());
+        try std.testing.expectEqualStrings("[4,4,9,4,4]", (try ctx.evaluate(
+            \\function lexical(a){let arguments=1;{function arguments(){}}a=9;return lexical.arguments[0]}
+            \\function loop(a){for(let arguments=1;false;){function arguments(){}}a=9;return loop.arguments[0]}
+            \\function nested(a){function inner(){function arguments(){}}a=9;return nested.arguments[0]}
+            \\function formalEval(arguments){eval('function arguments(){}');arguments=9;return formalEval.arguments[0]}
+            \\function lexicalNested(a){{let arguments=1;{function arguments(){}}}a=9;return lexicalNested.arguments[0]}
+            \\JSON.stringify([lexical(4),loop(4),nested(4),formalEval(4),lexicalNested(4)])
+        )).asStr());
+        try std.testing.expectEqualStrings("[true,true]", (try ctx.evaluate(
+            \\function originalWide(a,b,c,d,e,f,g,h,i,j) { var body=arguments; for(var k=0;k<10;k++)body[k]=null; $vm.gc(); var snapshot=originalWide.arguments; return snapshot[0].value===40 && snapshot[9].value===49 && a===null && j===null; }
+            \\function originalExtra(a) { var body=arguments; body[9]=null; a=null; $vm.gc(); return originalExtra.arguments[9].value===49 && originalExtra.arguments[0].value===40; }
+            \\JSON.stringify([originalWide({value:40},{value:41},{value:42},{value:43},{value:44},{value:45},{value:46},{value:47},{value:48},{value:49}), originalExtra({value:40},1,2,3,4,5,6,7,8,{value:49})]);
+        )).asStr());
+        try std.testing.expect((try ctx.evaluate(
+            \\var snapshotGarbage=[]; for(var garbageIndex=0;garbageIndex<1024;garbageIndex++)snapshotGarbage.push({});
+            \\var snapshotMarker = {value:41}, savedSnapshots=[];
+            \\function snapshotMoving(a) { var first=snapshotMoving.arguments; a={value:42}; $vm.gc(); var second=snapshotMoving.arguments; savedSnapshots=[first,second]; return first[0]===snapshotMarker && second[0]===a && first!==second; }
+            \\var snapshotGcResult=snapshotMoving(snapshotMarker); snapshotGarbage=null; snapshotGcResult;
+        )).asBool());
+        const before = ctx.global_object.getOwn("snapshotMarker").?.asObj();
+        const moved = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+        try std.testing.expect(moved.moved_cells > 0);
+        try std.testing.expect(before != ctx.global_object.getOwn("snapshotMarker").?.asObj());
+        try std.testing.expect((try ctx.evaluate("savedSnapshots[0][0]===snapshotMarker && savedSnapshots[0][0].value===41 && savedSnapshots[1][0].value===42 && savedSnapshots[0].callee===snapshotMoving && Object.getOwnPropertyDescriptor(savedSnapshots[0],'callee').enumerable;")).asBool());
+    }
+}
+
+test "Function arguments snapshot allocation failures restore roots and realms" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |enable_gc| {
+        var failures: usize = 0;
+        for (0..12) |fail_index| {
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = enable_gc });
+            defer ctx.destroy();
+            const function = try ctx.evaluate("function snapshotRootOwner() {} snapshotRootOwner;");
+            const saved_context = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved_context);
+            var machine = ctx.interpreter();
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const saved_machine = gc_mod.setActiveInterpreter(&machine);
+            defer _ = gc_mod.setActiveInterpreter(saved_machine);
+            var inputs: [64]Value = @splat(function);
+            var frame = LegacyCallFrame{
+                .func_obj = function.asObj(),
+                .lazy_func = Interpreter.funcOf(function).?,
+                .lazy_args = &inputs,
+                .lazy_env = machine.env,
+            };
+            machine.active_call_frame = &frame;
+            const environment = machine.env;
+            const global = machine.global_object;
+            var fault = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = fail_index, .resize_fail_index = 0 });
+            machine.arena = fault.allocator();
+            _ = machine.materializeLegacyArguments(&frame) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                failures += 1;
+            };
+            machine.arena = ctx.arena();
+            try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+            try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+            try std.testing.expectEqual(environment, machine.env);
+            try std.testing.expectEqual(global, machine.global_object);
+            try std.testing.expect(frame.arguments == null);
+            const first = try machine.materializeLegacyArguments(&frame);
+            try machine.env.put("snapshotRootResult", first);
+            const second = try machine.materializeLegacyArguments(&frame);
+            try std.testing.expect(first.asObj() != second.asObj());
+            try std.testing.expectEqual(@as(usize, 64), first.asObj().elementsLen());
+            try std.testing.expectEqual(function.bits, first.asObj().elementAt(63).?.bits);
+            try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        }
+        try std.testing.expect(failures > 0);
     }
 }

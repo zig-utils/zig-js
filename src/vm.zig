@@ -11670,7 +11670,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             .caller = vm.active_call_frame,
         };
         act.legacy_call_frame_active = true;
-        if (interp.Interpreter.legacyCallerArgumentsAllowed(func) and fchunk.arguments_slot == null) {
+        if (interp.Interpreter.legacyCallerArgumentsAllowed(func)) {
             const retained = if (args.len <= act.legacy_inline_arguments.len)
                 act.legacy_inline_arguments[0..args.len]
             else retained: {
@@ -20040,7 +20040,7 @@ test "vm: native caller frames survive captured and receiver coercion" {
             \\var aliasResult = callerAlias(7), marker = {}, caught = false;
             \\replaceCapture({ valueOf: function() { calls++; if (callerCapture.arguments[0] !== 9) throw new Error('arguments'); $vm.gc(); throw marker; } });
             \\try { callerCapture(9); } catch (error) { caught = error === marker; }
-            \\captureResult === 114 && receiverResult === 114 && aliasResult === 8114 && caught && calls === 4
+            \\captureResult === 114 && receiverResult === 114 && aliasResult === 7114 && caught && calls === 4
         )).asBool());
     }
 }

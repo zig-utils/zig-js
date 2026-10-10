@@ -31844,7 +31844,7 @@ test "compiled ordinary functions publish exact active legacy arguments" {
         \\  legacyRead.caller === null
         \\].join("|");
     ;
-    const expected = "37|true|true:11:22:3:3|41:42:10|1:9|4:8|true:5|3:2:1:0:true|true:6|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|7|true|true|true|true";
+    const expected = "37|false|false:1:2:3:3|1:10:10|1:2|4:8|true:5|3:2:1:0:true|true:6|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|7|true|true|true|true";
     const Profile = struct { mode: interp.BytecodeExecutionMode, enable_gc: bool };
     const profiles = [_]Profile{
         .{ .mode = .tree_walker, .enable_gc = false },
@@ -31949,8 +31949,8 @@ test "parallel_js compiled legacy arguments remain invocation-local" {
         \\  var expectedIndex = index + 1;
         \\  seed = expectedSeed;
         \\  reflected[1] = expectedIndex;
-        \\  return reflected[0] === expectedSeed && index === expectedIndex &&
-        \\    reflected === legacyLaneProbe.arguments && legacyLaneProbe.caller === legacyLane;
+        \\  return reflected[0] === seed - 1 && index === expectedIndex - 1 &&
+        \\    reflected !== legacyLaneProbe.arguments && legacyLaneProbe.caller === legacyLane;
         \\}
         \\function legacyLane(seed) {
         \\  if ($vm.useThreadGIL() !== false) throw new Error("GIL held");
