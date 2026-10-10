@@ -619,6 +619,12 @@
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-lifecycle.js",
+      "runner_fixture": {
+        "path": "conformance/threads/thread-lifecycle.js",
+        "bytes": 2600,
+        "sha256": "bfc4d5ae104ad27bb1ed6686ac6ad5b755d3c9b8fed67bfe3fc28ccdcb0c6cd0",
+        "reason": "Create the asyncHold registrant while main owns the lock, preserving the pending ticket after registrant exit and all four lifecycle oracles."
+      },
       "required_shell_hooks": [
         "global:load",
         "option:--useJSThreads=1"

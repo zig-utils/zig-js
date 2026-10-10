@@ -354,6 +354,17 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "api/thread-lifecycle.js")) {
+        // A pending asyncHold ticket requires main to own the lock before
+        // the worker starts; independent scheduling does not provide that edge.
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &hex, "6ba032f13aac40c2f2bdddc322858151ca2f4aab822b2fe43cf3a6e2dc6493de"))
+            return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, @embedFile("threads/thread-lifecycle.js"));
+        return;
+    }
     if (std.mem.eql(u8, name, "sync/condition-notify-all.js")) {
         // The pinned cooperative-scheduler fixture can notify before main
         // starts waiting in no-GIL mode. The owned fixture establishes waiter
