@@ -155,7 +155,7 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
-pub const FrameStateKind = enum { block_entry, branch, return_, throw_, finally_dispatch, abrupt_return, abrupt_jump, call, effect };
+pub const FrameStateKind = enum { block_entry, branch, return_, throw_, finally_dispatch, abrupt_return, abrupt_jump, call, effect, continuation };
 
 fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
     return switch (op) {
@@ -639,6 +639,13 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
     };
 }
 
+pub fn nativeOperationStackDepth(inst: bc.Inst, before: u32) ?u32 {
+    if (nativeOperationInputCount(inst) == null) return null;
+    const effect = depthEffect(inst);
+    if (before < effect.required or before < effect.removed) return null;
+    return std.math.add(u32, before - effect.removed, effect.added) catch null;
+}
+
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
     switch (inst.op) {
         .to_numeric,
@@ -715,6 +722,12 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
     const kind = terminalFrameStateKind(inst.op) orelse return null;
     if (kind != .call and kind != .effect) return null;
     return depthEffect(inst).required;
+}
+
+fn hasNativeContinuation(inst: bc.Inst) bool {
+    // A tail call replaces the activation; there is no next instruction in
+    // that activation to reconstruct after its result arrives.
+    return nativeOperationInputCount(inst) != null and terminalFrameStateKind(inst.op) != .call;
 }
 
 const GraphBuilder = struct {
@@ -820,6 +833,26 @@ const GraphBuilder = struct {
             .first_handler = first_handler,
             .handler_count = @intCast(handlers.len),
         });
+    }
+
+    fn appendContinuation(
+        self: *GraphBuilder,
+        block: u32,
+        origin: u32,
+        locals: []const ValueId,
+        stack: []const ValueId,
+        handlers: []const HandlerState,
+        native_operation: bool,
+    ) std.mem.Allocator.Error!void {
+        if (!native_operation or origin == 0 or self.frame_states.items.len == 0) return;
+        const previous = self.frame_states.items[self.frame_states.items.len - 1];
+        if (previous.block != block or previous.origin != origin - 1 or (previous.kind != .effect and previous.kind != .call) or
+            self.roots.items.len == 0) return;
+        // Interpreter-owned terminals have pre-effect maps too, but no native
+        // result to resume after. Keep their original before-operation exit.
+        const producer = self.nodes.items[self.roots.items[self.roots.items.len - 1]];
+        if (producer.block == block and producer.origin == previous.origin and producer.may_have_effect and producer.kind != .interpreter_value)
+            try self.appendFrameState(.continuation, block, origin, locals, stack, handlers);
     }
 
     fn appendExceptionalTarget(
@@ -1096,7 +1129,12 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         try handlers.appendSlice(allocator, entry_handlers[block_id].?);
         try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth], handlers.items);
 
-        for (chunk.code.items[block.start..block.end], block.start..) |inst, origin| switch (inst.op) {
+        for (chunk.code.items[block.start..block.end], block.start..) |inst, origin| switch (operation: {
+            // Re-entry consumes child dispatch. Preserve the completed effect
+            // before any later bytecode can mutate native locals or operands.
+            try builder.appendContinuation(@intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items, origin > 0 and hasNativeContinuation(chunk.code.items[origin - 1]));
+            break :operation inst.op;
+        }) {
             .load_const => {
                 if (inst.a >= chunk.consts.items.len) return error.InvalidControlFlow;
                 const constant: RuntimeValue = chunk.consts.items[inst.a];
@@ -1622,6 +1660,9 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 }
             },
         };
+
+        if (block.end < chunk.code.items.len)
+            try builder.appendContinuation(@intCast(block_id), block.end, locals, stack[0..depth], handlers.items, hasNativeContinuation(chunk.code.items[block.end - 1]));
 
         for (block.successors[0..block.successor_count]) |successor| {
             const first_argument: u32 = @intCast(builder.edge_arguments.items.len);
@@ -2435,4 +2476,40 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     _ = try unbalanced_handler.emit(.pop_handler, 0);
     _ = try unbalanced_handler.emit(.ret_undef, 0);
     try std.testing.expectError(error.InvalidControlFlow, build(&unbalanced_handler, std.testing.allocator));
+}
+
+test "optimizer continuation snapshots retain the completed call result before the next instruction" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.call, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try plan.verify(.function);
+    var continuations: usize = 0;
+    for (plan.graph.frame_states) |state| if (state.kind == .continuation) {
+        continuations += 1;
+        try std.testing.expectEqual(@as(u32, 2), state.origin);
+        try std.testing.expectEqual(@as(u32, 1), state.stack_count);
+        const result = plan.graph.frame_state_values[state.first_value + state.local_count];
+        try std.testing.expectEqual(ValueKind.call, plan.graph.nodes[result].kind);
+        try std.testing.expectEqual(@as(u32, 1), plan.graph.nodes[result].origin);
+    };
+    try std.testing.expectEqual(@as(usize, 1), continuations);
+    for (plan.graph.frame_states, 0..) |state, index| if (state.kind == .continuation) {
+        plan.graph.frame_states[index].stack_count = 0;
+        try std.testing.expectError(error.InvalidFrameState, plan.verify(.function));
+        plan.graph.frame_states[index] = state;
+        const result_slot = state.first_value + state.local_count;
+        const original = plan.graph.frame_state_values[result_slot];
+        plan.graph.frame_state_values[result_slot] = plan.graph.frame_state_values[state.first_value];
+        try std.testing.expectError(error.InvalidFrameState, plan.verify(.function));
+        plan.graph.frame_state_values[result_slot] = original;
+    };
+    try plan.verify(.function);
 }

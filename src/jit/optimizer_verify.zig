@@ -304,7 +304,8 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
     for (graph.frame_states, 0..) |state, index| {
         if (state.block >= plan.blocks.len) return error.InvalidFrameState;
         const block = plan.blocks[state.block];
-        if (state.origin < block.start or state.origin >= block.end) return error.InvalidFrameState;
+        if (state.origin < block.start or state.origin >= plan.instructions.len or
+            (state.origin >= block.end and !(state.kind == .continuation and state.origin == block.end))) return error.InvalidFrameState;
         if (local_count) |known| if (state.local_count != known) return error.InvalidFrameState;
         local_count = state.local_count;
         const count = std.math.add(usize, state.local_count, state.stack_count) catch return error.InvalidFrameState;
@@ -335,6 +336,11 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             .block_entry => true,
             .call => call_operation,
             .effect => !call_operation and ir.nativeOperationInputCount(.{ .op = instruction.op, .a = instruction.a, .b = instruction.b }) != null,
+            .continuation => state.origin > block.start and ir.nativeOperationInputCount(.{
+                .op = plan.instructions[state.origin - 1].op,
+                .a = plan.instructions[state.origin - 1].a,
+                .b = plan.instructions[state.origin - 1].b,
+            }) != null,
             .throw_ => instruction.op == .throw_op,
             .return_ => instruction.op == .ret or instruction.op == .ret_undef,
             .branch => instruction.op == .jump_if_false,
@@ -573,6 +579,28 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         }
         try available(plan, dominance, branch.condition, branch.block, branch.origin, true);
     }
+    for (graph.frame_states) |state| if (state.kind == .continuation) {
+        const index = effects[state.origin - 1];
+        if (index == none) return error.InvalidFrameState;
+        const previous = graph.frame_states[index];
+        const instruction = plan.instructions[state.origin - 1];
+        const inst = bc.Inst{ .op = instruction.op, .a = instruction.a, .b = instruction.b };
+        const expected = ir.nativeOperationStackDepth(inst, previous.stack_count) orelse return error.InvalidFrameState;
+        const inputs = ir.nativeOperationInputCount(inst) orelse return error.InvalidFrameState;
+        if (previous.block != state.block or expected != state.stack_count or inputs > previous.stack_count or
+            !sameHandlers(graph, previous.first_handler, previous.handler_count, state.first_handler, state.handler_count))
+            return error.InvalidFrameState;
+        const prefix = previous.local_count + previous.stack_count - inputs;
+        if (!std.mem.eql(u32, graph.frame_state_values[previous.first_value..][0..prefix], graph.frame_state_values[state.first_value..][0..prefix]))
+            return error.InvalidFrameState;
+        if (state.stack_count > previous.stack_count - inputs) {
+            const result = graph.frame_state_values[state.first_value + state.local_count + state.stack_count - 1];
+            if (result >= graph.nodes.len) return error.InvalidValue;
+            const producer = graph.nodes[result];
+            if (producer.block != previous.block or producer.origin != previous.origin or !producer.may_have_effect or producer.kind == .interpreter_value)
+                return error.InvalidFrameState;
+        }
+    };
 }
 fn diamond(allocator: std.mem.Allocator) !ir.Plan {
     var arena = std.heap.ArenaAllocator.init(allocator);

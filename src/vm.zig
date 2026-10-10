@@ -2392,6 +2392,19 @@ fn unsigned32GuardsPass(slots: []const Value, required_mask: u64) bool {
     return true;
 }
 
+fn nativeContinuationCheckpoint(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) bool {
+    const machine: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return false));
+    const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse return false));
+    if (operation_id >= metadata.descriptors.len) return false;
+    const descriptor = metadata.descriptors[operation_id];
+    if (descriptor.continuation_deopt_index == jit.NativeOperationDescriptor.none or
+        frame.deopt_index != descriptor.continuation_deopt_index or frame.exit_ip != descriptor.origin + 1) return false;
+    frame.steps_until_checkpoint = 1024 - (machine.steps & 1023);
+    frame.steps_until_budget = if (machine.steps <= machine.step_budget) machine.step_budget - machine.steps else 0;
+    return machine.steps <= machine.step_budget and descriptor.continuation_steps < frame.steps_until_checkpoint and
+        descriptor.continuation_steps <= frame.steps_until_budget;
+}
+
 fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return @backingInt(jit.ExitStatus.stop)));
     const steps = (frame.steps orelse return @backingInt(jit.ExitStatus.stop)).*;
@@ -5894,6 +5907,7 @@ fn tryRunManagedNativeWithProfileContext(
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
         .operation_context = if (native.native_operations) |metadata| @constCast(metadata) else null,
         .checkpoint = nativeCheckpoint,
+        .continuation_checkpoint = nativeContinuationCheckpoint,
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
         .property_write_barrier = nativePropertyWriteBarrier,
@@ -5983,6 +5997,7 @@ fn tryRunOsrNative(
         .operation = if (native.native_operations != null) nativeOperationDispatch else null,
         .operation_context = if (native.native_operations) |operations| @constCast(operations) else null,
         .checkpoint = nativeCheckpoint,
+        .continuation_checkpoint = nativeContinuationCheckpoint,
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
         .property_write_barrier = nativePropertyWriteBarrier,
@@ -6405,6 +6420,34 @@ test "vm: native code origin uses the inspector stack identity" {
     try std.testing.expectEqual(@as(usize, 0), empty.source_url.len);
 }
 
+fn directContinuationInputsAreReadOnly(vm: *Interpreter, native: *const jit.CompiledCode, slots: []const Value) bool {
+    if (!native.continuation_only_exits or native.requires_activation_context) return false;
+    const operations = native.native_operations orelse return false;
+    const recovery = native.deopt orelse return false;
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.step_delta == 0) continue;
+        const op = std.enums.fromInt(bc.Op, descriptor.bytecode_op) orelse return false;
+        switch (op) {
+            .not, .typeof_op, .to_numeric, .neg, .pos, .inc, .dec, .bit_not, .to_string, .to_property_key, .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr, .load_var, .get_prop, .get_index => {},
+            else => return false,
+        }
+        if (descriptor.deopt_index >= recovery.points.len or descriptor.input_count > 3) return false;
+        const point = recovery.points[descriptor.deopt_index];
+        if (descriptor.input_count > point.stack_count) return false;
+        const first: usize = @as(usize, point.first_value) + point.local_count + point.stack_count - descriptor.input_count;
+        if (first > recovery.values.len or descriptor.input_count > recovery.values.len - first) return false;
+        var inputs: [3]u64 = undefined;
+        for (recovery.values[first..][0..descriptor.input_count], 0..) |value_word, index| {
+            // Scratch inputs depend on preceding native work. Entry cannot
+            // prove their representation before that work, so retain a frame.
+            const input = value_word.materialize(@as([]const u64, @ptrCast(slots)), &.{}) orelse return false;
+            inputs[index] = input;
+        }
+        if (!nativeOperationCanElideLegacyFrame(vm, operations, @intCast(operation_id), descriptor, inputs[0..descriptor.input_count])) return false;
+    }
+    return true;
+}
+
 /// A ready numeric leaf has no object/upvalue/`this`/eval opcode and its native
 /// metadata guards every parameter representation before doing observable
 /// work. Run it over bounded stack slots so a hot ordinary call avoids building
@@ -6464,11 +6507,15 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const baseline_artifact = chunk.tier.loadCode();
     if (!nativeExecutionPermitted(vm, owner)) return null;
     if (optimizer_artifact == null and baseline_artifact == null) return null;
-    if (optimizer_artifact) |artifact| if (artifact.has_side_exits or artifact.requires_activation_context) return null;
+    const continuation_direct = if (optimizer_artifact) |artifact|
+        directContinuationInputsAreReadOnly(vm, artifact, slots[0..slot_count])
+    else
+        false;
+    if (optimizer_artifact) |artifact| if ((artifact.has_side_exits and !continuation_direct) or artifact.requires_activation_context) return null;
 
     const legacy_allowed = interp.Interpreter.legacyCallerArgumentsAllowed(func);
     const restricted_tail = !func.is_arrow and !legacy_allowed and chunkHasTailCall(chunk);
-    const guard_reentry = legacy_allowed or restricted_tail;
+    const guard_reentry = legacy_allowed or restricted_tail or continuation_direct;
     if (guard_reentry) vm.native_legacy_direct_depth += 1;
     defer {
         if (guard_reentry) vm.native_legacy_direct_depth -= 1;
@@ -6493,8 +6540,9 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     vm.depth += 1;
     defer vm.depth -= 1;
 
-    if (optimizer_artifact) |artifact| if (artifact.frame_slots == slot_count and !artifact.has_side_exits) {
+    if (optimizer_artifact) |artifact| if (artifact.frame_slots == slot_count and (!artifact.has_side_exits or continuation_direct)) {
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
+        const direct_steps = vm.steps;
         const optimized = if (artifact.manages_steps) optimized: {
             const outcome = try tryRunManagedNativeWithProfileContext(vm, artifact, slots[0..slot_count], null, chunk);
             break :optimized switch (outcome) {
@@ -6512,6 +6560,10 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
             if (builtin.is_test) _ = optimizer_native_hits.fetchAdd(1, .monotonic);
             return native_value;
         }
+        // Every admitted prefix is read-only, and the per-operation guard
+        // refuses re-entry before it occurs. A stale data proof can restart
+        // safely without charging the pure prefix twice.
+        if (continuation_direct) vm.steps = direct_steps;
     };
 
     const native = baseline_artifact orelse return null;
@@ -18304,7 +18356,7 @@ test "vm: optimizer native to_numeric returns and propagates uncaught object thr
     const artifact = post_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(artifact.manages_steps);
-    try std.testing.expect(!artifact.has_side_exits);
+    try std.testing.expect(artifact.has_continuation_exits);
     const metadata = artifact.native_operations orelse return error.TestUnexpectedResult;
     var to_numeric: ?jit.NativeOperationDescriptor = null;
     for (metadata.descriptors) |descriptor| {
@@ -24606,7 +24658,7 @@ test "vm: optimizer activation entry refuses direct elision before callbacks" {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
         const chunk = function.chunk.?;
         const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(artifact.entry_enabled and !artifact.has_side_exits and artifact.requires_activation_context);
+        try std.testing.expect(artifact.entry_enabled and artifact.has_continuation_exits and artifact.requires_activation_context);
         const calls = ctx.global_object.getOwn("activationCalls").?.asNum();
         const steps = machine.steps;
         const attempts = optimizer_native_attempts.load(.monotonic);
@@ -24891,7 +24943,10 @@ test "vm: optimizer captured binding seeded effects preserve coercion and aliase
                 for ([_][]const u8{ "read", "write", "replace", "add" }) |name| {
                     const function = Interpreter.funcOf(holder.getOwn(name).?).?;
                     const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
-                    try std.testing.expect(artifact.entry_enabled and !artifact.has_side_exits and artifact.requires_frame_context);
+                    try std.testing.expect(artifact.entry_enabled and artifact.requires_frame_context);
+                    const hits = optimizer_native_hits.load(.monotonic);
+                    _ = try ctx.evaluate(if (std.mem.eql(u8, name, "read")) "cap.read()" else if (std.mem.eql(u8, name, "write")) "cap.write(3)" else if (std.mem.eql(u8, name, "replace")) "cap.replace(3)" else "cap.add(1)");
+                    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits);
                 }
             }
         };
@@ -24925,7 +24980,7 @@ test "vm: optimizer captured binding shared frames preserve mapped and lexical c
             for ([_][]const u8{ "bump", "read" }) |name| {
                 const function = Interpreter.funcOf(holder.getOwn(name).?).?;
                 const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
-                try std.testing.expect(code.entry_enabled and !code.has_side_exits and code.requires_frame_context);
+                try std.testing.expect(code.entry_enabled and code.has_continuation_exits and code.requires_frame_context);
             }
         }
     }
@@ -25039,4 +25094,256 @@ test "vm: optimizer captured binding regions preserve moving checkpoints and sto
             try std.testing.expectEqualStrings(if (stop_requested) "Error" else "RangeError", machine.exception.asObj().errorName());
         }
     };
+}
+
+test "vm: optimizer continuation roots the completed call result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.call, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try optimizer_compiler.lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+    try program.verify();
+    var continuations: usize = 0;
+    for (program.deopt_points, program.stack_maps) |point, map| if (point.kind == .continuation) {
+        continuations += 1;
+        try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
+        try std.testing.expectEqual(@as(u16, 1), point.stack_count);
+        const result = program.deopt_values[point.first_value + point.local_count];
+        try std.testing.expectEqual(jit.RecoverySource.scratch_slot, result.source);
+        try std.testing.expect(map.scratch_pointer_slots & (@as(u128, 1) << @intCast(result.index)) != 0);
+    };
+    try std.testing.expectEqual(@as(usize, 1), continuations);
+}
+
+test "vm: optimizer continuation callbacks preserve budgets branches getters loops and catches" {
+    const Context = @import("context.zig").Context;
+    const Record = struct { steps: u64, value: u64, error_kind: u8, effect: f64 };
+    const cases = [_]struct { body: []const u8, argument: f64, getter: bool = false, loop: bool = false }{
+        .{ .body = "function budgetWrite(rhs,n){var value=rhs();return value;}", .argument = 1 },
+        .{ .body = "function budgetWrite(rhs,n){var value=rhs();if(n<0)return value;return value;}", .argument = -1 },
+        .{ .body = "function budgetWrite(rhs,n){var value=rhs();if(n<0)return value;return value;}", .argument = 1 },
+        .{ .body = "function budgetWrite(rhs,n){var value=rhs.read;return value;}", .argument = 1, .getter = true },
+        .{ .body = "function budgetWrite(rhs,n){var i=0;while(i<n){rhs();i=i+1;}return i;}", .argument = 3, .loop = true },
+        .{ .body = "function budgetWrite(rhs,n){try{var value=rhs();return value;}catch(e){return 9;}}", .argument = 1 },
+    };
+    var expected: [cases.len][2][32]Record = undefined;
+    var mismatches: usize = 0;
+    for ([_]bool{ false, true }) |native| for (cases, 0..) |case, case_index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = false,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const setup = try std.mem.concat(std.testing.allocator, u8, &.{
+            "var budgetEffects=0;function budgetRhs(){budgetEffects++;return 7;}var getterSubject={get read(){return budgetRhs();}};",
+            case.body,
+            if (case.getter) "for(var warm=0;warm<64;warm++)budgetWrite(getterSubject,1);" else "for(var warm=0;warm<64;warm++)budgetWrite(budgetRhs,3);",
+        });
+        defer std.testing.allocator.free(setup);
+        _ = try ctx.evaluate(setup);
+        const function = Interpreter.funcOf(ctx.global_object.getOwn("budgetWrite").?).?;
+        const rhs = ctx.global_object.getOwn(if (case.getter) "getterSubject" else "budgetRhs").?;
+        if (native and jit.optimizer_supported) {
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect((code.entry_enabled or code.osr != null) and code.has_continuation_exits);
+        }
+        for (0..2) |mode| for (0..32) |index| {
+            _ = try ctx.evaluate("budgetEffects=0");
+            var machine = ctx.interpreter();
+            machine.steps = (if (case.loop) @as(u64, 944) else 992) + index;
+            machine.step_budget = if (mode == 0) 1024 else 1_000_000;
+            var stop: std.atomic.Value(bool) = .init(mode == 1);
+            machine.stop_flag = &stop;
+            var record = Record{ .steps = 0, .value = 0, .error_kind = 0, .effect = 0 };
+            if (runFunction(&machine, function, function.chunk.?, &.{ rhs, Value.num(case.argument) }, Value.undef(), Value.undef())) |result| {
+                record.value = result.rawBits();
+            } else |err| {
+                if (err != error.Throw) return err;
+                const name = machine.exception.asObj().errorName();
+                record.error_kind = if (std.mem.eql(u8, name, "RangeError")) 1 else if (std.mem.eql(u8, name, "Error")) 2 else return error.TestUnexpectedResult;
+            }
+            record.steps = machine.steps;
+            record.effect = ctx.global_object.getOwn("budgetEffects").?.asNum();
+            if (!native) expected[case_index][mode][index] = record else {
+                const baseline = expected[case_index][mode][index];
+                if (record.steps != baseline.steps or record.value != baseline.value or record.error_kind != baseline.error_kind or record.effect != baseline.effect) {
+                    std.debug.print("case={d} mode={d} start={d} before={any} after={any}\n", .{ case_index, mode, (if (case.loop) @as(u64, 944) else 992) + index, baseline, record });
+                    mismatches += 1;
+                }
+            }
+        };
+    };
+    std.debug.print("callback boundary mismatches: {d}/384\n", .{mismatches});
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "vm: optimizer continuation map relocates the completed callback object" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const Probe = struct {
+        before_bits: u64 = 0,
+        moved: bool = false,
+
+        fn operation(frame: *jit.NativeFrame, _: u32) callconv(.c) u32 {
+            const machine: *Interpreter = @ptrCast(@alignCast(frame.runtime_context.?));
+            const self: *@This() = @ptrCast(@alignCast(@constCast(frame.profile_bytecode_context.?)));
+            for (0..1024) |_| _ = machine.newObject() catch return @backingInt(jit.NativeOperationStatus.out_of_memory);
+            const subject = machine.newObject() catch return @backingInt(jit.NativeOperationStatus.out_of_memory);
+            machine.setProp(subject.asObj(), "value", Value.num(37)) catch return @backingInt(jit.NativeOperationStatus.out_of_memory);
+            self.before_bits = subject.rawBits();
+            frame.operation_value_bits = subject.rawBits();
+            machine.steps += 10;
+            return @backingInt(jit.NativeOperationStatus.value);
+        }
+
+        fn checkpoint(frame: *jit.NativeFrame, _: u32) callconv(.c) bool {
+            const machine: *Interpreter = @ptrCast(@alignCast(frame.runtime_context.?));
+            const self: *@This() = @ptrCast(@alignCast(@constCast(frame.profile_bytecode_context.?)));
+            const context: *Context = @ptrCast(@alignCast(machine.gc_safepoint_ctx.?));
+            const before = context.gc_moving_safepoint_compactions.load(.monotonic);
+            if (!context.requestGarbageCompaction()) return false;
+            const saved_precise = machine.gc_precise_safepoint;
+            const saved_moving = machine.gc_moving_safepoint;
+            machine.gc_precise_safepoint = true;
+            machine.gc_moving_safepoint = true;
+            machine.gc_safepoint_fn.?(machine.gc_safepoint_ctx.?, machine);
+            machine.gc_precise_safepoint = saved_precise;
+            machine.gc_moving_safepoint = saved_moving;
+            self.moved = context.gc_moving_safepoint_compactions.load(.monotonic) > before;
+            return true;
+        }
+    };
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = true,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+        });
+        defer ctx.destroy();
+        ctx.collectGarbage();
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const active = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(active);
+        var chunk = bc.Chunk.init(ctx.arena());
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.call, 0);
+        _ = try chunk.emit(.ret, 0);
+        var code = try optimizer_compiler.compile(&chunk);
+        defer code.deinit();
+        var slots = [_]Value{Value.undef()};
+        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+        var probe = Probe{};
+        var frame = jit.NativeFrame{
+            .slots = @ptrCast(&slots),
+            .scratch = &scratch,
+            .steps = &machine.steps,
+            .runtime_context = &machine,
+            .profile_bytecode_context = &probe,
+            .operation_context = code.native_operations.?,
+            .operation = Probe.operation,
+            .continuation_checkpoint = Probe.checkpoint,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.complete, runNativeWithPublishedRoots(&machine, &code, &frame));
+        try std.testing.expect(probe.moved);
+        try std.testing.expect(frame.result_bits != probe.before_bits);
+        try std.testing.expectEqual(@as(f64, 37), Value.fromRawBits(frame.result_bits).asObj().getOwn("value").?.asNum());
+        try std.testing.expectEqual(@as(u64, 13), machine.steps);
+    }
+}
+
+test "vm: optimizer continuation callbacks isolate four shared realm workers" {
+    if (builtin.single_threaded or !jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 896), (try ctx.evaluate(
+            \\function sharedContinuationRhs(){var result={value:7};$vm.gc();return result;}
+            \\function sharedContinuationCaller(rhs){var result=rhs();return result.value;}
+            \\for(var warm=0;warm<64;warm++)sharedContinuationCaller(sharedContinuationRhs);
+            \\function continuationLane(){if($vm.useThreadGIL()!==false)throw new Error('GIL');var total=0;for(var i=0;i<32;i++)total+=sharedContinuationCaller(sharedContinuationRhs);return total;}
+            \\var lanes=[];for(var lane=0;lane<4;lane++)lanes.push(new Thread(continuationLane));
+            \\var total=0;for(var lane=0;lane<4;lane++)total+=lanes[lane].join();total;
+        )).asNum());
+        if (native) {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn("sharedContinuationCaller").?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and code.has_continuation_exits);
+        }
+    }
+}
+
+test "vm: optimizer continuation direct entry proves read only inputs before work" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = false,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var guardedSubject={value:7},guardedTarget={value:0},guardedCoercions=0,guardedGetters=0;
+        \\function guardedUnary(x){return +x;}function guardedStrictUnary(x){'use strict';return +x;}
+        \\function guardedProperty(x){return x.value;}function guardedStore(x,value){x.value=value;return value;}
+        \\for(var warm=0;warm<64;warm++){guardedUnary(7);guardedStrictUnary(7);guardedProperty(guardedSubject);guardedStore(guardedTarget,0);}
+    );
+    var machine = ctx.interpreter();
+    machine.jit_execution_allowed = true;
+    for ([_][]const u8{ "guardedUnary", "guardedStrictUnary", "guardedProperty" }) |name| {
+        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+        const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(code.has_side_exits and code.continuation_only_exits);
+        const input = if (std.mem.eql(u8, name, "guardedProperty")) ctx.global_object.getOwn("guardedSubject").? else Value.num(7);
+        const steps = machine.steps;
+        const hits = nativeDirectCallHitsForTesting();
+        const result = (try tryRunNativeDirectCall(&machine, function, &.{input})) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(f64, 7), result.asNum());
+        try std.testing.expectEqual(steps + @as(u64, if (std.mem.eql(u8, name, "guardedStrictUnary")) 5 else 3), machine.steps);
+        try std.testing.expectEqual(hits + 1, nativeDirectCallHitsForTesting());
+    }
+    _ = try ctx.evaluate(
+        \\Object.defineProperty(guardedSubject,'value',{get:function(){guardedGetters++;return 7;}});
+        \\var guardedObject={valueOf:function(){guardedCoercions++;return 7;}};
+    );
+    for ([_][]const u8{ "guardedUnary", "guardedStrictUnary", "guardedProperty" }) |name| {
+        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+        const input = ctx.global_object.getOwn(if (std.mem.eql(u8, name, "guardedProperty")) "guardedSubject" else "guardedObject").?;
+        const steps = machine.steps;
+        try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, function, &.{input}));
+        try std.testing.expectEqual(steps, machine.steps);
+        try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("guardedGetters").?.asNum());
+        try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("guardedCoercions").?.asNum());
+    }
+    const store = Interpreter.funcOf(ctx.global_object.getOwn("guardedStore").?).?;
+    const target = ctx.global_object.getOwn("guardedTarget").?;
+    const steps = machine.steps;
+    try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, store, &.{ target, Value.num(9) }));
+    try std.testing.expectEqual(steps, machine.steps);
+    try std.testing.expectEqual(@as(f64, 0), target.asObj().getOwn("value").?.asNum());
+    try std.testing.expectEqual(@as(f64, 9), (try runFunction(&machine, store, store.chunk.?, &.{ target, Value.num(9) }, Value.undef(), Value.undef())).asNum());
+    try std.testing.expectEqual(@as(f64, 9), target.asObj().getOwn("value").?.asNum());
+    try std.testing.expectEqualStrings("[7,7,7,1,2]", (try ctx.evaluate("JSON.stringify([guardedUnary(guardedObject),guardedStrictUnary(guardedObject),guardedProperty(guardedSubject),guardedGetters,guardedCoercions])")).asStr());
 }

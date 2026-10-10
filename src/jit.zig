@@ -369,6 +369,10 @@ pub const NativeOperationDescriptor = extern struct {
     origin: u32,
     operand_a: u32 = 0,
     operand_b: u32 = 0,
+    /// Exact state after a successful callback, before the next bytecode.
+    continuation_deopt_index: u16 = none,
+    continuation_steps: u32 = 0,
+    block_prefix_steps: u32 = 0,
 
     pub const none = std.math.maxInt(u16);
     pub const numeric_result: u16 = 1 << 0;
@@ -789,6 +793,9 @@ pub const NativeFrame = extern struct {
     /// Non-allocating, guarded Number access to captured cells and own data properties.
     /// False means no write occurred and the opcode must be replayed in bytecode.
     numeric_data_access: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) bool = null,
+    /// Revalidate the native window only when a callback consumed child dispatch.
+    continuation_checkpoint: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) bool = null,
+    operation_entry_steps: u64 = 0,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
@@ -1136,7 +1143,7 @@ pub const RecoveryValue = struct {
     }
 };
 
-pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, throw_, finally_dispatch, abrupt_return, abrupt_jump, call, effect, edge };
+pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, throw_, finally_dispatch, abrupt_return, abrupt_jump, call, effect, edge, continuation };
 
 pub const DeoptPoint = struct {
     kind: DeoptPointKind,
@@ -1401,6 +1408,8 @@ pub const CompiledCode = struct {
     /// A side exit may have executed observable bytecode and must resume from
     /// `deopt`; direct/restart-only entry paths reject such artifacts.
     has_side_exits: bool = false,
+    has_continuation_exits: bool = false,
+    continuation_only_exits: bool = false,
     /// Present only for owners created with native observability enabled. Its
     /// lifetime is exactly the executable mapping's lifetime, including epochs
     /// retained by in-flight native readers.

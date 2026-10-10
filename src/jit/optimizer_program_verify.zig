@@ -119,9 +119,21 @@ pub fn verify(program: *const compiler.Program) Error!void {
             (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and descriptor.exceptional_target >= program.native_exceptional_targets.len))
             return error.InvalidDescriptor;
         const op = std.enums.fromInt(bc.Op, descriptor.bytecode_op) orelse return error.InvalidDescriptor;
+        const expected_inputs = optimizer.nativeOperationInputCount(.{ .op = op, .a = descriptor.operand_a, .b = descriptor.operand_b }) orelse return error.InvalidDescriptor;
+        if (descriptor.input_count != expected_inputs) return error.InvalidDescriptor;
         const origin = program.deopt_points[descriptor.deopt_index];
         if (origin.exit_ip != descriptor.origin or (origin.kind != .effect and origin.kind != .call) or
             descriptor.step_delta > std.math.maxInt(u12)) return error.InvalidDescriptor;
+        if (descriptor.continuation_deopt_index != jit.NativeOperationDescriptor.none) {
+            if (descriptor.continuation_deopt_index >= program.deopt_points.len or descriptor.origin == std.math.maxInt(u32))
+                return error.InvalidDescriptor;
+            const next = program.deopt_points[descriptor.continuation_deopt_index];
+            const expected_depth = optimizer.nativeOperationStackDepth(.{ .op = op, .a = descriptor.operand_a, .b = descriptor.operand_b }, origin.stack_count) orelse return error.InvalidDescriptor;
+            if (next.kind != .continuation or next.exit_ip != descriptor.origin + 1 or next.local_count != origin.local_count or
+                next.stack_count != expected_depth or next.handler_count != origin.handler_count or
+                descriptor.block_prefix_steps > program.bytecode_steps or descriptor.continuation_steps > program.bytecode_steps - descriptor.block_prefix_steps)
+                return error.InvalidDescriptor;
+        }
         if (descriptor.flags & ~(jit.NativeOperationDescriptor.numeric_result | jit.NativeOperationDescriptor.literal_function_method |
             jit.NativeOperationDescriptor.literal_function_anonymous) != 0) return error.InvalidDescriptor;
         switch (op) {
@@ -381,5 +393,28 @@ test "optimizer native metadata verifier rejects OSR imports and control referen
     program.side_exit = .{ .deopt_index = @intCast(program.deopt_points.len), .steps = 1 };
     try std.testing.expectError(error.InvalidControl, verify(&program));
     program.side_exit = exit;
+    try verify(&program);
+}
+
+test "optimizer native metadata verifier validates completed effect continuations" {
+    var program = try boxedProgram(std.testing.allocator, false);
+    defer program.deinit();
+    try verify(&program);
+    const descriptor = program.native_operations[0];
+    try std.testing.expect(descriptor.continuation_deopt_index != jit.NativeOperationDescriptor.none);
+    program.native_operations[0].continuation_deopt_index = @intCast(program.deopt_points.len);
+    try std.testing.expectError(error.InvalidDescriptor, verify(&program));
+    program.native_operations[0] = descriptor;
+    const index = descriptor.continuation_deopt_index;
+    const original = program.deopt_points[index];
+    program.deopt_points[index].exit_ip += 1;
+    try std.testing.expectError(error.InvalidDescriptor, verify(&program));
+    program.deopt_points[index] = original;
+    program.deopt_points[index].stack_count -= 1;
+    try std.testing.expectError(error.InvalidDescriptor, verify(&program));
+    program.deopt_points[index] = original;
+    program.native_operations[0].continuation_steps = program.bytecode_steps + 1;
+    try std.testing.expectError(error.InvalidDescriptor, verify(&program));
+    program.native_operations[0] = descriptor;
     try verify(&program);
 }
