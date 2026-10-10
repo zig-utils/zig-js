@@ -4536,6 +4536,64 @@ fn chunkHasTailCall(chunk: *const Chunk) bool {
     return false;
 }
 
+fn nativeNumericDataAccess(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) bool {
+    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return false));
+    const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse return false));
+    if (operation_id >= metadata.descriptors.len or frame.scratch == null) return false;
+    const descriptor = metadata.descriptors[operation_id];
+    if (descriptor.origin != frame.exit_ip or descriptor.deopt_index != frame.deopt_index or
+        descriptor.flags & jit.NativeOperationDescriptor.numeric_result == 0) return false;
+    const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
+    if (op == .get_prop) {
+        if (descriptor.input_count != 1 or descriptor.first_input >= jit.numeric_scratch_capacity) return false;
+        const receiver = Value.fromRawBits(frame.scratch.?[descriptor.first_input]);
+        if (!receiver.isObject()) return false;
+        const object = receiver.asObj();
+        // Type/exotic identity is fixed before publication. The own descriptor
+        // and value are then snapshotted under the canonical property lock, so
+        // conversion to an accessor can only cause a pre-effect miss.
+        if (object.private_data_tag != .none or object.is_array or object.is_arguments or
+            object.is_symbol or object.is_bigint or object.native != null) return false;
+        const name = metadata.nameFor(operation_id) orelse return false;
+        const snapshot = object.namedOwnPropertySnapshot(name);
+        const loaded = switch (snapshot) {
+            .data => |data| data.value,
+            else => return false,
+        };
+        if (!loaded.isNumber()) return false;
+        frame.operation_value_bits = loaded.rawBits();
+        return true;
+    }
+    if (frame.bytecode_frame == null) return false;
+    const write = op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical;
+    if (!write and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical) return false;
+    if (descriptor.input_count != @as(u16, if (write) 1 else 0) or descriptor.first_input >= jit.numeric_scratch_capacity) return false;
+    const current: *Frame = @ptrCast(@alignCast(frame.bytecode_frame.?));
+    const lexical_write = op == .store_upval_lexical;
+    const slot = if (lexical_write) descriptor.operand_b & ~(@as(u32, 1) << 31) else descriptor.operand_b;
+    const target = capturedFrame(current, descriptor.operand_a, slot) orelse return false;
+    const parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    var result: Value = undefined;
+    if (write) {
+        result = Value.fromRawBits(frame.scratch.?[descriptor.first_input]);
+        if (!result.isNumber()) return false;
+        if (lexical_write) {
+            const held = target.lockSlots(parallel);
+            const refused = vm.isTdz(target.slots[slot]) or descriptor.operand_b & (@as(u32, 1) << 31) != 0;
+            if (!refused) target.slots[slot] = result;
+            target.unlockSlots(held);
+            if (refused) return false;
+        } else target.writeSlot(slot, result, parallel);
+    } else {
+        result = target.readSlot(slot, parallel);
+        // TDZ markers and all other boxed values leave before the opcode's
+        // step delta or any mutation. Captured reads never call JS accessors.
+        if (!result.isNumber()) return false;
+    }
+    frame.operation_value_bits = result.rawBits();
+    return true;
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @backingInt(jit.NativeOperationStatus.host_trap)));
@@ -4606,6 +4664,24 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             operation_id,
             applyBinaryEffect(vm, op, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
+    }
+    const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
+    if (op == .load_upval or op == .load_upval_mapped or op == .load_upval_lexical or
+        op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical)
+    {
+        const current: *Frame = @ptrCast(@alignCast(frame.bytecode_frame orelse
+            return @backingInt(jit.NativeOperationStatus.host_trap)));
+        const write = op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical;
+        if (inputs.len != @as(usize, if (write) 1 else 0)) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const slot = if (op == .store_upval_lexical) descriptor.operand_b & ~(@as(u32, 1) << 31) else descriptor.operand_b;
+        if (capturedFrame(current, descriptor.operand_a, slot) == null)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        const inst = bc.Inst{ .op = op, .a = descriptor.operand_a, .b = descriptor.operand_b };
+        const parallel = bc.ic_seqlock_enabled.load(.monotonic);
+        return finishNativeOperation(frame, vm, operation_id, if (write)
+            storeCapturedBinding(vm, current, inst, Value.fromRawBits(inputs[0]), parallel)
+        else
+            loadCapturedBinding(vm, current, inst, parallel));
     }
     // ECMA-262 GetThisBinding and GetNewTarget use the current activation,
     // including a lexical arrow's live shared this cell and initializer rules.
@@ -5794,6 +5870,7 @@ fn tryRunManagedNativeWithProfileContext(
     exec: ?*Exec,
     profile_chunk: ?*const Chunk,
 ) EvalError!NativeRunOutcome {
+    if (native.requires_frame_context and (exec == null or exec.?.frame == null)) return .miss;
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
         !nativeSlotGuardsPass(native, slots)) return .miss;
     if (native.has_side_exits or native.native_operations != null) {
@@ -5809,6 +5886,8 @@ fn tryRunManagedNativeWithProfileContext(
         .scratch = scratch[0..].ptr,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .bytecode_frame = if (exec) |active| active.frame else null,
+        .numeric_data_access = nativeNumericDataAccess,
         .profile_bytecode_context = profile_chunk,
         .global_binding_caches = if (native.native_operations) |metadata| metadata.global_binding_caches.ptr else null,
         .call_links = if (native.native_operations) |metadata| metadata.call_links.ptr else null,
@@ -5896,6 +5975,8 @@ fn tryRunOsrNative(
         .scratch = &scratch,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .bytecode_frame = exec.frame,
+        .numeric_data_access = nativeNumericDataAccess,
         .profile_bytecode_context = chunk,
         .global_binding_caches = if (native.native_operations) |operations| operations.global_binding_caches.ptr else null,
         .call_links = if (native.native_operations) |operations| operations.call_links.ptr else null,
@@ -6640,6 +6721,42 @@ fn throwTdzSlot(vm: *Interpreter, chunk: *const Chunk, slot: u32) EvalError {
     return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
 }
 
+fn capturedFrame(frame: ?*Frame, depth: u32, slot: u32) ?*Frame {
+    var target = frame orelse return null;
+    var remaining = depth;
+    while (remaining > 0) : (remaining -= 1) target = target.parent orelse return null;
+    return if (slot < target.slots.len) target else null;
+}
+
+fn loadCapturedBinding(vm: *Interpreter, frame: ?*Frame, inst: bc.Inst, parallel: bool) EvalError!Value {
+    const target = capturedFrame(frame, inst.a, inst.b) orelse
+        return vm.throwError("InternalError", "invalid captured binding coordinate");
+    const loaded = target.readSlot(inst.b, parallel);
+    if (inst.op == .load_upval_lexical and vm.isTdz(loaded))
+        return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+    return loaded;
+}
+
+fn storeCapturedBinding(vm: *Interpreter, frame: ?*Frame, inst: bc.Inst, stored: Value, parallel: bool) EvalError!Value {
+    const immutable_mask: u32 = @as(u32, 1) << 31;
+    const lexical = inst.op == .store_upval_lexical;
+    const slot = if (lexical) inst.b & ~immutable_mask else inst.b;
+    const target = capturedFrame(frame, inst.a, slot) orelse
+        return vm.throwError("InternalError", "invalid captured binding coordinate");
+    if (lexical) {
+        // GetBindingValue/SetMutableBinding: TDZ wins over readonly rejection.
+        // Check and mutate under the same escaped-frame lock, then throw outside it.
+        const held = target.lockSlots(parallel);
+        const in_tdz = vm.isTdz(target.slots[slot]);
+        const immutable = inst.b & immutable_mask != 0;
+        if (!in_tdz and !immutable) target.slots[slot] = stored;
+        target.unlockSlots(held);
+        if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+        if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
+    } else target.writeSlot(slot, stored, parallel);
+    return stored;
+}
+
 fn storeStaticBindingFallback(
     vm: *Interpreter,
     frame: ?*Frame,
@@ -7024,69 +7141,11 @@ fn runChunk(
                 if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
                 if (inst.b != 0) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
             },
-            .load_upval => {
-                var f = frame.?;
-                var d = inst.a;
-                while (d > 0) : (d -= 1) f = f.parent.?;
-                const v = if (f.mapped_arguments != null) mapped: {
-                    break :mapped f.readSlot(inst.b, parallel_sync);
-                } else direct: {
-                    const held = f.lockSlots(parallel_sync);
-                    defer f.unlockSlots(held);
-                    break :direct f.slots[inst.b];
-                };
-                try stack.append(stack_alloc, v);
+            .load_upval, .load_upval_mapped, .load_upval_lexical => {
+                try stack.append(stack_alloc, try loadCapturedBinding(vm, frame, inst, parallel_sync));
             },
-            .load_upval_mapped => {
-                var f = frame.?;
-                var d = inst.a;
-                while (d > 0) : (d -= 1) f = f.parent.?;
-                try stack.append(stack_alloc, f.readSlot(inst.b, parallel_sync));
-            },
-            .load_upval_lexical => {
-                var f = frame.?;
-                var d = inst.a;
-                while (d > 0) : (d -= 1) f = f.parent.?;
-                const held = f.lockSlots(parallel_sync);
-                const v = f.slots[inst.b];
-                const in_tdz = vm.isTdz(v);
-                f.unlockSlots(held);
-                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-                try stack.append(stack_alloc, v);
-            },
-            .store_upval => {
-                var f = frame.?;
-                var d = inst.a;
-                while (d > 0) : (d -= 1) f = f.parent.?;
-                const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                if (f.mapped_arguments != null) {
-                    f.writeSlot(inst.b, v, parallel_sync);
-                } else {
-                    const held = f.lockSlots(parallel_sync);
-                    f.slots[inst.b] = v;
-                    f.unlockSlots(held);
-                }
-            },
-            .store_upval_mapped => {
-                var f = frame.?;
-                var d = inst.a;
-                while (d > 0) : (d -= 1) f = f.parent.?;
-                f.writeSlot(inst.b, stack.items[stack.items.len - 1], parallel_sync);
-            },
-            .store_upval_lexical => {
-                var f = frame.?;
-                var d = inst.a;
-                while (d > 0) : (d -= 1) f = f.parent.?;
-                const immutable_mask: u32 = @as(u32, 1) << 31;
-                const slot = inst.b & ~immutable_mask;
-                const immutable = (inst.b & immutable_mask) != 0;
-                const v = stack.items[stack.items.len - 1]; // assignment leaves its value
-                const held = f.lockSlots(parallel_sync);
-                const in_tdz = vm.isTdz(f.slots[slot]);
-                if (!in_tdz and !immutable) f.slots[slot] = v;
-                f.unlockSlots(held);
-                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-                if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
+            .store_upval, .store_upval_mapped, .store_upval_lexical => {
+                _ = try storeCapturedBinding(vm, frame, inst, stack.items[stack.items.len - 1], parallel_sync);
             },
 
             .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {
@@ -24703,4 +24762,281 @@ test "vm: optimizer seeded activation reads preserve coercion GC and result orde
             }
         }
     }
+}
+
+test "vm: optimizer captured binding admission" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate(
+        \\function capturedFactory() { var captured=3; return [function(){return captured;},function(v){captured=v;return v;}]; }
+        \\var capturedPair=capturedFactory(), capturedReader=capturedPair[0], capturedWriter=capturedPair[1];
+        \\for(var warm=0;warm<64;warm++){capturedReader();capturedWriter(warm);}
+        \\capturedWriter(11); capturedReader();
+    )).asNum());
+    for ([_][]const u8{ "capturedReader", "capturedWriter" }) |name| {
+        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode);
+        const fully_native = if (artifact) |code| code.entry_enabled and !code.has_side_exits else false;
+        try std.testing.expect(fully_native);
+        try std.testing.expect(artifact.?.requires_frame_context and artifact.?.requires_activation_context);
+        const before = optimizer_native_hits.load(.monotonic);
+        var machine = ctx.interpreter();
+        const result = try runFunction(&machine, function, function.chunk.?, if (std.mem.eql(u8, name, "capturedWriter")) &.{Value.num(11)} else &.{}, Value.undef(), Value.undef());
+        try std.testing.expectEqual(@as(f64, 11), result.asNum());
+        try std.testing.expect(optimizer_native_hits.load(.monotonic) > before);
+    }
+}
+
+test "vm: optimizer captured binding effects preserve depth TDZ readonly and steps" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = false, .enable_jit = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const object = try machine.newObject();
+    var outer_slots = [_]Value{ Value.undef(), Value.undef(), Value.undef(), object };
+    var outer = Frame{ .slots = &outer_slots, .parent = null };
+    outer.escaped.store(true, .release);
+    var middle = Frame{ .slots = &.{}, .parent = &outer };
+    var local_slots = [_]Value{Value.num(19)};
+    var current = Frame{ .slots = &local_slots, .parent = &middle };
+    var exec = Exec{ .frame = &current };
+    for ([_]bc.Op{ .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical }) |op| {
+        var chunk = bc.Chunk.init(ctx.arena());
+        const write = op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical;
+        chunk.param_count = if (write) 1 else 0;
+        chunk.local_count = chunk.param_count;
+        if (write) _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emitAB(op, 2, 3);
+        _ = try chunk.emit(.ret, 0);
+        var code = try optimizer_compiler.compile(&chunk);
+        defer code.deinit();
+        outer_slots[3] = object;
+        const before = machine.steps;
+        const outcome = try tryRunManagedNative(&machine, &code, if (write) &local_slots else &.{}, &exec);
+        try std.testing.expect(outcome == .complete);
+        try std.testing.expectEqual((if (write) local_slots[0] else object).bits, outcome.complete.bits);
+        try std.testing.expectEqual(before + chunk.code.items.len, machine.steps);
+        try std.testing.expectEqual((if (write) local_slots[0] else object).bits, outer_slots[3].bits);
+        if (op == .load_upval_lexical or op == .store_upval_lexical) {
+            outer_slots[3] = Value.obj(machine.tdz_marker.?);
+            try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &code, if (write) &local_slots else &.{}, &exec));
+            try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+            machine.exception = Value.undef();
+        }
+    }
+    var immutable = bc.Chunk.init(ctx.arena());
+    immutable.param_count = 1;
+    immutable.local_count = 1;
+    _ = try immutable.emit(.load_local, 0);
+    _ = try immutable.emitAB(.store_upval_lexical, 2, (@as(u32, 1) << 31) | 3);
+    _ = try immutable.emit(.ret, 0);
+    var code = try optimizer_compiler.compile(&immutable);
+    defer code.deinit();
+    outer_slots[3] = object;
+    try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &code, &local_slots, &exec));
+    try std.testing.expectEqualStrings("TypeError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(object.bits, outer_slots[3].bits);
+    machine.exception = Value.undef();
+    outer_slots[3] = Value.obj(machine.tdz_marker.?);
+    try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &code, &local_slots, &exec));
+    try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+}
+
+test "vm: optimizer captured binding seeded effects preserve coercion and aliases" {
+    const Context = @import("context.zig").Context;
+    var seed: u64 = 0x6361707475726573;
+    for (0..8) |_| {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const bias = (seed >> 32) % 97 + 1;
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const delta = (seed >> 32) % 31 + 1;
+        const prefix = try std.fmt.allocPrint(std.testing.allocator, "var captureBias={d},captureDelta={d};", .{ bias, delta });
+        defer std.testing.allocator.free(prefix);
+        const body =
+            \\function forceCaptureGc(){if(typeof $vm!=='undefined')$vm.gc();}
+            \\function captureFactory(a) { var own=arguments, plain=3; let cell=5; const frozen=7; return {read:function(){return [plain,a,cell]},write:function(v){plain=v;a=v+1;cell=v+2;return [plain,a,cell,own[0]]},replace:function(v){plain=v;return v;},add:function(n){return plain+n;},readonly:function(v){frozen=v;return v;},original:function(){return own[0]}}; }
+            \\var cap=captureFactory(captureBias), first=cap.read();
+            \\for(var warm=0;warm<64;warm++){cap.read();cap.write(warm);cap.replace(warm);cap.add(1);}
+            \\var changed=cap.write(captureBias+captureDelta), effects=0;
+            \\cap.replace({valueOf:function(){effects++;cap.replace(captureBias*2);forceCaptureGc();return captureBias;}});
+            \\var coerced=cap.add(captureDelta), later=cap.add(captureDelta), readonly=false;
+            \\try{cap.readonly(9);}catch(e){readonly=e instanceof TypeError;}
+            \\cap.replace('x');var text=cap.add(captureDelta);cap.replace(1n);var mixed=false;try{cap.add(captureDelta);}catch(e){mixed=e instanceof TypeError;}
+            \\JSON.stringify([first,changed,coerced,later,effects,readonly,text,mixed,cap.original()]);
+        ;
+        const source = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, body });
+        defer std.testing.allocator.free(source);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "[[3,{d},5],[{d},{d},{d},{d}],{d},{d},1,true,\"x{d}\",true,{d}]", .{ bias, bias + delta, bias + delta + 1, bias + delta + 2, bias + delta + 1, bias + delta, bias * 2 + delta, delta, bias + delta + 1 });
+        defer std.testing.allocator.free(expected);
+        for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = native,
+                .enable_threads = parallel,
+                .parallel_gc = parallel,
+                .parallel_js = parallel,
+                .bytecode_execution_mode = .required,
+            });
+            defer ctx.destroy();
+            try std.testing.expectEqualStrings(expected, (try ctx.evaluate(source)).asStr());
+            if (native and jit.optimizer_supported) {
+                const holder = ctx.global_object.getOwn("cap").?.asObj();
+                for ([_][]const u8{ "read", "write", "replace", "add" }) |name| {
+                    const function = Interpreter.funcOf(holder.getOwn(name).?).?;
+                    const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                    try std.testing.expect(artifact.entry_enabled and !artifact.has_side_exits and artifact.requires_frame_context);
+                }
+            }
+        };
+    }
+}
+
+test "vm: optimizer captured binding shared frames preserve mapped and lexical cells" {
+    if (builtin.single_threaded or !jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[320,320,320,320]", (try ctx.evaluate(
+            \\function sharedFactory(a){var own=arguments,regular=0;let cell=0;return {bump:function(){a=a+1;regular=regular+1;cell=cell+1;return a+regular+cell;},read:function(){return [a,regular,cell,own[0]]}};}
+            \\var sharedCaptures=sharedFactory(0),captureLock=new Lock();
+            \\for(var warm=0;warm<64;warm++){sharedCaptures.bump();sharedCaptures.read();}
+            \\function captureLane(){if($vm.useThreadGIL()!==false)throw new Error('GIL');for(var i=0;i<64;i++)captureLock.hold(sharedCaptures.bump);return 1;}
+            \\var captureWorkers=[];for(var lane=0;lane<4;lane++)captureWorkers.push(new Thread(captureLane));
+            \\for(var lane=0;lane<4;lane++)captureWorkers[lane].join();
+            \\JSON.stringify(sharedCaptures.read());
+        )).asStr());
+        if (native) {
+            const holder = ctx.global_object.getOwn("sharedCaptures").?.asObj();
+            for ([_][]const u8{ "bump", "read" }) |name| {
+                const function = Interpreter.funcOf(holder.getOwn(name).?).?;
+                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(code.entry_enabled and !code.has_side_exits and code.requires_frame_context);
+            }
+        }
+    }
+}
+
+test "vm: optimizer captured binding frame edges relocate without cached values" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = true,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var captureGarbage=[];for(var i=0;i<1024;i++)captureGarbage.push({});
+            \\function movingCaptureFactory(){let cell={value:41};return {read:function(){return cell;},write:function(value){cell=value;return cell;}};}
+            \\var movingCapture=movingCaptureFactory();for(var warm=0;warm<64;warm++){movingCapture.write(movingCapture.read());}
+            \\captureGarbage=null;
+        );
+        const before = (try ctx.evaluate("movingCapture.read()")).asObj();
+        const moved = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+        try std.testing.expect(moved.moved_cells > 0);
+        const after = try ctx.evaluate("movingCapture.read()");
+        try std.testing.expect(before != after.asObj());
+        try std.testing.expectEqual(@as(f64, 41), after.asObj().getOwn("value").?.asNum());
+        try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("movingCapture.write({value:42});$vm.gc();movingCapture.read().value")).asNum());
+        const holder = ctx.global_object.getOwn("movingCapture").?.asObj();
+        for ([_][]const u8{ "read", "write" }) |name| {
+            const function = Interpreter.funcOf(holder.getOwn(name).?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and !code.has_side_exits and code.requires_frame_context);
+            var machine = ctx.interpreter();
+            const steps = machine.steps;
+            const attempts = optimizer_native_attempts.load(.monotonic);
+            try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, function, if (std.mem.eql(u8, name, "write")) &.{Value.obj(holder)} else &.{}));
+            try std.testing.expectEqual(steps, machine.steps);
+            try std.testing.expectEqual(attempts, optimizer_native_attempts.load(.monotonic));
+        }
+    }
+}
+
+test "vm: optimizer captured binding regions preserve moving checkpoints and stops" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const source =
+        \\var regionGarbage=[];for(var dead=0;dead<1024;dead++)regionGarbage.push({});
+        \\function captureRegionFactory(){var total=0;let held={value:2};return {run:function(n){var i=0;while(i<n){total=total+held.value;i=i+1;}return total;},reset:function(v){total=v;return v;},held:function(){return held;}};}
+        \\var captureRegion=captureRegionFactory();for(var warm=0;warm<10;warm++){captureRegion.reset(0);captureRegion.run(8);}
+        \\captureRegion.reset(0);regionGarbage=null;
+    ;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        const holder = ctx.global_object.getOwn("captureRegion").?.asObj();
+        const function = Interpreter.funcOf(holder.getOwn("run").?).?;
+        if (native) {
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.osr != null and code.requires_frame_context);
+            var reads = false;
+            var writes = false;
+            for (code.native_operations.?.descriptors) |descriptor| {
+                reads = reads or descriptor.bytecode_op == @backingInt(bc.Op.load_upval_lexical) or descriptor.bytecode_op == @backingInt(bc.Op.load_upval);
+                writes = writes or descriptor.bytecode_op == @backingInt(bc.Op.store_upval);
+            }
+            try std.testing.expect(reads and writes);
+        }
+        ctx.collectGarbage();
+        const before = (try ctx.evaluate("captureRegion.held()")).asObj();
+        const entries = optimizer_osr_entries.load(.monotonic);
+        if (native) try std.testing.expect(ctx.requestGarbageCompaction());
+        try std.testing.expectEqual(@as(f64, 40000), (try ctx.evaluate("captureRegion.run(20000)")).asNum());
+        if (native) {
+            try std.testing.expect(optimizer_osr_entries.load(.monotonic) > entries);
+            try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+            try std.testing.expect(before != (try ctx.evaluate("captureRegion.held()")).asObj());
+        }
+        try std.testing.expectEqualStrings("x222", (try ctx.evaluate("captureRegion.reset('x');captureRegion.run(3)")).asStr());
+        try std.testing.expectEqualStrings("6:3", (try ctx.evaluate(
+            \\var captureGetterCalls=0;
+            \\Object.defineProperty(captureRegion.held(),'value',{configurable:true,get:function(){captureGetterCalls++;$vm.gc();return 2;}});
+            \\captureRegion.reset(0);captureRegion.run(3)+':'+captureGetterCalls;
+        )).asStr());
+        for ([_]bool{ false, true }) |stop_requested| {
+            _ = try ctx.evaluate("captureRegion.reset(0)");
+            var machine = ctx.interpreter();
+            machine.step_budget = 1024;
+            var stop: std.atomic.Value(bool) = .init(stop_requested);
+            machine.stop_flag = &stop;
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const active = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(active);
+            const live_holder = ctx.global_object.getOwn("captureRegion").?.asObj();
+            const live_function = Interpreter.funcOf(live_holder.getOwn("run").?).?;
+            try std.testing.expectError(error.Throw, runFunction(&machine, live_function, live_function.chunk.?, &.{Value.num(20000)}, Value.undef(), Value.undef()));
+            try std.testing.expectEqual(@as(u64, if (stop_requested) 1024 else 1025), machine.steps);
+            try std.testing.expectEqualStrings(if (stop_requested) "Error" else "RangeError", machine.exception.asObj().errorName());
+        }
+    };
 }

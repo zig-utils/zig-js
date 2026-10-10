@@ -103,6 +103,8 @@ pub const ValueKind = enum {
     load_var,
     load_this,
     load_new_target,
+    load_capture,
+    store_capture,
     /// A value produced by exact bytecode but deliberately not embedded in the
     /// graph — regex literals and managed constants.
     ///
@@ -183,8 +185,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .store_binding_ref,
         .call_eval_with_this,
         .call_eval_with_this_spread,
-        .load_upval,
-        .store_upval,
         .name_anon,
         .super_get,
         .super_get_index,
@@ -572,6 +572,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .load_local,
         .load_local_lexical,
         .load_upval,
+        .load_upval_mapped,
         .load_upval_lexical,
         .load_this,
         .load_new_target,
@@ -584,7 +585,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         => .{ .required = 0, .removed = 0, .added = 1 },
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
         .end_finally => .{ .required = 2, .removed = 2, .added = 0 },
-        .store_var, .store_local, .store_local_lexical, .store_upval, .store_upval_lexical, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
+        .store_var, .store_local, .store_local_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
         .collect_rest_parameter, .init_declarations, .copy_annex_b => .{ .required = 0, .removed = 0, .added = 0 },
         .store_binding_ref => .{ .required = 1, .removed = 1, .added = 0 },
         .dup => .{ .required = 1, .removed = 0, .added = 1 },
@@ -653,6 +654,12 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .load_var,
         .load_this,
         .load_new_target,
+        .load_upval,
+        .load_upval_mapped,
+        .load_upval_lexical,
+        .store_upval,
+        .store_upval_mapped,
+        .store_upval_lexical,
         .get_prop,
         .get_index,
         .set_prop,
@@ -867,7 +874,8 @@ pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: V
         // `may_have_effect`, which is already true for any argument operand and
         // would push all argument arithmetic through the runtime ABI.
         if (nodes[operand].kind == .get_prop or nodes[operand].kind == .load_var or
-            nodes[operand].kind == .load_this or nodes[operand].kind == .load_new_target) return true;
+            nodes[operand].kind == .load_this or nodes[operand].kind == .load_new_target or
+            nodes[operand].kind == .load_capture or nodes[operand].kind == .store_capture) return true;
     }
     return false;
 }
@@ -1198,6 +1206,28 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .void_op => {
                 if (depth == 0) return error.InvalidControlFlow;
                 stack[depth - 1] = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
+            },
+            .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical => {
+                const write = inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical;
+                if (write and depth == 0) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = if (write) .store_capture else .load_capture,
+                    .lhs = if (write) stack[depth - 1] else ValueNode.none,
+                    .immediate = (@as(u64, inst.a) << 32) | inst.b,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                if (write) {
+                    stack[depth - 1] = result;
+                } else {
+                    stack[depth] = result;
+                    depth += 1;
+                }
             },
             .load_var, .load_this, .load_new_target => {
                 if (inst.op == .load_var and inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
@@ -1802,6 +1832,12 @@ fn supports(op: bc.Op) bool {
         .load_var,
         .load_this,
         .load_new_target,
+        .load_upval,
+        .load_upval_mapped,
+        .load_upval_lexical,
+        .store_upval,
+        .store_upval_mapped,
+        .store_upval_lexical,
         .get_prop,
         .get_index,
         .set_prop,

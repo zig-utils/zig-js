@@ -65,8 +65,10 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .load_var,
         .load_this,
         .load_new_target,
+        .load_capture,
         .interpreter_value,
         => 0,
+        .store_capture,
         .to_numeric,
         .neg,
         .pos,
@@ -471,6 +473,8 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         } else if (node.kind != .interpreter_value) {
             const op = plan.instructions[node.origin].op;
             const expected: ir.ValueKind = switch (op) {
+                .load_upval, .load_upval_mapped, .load_upval_lexical => .load_capture,
+                .store_upval, .store_upval_mapped, .store_upval_lexical => .store_capture,
                 .new_call => .construct,
                 .new_spread => .construct_spread,
                 .tail_call => .call,
@@ -483,6 +487,10 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             };
             if (expected != node.kind) return error.InvalidValue;
             switch (node.kind) {
+                .load_capture, .store_capture => {
+                    const instruction = plan.instructions[node.origin];
+                    if (node.immediate != (@as(u64, instruction.a) << 32) | instruction.b) return error.InvalidValue;
+                },
                 .load_var,
                 .get_prop,
                 .set_prop,

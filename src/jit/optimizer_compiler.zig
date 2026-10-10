@@ -722,7 +722,9 @@ fn stageNativeOperationDescriptors(
                 inst.op == .tail_call_with_this or inst.op == .tail_call_spread or
                 inst.op == .tail_call_with_this_spread)
                 break :runtime operation.lhs;
-            if (inst.op == .load_var or inst.op == .load_this or inst.op == .load_new_target or
+            if (inst.op == .load_upval or inst.op == .load_upval_mapped or inst.op == .load_upval_lexical or
+                inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical or
+                inst.op == .load_var or inst.op == .load_this or inst.op == .load_new_target or
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
                 inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
                 inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
@@ -795,6 +797,8 @@ fn stageNativeOperationDescriptors(
             else
                 0),
             .origin = state.origin,
+            .operand_a = inst.a,
+            .operand_b = inst.b,
         });
         if (runtime_operation) |operation| operation.immediate = descriptor_index;
     }
@@ -889,7 +893,7 @@ fn deterministicSteps(
 
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
     if (state.kind != .effect and state.kind != .call) return false;
-    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
+    for (graph.nodes) |node| if ((node.kind == .load_capture or node.kind == .store_capture or node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
         node.kind == .not or node.kind == .typeof_op or node.kind == .inc or node.kind == .dec or
         node.kind == .bit_not or node.kind == .to_string or node.kind == .to_property_key or
         node.kind == .get_prop or node.kind == .get_index or node.kind == .add or
@@ -1125,7 +1129,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .load_var, .load_this, .load_new_target, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -2847,7 +2851,7 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
-            .load_var, .load_this, .load_new_target => {
+            .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -2868,6 +2872,7 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
+            .store_capture,
             .to_numeric,
             .neg,
             .pos,
@@ -3738,12 +3743,19 @@ fn compileAarch64WithAllocator(
     errdefer if (osr) |metadata| metadata.destroy();
 
     var requires_activation_context = false;
+    var requires_frame_context = false;
     for (program.native_operations) |descriptor| {
+        const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
+        if (op == .load_upval or op == .load_upval_mapped or op == .load_upval_lexical or
+            op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical)
+        {
+            requires_frame_context = true;
+            requires_activation_context = true;
+        }
         if (descriptor.bytecode_op == @backingInt(bc.Op.load_this) or
             descriptor.bytecode_op == @backingInt(bc.Op.load_new_target))
         {
             requires_activation_context = true;
-            break;
         }
     }
     return .{
@@ -3751,6 +3763,7 @@ fn compileAarch64WithAllocator(
         .entry = @ptrCast(@alignCast(memory.executableBytes().ptr)),
         .kind = .optimizer,
         .requires_activation_context = requires_activation_context,
+        .requires_frame_context = requires_frame_context,
         .bytecode_steps = program.bytecode_steps,
         .frame_slots = program.frame_slots,
         .required_numeric_slots = program.required_numeric_slots,
@@ -3886,7 +3899,7 @@ const DirectRuntimeAccess = struct {
 
     fallbacks: [32]Fallback = undefined,
     fallback_count: usize = 0,
-    completions: [4]usize = undefined,
+    completions: [8]usize = undefined,
     completion_count: usize = 0,
     statuses: [2]usize = undefined,
     status_count: usize = 0,
@@ -4802,6 +4815,36 @@ fn emitDirectNativeBuiltinCall(
     return direct;
 }
 
+fn emitDirectNumericDataAccess(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
+    if (op != .get_prop and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical and
+        op != .store_upval and op != .store_upval_mapped and op != .store_upval_lexical) return null;
+    var direct = DirectRuntimeAccess{};
+    try assembler.load64(17, 12, frameOffset("numeric_data_access"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(17), true);
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.moveRegister64(0, 12);
+    try assembler.movImmediate32(1, @intCast(operation.immediate));
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+    try assembler.compareImmediate64(0, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.load64(9, 12, frameOffset("operation_value_bits"));
+    try assembler.store64(9, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
+}
+
 fn emitRuntimeOperation(
     assembler: *aarch64.Assembler,
     returns: *aarch64.ReturnBranches,
@@ -4823,12 +4866,23 @@ fn emitRuntimeOperation(
     try assembler.store64(9, 12, frameOffset("operation_detail"));
     const numeric_result = descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0;
     if (numeric_result) {
-        var direct = (try emitDirectGlobalBindingRead(assembler, program, operation, descriptor)) orelse
+        const fast = (try emitDirectGlobalBindingRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectStringOrDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
-            (try emitDirectUnsigned32BitAnd(assembler, operation, descriptor)) orelse
-            return error.UnsupportedChunk;
+            try emitDirectUnsigned32BitAnd(assembler, operation, descriptor);
+        const synchronized_position = assembler.position();
+        const synchronized = try emitDirectNumericDataAccess(assembler, operation, descriptor);
+        var direct: DirectRuntimeAccess = undefined;
+        if (synchronized) |guarded| {
+            direct = guarded;
+            if (fast) |specialized| {
+                // Fast-path misses, including shared-mode guards, continue to
+                // the synchronized canonical snapshot before deoptimizing.
+                try specialized.patchFallbacks(assembler, synchronized_position);
+                for (specialized.completions[0..specialized.completion_count]) |branch| try direct.addCompletion(branch);
+            }
+        } else direct = fast orelse return error.UnsupportedChunk;
         try direct.patchCompletions(assembler, assembler.position());
         try assembler.load64(9, 14, try slotOffset(operation.destination));
         try assembler.movImmediate64(10, Value.number_box_mask);
@@ -6359,7 +6413,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .def_var, .inputs = 1, .kind = .effect },
         .{ .op = .def_lex, .inputs = 1, .kind = .effect },
         .{ .op = .bind_pattern, .inputs = 1, .kind = .effect },
-        .{ .op = .store_upval, .inputs = 1, .kind = .effect },
         .{ .op = .name_anon, .inputs = 1, .kind = .effect },
         .{ .op = .super_get_index, .inputs = 1, .kind = .effect },
         .{ .op = .enter_with, .inputs = 1, .kind = .effect },
@@ -6415,7 +6468,6 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         // `load_var` used to belong here; it is now a modelled zero-input
         // runtime operation, covered below.
         .{ .op = .load_var_or_undef },
-        .{ .op = .load_upval },
         .{ .op = .super_get },
         .{ .op = .enter_block },
         .{ .op = .exit_block },
@@ -8209,4 +8261,57 @@ test "optimizer activation reads lower as rooted zero-input effects with OOM cle
         };
         try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{op});
     }
+}
+
+test "optimizer captured binding effects retain exact coordinates" {
+    for ([_]bc.Op{ .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        const write = op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical;
+        chunk.param_count = if (write) 1 else 0;
+        chunk.local_count = chunk.param_count;
+        if (write) _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emitAB(op, 2, 3);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = lower(&chunk, &plan, std.testing.allocator) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ @tagName(op), @errorName(err) });
+            return err;
+        };
+        defer program.deinit();
+        try program.verify();
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        try std.testing.expectEqual(@as(u32, 2), program.native_operations[0].operand_a);
+        try std.testing.expectEqual(@as(u32, 3), program.native_operations[0].operand_b);
+        try std.testing.expectEqual(@as(u16, if (write) 1 else 0), program.native_operations[0].input_count);
+    }
+}
+
+fn lowerCaptureForTesting(allocator: std.mem.Allocator, op: bc.Op) !Program {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const write = op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical;
+    chunk.param_count = if (write) 1 else 0;
+    chunk.local_count = chunk.param_count;
+    if (write) _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emitAB(op, 2, 3);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, allocator);
+    defer plan.deinit();
+    return lower(&chunk, &plan, allocator);
+}
+
+test "optimizer captured binding allocation failures release effect and recovery tables" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, op: bc.Op) !void {
+            var program = try lowerCaptureForTesting(allocator, op);
+            defer program.deinit();
+        }
+    };
+    for ([_]bc.Op{ .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical }) |op|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{op});
 }

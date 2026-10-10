@@ -367,6 +367,8 @@ pub const NativeOperationDescriptor = extern struct {
     step_delta: u16,
     flags: u16 = 0,
     origin: u32,
+    operand_a: u32 = 0,
+    operand_b: u32 = 0,
 
     pub const none = std.math.maxInt(u16);
     pub const numeric_result: u16 = 1 << 0;
@@ -781,6 +783,12 @@ pub const NativeFrame = extern struct {
     /// Exact Zig-native [[Call]] trampoline used after a stable call link is
     /// published. It may return `.fallback` only before invoking the callee.
     native_builtin_call: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) u32 = null,
+    /// Stable defining-frame access, owned and traced by the published VM Exec.
+    /// Generated code never interprets this pointer or retains captured Values.
+    bytecode_frame: ?*anyopaque = null,
+    /// Non-allocating, guarded Number access to captured cells and own data properties.
+    /// False means no write occurred and the opcode must be replayed in bytecode.
+    numeric_data_access: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) bool = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
@@ -1379,6 +1387,7 @@ pub const CompiledCode = struct {
     /// Immutable admission ruling: activation-eliding entry has no callee
     /// receiver/new-target context and must refuse before executing any effect.
     requires_activation_context: bool = false,
+    requires_frame_context: bool = false,
     /// Machine-frame facts emitted by codegen and consumed only by an opt-in
     /// external publisher. `.none` adds no publication work on the default path.
     unwind: native_observability.UnwindPlan = .none,
