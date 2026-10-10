@@ -138,12 +138,17 @@ pub fn verify(program: *const compiler.Program) Error!void {
             jit.NativeOperationDescriptor.literal_function_anonymous) != 0) return error.InvalidDescriptor;
         switch (op) {
             .load_upval, .load_upval_mapped, .load_upval_lexical => if (descriptor.input_count != 0) return error.InvalidDescriptor,
+            .load_var_or_undef, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref => if (descriptor.input_count != 0) return error.InvalidDescriptor,
+            .store_var, .def_var, .def_lex, .store_binding_ref => if (descriptor.input_count != 1) return error.InvalidDescriptor,
             .store_upval, .store_upval_mapped, .store_upval_lexical => if (descriptor.input_count != 1) return error.InvalidDescriptor,
             else => {},
         }
+        if ((op == .def_var and descriptor.operand_b > 3) or (op == .def_lex and descriptor.operand_b > 4) or
+            (op == .load_binding_ref and descriptor.operand_b & ~(bc.binding_ref_load_retain | bc.binding_ref_load_with_base | bc.binding_ref_load_allow_unresolvable) != 0))
+            return error.InvalidDescriptor;
         if ((op == .load_var or op == .load_this or op == .load_new_target) and descriptor.input_count != 0) return error.InvalidDescriptor;
     }
-    for (program.operations) |operation| {
+    for (program.operations, 0..) |operation, operation_index| {
         try slot(program, operation.destination);
         defined[operation.destination] = true;
         switch (operation.kind) {
@@ -153,6 +158,24 @@ pub fn verify(program: *const compiler.Program) Error!void {
             },
             .constant => if (!primitiveConstant(operation.immediate)) return error.InvalidOperation,
             .copy => try slot(program, operation.lhs),
+            .branch_predicate => {
+                try slot(program, operation.lhs);
+                const op = std.enums.fromInt(bc.Op, (std.math.cast(u16, operation.immediate) orelse return error.InvalidOperation)) orelse return error.InvalidOperation;
+                if (op != .jump_if_true_peek and op != .jump_if_false_peek and op != .jump_if_nullish_peek and op != .jump_if_not_nullish_peek) return error.InvalidOperation;
+            },
+            .runtime_base => {
+                try slot(program, operation.lhs);
+                if (!defined[operation.lhs]) return error.InvalidOperation;
+                var producer = false;
+                for (program.operations[0..operation_index]) |candidate| {
+                    if (candidate.kind != .runtime_operation or candidate.destination != operation.lhs or candidate.origin != operation.origin) continue;
+                    if (candidate.immediate >= program.native_operations.len) return error.InvalidOperation;
+                    const descriptor = program.native_operations[candidate.immediate];
+                    producer = descriptor.bytecode_op == @backingInt(bc.Op.load_binding_ref) and descriptor.operand_b & bc.binding_ref_load_with_base != 0;
+                }
+                if (!producer) return error.InvalidOperation;
+                managed[operation.destination] = true;
+            },
             .runtime_operation => {
                 if (operation.immediate >= descriptor_count) return error.InvalidOperation;
                 const descriptor = program.native_operations[operation.immediate];
@@ -219,6 +242,18 @@ pub fn verify(program: *const compiler.Program) Error!void {
         try slot(program, branch.condition);
         try slot(program, branch.false_result);
         try slot(program, branch.true_result);
+        if (branch.merge_block) |merge| {
+            if (branch.false_block == branch.true_block or merge == branch.false_block or merge == branch.true_block or
+                merge == program.execution_block or branch.false_block == program.execution_block or branch.true_block == program.execution_block or
+                branch.false_result != program.result or branch.true_result != program.result or
+                program.bytecode_steps != @as(u32, branch.entry_steps) + @max(@as(u32, branch.false_steps), @as(u32, branch.true_steps)) + branch.merge_steps)
+                return error.InvalidControl;
+            for (program.operations) |operation| {
+                if (operation.block != optimizer.Block.none and operation.block != program.execution_block and
+                    operation.block != branch.false_block and operation.block != branch.true_block and operation.block != merge)
+                    return error.InvalidControl;
+            }
+        }
     } else if (program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null) try slot(program, program.result);
     for (program.loop_exit_guards) |guard| {
         try slot(program, guard.condition);

@@ -796,7 +796,20 @@ pub const NativeFrame = extern struct {
     /// Revalidate the native window only when a callback consumed child dispatch.
     continuation_checkpoint: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) bool = null,
     operation_entry_steps: u64 = 0,
+    /// WithBaseObject returned alongside one exact GetValue operation.
+    operation_base_bits: u64 = 0,
+    /// Owning execution for retained References and declaration eligibility.
+    bytecode_execution: ?*anyopaque = null,
 };
+
+/// Pure ToBoolean/IsNullish for tagged branch operands. It neither allocates
+/// nor invokes JavaScript; the input stays in rooted native scratch.
+pub fn evaluateBranchPredicate(bits: u64, mode: u64) callconv(.c) u64 {
+    const RuntimeValue = @import("value.zig").Value;
+    const value_ = RuntimeValue.fromRawBits(bits);
+    const result = if (mode == 0) value_.toBoolean() else value_.isNull() or value_.isUndefined();
+    return RuntimeValue.boolVal(result).rawBits();
+}
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
 
@@ -1395,6 +1408,7 @@ pub const CompiledCode = struct {
     /// receiver/new-target context and must refuse before executing any effect.
     requires_activation_context: bool = false,
     requires_frame_context: bool = false,
+    requires_execution_context: bool = false,
     /// Machine-frame facts emitted by codegen and consumed only by an opt-in
     /// external publisher. `.none` adds no publication work on the default path.
     unwind: native_observability.UnwindPlan = .none,

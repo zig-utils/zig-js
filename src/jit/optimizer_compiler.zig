@@ -41,6 +41,8 @@ pub const OperationKind = enum {
     eq,
     neq,
     runtime_operation,
+    runtime_base,
+    branch_predicate,
 };
 
 pub const Operation = struct {
@@ -68,6 +70,11 @@ pub const BranchSelection = struct {
     origin: u32,
     false_return_origin: u32,
     true_return_origin: u32,
+    merge_block: ?u32 = null,
+    entry_steps: u12 = 0,
+    false_steps: u12 = 0,
+    true_steps: u12 = 0,
+    merge_steps: u12 = 0,
 };
 
 pub const SideExitBranch = struct {
@@ -731,7 +738,8 @@ fn stageNativeOperationDescriptors(
                 inst.op == .tail_call_with_this or inst.op == .tail_call_spread or
                 inst.op == .tail_call_with_this_spread)
                 break :runtime operation.lhs;
-            if (inst.op == .load_upval or inst.op == .load_upval_mapped or inst.op == .load_upval_lexical or
+            if (inst.op == .load_var_or_undef or inst.op == .store_var or inst.op == .def_var or inst.op == .def_lex or inst.op == .init_declarations or inst.op == .copy_annex_b or inst.op == .resolve_binding_ref or inst.op == .load_binding_ref or inst.op == .clear_binding_ref or inst.op == .store_binding_ref or
+                inst.op == .load_upval or inst.op == .load_upval_mapped or inst.op == .load_upval_lexical or
                 inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical or
                 inst.op == .load_var or inst.op == .load_this or inst.op == .load_new_target or
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
@@ -921,7 +929,7 @@ fn deterministicSteps(
 
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
     if (state.kind != .effect and state.kind != .call) return false;
-    for (graph.nodes) |node| if ((node.kind == .load_capture or node.kind == .store_capture or node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
+    for (graph.nodes) |node| if ((node.kind == .load_capture or node.kind == .store_capture or node.kind == .load_var_or_undef or node.kind == .store_var or node.kind == .def_var or node.kind == .def_lex or node.kind == .init_declarations or node.kind == .copy_annex_b or node.kind == .resolve_binding_ref or node.kind == .load_binding_ref or node.kind == .clear_binding_ref or node.kind == .store_binding_ref or node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
         node.kind == .not or node.kind == .typeof_op or node.kind == .inc or node.kind == .dec or
         node.kind == .bit_not or node.kind == .to_string or node.kind == .to_property_key or
         node.kind == .get_prop or node.kind == .get_index or node.kind == .add or
@@ -963,11 +971,15 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             ordinal += 1;
         };
         var incoming: ?optimizer.Edge = null;
+        var incoming_count: usize = 0;
         for (graph.edges) |edge| if (edge.to == node.block) {
-            if (incoming != null) return error.UnsupportedChunk;
+            incoming_count += 1;
             incoming = edge;
         };
         const edge = incoming orelse return error.UnsupportedChunk;
+        // A merge owns a scratch slot. Each predecessor writes it on its edge,
+        // so recovery never aliases the unselected arm.
+        if (incoming_count > 1) continue;
         if (ordinal >= edge.argument_count) return error.UnsupportedChunk;
         aliases[node.id] = graph.edge_arguments[edge.first_argument + ordinal];
     };
@@ -994,6 +1006,14 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         // out of the tier; they are now modelled as `.load_var` and staged as
         // zero-input runtime operations.
         .interpreter_value => return error.UnsupportedChunk,
+        .branch_predicate => {
+            types[node.id] = .boolean;
+            try operations.append(allocator, .{ .kind = .branch_predicate, .destination = @intCast(node.id), .block = node.block, .lhs = @intCast(try resolveAlias(node.lhs, aliases)), .immediate = node.immediate, .origin = node.origin });
+        },
+        .binding_base => {
+            types[node.id] = .other;
+            try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = node.block, .lhs = @intCast(node.lhs), .origin = node.origin });
+        },
         .argument => {
             if (node.immediate >= chunk.param_count or node.immediate >= 64) return error.UnsupportedChunk;
             if (numeric_inputs[node.id]) required_numeric_slots |= @as(u64, 1) << @intCast(node.immediate);
@@ -1157,7 +1177,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -1294,48 +1314,105 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         } else return error.UnsupportedChunk;
     } else {
         const branch = graph.branches[0];
-        if (branch.block != 0 or graph.edges.len != 3 or graph.returns.len != 2 or
-            branch.false_block == branch.true_block or branch.false_block >= plan.blocks.len or
-            branch.true_block >= plan.blocks.len or plan.blocks[branch.false_block].successor_count != 0 or
-            plan.blocks[branch.true_block].successor_count != 0)
-            return error.UnsupportedChunk;
-        var saw_entry = false;
-        var saw_false = false;
-        var saw_true = false;
-        for (graph.edges) |edge| {
-            if (edge.from == optimizer.Block.none and edge.to == 0) saw_entry = true else if (edge.from == 0 and edge.to == branch.false_block) saw_false = true else if (edge.from == 0 and edge.to == branch.true_block) saw_true = true else return error.UnsupportedChunk;
-        }
-        if (!saw_entry or !saw_false or !saw_true) return error.UnsupportedChunk;
-        const false_return = returnForBlock(graph.returns, branch.false_block) orelse return error.UnsupportedChunk;
-        const true_return = returnForBlock(graph.returns, branch.true_block) orelse return error.UnsupportedChunk;
-        const condition = try resolveAlias(branch.condition, aliases);
-        if (types[condition] != .boolean) return error.UnsupportedChunk;
-        const false_result = try resolveAlias(false_return.value, aliases);
-        const true_result = try resolveAlias(true_return.value, aliases);
-        const false_steps = plan.blocks[0].instruction_count + plan.blocks[branch.false_block].instruction_count;
-        const true_steps = plan.blocks[0].instruction_count + plan.blocks[branch.true_block].instruction_count;
-        if (false_steps == true_steps) {
-            bytecode_steps = false_steps;
+        if (graph.returns.len == 1 and branch.block == 0 and graph.edges.len == 5 and
+            branch.false_block != branch.true_block and branch.false_block < plan.blocks.len and
+            branch.true_block < plan.blocks.len)
+        {
+            const false_arm = plan.blocks[branch.false_block];
+            const true_arm = plan.blocks[branch.true_block];
+            const returned = graph.returns[0];
+            if (false_arm.successor_count != 1 or true_arm.successor_count != 1 or
+                false_arm.successors[0] != returned.block or true_arm.successors[0] != returned.block or
+                returned.block == 0 or returned.block == branch.false_block or returned.block == branch.true_block or
+                plan.blocks[returned.block].successor_count != 0) return error.UnsupportedChunk;
+            for (graph.edges) |edge| {
+                if ((edge.from == optimizer.Block.none and edge.to == 0) or
+                    (edge.from == 0 and (edge.to == branch.false_block or edge.to == branch.true_block)) or
+                    ((edge.from == branch.false_block or edge.from == branch.true_block) and edge.to == returned.block)) continue;
+                return error.UnsupportedChunk;
+            }
+            const condition = try resolveAlias(branch.condition, aliases);
+            if (types[condition] != .boolean) return error.UnsupportedChunk;
+            for ([_]u32{ branch.false_block, branch.true_block }) |arm| {
+                var copies: [jit.numeric_scratch_capacity]CopyPair = undefined;
+                var copy_count: usize = 0;
+                const edge = for (graph.edges) |candidate| {
+                    if (candidate.from == arm and candidate.to == returned.block) break candidate;
+                } else return error.UnsupportedChunk;
+                for (graph.nodes) |node| if (node.kind == .block_argument and node.block == returned.block) {
+                    if (copy_count >= edge.argument_count) return error.UnsupportedChunk;
+                    copies[copy_count] = .{
+                        .destination = @intCast(node.id),
+                        .source = @intCast(try resolveAlias(graph.edge_arguments[edge.first_argument + copy_count], aliases)),
+                    };
+                    copy_count += 1;
+                };
+                if (copy_count != edge.argument_count) return error.UnsupportedChunk;
+                try appendParallelCopies(allocator, &operations, arm, copies[0..copy_count], &scratch_slots);
+            }
+            result = try resolveAlias(returned.value, aliases);
+            const merge_steps = returned.origin - plan.blocks[returned.block].start + 1;
+            const entry_steps = plan.blocks[0].instruction_count;
+            bytecode_steps = entry_steps + @max(false_arm.instruction_count, true_arm.instruction_count) + merge_steps;
             branch_selection = .{
                 .condition = @intCast(condition),
-                .false_result = @intCast(false_result),
-                .true_result = @intCast(true_result),
+                .false_result = @intCast(result),
+                .true_result = @intCast(result),
                 .false_block = branch.false_block,
                 .true_block = branch.true_block,
                 .origin = branch.origin,
-                .false_return_origin = false_return.origin,
-                .true_return_origin = true_return.origin,
+                .false_return_origin = returned.origin,
+                .true_return_origin = returned.origin,
+                .merge_block = returned.block,
+                .entry_steps = std.math.cast(u12, entry_steps) orelse return error.UnsupportedChunk,
+                .false_steps = std.math.cast(u12, false_arm.instruction_count) orelse return error.UnsupportedChunk,
+                .true_steps = std.math.cast(u12, true_arm.instruction_count) orelse return error.UnsupportedChunk,
+                .merge_steps = std.math.cast(u12, merge_steps) orelse return error.UnsupportedChunk,
             };
         } else {
-            bytecode_steps = plan.blocks[0].instruction_count;
-            side_exit_branch = .{
-                .condition = @intCast(condition),
-                .false_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.false_block),
-                .true_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.true_block),
-                .false_steps = @intCast(plan.blocks[0].instruction_count),
-                .true_steps = @intCast(plan.blocks[0].instruction_count),
-                .origin = branch.origin,
-            };
+            if (branch.block != 0 or graph.edges.len != 3 or graph.returns.len != 2 or
+                branch.false_block == branch.true_block or branch.false_block >= plan.blocks.len or
+                branch.true_block >= plan.blocks.len or plan.blocks[branch.false_block].successor_count != 0 or
+                plan.blocks[branch.true_block].successor_count != 0)
+                return error.UnsupportedChunk;
+            var saw_entry = false;
+            var saw_false = false;
+            var saw_true = false;
+            for (graph.edges) |edge| {
+                if (edge.from == optimizer.Block.none and edge.to == 0) saw_entry = true else if (edge.from == 0 and edge.to == branch.false_block) saw_false = true else if (edge.from == 0 and edge.to == branch.true_block) saw_true = true else return error.UnsupportedChunk;
+            }
+            if (!saw_entry or !saw_false or !saw_true) return error.UnsupportedChunk;
+            const false_return = returnForBlock(graph.returns, branch.false_block) orelse return error.UnsupportedChunk;
+            const true_return = returnForBlock(graph.returns, branch.true_block) orelse return error.UnsupportedChunk;
+            const condition = try resolveAlias(branch.condition, aliases);
+            if (types[condition] != .boolean) return error.UnsupportedChunk;
+            const false_result = try resolveAlias(false_return.value, aliases);
+            const true_result = try resolveAlias(true_return.value, aliases);
+            const false_steps = plan.blocks[0].instruction_count + plan.blocks[branch.false_block].instruction_count;
+            const true_steps = plan.blocks[0].instruction_count + plan.blocks[branch.true_block].instruction_count;
+            if (false_steps == true_steps) {
+                bytecode_steps = false_steps;
+                branch_selection = .{
+                    .condition = @intCast(condition),
+                    .false_result = @intCast(false_result),
+                    .true_result = @intCast(true_result),
+                    .false_block = branch.false_block,
+                    .true_block = branch.true_block,
+                    .origin = branch.origin,
+                    .false_return_origin = false_return.origin,
+                    .true_return_origin = true_return.origin,
+                };
+            } else {
+                bytecode_steps = plan.blocks[0].instruction_count;
+                side_exit_branch = .{
+                    .condition = @intCast(condition),
+                    .false_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.false_block),
+                    .true_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.true_block),
+                    .false_steps = @intCast(plan.blocks[0].instruction_count),
+                    .true_steps = @intCast(plan.blocks[0].instruction_count),
+                    .origin = branch.origin,
+                };
+            }
         }
     }
     var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
@@ -1380,6 +1457,16 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
         });
     }
+    var diamond_windows: []u32 = &.{};
+    defer if (diamond_windows.len != 0) allocator.free(diamond_windows);
+    if (branch_selection) |branch| if (branch.merge_block) |merge| {
+        diamond_windows = try allocator.alloc(u32, plan.blocks.len);
+        @memset(diamond_windows, 0);
+        diamond_windows[0] = bytecode_steps;
+        diamond_windows[branch.false_block] = @as(u32, branch.false_steps) + branch.merge_steps;
+        diamond_windows[branch.true_block] = @as(u32, branch.true_steps) + branch.merge_steps;
+        diamond_windows[merge] = branch.merge_steps;
+    };
     const native_operations = try stageNativeOperationDescriptors(
         chunk,
         plan,
@@ -1388,11 +1475,11 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         allocator,
         &operations,
         &scratch_slots,
-        .deterministic,
+        if (branch_selection != null and branch_selection.?.merge_block != null) .block_local else .deterministic,
         null,
         null,
         bytecode_steps,
-        null,
+        if (diamond_windows.len == 0) null else diamond_windows,
     );
     errdefer if (native_operations.len != 0) allocator.free(native_operations);
     const native_operation_names = try allocator.alloc(?[]const u8, native_operations.len);
@@ -1400,7 +1487,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     for (native_operations, 0..) |descriptor, index| {
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
-        native_operation_names[index] = if (inst.op == .load_var or
+        native_operation_names[index] = if (inst.op == .load_var_or_undef or inst.op == .store_var or inst.op == .def_var or inst.op == .def_lex or inst.op == .load_var or
             inst.op == .get_prop or inst.op == .set_prop or
             inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method or
             inst.op == .init_prop)
@@ -2286,7 +2373,7 @@ fn lowerRegionOsr(
     for (native_operations, 0..) |descriptor, index| {
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
-        native_operation_names[index] = if (inst.op == .load_var or
+        native_operation_names[index] = if (inst.op == .load_var_or_undef or inst.op == .store_var or inst.op == .def_var or inst.op == .def_lex or inst.op == .load_var or
             inst.op == .get_prop or inst.op == .set_prop or
             inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method or
             inst.op == .init_prop)
@@ -2885,7 +2972,19 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
-            .load_var, .load_this, .load_new_target, .load_capture => {
+            .branch_predicate => {
+                if (node.lhs >= initialized.len or !initialized[node.lhs]) return error.UnsupportedChunk;
+                types[node.id] = .boolean;
+                initialized[node.id] = true;
+                try operations.append(allocator, .{ .kind = .branch_predicate, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .immediate = node.immediate, .origin = node.origin });
+            },
+            .binding_base => {
+                if (node.lhs >= initialized.len or !initialized[node.lhs]) return error.UnsupportedChunk;
+                types[node.id] = .other;
+                initialized[node.id] = true;
+                try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .origin = node.origin });
+            },
+            .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -3707,22 +3806,30 @@ fn compileAarch64WithAllocator(
     } else if (program.branch) |branch| {
         for (program.operations) |operation| if (operation.block == program.execution_block)
             try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
+        if (branch.merge_block != null) try emitBlockStepSuffix(&assembler, program, program.execution_block, branch.entry_steps);
         try pc_map.mark(assembler.position(), branch.origin);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
         try emitBlockOperations(&assembler, &returns, program, branch.true_block, &pc_map);
+        if (branch.merge_block != null) try emitBlockStepSuffix(&assembler, program, branch.true_block, branch.true_steps);
         try pc_map.mark(assembler.position(), branch.true_return_origin);
-        try assembler.load64(9, 14, try slotOffset(branch.true_result));
+        if (branch.merge_block == null) try assembler.load64(9, 14, try slotOffset(branch.true_result));
         const done = try assembler.branchPlaceholder();
         try assembler.patchConditionBranch(false_jump, assembler.position());
         try emitBlockOperations(&assembler, &returns, program, branch.false_block, &pc_map);
+        if (branch.merge_block != null) try emitBlockStepSuffix(&assembler, program, branch.false_block, branch.false_steps);
         try pc_map.mark(assembler.position(), branch.false_return_origin);
-        try assembler.load64(9, 14, try slotOffset(branch.false_result));
+        if (branch.merge_block == null) try assembler.load64(9, 14, try slotOffset(branch.false_result));
         try assembler.patchBranch(done, assembler.position());
-        // The machine join is reached from two distinct return bytecodes.
         try pc_map.mark(assembler.position(), null);
+        if (branch.merge_block) |merge| {
+            try emitBlockOperations(&assembler, &returns, program, merge, &pc_map);
+            try emitBlockStepSuffix(&assembler, program, merge, branch.merge_steps);
+            try pc_map.mark(assembler.position(), branch.true_return_origin);
+            try assembler.load64(9, 14, try slotOffset(program.result));
+        }
     } else {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
@@ -3732,7 +3839,10 @@ fn compileAarch64WithAllocator(
     }
     if (program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null) {
         try assembler.store64(9, 12, frameOffset("result_bits"));
-        const runtime_steps = try runtimeOperationSteps(program);
+        const runtime_steps = if (program.branch != null and program.branch.?.merge_block != null)
+            program.bytecode_steps
+        else
+            try runtimeOperationSteps(program);
         if (runtime_steps > program.bytecode_steps) return error.UnsupportedChunk;
         const suffix_steps = std.math.cast(u12, program.bytecode_steps - runtime_steps) orelse
             return error.UnsupportedChunk;
@@ -3779,8 +3889,13 @@ fn compileAarch64WithAllocator(
 
     var requires_activation_context = false;
     var requires_frame_context = false;
+    var requires_execution_context = false;
     for (program.native_operations) |descriptor| {
         const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
+        if (op == .load_var_or_undef or op == .store_var or op == .def_var or op == .def_lex or op == .init_declarations or op == .copy_annex_b or op == .resolve_binding_ref or op == .load_binding_ref or op == .clear_binding_ref or op == .store_binding_ref) {
+            requires_execution_context = true;
+            requires_activation_context = true;
+        }
         if (op == .load_upval or op == .load_upval_mapped or op == .load_upval_lexical or
             op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical)
         {
@@ -3805,6 +3920,7 @@ fn compileAarch64WithAllocator(
         .kind = .optimizer,
         .requires_activation_context = requires_activation_context,
         .requires_frame_context = requires_frame_context,
+        .requires_execution_context = requires_execution_context,
         .bytecode_steps = program.bytecode_steps,
         .frame_slots = program.frame_slots,
         .required_numeric_slots = program.required_numeric_slots,
@@ -3816,7 +3932,8 @@ fn compileAarch64WithAllocator(
         .osr = osr,
         .entry_enabled = program.entry_enabled,
         .manages_steps = program.side_exit != null or program.side_exit_branch != null or
-            program.finally_dispatch != null or program.native_operations.len != 0,
+            program.finally_dispatch != null or program.native_operations.len != 0 or
+            (program.branch != null and program.branch.?.merge_block != null),
         .has_side_exits = program.side_exit != null or program.side_exit_branch != null or
             program.finally_dispatch != null or programHasExceptionalOperations(program) or has_continuation_exits,
         .has_continuation_exits = has_continuation_exits,
@@ -3852,6 +3969,16 @@ fn runtimeOperationSteps(program: *const Program) !u32 {
     return steps;
 }
 
+fn emitBlockStepSuffix(assembler: *aarch64.Assembler, program: *const Program, block: u32, steps: u12) !void {
+    var runtime_steps: u32 = 0;
+    for (program.operations) |operation| if (operation.block == block and operation.kind == .runtime_operation) {
+        if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
+        runtime_steps += program.native_operations[operation.immediate].step_delta;
+    };
+    if (runtime_steps > steps) return error.UnsupportedChunk;
+    if (runtime_steps != steps) try emitStepIncrement(assembler, @intCast(steps - runtime_steps));
+}
+
 fn emitBlockOperations(
     assembler: *aarch64.Assembler,
     returns: *aarch64.ReturnBranches,
@@ -3872,6 +3999,27 @@ fn emitMappedOperation(
 ) !void {
     try pc_map.mark(assembler.position(), if (operation.origin) |origin| @as(usize, origin) else null);
     try emitOperation(assembler, returns, program, operation);
+    var producer: ?Operation = null;
+    if (operation.kind == .runtime_operation) {
+        if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
+        const descriptor = program.native_operations[operation.immediate];
+        if (descriptor.bytecode_op != @backingInt(bc.Op.load_binding_ref) or descriptor.operand_b & bc.binding_ref_load_with_base == 0)
+            producer = operation;
+    } else if (operation.kind == .runtime_base) {
+        for (program.operations) |candidate| {
+            if (candidate.kind != .runtime_operation or candidate.destination != operation.lhs or candidate.origin != operation.origin) continue;
+            if (producer != null) return error.UnsupportedChunk;
+            producer = candidate;
+        }
+        if (producer == null) return error.UnsupportedChunk;
+    }
+    if (producer) |completed| {
+        const descriptor = program.native_operations[completed.immediate];
+        // Number-only helpers cannot consume child dispatch. A retained call
+        // receiver must be in scratch before a generic post-effect exit.
+        if (descriptor.flags & jit.NativeOperationDescriptor.numeric_result == 0)
+            try emitContinuationCheckpoint(assembler, returns, program, completed, descriptor);
+    }
 }
 
 fn emitOperation(
@@ -3936,6 +4084,27 @@ fn emitOperation(
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
         .runtime_operation => try emitRuntimeOperation(assembler, returns, program, operation),
+        .branch_predicate => {
+            const op: bc.Op = @fromBackingInt(@intCast(operation.immediate));
+            const nullish = op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek;
+            try assembler.pushPair(8, 12);
+            try assembler.pushPair(13, 14);
+            try assembler.pushPair(15, 16);
+            try assembler.pushPair(17, 30);
+            try assembler.load64(0, 14, try slotOffset(operation.lhs));
+            try assembler.movImmediate64(1, if (nullish) 1 else 0);
+            try assembler.movImmediate64(17, @intFromPtr(&jit.evaluateBranchPredicate));
+            try assembler.branchLinkRegister(17);
+            try assembler.popPair(17, 30);
+            try assembler.popPair(15, 16);
+            try assembler.popPair(13, 14);
+            try assembler.popPair(8, 12);
+            try assembler.store64(0, 14, try slotOffset(operation.destination));
+        },
+        .runtime_base => {
+            try assembler.load64(9, 12, frameOffset("operation_base_bits"));
+            try assembler.store64(9, 14, try slotOffset(operation.destination));
+        },
     }
 }
 
@@ -4866,7 +5035,7 @@ fn emitDirectNumericDataAccess(
     descriptor: jit.NativeOperationDescriptor,
 ) !?DirectRuntimeAccess {
     const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
-    if (op != .get_prop and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical and
+    if (op != .get_prop and op != .load_binding_ref and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical and
         op != .store_upval and op != .store_upval_mapped and op != .store_upval_lexical) return null;
     var direct = DirectRuntimeAccess{};
     try assembler.load64(17, 12, frameOffset("numeric_data_access"));
@@ -5039,7 +5208,6 @@ fn emitRuntimeOperation(
     try assembler.patchBranch(done, completion_position);
     if (direct_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
     if (secondary_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
-    try emitContinuationCheckpoint(assembler, returns, program, operation, descriptor);
 }
 
 fn emitContinuationCheckpoint(
@@ -6516,9 +6684,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         kind: jit.DeoptPointKind,
     };
     const cases = [_]Case{
-        .{ .op = .store_var, .inputs = 1, .kind = .effect },
-        .{ .op = .def_var, .inputs = 1, .kind = .effect },
-        .{ .op = .def_lex, .inputs = 1, .kind = .effect },
         .{ .op = .bind_pattern, .inputs = 1, .kind = .effect },
         .{ .op = .name_anon, .inputs = 1, .kind = .effect },
         .{ .op = .super_get_index, .inputs = 1, .kind = .effect },
@@ -6574,7 +6739,6 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         .{ .op = .load_bigint },
         // `load_var` used to belong here; it is now a modelled zero-input
         // runtime operation, covered below.
-        .{ .op = .load_var_or_undef },
         .{ .op = .super_get },
         .{ .op = .enter_block },
         .{ .op = .exit_block },
@@ -8432,4 +8596,163 @@ test "optimizer captured binding allocation failures release effect and recovery
     };
     for ([_]bc.Op{ .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical }) |op|
         try std.testing.checkAllAllocationFailures(allocationFailureBackingForTesting(), Probe.run, .{op});
+}
+
+fn lowerEnvironmentForTesting(allocator: std.mem.Allocator, op: bc.Op, flags: u32) !Program {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const name = try chunk.addName("environmentProbe");
+    try chunk.binding_reference_plans.append(arena.allocator(), .{ .name_index = name, .environment_depth = bc.delete_name_full_environment_depth, .fallback = .{ .op = .store_local, .a = 0 } });
+    const annex = try arena.allocator().alloc(bc.EnvironmentDeclarations.AnnexB, 1);
+    annex[0] = .{ .name = "environmentProbe", .create_binding = true };
+    chunk.environment_declarations.annex_b = annex;
+    const input = op == .store_var or op == .def_var or op == .def_lex or op == .store_binding_ref;
+    chunk.param_count = if (input) 1 else 0;
+    chunk.local_count = chunk.param_count;
+    if (input) _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emitAB(op, 0, flags);
+    if (op == .load_binding_ref and flags & bc.binding_ref_load_with_base != 0) _ = try chunk.emit(.pop, 0);
+    if (op == .load_binding_ref or op == .load_var_or_undef or op == .store_var) _ = try chunk.emit(.ret, 0) else _ = try chunk.emit(.ret_undef, 0);
+    var plan = try optimizer.build(&chunk, allocator);
+    defer plan.deinit();
+    return lower(&chunk, &plan, allocator);
+}
+
+test "optimizer environment binding metadata covers declarations references and receiver roots" {
+    const cases = [_]struct { op: bc.Op, flags: u32 = 0 }{
+        .{ .op = .load_var_or_undef },                                        .{ .op = .store_var },
+        .{ .op = .def_var, .flags = 0 },                                      .{ .op = .def_var, .flags = 1 },
+        .{ .op = .def_var, .flags = 2 },                                      .{ .op = .def_var, .flags = 3 },
+        .{ .op = .def_lex, .flags = 0 },                                      .{ .op = .def_lex, .flags = 1 },
+        .{ .op = .def_lex, .flags = 2 },                                      .{ .op = .def_lex, .flags = 3 },
+        .{ .op = .def_lex, .flags = 4 },                                      .{ .op = .init_declarations },
+        .{ .op = .copy_annex_b },                                             .{ .op = .resolve_binding_ref },
+        .{ .op = .clear_binding_ref },                                        .{ .op = .store_binding_ref },
+        .{ .op = .load_binding_ref },                                         .{ .op = .load_binding_ref, .flags = bc.binding_ref_load_retain },
+        .{ .op = .load_binding_ref, .flags = bc.binding_ref_load_with_base }, .{ .op = .load_binding_ref, .flags = bc.binding_ref_load_with_base | bc.binding_ref_load_retain | bc.binding_ref_load_allow_unresolvable },
+    };
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, op: bc.Op, flags: u32) !void {
+            var program = try lowerEnvironmentForTesting(allocator, op, flags);
+            defer program.deinit();
+        }
+    };
+    for (cases) |case| {
+        var program = try lowerEnvironmentForTesting(std.testing.allocator, case.op, case.flags);
+        defer program.deinit();
+        try program.verify();
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        try std.testing.expectEqual(@as(u32, 0), program.native_operations[0].operand_a);
+        try std.testing.expectEqual(case.flags, program.native_operations[0].operand_b);
+        const descriptor = program.native_operations[0];
+        program.native_operations[0].input_count += 1;
+        try std.testing.expectError(error.InvalidDescriptor, program.verify());
+        program.native_operations[0] = descriptor;
+        if (case.op == .load_binding_ref and case.flags & bc.binding_ref_load_with_base != 0) {
+            program.native_operations[0].operand_b &= ~bc.binding_ref_load_with_base;
+            try std.testing.expectError(error.InvalidDescriptor, program.verify());
+            program.native_operations[0] = descriptor;
+            var base_slot: ?u8 = null;
+            for (program.operations, 0..) |operation, index| if (operation.kind == .runtime_base) {
+                base_slot = operation.destination;
+                program.operations[index].origin = null;
+                try std.testing.expectError(error.InvalidOperation, program.verify());
+                program.operations[index] = operation;
+            };
+            const slot = base_slot orelse return error.TestUnexpectedResult;
+            const last = program.stack_maps.len - 1;
+            const map = program.stack_maps[last];
+            program.stack_maps[last].scratch_pointer_slots &= ~(@as(u128, 1) << @intCast(slot));
+            try std.testing.expectError(error.MissingRoot, program.verify());
+            program.stack_maps[last] = map;
+        }
+        try program.verify();
+        try std.testing.checkAllAllocationFailures(allocationFailureBackingForTesting(), Probe.run, .{ case.op, case.flags });
+    }
+}
+
+fn makePeekDiamond(allocator: std.mem.Allocator, op: bc.Op) !bc.Chunk {
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(op, 5);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.jump, 6);
+    _ = try chunk.emit(.jump, 6);
+    _ = try chunk.emit(.ret, 0);
+    return chunk;
+}
+
+fn lowerPeekDiamond(allocator: std.mem.Allocator, op: bc.Op) !Program {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makePeekDiamond(arena.allocator(), op);
+    var plan = try optimizer.build(&chunk, allocator);
+    defer plan.deinit();
+    return lower(&chunk, &plan, allocator);
+}
+
+test "optimizer environment binding peek diamonds preserve all branch modes and allocation failures" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, op: bc.Op) !void {
+            var program = try lowerPeekDiamond(allocator, op);
+            defer program.deinit();
+            try program.verify();
+        }
+    };
+    for ([_]bc.Op{ .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek }) |op| {
+        var lowered = try lowerPeekDiamond(std.testing.allocator, op);
+        defer lowered.deinit();
+        for (lowered.operations, 0..) |operation, index| if (operation.kind == .branch_predicate) {
+            lowered.operations[index].immediate = std.math.maxInt(u64);
+            try std.testing.expectError(error.InvalidOperation, lowered.verify());
+            lowered.operations[index] = operation;
+        };
+        const branch = lowered.branch.?;
+        lowered.branch.?.merge_block = branch.true_block;
+        try std.testing.expectError(error.InvalidControl, lowered.verify());
+        lowered.branch = branch;
+        var plan_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer plan_arena.deinit();
+        var planned = try makePeekDiamond(plan_arena.allocator(), op);
+        var plan = try optimizer.build(&planned, std.testing.allocator);
+        defer plan.deinit();
+        for (plan.graph.nodes, 0..) |node, index| if (node.kind == .branch_predicate) {
+            plan.graph.nodes[index].immediate = @backingInt(bc.Op.ret);
+            try std.testing.expectError(error.InvalidValue, plan.verify(.function));
+            plan.graph.nodes[index] = node;
+            plan.graph.nodes[index].may_have_effect = true;
+            try std.testing.expectError(error.InvalidEffect, plan.verify(.function));
+            plan.graph.nodes[index] = node;
+        };
+        try plan.verify(.function);
+        try std.testing.checkAllAllocationFailures(allocationFailureBackingForTesting(), Probe.run, .{op});
+        if (!jit.optimizer_supported) continue;
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = try makePeekDiamond(arena.allocator(), op);
+        var code = try compile(&chunk);
+        defer code.deinit();
+        try std.testing.expect(code.manages_steps and !code.has_side_exits);
+        for ([_]Value{ Value.undef(), Value.nul(), Value.boolVal(false), Value.num(0), Value.num(-0.0), Value.num(std.math.nan(f64)), Value.str(""), Value.str("x"), Value.num(1) }) |input| {
+            const taken = switch (op) {
+                .jump_if_true_peek => input.toBoolean(),
+                .jump_if_false_peek => !input.toBoolean(),
+                .jump_if_nullish_peek => input.isNull() or input.isUndefined(),
+                .jump_if_not_nullish_peek => !input.isNull() and !input.isUndefined(),
+                else => unreachable,
+            };
+            var slots = [_]Value{ input, Value.num(17) };
+            var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+            var steps: u64 = 0;
+            var frame = jit.NativeFrame{ .slots = @ptrCast(&slots), .scratch = &scratch, .steps = &steps };
+            try std.testing.expectEqual(jit.ExitStatus.complete, code.run(&frame));
+            try std.testing.expectEqual((if (taken) input else slots[1]).bits, frame.result_bits);
+            try std.testing.expectEqual(@as(u64, if (taken) 4 else 6), steps);
+        }
+    }
 }

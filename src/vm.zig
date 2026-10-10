@@ -4549,6 +4549,16 @@ fn chunkHasTailCall(chunk: *const Chunk) bool {
     return false;
 }
 
+fn nativeOwnDataNumber(object: *value.Object, name: []const u8) ?Value {
+    if (object.private_data_tag != .none or object.is_array or object.is_arguments or
+        object.is_symbol or object.is_bigint or object.native != null) return null;
+    const loaded = switch (object.namedOwnPropertySnapshot(name)) {
+        .data => |data| data.value,
+        else => return null,
+    };
+    return if (loaded.isNumber()) loaded else null;
+}
+
 fn nativeNumericDataAccess(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) bool {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return false));
     const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse return false));
@@ -4561,20 +4571,44 @@ fn nativeNumericDataAccess(frame: *jit.NativeFrame, operation_id: u32) callconv(
         if (descriptor.input_count != 1 or descriptor.first_input >= jit.numeric_scratch_capacity) return false;
         const receiver = Value.fromRawBits(frame.scratch.?[descriptor.first_input]);
         if (!receiver.isObject()) return false;
-        const object = receiver.asObj();
-        // Type/exotic identity is fixed before publication. The own descriptor
-        // and value are then snapshotted under the canonical property lock, so
-        // conversion to an accessor can only cause a pre-effect miss.
-        if (object.private_data_tag != .none or object.is_array or object.is_arguments or
-            object.is_symbol or object.is_bigint or object.native != null) return false;
+        // Conversion to an accessor or an exotic receiver misses before Get.
         const name = metadata.nameFor(operation_id) orelse return false;
-        const snapshot = object.namedOwnPropertySnapshot(name);
-        const loaded = switch (snapshot) {
-            .data => |data| data.value,
+        const loaded = nativeOwnDataNumber(receiver.asObj(), name) orelse return false;
+        frame.operation_value_bits = loaded.rawBits();
+        return true;
+    }
+    if (op == .load_binding_ref) {
+        const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse return false));
+        const chunk = active.chunk orelse return false;
+        if (descriptor.input_count != 0 or descriptor.origin >= chunk.code.items.len or
+            descriptor.operand_a >= active.binding_references.len or descriptor.operand_a >= chunk.binding_reference_plans.items.len) return false;
+        const instruction = chunk.code.items[descriptor.origin];
+        if (instruction.op != op or instruction.a != descriptor.operand_a or instruction.b != descriptor.operand_b) return false;
+        const plan = chunk.binding_reference_plans.items[descriptor.operand_a];
+        if (plan.name_index >= chunk.names.items.len) return false;
+        const reference = active.binding_references[descriptor.operand_a];
+        const loaded = switch (reference) {
+            .environment => |environment| environment.getOwnResolved(chunk.names.items[plan.name_index]) orelse return false,
+            .with_object, .global_object => |object| nativeOwnDataNumber(object, chunk.names.items[plan.name_index]) orelse return false,
+            .static => static: {
+                const current = active.frame orelse return false;
+                const fallback = plan.fallback;
+                const target = switch (fallback.op) {
+                    .load_local, .load_local_mapped, .load_local_lexical => capturedFrame(current, 0, fallback.a) orelse return false,
+                    .load_upval, .load_upval_mapped, .load_upval_lexical => capturedFrame(current, fallback.a, fallback.b) orelse return false,
+                    else => return false,
+                };
+                break :static target.readSlot(if (fallback.op == .load_local or fallback.op == .load_local_mapped or fallback.op == .load_local_lexical) fallback.a else fallback.b, bc.ic_seqlock_enabled.load(.monotonic));
+            },
             else => return false,
         };
         if (!loaded.isNumber()) return false;
+        // GetBindingValue for an ordinary present own data property has no
+        // user code between HasProperty and Get. Commit clearing only after
+        // the numeric guard; a miss resumes the still-retained Reference.
+        frame.operation_base_bits = if (reference == .with_object) Value.obj(reference.with_object).rawBits() else Value.undef().rawBits();
         frame.operation_value_bits = loaded.rawBits();
+        if (instruction.b & bc.binding_ref_load_retain == 0) active.binding_references[instruction.a] = .empty;
         return true;
     }
     if (frame.bytecode_frame == null) return false;
@@ -4695,6 +4729,33 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             storeCapturedBinding(vm, current, inst, Value.fromRawBits(inputs[0]), parallel)
         else
             loadCapturedBinding(vm, current, inst, parallel));
+    }
+    if (op == .load_var_or_undef or op == .store_var or op == .def_var or op == .def_lex or op == .init_declarations or op == .copy_annex_b or op == .resolve_binding_ref or op == .load_binding_ref or op == .clear_binding_ref or op == .store_binding_ref) {
+        const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse return @backingInt(jit.NativeOperationStatus.host_trap)));
+        const chunk = active.chunk orelse return @backingInt(jit.NativeOperationStatus.host_trap);
+        const expected: usize = if (op == .store_var or op == .def_var or op == .def_lex or op == .store_binding_ref) 1 else 0;
+        if (inputs.len != expected or descriptor.origin >= chunk.code.items.len)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        const original = chunk.code.items[descriptor.origin];
+        if (original.op != op or original.a != descriptor.operand_a or original.b != descriptor.operand_b)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        switch (op) {
+            .load_var_or_undef, .store_var, .def_var, .def_lex => if (original.a >= chunk.names.items.len)
+                return @backingInt(jit.NativeOperationStatus.host_trap),
+            .copy_annex_b => if (original.a >= active.annex_b_enabled.len or original.a >= chunk.environment_declarations.annex_b.len)
+                return @backingInt(jit.NativeOperationStatus.host_trap),
+            .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref => {
+                if (original.a >= active.binding_references.len or original.a >= chunk.binding_reference_plans.items.len or
+                    chunk.binding_reference_plans.items[original.a].name_index >= chunk.names.items.len)
+                    return @backingInt(jit.NativeOperationStatus.host_trap);
+            },
+            else => {},
+        }
+        const instruction = bc.Inst{ .op = op, .a = descriptor.operand_a, .b = descriptor.operand_b };
+        const loaded = executeEnvironmentBinding(vm, active, chunk, instruction, if (inputs.len == 1) Value.fromRawBits(inputs[0]) else Value.undef()) catch |err|
+            return finishNativeOperation(frame, vm, operation_id, err);
+        frame.operation_base_bits = loaded.with_base.rawBits();
+        return finishNativeOperation(frame, vm, operation_id, loaded.value);
     }
     // ECMA-262 GetThisBinding and GetNewTarget use the current activation,
     // including a lexical arrow's live shared this cell and initializer rules.
@@ -5883,13 +5944,12 @@ fn tryRunManagedNativeWithProfileContext(
     exec: ?*Exec,
     profile_chunk: ?*const Chunk,
 ) EvalError!NativeRunOutcome {
+    if (native.requires_execution_context and exec == null) return .miss;
     if (native.requires_frame_context and (exec == null or exec.?.frame == null)) return .miss;
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
         !nativeSlotGuardsPass(native, slots)) return .miss;
-    if (native.has_side_exits or native.native_operations != null) {
-        const end_steps = std.math.add(u64, vm.steps, native.bytecode_steps) catch return .miss;
-        if (end_steps > vm.step_budget or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
-    }
+    const end_steps = std.math.add(u64, vm.steps, native.bytecode_steps) catch return .miss;
+    if (end_steps > vm.step_budget or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
     const frame_slots: usize = @intCast(native.frame_slots);
     const live_slots = slots[0..frame_slots];
 
@@ -5900,6 +5960,7 @@ fn tryRunManagedNativeWithProfileContext(
         .steps = &vm.steps,
         .runtime_context = vm,
         .bytecode_frame = if (exec) |active| active.frame else null,
+        .bytecode_execution = if (exec) |active| active else null,
         .numeric_data_access = nativeNumericDataAccess,
         .profile_bytecode_context = profile_chunk,
         .global_binding_caches = if (native.native_operations) |metadata| metadata.global_binding_caches.ptr else null,
@@ -5990,6 +6051,7 @@ fn tryRunOsrNative(
         .steps = &vm.steps,
         .runtime_context = vm,
         .bytecode_frame = exec.frame,
+        .bytecode_execution = exec,
         .numeric_data_access = nativeNumericDataAccess,
         .profile_bytecode_context = chunk,
         .global_binding_caches = if (native.native_operations) |operations| operations.global_binding_caches.ptr else null,
@@ -6809,6 +6871,86 @@ fn storeCapturedBinding(vm: *Interpreter, frame: ?*Frame, inst: bc.Inst, stored:
     return stored;
 }
 
+fn executeEnvironmentBinding(
+    vm: *Interpreter,
+    exec: *Exec,
+    chunk: *const Chunk,
+    inst: bc.Inst,
+    stored: Value,
+) EvalError!interp.CapturedBindingValue {
+    const parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    switch (inst.op) {
+        .load_var_or_undef => return vm.resolveBindingValue(chunk.names.items[inst.a], true),
+        .store_var, .def_var, .def_lex => {
+            const root = try vm.pushTempRoot(stored);
+            defer vm.restoreTempRoots(root);
+            const name = chunk.names.items[inst.a];
+            switch (inst.op) {
+                .store_var => try vm.assignVarVM(name, vm.tempRoot(root, stored)),
+                .def_var => {
+                    if (inst.b == 0) try vm.createVarBinding(name) else if (inst.b == 3) try vm.globalDefineFunc(name, vm.tempRoot(root, stored)) else {
+                        const object = if (inst.b == 1) try vm.assignWithObject(name) else null;
+                        if (object) |target| try vm.setMember(Value.obj(target), name, vm.tempRoot(root, stored)) else try vm.globalDefine(name, vm.tempRoot(root, stored));
+                    }
+                },
+                .def_lex => try vm.defineLexicalVM(name, if (inst.b >= 3) Value.obj(vm.tdz_marker.?) else vm.tempRoot(root, stored), inst.b == 2 or inst.b == 4),
+                else => unreachable,
+            }
+            return .{ .value = vm.tempRoot(root, stored) };
+        },
+        .init_declarations => {
+            const plan = chunk.environment_declarations;
+            exec.annex_b_enabled = try vm.arena.alloc(bool, plan.annex_b.len);
+            @memset(exec.annex_b_enabled, false);
+            try vm.instantiateEnvironmentDeclarations(plan, exec.annex_b_enabled);
+        },
+        .copy_annex_b => if (exec.annex_b_enabled[inst.a]) try vm.copyAnnexBEnvironmentBinding(chunk.environment_declarations.annex_b[inst.a].name),
+        .resolve_binding_ref => {
+            const plan = chunk.binding_reference_plans.items[inst.a];
+            const limit: ?u32 = if (plan.environment_depth == bc.delete_name_full_environment_depth) null else plan.environment_depth;
+            var reference = try vm.captureBindingReference(chunk.names.items[plan.name_index], limit);
+            const may_adopt = switch (reference) {
+                .static, .global_object, .unresolvable => true,
+                else => false,
+            };
+            if (may_adopt) if (plan.direct_eval_frame_depth) |depth| {
+                var target = exec.frame orelse return vm.throwError("InternalError", "dynamic parameter reference has no frame");
+                var remaining = depth;
+                while (remaining > 0) : (remaining -= 1) target = target.parent orelse return vm.throwError("InternalError", "dynamic parameter defining frame is unavailable");
+                if (target.direct_eval_environment.load(.acquire)) |environment| if (environment.hasOwnBinding(chunk.names.items[plan.name_index])) {
+                    reference = .{ .environment = environment };
+                };
+            };
+            exec.binding_references[inst.a] = reference;
+        },
+        .load_binding_ref => {
+            const plan = chunk.binding_reference_plans.items[inst.a];
+            const reference = exec.binding_references[inst.a];
+            defer if (inst.b & bc.binding_ref_load_retain == 0) {
+                exec.binding_references[inst.a] = .empty;
+            };
+            return if (reference == .static)
+                .{ .value = try loadStaticBindingFallback(vm, exec.frame, plan.fallback, parallel, chunk.names.items[plan.name_index]) }
+            else
+                vm.loadCapturedBindingReference(reference, chunk.names.items[plan.name_index], inst.b & bc.binding_ref_load_allow_unresolvable != 0);
+        },
+        .clear_binding_ref => exec.binding_references[inst.a] = .empty,
+        .store_binding_ref => {
+            const plan = chunk.binding_reference_plans.items[inst.a];
+            const reference = exec.binding_references[inst.a];
+            const root = vm.pushTempBindingReferenceRoot(reference) catch |err| {
+                exec.binding_references[inst.a] = .empty;
+                return err;
+            };
+            defer vm.restoreTempBindingReferenceRoots(root);
+            exec.binding_references[inst.a] = .empty;
+            if (reference == .static) try storeStaticBindingFallback(vm, exec.frame, plan.fallback, stored, parallel, chunk.names.items[plan.name_index]) else try vm.storeCapturedBindingReference(vm.tempBindingReferenceRoot(root, reference), chunk.names.items[plan.name_index], stored);
+        },
+        else => unreachable,
+    }
+    return .{ .value = Value.undef() };
+}
+
 fn storeStaticBindingFallback(
     vm: *Interpreter,
     frame: ?*Frame,
@@ -6989,55 +7131,15 @@ fn runChunk(
                 const cf = frame.?;
                 try stack.append(stack_alloc, cf.readSlot(inst.a, parallel_sync));
             },
-            .load_var_or_undef => {
-                const name = chunk.names.items[inst.a];
-                const v = (try vm.resolveBindingValue(name, true)).value;
-                try stack.append(stack_alloc, v);
-            },
+            .load_var_or_undef => try stack.append(stack_alloc, (try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef())).value),
             .store_var => {
-                const name = chunk.names.items[inst.a];
-                try vm.assignVarVM(name, stack.items[stack.items.len - 1]); // assignment leaves its value
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.items[stack.items.len - 1]);
             },
-            .init_declarations => {
-                const plan = chunk.environment_declarations;
-                exec.annex_b_enabled = try vm.arena.alloc(bool, plan.annex_b.len);
-                @memset(exec.annex_b_enabled, false);
-                try vm.instantiateEnvironmentDeclarations(plan, exec.annex_b_enabled);
+            .init_declarations, .copy_annex_b => {
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef());
             },
-            .copy_annex_b => {
-                if (exec.annex_b_enabled[inst.a])
-                    try vm.copyAnnexBEnvironmentBinding(chunk.environment_declarations.annex_b[inst.a].name);
-            },
-            .def_var => {
-                const name = chunk.names.items[inst.a];
-                const val = stack.pop().?;
-                if (inst.b == 0) {
-                    try vm.createVarBinding(name);
-                    continue;
-                }
-                if (inst.b == 3) {
-                    try vm.globalDefineFunc(name, val);
-                    continue;
-                }
-                // A `var x = init` (b == 1) whose name a `with` object provides
-                // writes to that object: ResolveBinding runs before PutValue, and
-                // the object Environment Record (honoring `@@unscopables`) shadows
-                // the hoisted var binding, which is left untouched. Mirrors the
-                // tree-walker's `assignWithObject` capture. A bare `var x;` (b == 0)
-                // never redirects or overwrites an existing binding; force
-                // definitions (b == 2, function declarations/internal temps) do.
-                const wo: ?*value.Object = if (inst.b == 1) try vm.assignWithObject(name) else null;
-                if (wo) |o| {
-                    try vm.setMember(Value.obj(o), name, val);
-                } else {
-                    try vm.globalDefine(name, val);
-                }
-            },
-            .def_lex => {
-                const name = chunk.names.items[inst.a];
-                const placeholder = stack.pop().?;
-                const value_ = if (inst.b >= 3) Value.obj(vm.tdz_marker.?) else placeholder;
-                try vm.defineLexicalVM(name, value_, inst.b == 2 or inst.b == 4);
+            .def_var, .def_lex => {
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.pop().?);
             },
             .bind_pattern => {
                 // Reuse the tree-walker's destructuring over the live env (a=pattern
@@ -7046,69 +7148,16 @@ fn runChunk(
                 const v = stack.pop().?;
                 try vm.bindPatternVM(pat, v, inst.b);
             },
-            .resolve_binding_ref => {
-                const plan = chunk.binding_reference_plans.items[inst.a];
-                const environment_limit: ?u32 = if (plan.environment_depth == bc.delete_name_full_environment_depth)
-                    null
-                else
-                    plan.environment_depth;
-                var reference = try vm.captureBindingReference(
-                    chunk.names.items[plan.name_index],
-                    environment_limit,
-                );
-                // A `var` created by the defining frame's sloppy direct eval is
-                // nearer than anything the environment walk can still reach:
-                // `.static` means the compiler bound a slot, while
-                // `.global_object`/`.unresolvable` mean it found nothing at all.
-                // An `.environment`/`.with_object` hit is a genuinely nearer
-                // dynamic binding and keeps precedence.
-                const may_adopt_defining_frame = switch (reference) {
-                    .static, .global_object, .unresolvable => true,
-                    else => false,
-                };
-                if (may_adopt_defining_frame) if (plan.direct_eval_frame_depth) |frame_depth| {
-                    var target = frame orelse
-                        return vm.throwError("InternalError", "dynamic parameter reference has no frame");
-                    var remaining = frame_depth;
-                    while (remaining > 0) : (remaining -= 1) target = target.parent orelse
-                        return vm.throwError("InternalError", "dynamic parameter defining frame is unavailable");
-                    if (target.direct_eval_environment.load(.acquire)) |environment| {
-                        if (environment.hasOwnBinding(chunk.names.items[plan.name_index])) {
-                            reference = .{ .environment = environment };
-                        }
-                    }
-                };
-                exec.binding_references[inst.a] = reference;
+            .resolve_binding_ref, .clear_binding_ref => {
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef());
             },
             .load_binding_ref => {
-                const plan = chunk.binding_reference_plans.items[inst.a];
-                const reference = exec.binding_references[inst.a];
-                const retain = (inst.b & bc.binding_ref_load_retain) != 0;
-                defer if (!retain) {
-                    exec.binding_references[inst.a] = .empty;
-                };
-                const loaded: interp.CapturedBindingValue = if (reference == .static)
-                    .{ .value = try loadStaticBindingFallback(vm, frame, plan.fallback, parallel_sync, chunk.names.items[plan.name_index]) }
-                else
-                    try vm.loadCapturedBindingReference(
-                        reference,
-                        chunk.names.items[plan.name_index],
-                        (inst.b & bc.binding_ref_load_allow_unresolvable) != 0,
-                    );
-                if ((inst.b & bc.binding_ref_load_with_base) != 0)
-                    try stack.append(stack_alloc, loaded.with_base);
+                const loaded = try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef());
+                if (inst.b & bc.binding_ref_load_with_base != 0) try stack.append(stack_alloc, loaded.with_base);
                 try stack.append(stack_alloc, loaded.value);
             },
-            .clear_binding_ref => exec.binding_references[inst.a] = .empty,
             .store_binding_ref => {
-                const plan = chunk.binding_reference_plans.items[inst.a];
-                const reference = exec.binding_references[inst.a];
-                exec.binding_references[inst.a] = .empty;
-                const stored = stack.pop().?;
-                if (reference == .static)
-                    try storeStaticBindingFallback(vm, frame, plan.fallback, stored, parallel_sync, chunk.names.items[plan.name_index])
-                else
-                    try vm.storeCapturedBindingReference(reference, chunk.names.items[plan.name_index], stored);
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.pop().?);
             },
 
             .init_local_lexical => {
@@ -25096,6 +25145,401 @@ test "vm: optimizer captured binding regions preserve moving checkpoints and sto
     };
 }
 
+test "vm: optimizer environment binding admission" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true, .bytecode_execution_mode = .required });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var environmentValue=3, retainedStore, retainedCall;
+        \\function environmentStore(v){environmentValue=v;return environmentValue;}
+        \\function environmentType(){return typeof missingEnvironmentProbe;}
+        \\with({environmentValue:5}){retainedStore=function(v){environmentValue=v;return environmentValue;};}
+        \\with({method:function(){return 17;}}){retainedCall=function(){return method();};}
+        \\for(var warm=0;warm<64;warm++){environmentStore(warm);environmentType();retainedStore(warm);retainedCall();}
+    );
+    for ([_][]const u8{ "environmentStore", "environmentType", "retainedStore", "retainedCall" }) |name| {
+        const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode);
+        const fully_native = if (artifact) |code| code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) else false;
+        try std.testing.expect(fully_native);
+        try std.testing.expect(artifact.?.requires_execution_context and artifact.?.requires_activation_context);
+        const hits = optimizer_native_hits.load(.monotonic);
+        if (std.mem.eql(u8, name, "environmentStore")) {
+            try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate("environmentStore(11)")).asNum());
+        } else if (std.mem.eql(u8, name, "environmentType")) {
+            try std.testing.expectEqualStrings("undefined", (try ctx.evaluate("environmentType()")).asStr());
+        } else if (std.mem.eql(u8, name, "retainedStore")) {
+            try std.testing.expectEqual(@as(f64, 12), (try ctx.evaluate("retainedStore(12)")).asNum());
+        } else try std.testing.expectEqual(@as(f64, 17), (try ctx.evaluate("retainedCall()")).asNum());
+        try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits);
+    }
+}
+
+test "vm: optimizer environment binding retains RHS references and call receivers" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        // JSC retains the Object Environment Record selected before RHS deletion.
+        try std.testing.expectEqualStrings("[11,\"undefined\",\"ReferenceError\",7,9,[\"rhs\"],17,true]", (try ctx.evaluate(
+            \\var globalBinding=3, events=[];
+            \\function ordinaryWrite(value){globalBinding=value;return globalBinding;}
+            \\function missingType(){return typeof absentEnvironmentBinding;}
+            \\function strictWrite(value){'use strict';missingEnvironmentBinding=value;return value;}
+            \\var target=9, held={target:1}, retainedWriter;
+            \\with(held){retainedWriter=function(rhs){target=rhs();return target;};}
+            \\var receivedThis, callableScope={method:function(){receivedThis=this;return 17;}}, scopeCall;
+            \\with(callableScope){scopeCall=function(){return method();};}
+            \\var first=ordinaryWrite(11), missing=missingType(), strictName='';
+            \\try{strictWrite(12);}catch(e){strictName=e.name;}
+            \\retainedWriter(function(){events.push('rhs');delete held.target;return 7;});
+            \\var callResult=scopeCall();
+            \\JSON.stringify([first,missing,strictName,held.target,target,events,callResult,receivedThis===callableScope]);
+        )).asStr());
+    };
+}
+
+test "vm: optimizer environment binding proxy effects resolve once and retain receiver" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        // ECMA-262 9.1.1.2.6 GetBindingValue includes its own HasProperty check;
+        // the reference engines elide that observable trap in this control.
+        try std.testing.expectEqualStrings("[7,true,9,9,9,[\"h:value\",\"u\",\"rhs\",\"h:value\",\"s:7\",\"h:value\",\"u\",\"h:value\",\"g:value\",\"h:method\",\"u\",\"h:method\",\"g:method\",\"call\",\"h:value\",\"u\",\"h:value\",\"g:value\",\"h:value\",\"s:9\",\"h:value\",\"u\",\"h:value\",\"g:value\"]]", (try ctx.evaluate(
+            \\var effects=[];
+            \\function environmentGc(){if(typeof $vm!=='undefined')$vm.gc();}
+            \\var backing={value:1,method:function(){effects.push('call');environmentGc();return this===proxy;}};
+            \\Object.defineProperty(backing,Symbol.unscopables,{get:function(){effects.push('u');environmentGc();return {};}});
+            \\var proxy=new Proxy(backing,{
+            \\ has:function(t,k){if(k==='value'||k==='method')effects.push('h:'+k);return Reflect.has(t,k);},
+            \\ get:function(t,k,r){if(k==='value'||k==='method')effects.push('g:'+k);return Reflect.get(t,k,r);},
+            \\ set:function(t,k,v,r){if(k==='value')effects.push('s:'+v);environmentGc();return Reflect.set(t,k,v,r);}
+            \\});
+            \\var proxyWrite,proxyCall,proxyAdd,proxyLogical;
+            \\with(proxy){proxyWrite=function(rhs){value=rhs();return value;};proxyCall=function(){return method();};proxyAdd=function(n){return value+=n;};proxyLogical=function(n){return value||=n;};}
+            \\function proxyRhs(){effects.push('rhs');environmentGc();return 7;}
+            \\for(var warm=0;warm<64;warm++){proxyWrite(proxyRhs);proxyCall();proxyAdd(1);proxyLogical(9);}
+            \\effects=[];var written=proxyWrite(proxyRhs),called=proxyCall(),added=proxyAdd(2),logical=proxyLogical(19);
+            \\JSON.stringify([written,called,added,logical,backing.value,effects]);
+        )).asStr());
+        if (native and jit.optimizer_supported) for ([_][]const u8{ "proxyWrite", "proxyCall", "proxyAdd", "proxyLogical" }) |name| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
+        };
+    };
+}
+
+test "vm: optimizer environment binding logical diamonds retain values and exact steps" {
+    const Context = @import("context.zig").Context;
+    const inputs = [_][]const u8{ "undefined", "null", "false", "0", "-0", "NaN", "''", "0n", "1", "-1", "true", "'x'", "1n", "({})", "Symbol('x')" };
+    var before_steps: [3][inputs.len]u64 = undefined;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var logicalScope={value:0},logicalOr,logicalAnd,logicalNullish;
+            \\with(logicalScope){logicalOr=function(n){return value||=n;};logicalAnd=function(n){return value&&=n;};logicalNullish=function(n){return value??=n;};}
+            \\for(var warm=0;warm<64;warm++){logicalOr(7);logicalAnd(7);logicalNullish(7);}
+        );
+        const scope = ctx.global_object.getOwn("logicalScope").?.asObj();
+        for ([_][]const u8{ "logicalOr", "logicalAnd", "logicalNullish" }, 0..) |name, operation| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            if (native and jit.optimizer_supported) {
+                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
+            }
+            for (inputs, 0..) |source, index| {
+                const input = try ctx.evaluate(source);
+                var machine = ctx.interpreter();
+                try machine.setMember(Value.obj(scope), "value", input);
+                const steps = machine.steps;
+                const hits = optimizer_native_hits.load(.monotonic);
+                const result = try runFunction(&machine, function, function.chunk.?, &.{Value.num(17)}, Value.undef(), Value.undef());
+                const assigned = switch (operation) {
+                    0 => index < 8,
+                    1 => index >= 8,
+                    2 => index < 2,
+                    else => unreachable,
+                };
+                try std.testing.expectEqual((if (assigned) Value.num(17) else input).bits, result.bits);
+                try std.testing.expectEqual(result.bits, scope.getOwn("value").?.bits);
+                if (!native) before_steps[operation][index] = machine.steps - steps else {
+                    try std.testing.expectEqual(before_steps[operation][index], machine.steps - steps);
+                    if (jit.optimizer_supported) try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits);
+                }
+            }
+        }
+    }
+}
+
+test "vm: optimizer environment binding reentry preserves recursive setters and caught markers" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[3,3,\"s3,s2,s1,s0,g,g,g,g\",true,1,3]", (try ctx.evaluate(
+            \\var stored=0, events=[], nestedWriter, nestedReader, nestedCaught;
+            \\function bindingGc(){if(typeof $vm!=='undefined')$vm.gc();}
+            \\var retainedScope={};
+            \\Object.defineProperty(retainedScope,'value',{configurable:true,get:function(){events.push('g');bindingGc();return stored;},set:function(v){events.push('s'+v);bindingGc();if(v>0)nestedWriter(v-1);stored=v;}});
+            \\with(retainedScope){nestedWriter=function(v){value=v;return value;};nestedReader=function(){return value;};nestedCaught=function(rhs){try{return value=rhs();}catch(e){return e;}};}
+            \\function retainedRhs(){bindingGc();return 0;}
+            \\for(var warm=0;warm<64;warm++){nestedWriter(0);nestedReader();nestedCaught(retainedRhs);}
+            \\events=[];var result=nestedWriter(3), trace=events.join(',');
+            \\var marker={}, calls=0;var thrown=nestedCaught(function(){calls++;bindingGc();throw marker;});
+            \\JSON.stringify([result,stored,trace,thrown===marker,calls,nestedReader()]);
+        )).asStr());
+        if (native and jit.optimizer_supported) for ([_][]const u8{ "nestedWriter", "nestedReader", "nestedCaught" }) |name| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and code.requires_execution_context);
+        };
+    };
+}
+
+test "vm: optimizer environment binding declaration modes execute exact environment effects" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const cases = [_]struct { op: bc.Op, mode: u32 }{
+        .{ .op = .store_var, .mode = 0 }, .{ .op = .def_var, .mode = 0 },
+        .{ .op = .def_var, .mode = 1 },   .{ .op = .def_var, .mode = 2 },
+        .{ .op = .def_var, .mode = 3 },   .{ .op = .def_lex, .mode = 0 },
+        .{ .op = .def_lex, .mode = 1 },   .{ .op = .def_lex, .mode = 2 },
+        .{ .op = .def_lex, .mode = 3 },   .{ .op = .def_lex, .mode = 4 },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = false, .enable_jit = native });
+        defer ctx.destroy();
+        var machine = ctx.interpreter();
+        if (case.op == .store_var) try machine.globalDefine("declarationValue", Value.num(0));
+        var chunk = bc.Chunk.init(ctx.arena());
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        const name = try chunk.addName("declarationValue");
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emitAB(case.op, name, case.mode);
+        _ = try chunk.emit(.ret_undef, 0);
+        var slots = [_]Value{Value.num(17)};
+        var frame = Frame{ .slots = &slots, .parent = null };
+        const before = machine.steps;
+        if (native) {
+            var code = try optimizer_compiler.compile(&chunk);
+            defer code.deinit();
+            var exec = Exec{ .chunk = &chunk, .frame = &frame };
+            const outcome = try tryRunManagedNative(&machine, &code, &slots, &exec);
+            try std.testing.expect(outcome == .complete and outcome.complete.isUndefined());
+            const steps = machine.steps;
+            try std.testing.expect((try tryRunManagedNative(&machine, &code, &slots, null)) == .miss);
+            try std.testing.expectEqual(steps, machine.steps);
+        } else try std.testing.expect((try run(&machine, &chunk, &frame)).isUndefined());
+        try std.testing.expectEqual(before + 3, machine.steps);
+        if (case.op == .def_lex) {
+            const result = machine.env.getOwnResolved("declarationValue").?;
+            if (case.mode >= 3) try std.testing.expect(machine.isTdz(result)) else try std.testing.expectEqual(@as(f64, 17), result.asNum());
+            if (case.mode == 2) try std.testing.expect(machine.env.resolvedBindingState("declarationValue", machine.tdz_marker) == .immutable);
+            if (case.mode == 4) try std.testing.expect(machine.env.resolvedBindingState("declarationValue", machine.tdz_marker) == .tdz);
+        } else {
+            const result = ctx.global_object.getOwn("declarationValue").?;
+            if (case.op == .def_var and case.mode == 0) try std.testing.expect(result.isUndefined()) else try std.testing.expectEqual(@as(f64, 17), result.asNum());
+        }
+    };
+}
+
+test "vm: optimizer environment binding declaration masks remain invocation local" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| for ([_]bool{ false, true }) |blocked| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = false, .enable_jit = native });
+        defer ctx.destroy();
+        var machine = ctx.interpreter();
+        if (blocked) try machine.defineLexicalVM("annexValue", Value.num(99), false);
+        const block = try gc_mod.allocEnv(machine.arena);
+        machine.initEnvironment(block, machine.env, false);
+        machine.env = block;
+        var chunk = bc.Chunk.init(ctx.arena());
+        const name = try chunk.addName("annexValue");
+        chunk.environment_declarations = .{ .is_script = true, .annex_b = &.{.{ .name = "annexValue", .create_binding = true }} };
+        const value_index = try chunk.addConst(Value.num(17));
+        _ = try chunk.emit(.init_declarations, 0);
+        _ = try chunk.emit(.load_const, value_index);
+        _ = try chunk.emitAB(.def_lex, name, 1);
+        _ = try chunk.emit(.copy_annex_b, 0);
+        _ = try chunk.emit(.ret_undef, 0);
+        if (native) {
+            var code = try optimizer_compiler.compile(&chunk);
+            defer code.deinit();
+            var previous: ?[*]bool = null;
+            for (0..2) |_| {
+                var exec = Exec{ .chunk = &chunk };
+                const before = machine.steps;
+                try std.testing.expect((try tryRunManagedNative(&machine, &code, &.{}, &exec)) == .complete);
+                try std.testing.expectEqual(before + 5, machine.steps);
+                try std.testing.expectEqual(!blocked, exec.annex_b_enabled[0]);
+                if (previous) |pointer| try std.testing.expect(pointer != exec.annex_b_enabled.ptr);
+                previous = exec.annex_b_enabled.ptr;
+            }
+        } else _ = try run(&machine, &chunk, null);
+        try std.testing.expectEqual(@as(f64, 17), block.getOwnResolved("annexValue").?.asNum());
+        if (blocked) try std.testing.expectEqual(@as(f64, 99), block.parent.?.getOwnResolved("annexValue").?.asNum()) else try std.testing.expectEqual(@as(f64, 17), ctx.global_object.getOwn("annexValue").?.asNum());
+    };
+}
+
+test "vm: optimizer environment binding shared references remain invocation local" {
+    if (builtin.single_threaded or !jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 320), (try ctx.evaluate(
+            \\var sharedEnvironment={value:0},environmentBump,environmentRead,environmentLock=new Lock();
+            \\with(sharedEnvironment){environmentBump=function(){value=value+1;return value;};environmentRead=function(){return value;};}
+            \\for(var warm=0;warm<64;warm++)environmentBump();
+            \\function environmentLane(){if($vm.useThreadGIL()!==false)throw new Error('GIL');for(var i=0;i<64;i++)environmentLock.hold(environmentBump);return 1;}
+            \\var environmentWorkers=[];for(var lane=0;lane<4;lane++)environmentWorkers.push(new Thread(environmentLane));
+            \\for(var lane=0;lane<4;lane++)environmentWorkers[lane].join();environmentRead();
+        )).asNum());
+        if (native) {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn("environmentBump").?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
+        }
+    }
+}
+
+test "vm: optimizer environment binding regions relocate bases and preserve budgets" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var environmentGarbage=[];for(var dead=0;dead<1024;dead++)environmentGarbage.push({});
+            \\var regionEnvironment={held:{value:2}},environmentTotal=0,environmentRegion;
+            \\with(regionEnvironment){environmentRegion=function(n){var i=0;while(i<n){environmentTotal=environmentTotal+held.value;i=i+1;}return environmentTotal;};}
+            \\for(var warm=0;warm<10;warm++){environmentTotal=0;environmentRegion(8);}environmentTotal=0;environmentGarbage=null;
+        );
+        const function = Interpreter.funcOf(ctx.global_object.getOwn("environmentRegion").?).?;
+        if (native) {
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.osr != null and code.requires_execution_context);
+        }
+        ctx.collectGarbage();
+        const before = ctx.global_object.getOwn("regionEnvironment").?.asObj();
+        const entries = optimizer_osr_entries.load(.monotonic);
+        if (native) try std.testing.expect(ctx.requestGarbageCompaction());
+        try std.testing.expectEqual(@as(f64, 40000), (try ctx.evaluate("environmentRegion(20000)")).asNum());
+        if (native) {
+            try std.testing.expect(optimizer_osr_entries.load(.monotonic) > entries);
+            try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+            try std.testing.expect(before != ctx.global_object.getOwn("regionEnvironment").?.asObj());
+        }
+        for ([_]bool{ false, true }) |stop_requested| {
+            _ = try ctx.evaluate("environmentTotal=0");
+            var machine = ctx.interpreter();
+            machine.step_budget = 1024;
+            var stop: std.atomic.Value(bool) = .init(stop_requested);
+            machine.stop_flag = &stop;
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const active = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(active);
+            const live = Interpreter.funcOf(ctx.global_object.getOwn("environmentRegion").?).?;
+            try std.testing.expectError(error.Throw, runFunction(&machine, live, live.chunk.?, &.{Value.num(20000)}, Value.undef(), Value.undef()));
+            try std.testing.expectEqual(@as(u64, if (stop_requested) 1024 else 1025), machine.steps);
+            try std.testing.expectEqualStrings(if (stop_requested) "Error" else "RangeError", machine.exception.asObj().errorName());
+        }
+    };
+}
+
+test "vm: optimizer environment binding retained reference moves before native consumption" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+    const before = (try ctx.evaluate("({value:37})")).asObj();
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const active = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(active);
+    var chunk = bc.Chunk.init(ctx.arena());
+    const name = try chunk.addName("value");
+    try chunk.binding_reference_plans.append(ctx.arena(), .{ .name_index = name, .environment_depth = bc.delete_name_full_environment_depth, .fallback = .{ .op = .load_var, .a = name } });
+    _ = try chunk.emitAB(.load_binding_ref, 0, bc.binding_ref_load_with_base);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.ret, 0);
+    var code = try optimizer_compiler.compile(&chunk);
+    defer code.deinit();
+    var references = [_]interp.BindingReference{.{ .with_object = before }};
+    var exec = Exec{ .chunk = &chunk, .binding_references = &references };
+    const roots = machine.gc_execs.items.len;
+    try machine.gc_execs.append(machine.arena, &exec);
+    defer machine.gc_execs.items.len = roots;
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = 1;
+    const moving_before = heap.accounting().moving_minor_collections;
+    machine.gc_precise_safepoint = true;
+    machine.gc_moving_safepoint = true;
+    machine.gc_safepoint_fn.?(machine.gc_safepoint_ctx.?, &machine);
+    machine.gc_moving_safepoint = false;
+    machine.gc_precise_safepoint = false;
+    try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    const after = references[0].with_object;
+    try std.testing.expect(before != after);
+    const outcome = try tryRunManagedNative(&machine, &code, &.{}, &exec);
+    try std.testing.expect(outcome == .complete);
+    try std.testing.expectEqual(after, outcome.complete.asObj());
+    try std.testing.expectEqual(@as(f64, 37), outcome.complete.asObj().getOwn("value").?.asNum());
+    try std.testing.expect(references[0] == .empty);
+}
+
 test "vm: optimizer continuation roots the completed call result" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -25346,4 +25790,188 @@ test "vm: optimizer continuation direct entry proves read only inputs before wor
     try std.testing.expectEqual(@as(f64, 9), (try runFunction(&machine, store, store.chunk.?, &.{ target, Value.num(9) }, Value.undef(), Value.undef())).asNum());
     try std.testing.expectEqual(@as(f64, 9), target.asObj().getOwn("value").?.asNum());
     try std.testing.expectEqualStrings("[7,7,7,1,2]", (try ctx.evaluate("JSON.stringify([guardedUnary(guardedObject),guardedStrictUnary(guardedObject),guardedProperty(guardedSubject),guardedGetters,guardedCoercions])")).asStr());
+}
+
+test "vm: optimizer environment binding TDZ and immutable References preserve warmed errors" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = false,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\var referenceScope={},referenceTdz,referenceConst,tdzErrors=0,constErrors=0;
+            \\with(referenceScope){referenceTdz=function(){return laterBinding;};referenceConst=function(v){fixedBinding=v;return v;};}
+            \\for(var warm=0;warm<64;warm++){try{referenceTdz();}catch(e){if(e instanceof ReferenceError)tdzErrors++;}}
+            \\let laterBinding=7;const fixedBinding=7;
+            \\for(var warm=0;warm<64;warm++){try{referenceConst(warm);}catch(e){if(e instanceof TypeError)constErrors++;}}
+            \\JSON.stringify([tdzErrors,referenceTdz(),constErrors,fixedBinding]);
+        );
+        try std.testing.expectEqualStrings("[64,7,64,7]", result.asStr());
+        if (native and jit.optimizer_supported) for ([_][]const u8{ "referenceTdz", "referenceConst" }) |name| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
+        };
+    }
+}
+
+test "vm: optimizer environment binding callback reentry budgets preserve exact dispatch" {
+    const Context = @import("context.zig").Context;
+    const Record = struct { steps: u64, value: u64, error_kind: u8, effect: f64 };
+    var expected: [2][32]Record = undefined;
+    var mismatches: usize = 0;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = false,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var budgetScope={value:0},budgetWrite,budgetEffects=0;
+            \\with(budgetScope){budgetWrite=function(rhs){value=rhs();return value;};}
+            \\function budgetRhs(){budgetEffects++;return 7;}
+            \\for(var warm=0;warm<64;warm++)budgetWrite(budgetRhs);
+        );
+        const function = Interpreter.funcOf(ctx.global_object.getOwn("budgetWrite").?).?;
+        const rhs = ctx.global_object.getOwn("budgetRhs").?;
+        if (native and jit.optimizer_supported) {
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits));
+        }
+        for (0..2) |mode| for (0..32) |index| {
+            _ = try ctx.evaluate("budgetScope.value=0;budgetEffects=0");
+            var machine = ctx.interpreter();
+            machine.steps = 992 + index;
+            machine.step_budget = if (mode == 0) 1024 else 1_000_000;
+            var stop: std.atomic.Value(bool) = .init(mode == 1);
+            machine.stop_flag = &stop;
+            var record = Record{ .steps = 0, .value = 0, .error_kind = 0, .effect = 0 };
+            if (runFunction(&machine, function, function.chunk.?, &.{rhs}, Value.undef(), Value.undef())) |result| {
+                record.value = result.rawBits();
+            } else |err| {
+                if (err != error.Throw) return err;
+                const name = machine.exception.asObj().errorName();
+                record.error_kind = if (std.mem.eql(u8, name, "RangeError")) 1 else if (std.mem.eql(u8, name, "Error")) 2 else return error.TestUnexpectedResult;
+            }
+            record.steps = machine.steps;
+            record.effect = ctx.global_object.getOwn("budgetScope").?.asObj().getOwn("value").?.asNum();
+            if (!native) expected[mode][index] = record else {
+                const baseline = expected[mode][index];
+                if (record.steps != baseline.steps or record.value != baseline.value or record.error_kind != baseline.error_kind or record.effect != baseline.effect) {
+                    std.debug.print("mode={d} start={d} before={any} after={any}\n", .{ mode, 992 + index, baseline, record });
+                    mismatches += 1;
+                }
+            }
+        };
+    }
+    std.debug.print("callback boundary mismatches: {d}/64\n", .{mismatches});
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "vm: optimizer environment binding seeded effects preserve serialized and shared semantics" {
+    const Context = @import("context.zig").Context;
+    var seed: u64 = 0x656e7669726f6e;
+    for (0..8) |_| {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const bias = (seed >> 32) % 97 + 1;
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const delta = (seed >> 32) % 31 + 1;
+        const prefix = try std.fmt.allocPrint(std.testing.allocator, "var environmentBias={d},environmentDelta={d};", .{ bias, delta });
+        defer std.testing.allocator.free(prefix);
+        const body =
+            \\var environmentEvents=0,environmentScope={value:environmentBias,method:function(){environmentGc();return this===environmentScope;}},seedWrite,seedAdd,seedOr,seedAnd,seedNullish,seedCall;
+            \\function environmentGc(){if(typeof $vm!=='undefined')$vm.gc();}
+            \\with(environmentScope){seedWrite=function(rhs){value=rhs();return value;};seedAdd=function(n){return value+=n;};seedOr=function(n){return value||=n;};seedAnd=function(n){return value&&=n;};seedNullish=function(n){return value??=n;};seedCall=function(){return method();};}
+            \\function seedMissing(){return typeof absentSeededEnvironment;}
+            \\function seedRhs(){environmentEvents++;environmentGc();return environmentBias+environmentDelta;}
+            \\for(var warm=0;warm<64;warm++){seedWrite(seedRhs);seedAdd(1);seedOr(1);seedAnd(1);seedNullish(1);seedCall();seedMissing();}
+            \\environmentEvents=0;
+            \\var written=seedWrite(seedRhs),added=seedAdd(environmentDelta);
+            \\environmentScope.value=0;var logicalOr=seedOr(environmentBias);
+            \\environmentScope.value=0;var logicalAnd=seedAnd(environmentBias);
+            \\environmentScope.value=null;var logicalNullish=seedNullish(environmentDelta);
+            \\environmentScope.value={valueOf:function(){environmentEvents++;environmentGc();return environmentBias;}};var coerced=seedAdd(environmentDelta);
+            \\environmentScope.value='x';var text=seedAdd(environmentDelta);
+            \\environmentScope.value=1n;var mixed=false;try{seedAdd(environmentDelta);}catch(e){mixed=e instanceof TypeError;}
+            \\JSON.stringify([written,added,logicalOr,logicalAnd,logicalNullish,coerced,text,mixed,seedCall(),seedMissing(),environmentEvents]);
+        ;
+        const program = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, body });
+        defer std.testing.allocator.free(program);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "[{d},{d},{d},0,{d},{d},\"x{d}\",true,true,\"undefined\",2]", .{ bias + delta, bias + 2 * delta, bias, delta, bias + delta, delta });
+        defer std.testing.allocator.free(expected);
+        for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = native,
+                .enable_threads = parallel,
+                .parallel_gc = parallel,
+                .parallel_js = parallel,
+                .bytecode_execution_mode = .required,
+            });
+            defer ctx.destroy();
+            try std.testing.expectEqualStrings(expected, (try ctx.evaluate(program)).asStr());
+            if (native and jit.optimizer_supported) for ([_][]const u8{ "seedWrite", "seedAdd", "seedOr", "seedAnd", "seedNullish", "seedCall", "seedMissing" }) |name| {
+                const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
+            };
+        };
+    }
+}
+
+test "vm: optimizer environment binding callable receiver survives post getter continuation" {
+    const Context = @import("context.zig").Context;
+    const Record = struct { steps: u64, value: u64, error_kind: u8, getter_calls: f64, method_calls: f64 };
+    var baseline: [2][32]Record = undefined;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = false,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var receiverGets=0,receiverCalls=0,receiverScope={},receiverCall;
+            \\function receiverMethod(){if(this!==receiverScope)throw new Error('receiver');receiverCalls++;return 7;}
+            \\Object.defineProperty(receiverScope,'method',{get:function(){receiverGets++;return receiverMethod;}});
+            \\with(receiverScope){receiverCall=function(){var result=method();return result;};}
+            \\for(var warm=0;warm<64;warm++)receiverCall();
+        );
+        const function = Interpreter.funcOf(ctx.global_object.getOwn("receiverCall").?).?;
+        if (native and jit.optimizer_supported) {
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and code.continuation_only_exits and code.requires_execution_context);
+        }
+        for (0..2) |mode| for (0..32) |index| {
+            _ = try ctx.evaluate("receiverGets=0;receiverCalls=0");
+            var machine = ctx.interpreter();
+            machine.steps = 992 + index;
+            machine.step_budget = if (mode == 0) 1024 else 1_000_000;
+            var stop: std.atomic.Value(bool) = .init(mode == 1);
+            machine.stop_flag = &stop;
+            var observed = Record{ .steps = 0, .value = 0, .error_kind = 0, .getter_calls = 0, .method_calls = 0 };
+            if (runFunction(&machine, function, function.chunk.?, &.{}, Value.undef(), Value.undef())) |result| {
+                observed.value = result.rawBits();
+            } else |err| {
+                if (err != error.Throw) return err;
+                const name = machine.exception.asObj().errorName();
+                observed.error_kind = if (std.mem.eql(u8, name, "RangeError")) 1 else if (std.mem.eql(u8, name, "Error")) 2 else return error.TestUnexpectedResult;
+            }
+            observed.steps = machine.steps;
+            observed.getter_calls = ctx.global_object.getOwn("receiverGets").?.asNum();
+            observed.method_calls = ctx.global_object.getOwn("receiverCalls").?.asNum();
+            if (!native) baseline[mode][index] = observed else {
+                const expected = baseline[mode][index];
+                try std.testing.expectEqual(expected.steps, observed.steps);
+                try std.testing.expectEqual(expected.value, observed.value);
+                try std.testing.expectEqual(expected.error_kind, observed.error_kind);
+                try std.testing.expectEqual(expected.getter_calls, observed.getter_calls);
+                try std.testing.expectEqual(expected.method_calls, observed.method_calls);
+            }
+        };
+    }
 }

@@ -105,6 +105,18 @@ pub const ValueKind = enum {
     load_new_target,
     load_capture,
     store_capture,
+    load_var_or_undef,
+    store_var,
+    def_var,
+    def_lex,
+    init_declarations,
+    copy_annex_b,
+    resolve_binding_ref,
+    load_binding_ref,
+    clear_binding_ref,
+    store_binding_ref,
+    binding_base,
+    branch_predicate,
     /// A value produced by exact bytecode but deliberately not embedded in the
     /// graph — regex literals and managed constants.
     ///
@@ -172,17 +184,7 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .tail_call_with_this_spread,
         => .call,
         .load_bigint,
-        .load_var_or_undef,
-        .store_var,
-        .def_var,
-        .def_lex,
-        .init_declarations,
-        .copy_annex_b,
         .bind_pattern,
-        .resolve_binding_ref,
-        .load_binding_ref,
-        .clear_binding_ref,
-        .store_binding_ref,
         .call_eval_with_this,
         .call_eval_with_this_spread,
         .name_anon,
@@ -464,7 +466,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     @memset(starts, false);
     starts[0] = true;
     for (code, 0..) |inst, ip| switch (inst.op) {
-        .jump, .jump_if_false => {
+        .jump, .jump_if_false, .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => {
             if (inst.a >= code.len) return error.InvalidControlFlow;
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
@@ -519,7 +521,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
         const last = code[block.end - 1];
         switch (last.op) {
             .jump => addSuccessor(block, block_at[last.a]),
-            .jump_if_false => {
+            .jump_if_false, .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => {
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
@@ -583,6 +585,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .make_closure,
         .template_object,
         => .{ .required = 0, .removed = 0, .added = 1 },
+        .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => .{ .required = 1, .removed = 0, .added = 0 },
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
         .end_finally => .{ .required = 2, .removed = 2, .added = 0 },
         .store_var, .store_local, .store_local_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
@@ -661,6 +664,17 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .load_var,
         .load_this,
         .load_new_target,
+        .load_var_or_undef,
+        .store_var,
+        .def_var,
+        .def_lex,
+        .init_declarations,
+        .copy_annex_b,
+        .resolve_binding_ref,
+        .load_binding_ref,
+        .clear_binding_ref,
+        .store_binding_ref,
+
         .load_upval,
         .load_upval_mapped,
         .load_upval_lexical,
@@ -908,14 +922,15 @@ pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: V
         // would push all argument arithmetic through the runtime ABI.
         if (nodes[operand].kind == .get_prop or nodes[operand].kind == .load_var or
             nodes[operand].kind == .load_this or nodes[operand].kind == .load_new_target or
-            nodes[operand].kind == .load_capture or nodes[operand].kind == .store_capture) return true;
+            nodes[operand].kind == .load_capture or nodes[operand].kind == .store_capture or
+            nodes[operand].kind == .load_var_or_undef or nodes[operand].kind == .load_binding_ref or nodes[operand].kind == .store_var) return true;
     }
     return false;
 }
 
 fn knownSafePrimitive(node: ValueNode) bool {
     return switch (node.kind) {
-        .argument, .block_argument => false,
+        .argument, .block_argument, .binding_base => false,
         .constant, .undefined, .null, .true, .false => true,
         else => !node.may_have_effect,
     };
@@ -1245,6 +1260,37 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 if (depth == 0) return error.InvalidControlFlow;
                 stack[depth - 1] = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
             },
+            .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref => {
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                if (inst.op == .load_var_or_undef or inst.op == .store_var or inst.op == .def_var or inst.op == .def_lex) {
+                    if (inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+                } else if (inst.op == .resolve_binding_ref or inst.op == .load_binding_ref or inst.op == .clear_binding_ref or inst.op == .store_binding_ref) {
+                    if (inst.a >= chunk.binding_reference_plans.items.len) return error.InvalidControlFlow;
+                } else if (inst.op == .copy_annex_b and inst.a >= chunk.environment_declarations.annex_b.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = std.meta.stringToEnum(ValueKind, @tagName(inst.op)).?,
+                    .lhs = if (effect.required == 1) stack[depth - 1] else ValueNode.none,
+                    .immediate = (@as(u64, inst.a) << 32) | inst.b,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                depth -= effect.removed;
+                if (inst.op == .store_var) stack[depth - 1] = result else if (inst.op == .load_var_or_undef or inst.op == .load_binding_ref) {
+                    if (inst.op == .load_binding_ref and inst.b & bc.binding_ref_load_with_base != 0) {
+                        const base = try builder.appendNode(.{ .id = undefined, .block = @intCast(block_id), .origin = @intCast(origin), .kind = .binding_base, .lhs = result });
+                        stack[depth] = base;
+                        depth += 1;
+                    }
+                    stack[depth] = result;
+                    depth += 1;
+                }
+            },
             .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical => {
                 const write = inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical;
                 if (write and depth == 0) return error.InvalidControlFlow;
@@ -1519,6 +1565,14 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 });
             },
             .jump => {},
+            .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => {
+                if (depth == 0 or block.successor_count != 2) return error.InvalidControlFlow;
+                try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                const predicate = try builder.appendNode(.{ .id = undefined, .block = @intCast(block_id), .origin = @intCast(origin), .kind = .branch_predicate, .lhs = stack[depth - 1], .immediate = @backingInt(inst.op) });
+                try builder.roots.append(allocator, predicate);
+                const positive = inst.op == .jump_if_true_peek or inst.op == .jump_if_nullish_peek;
+                try builder.branches.append(allocator, .{ .block = @intCast(block_id), .origin = @intCast(origin), .condition = predicate, .false_block = if (positive) block.successors[1] else block.successors[0], .true_block = if (positive) block.successors[0] else block.successors[1] });
+            },
             .jump_if_false => {
                 if (depth == 0) return error.InvalidControlFlow;
                 try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
@@ -1854,6 +1908,11 @@ fn supports(op: bc.Op) bool {
         .neq_strict,
         .jump,
         .jump_if_false,
+        .jump_if_true_peek,
+        .jump_if_false_peek,
+        .jump_if_nullish_peek,
+        .jump_if_not_nullish_peek,
+
         .ret,
         .ret_undef,
         .push_handler,
@@ -1873,6 +1932,17 @@ fn supports(op: bc.Op) bool {
         .load_var,
         .load_this,
         .load_new_target,
+        .load_var_or_undef,
+        .store_var,
+        .def_var,
+        .def_lex,
+        .init_declarations,
+        .copy_annex_b,
+        .resolve_binding_ref,
+        .load_binding_ref,
+        .clear_binding_ref,
+        .store_binding_ref,
+
         .load_upval,
         .load_upval_mapped,
         .load_upval_lexical,

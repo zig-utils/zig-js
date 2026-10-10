@@ -12393,19 +12393,19 @@ pub const Interpreter = struct {
         return self.gc_env_roots.items[mark];
     }
 
-    fn pushTempBindingReferenceRoot(self: *Interpreter, reference: BindingReference) EvalError!usize {
+    pub fn pushTempBindingReferenceRoot(self: *Interpreter, reference: BindingReference) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_binding_reference_roots.items.len;
         try self.gc_binding_reference_roots.append(self.arena, reference);
         return mark;
     }
 
-    fn restoreTempBindingReferenceRoots(self: *Interpreter, mark: usize) void {
+    pub fn restoreTempBindingReferenceRoots(self: *Interpreter, mark: usize) void {
         if (self.gc == null) return;
         self.gc_binding_reference_roots.shrinkRetainingCapacity(mark);
     }
 
-    fn tempBindingReferenceRoot(self: *Interpreter, mark: usize, fallback: BindingReference) BindingReference {
+    pub fn tempBindingReferenceRoot(self: *Interpreter, mark: usize, fallback: BindingReference) BindingReference {
         if (self.gc == null) return fallback;
         return self.gc_binding_reference_roots.items[mark];
     }

@@ -38,7 +38,7 @@ fn binary(kind: ir.ValueKind) bool {
 }
 
 fn primitive(node: ir.ValueNode) bool {
-    if (node.kind == .argument or node.kind == .block_argument or node.kind == .interpreter_value) return false;
+    if (node.kind == .argument or node.kind == .block_argument or node.kind == .interpreter_value or node.kind == .binding_base) return false;
     return !node.may_have_effect;
 }
 
@@ -66,9 +66,23 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .load_this,
         .load_new_target,
         .load_capture,
+        .load_var_or_undef,
+        .init_declarations,
+        .copy_annex_b,
+        .resolve_binding_ref,
+        .load_binding_ref,
+        .clear_binding_ref,
+
         .interpreter_value,
         => 0,
         .store_capture,
+        .store_var,
+        .def_var,
+        .def_lex,
+        .store_binding_ref,
+        .binding_base,
+        .branch_predicate,
+
         .to_numeric,
         .neg,
         .pos,
@@ -343,7 +357,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             }) != null,
             .throw_ => instruction.op == .throw_op,
             .return_ => instruction.op == .ret or instruction.op == .ret_undef,
-            .branch => instruction.op == .jump_if_false,
+            .branch => instruction.op == .jump_if_false or instruction.op == .jump_if_true_peek or instruction.op == .jump_if_false_peek or instruction.op == .jump_if_nullish_peek or instruction.op == .jump_if_not_nullish_peek,
             .finally_dispatch => instruction.op == .end_finally,
             .abrupt_return => instruction.op == .abrupt_return,
             .abrupt_jump => instruction.op == .abrupt_break or instruction.op == .abrupt_continue,
@@ -478,7 +492,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             }
         } else if (node.kind != .interpreter_value) {
             const op = plan.instructions[node.origin].op;
-            const expected: ir.ValueKind = switch (op) {
+            const expected: ir.ValueKind = if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
                 .load_upval, .load_upval_mapped, .load_upval_lexical => .load_capture,
                 .store_upval, .store_upval_mapped, .store_upval_lexical => .store_capture,
                 .new_call => .construct,
@@ -493,7 +507,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             };
             if (expected != node.kind) return error.InvalidValue;
             switch (node.kind) {
-                .load_capture, .store_capture => {
+                .load_capture, .store_capture, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref => {
                     const instruction = plan.instructions[node.origin];
                     if (node.immediate != (@as(u64, instruction.a) << 32) | instruction.b) return error.InvalidValue;
                 },
@@ -519,19 +533,26 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
                     const immediate = if (node.kind == .call_method) instruction.b else instruction.a;
                     if (node.immediate != immediate) return error.InvalidValue;
                 },
+                .branch_predicate => {
+                    if (node.immediate != @backingInt(op)) return error.InvalidValue;
+                    if (node.may_have_effect) return error.InvalidEffect;
+                },
                 else => {},
             }
         }
         for ([_]u32{ node.lhs, node.rhs, node.third }) |operand| {
             if (operand == none) continue;
             if (operand >= graph.nodes.len or operand >= node.id) return error.InvalidSSA;
-            try available(plan, dominance, operand, node.block, node.origin, true);
+            const projection = node.kind == .binding_base;
+            if (projection and node.may_have_effect) return error.InvalidEffect;
+            if (projection and (operand != node.lhs or operand >= node.id or graph.nodes[operand].kind != .load_binding_ref or graph.nodes[operand].origin != node.origin)) return error.InvalidSSA;
+            try available(plan, dominance, operand, node.block, node.origin, !projection);
         }
         if (binary(node.kind)) {
             if (node.lhs == none or node.rhs == none or node.third != none) return error.InvalidSSA;
             if (!node.may_have_effect and (!primitive(graph.nodes[node.lhs]) or !primitive(graph.nodes[node.rhs]))) return error.InvalidEffect;
             if (ir.binaryNeedsRuntimeOperands(graph.nodes, node.lhs, node.rhs) and effects[node.origin] == none) return error.InvalidEffect;
-        } else if (!leaf(node.kind) and node.kind != .block_argument) {
+        } else if (!leaf(node.kind) and node.kind != .block_argument and node.kind != .binding_base and node.kind != .branch_predicate) {
             if (!node.may_have_effect) return error.InvalidEffect;
             if (node.kind != .interpreter_value or plan.instructions[node.origin].op != .load_const)
                 if (effects[node.origin] == none) return error.InvalidEffect;
@@ -568,7 +589,8 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         if (branch.block >= plan.blocks.len or !active[branch.block] or branch.false_block >= plan.blocks.len or branch.true_block >= plan.blocks.len or
             branch.origin < plan.blocks[branch.block].start or branch.origin >= plan.blocks[branch.block].end) return error.InvalidBlock;
         const block = plan.blocks[branch.block];
-        if (plan.instructions[branch.origin].op != .jump_if_false) return error.InvalidBlock;
+        const branch_op = plan.instructions[branch.origin].op;
+        if (branch_op != .jump_if_false and branch_op != .jump_if_true_peek and branch_op != .jump_if_false_peek and branch_op != .jump_if_nullish_peek and branch_op != .jump_if_not_nullish_peek) return error.InvalidBlock;
         for ([_]u32{ branch.false_block, branch.true_block }) |target| {
             var found = false;
             for (block.successors[0..block.successor_count]) |successor| if (successor == target) {
@@ -577,7 +599,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             };
             if (!found) return error.InvalidEdge;
         }
-        try available(plan, dominance, branch.condition, branch.block, branch.origin, true);
+        try available(plan, dominance, branch.condition, branch.block, branch.origin, branch_op == .jump_if_false);
     }
     for (graph.frame_states) |state| if (state.kind == .continuation) {
         const index = effects[state.origin - 1];
