@@ -354,6 +354,18 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "sync/atomics-futex-lock.js")) {
+        // Independent scheduling permits a worker to run before main's store
+        // or park. The owned protocol publishes its turn before spawn and
+        // advances it only after a notification proves waiter registration.
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &hex, "a23402939295e67ee7e0e54a42e14519cd4256499289e2ce2713d3231901e4d5"))
+            return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, @embedFile("threads/atomics-futex-lock.js"));
+        return;
+    }
     if (std.mem.eql(u8, name, "api/thread-lifecycle.js")) {
         // A pending asyncHold ticket requires main to own the lock before
         // the worker starts; independent scheduling does not provide that edge.

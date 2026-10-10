@@ -4785,6 +4785,12 @@
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/atomics-futex-lock.js",
+      "runner_fixture": {
+        "path": "conformance/threads/atomics-futex-lock.js",
+        "bytes": 5218,
+        "sha256": "221f0d6e8c535e54239d26c401dd1521515a07504cd525590708770b539601ab",
+        "reason": "Publish the turn before spawn and require a successful waiter dequeue before advancing it; preserve all rounds, laps, wait outcomes and wake-count oracles without legacy scheduling timeouts."
+      },
       "required_shell_hooks": [
         "global:load",
         "option:--useJSThreads=1"
