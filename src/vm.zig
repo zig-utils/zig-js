@@ -26201,3 +26201,65 @@ test "vm: optimizer synchronous iterator seeded serialized and four worker effec
         )).asStr());
     };
 }
+
+test "vm: optimizer iterator close primitive results preserve native completion and roots" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| for ([_]bool{ false, true }) |generator| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = native });
+        defer ctx.destroy();
+        for ([_]bc.Op{ .iter_close, .iter_close_completion }) |op| for (0..5) |value_kind| for (0..2) |completion_kind| {
+            if (op == .iter_close and completion_kind != 0) continue;
+            const setup = try std.fmt.allocPrint(std.testing.allocator,
+                \\var closeNativeGets=0,closeNativeCalls=0,closeNativeReceiver=true,closeNativeMarker={{}};
+                \\var closeNativeValues=[Symbol('primitive'),1n,{{}},Object(Symbol('boxed')),Object(1n)];
+                \\var closeNativeIterator={s};
+                \\Object.defineProperty(closeNativeIterator,'return',{{get:function(){{closeNativeGets++;$vm.gc();return function(){{closeNativeCalls++;closeNativeReceiver=closeNativeReceiver&&this===closeNativeIterator;$vm.gc();return closeNativeValues[{d}];}};}}}});
+            , .{ if (generator) "(function*(){yield 5;})()" else "{next:function(){return {done:false,value:5};}}", value_kind });
+            defer std.testing.allocator.free(setup);
+            _ = try ctx.evaluate(setup);
+            var machine = ctx.interpreter();
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const active = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(active);
+            const completion = ctx.global_object.getOwn("closeNativeMarker").?;
+            machine.exception = completion;
+            var chunk = bc.Chunk.init(ctx.arena());
+            const count: u32 = if (op == .iter_close_completion) 3 else 1;
+            chunk.param_count = count;
+            chunk.local_count = count;
+            for (0..count) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+            _ = try chunk.emit(op, 0);
+            if (op == .iter_close_completion) _ = try chunk.emit(.pop, 0);
+            _ = try chunk.emit(if (op == .iter_close) .ret_undef else .ret, 0);
+            var slots = [_]Value{ completion, Value.num(@floatFromInt(completion_kind)), ctx.global_object.getOwn("closeNativeIterator").? };
+            const arguments = if (count == 3) slots[0..3] else slots[2..3];
+            var frame = Frame{ .slots = arguments, .parent = null };
+            var code: ?jit.CompiledCode = if (native) try optimizer_compiler.compile(&chunk) else null;
+            defer if (code) |*entry| entry.deinit();
+            const result: EvalError!Value = if (code) |*entry| result: {
+                try std.testing.expect(entry.entry_enabled and (!entry.has_side_exits or entry.continuation_only_exits));
+                try std.testing.expectEqual(@as(u16, @backingInt(op)), entry.native_operations.?.descriptors[0].bytecode_op);
+                var exec = Exec{ .chunk = &chunk, .frame = &frame };
+                defer exec.stack.deinit(ctx.arena());
+                defer exec.handlers.deinit(ctx.arena());
+                const outcome = tryRunManagedNative(&machine, entry, arguments, &exec) catch |err| break :result err;
+                if (outcome != .complete) return error.TestUnexpectedResult;
+                break :result outcome.complete;
+            } else run(&machine, &chunk, &frame);
+            if (value_kind < 2 and completion_kind == 0) {
+                try std.testing.expectError(error.Throw, result);
+                try std.testing.expectEqualStrings("TypeError", machine.exception.asObj().errorName());
+            } else {
+                const completed_value = try result;
+                if (op == .iter_close) try std.testing.expect(completed_value.isUndefined()) else try std.testing.expectEqual(ctx.global_object.getOwn("closeNativeMarker").?.rawBits(), completed_value.rawBits());
+                if (completion_kind == 1)
+                    try std.testing.expectEqual(ctx.global_object.getOwn("closeNativeMarker").?.rawBits(), machine.exception.rawBits());
+            }
+            try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("closeNativeGets").?.asNum());
+            try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("closeNativeCalls").?.asNum());
+            try std.testing.expect(ctx.global_object.getOwn("closeNativeReceiver").?.asBool());
+        };
+    };
+}

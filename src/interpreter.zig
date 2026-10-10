@@ -17323,10 +17323,12 @@ pub const Interpreter = struct {
     /// IteratorClose: invoke `iterator.return()` if present (generators are
     /// closed through their dispatched `return`). The result is discarded; a
     /// throw propagates (normal-completion close).
+    /// ECMA-262 IteratorClose step 7 requires semantic Object, excluding the
+    /// primitive Symbol/BigInt cells that also use the object representation tag.
     pub fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
         if (iter.isObject() and iter.asObj().generator() != null) {
             const r = try self.callMethod(iter, "return", &.{});
-            if (!r.isObject()) return self.throwError("TypeError", "iterator 'return' did not return an object");
+            if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator 'return' did not return an object");
             return;
         }
         // GetMethod(iterator, "return"): absent (undefined/null) → no close; a
@@ -17336,7 +17338,7 @@ pub const Interpreter = struct {
         if (ret.isUndefined() or ret.isNull()) return;
         if (!ret.isCallable()) return self.throwError("TypeError", "iterator 'return' is not a function");
         const r = try self.callValueWithThis(ret, &.{}, iter);
-        if (!r.isObject()) return self.throwError("TypeError", "iterator 'return' did not return an object");
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator 'return' did not return an object");
     }
 
     /// IteratorClose with an existing throw completion: close `iter`, but keep the

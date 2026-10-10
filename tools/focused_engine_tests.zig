@@ -862,6 +862,42 @@ const frontend_error_cases = [_]ErrorCase{
 
 const vm_cases = [_]Case{
     .{
+        .name = "iterator close primitive results preserve semantic Object and throw precedence",
+        .enable_gc = true,
+        .required_bytecode = true,
+        .jit_differential = true,
+        .source =
+        \\var close1100Events=[],close1100Original={},close1100MethodError={};
+        \\function close1100Gc(){if(typeof $vm!=='undefined')$vm.gc();}
+        \\function close1100First(value){for(var item of value)return item;return -1;}
+        \\function close1100Break(value){for(var item of value)break;return 7;}
+        \\function close1100Binding(value){var [item]=value;return item;}
+        \\function close1100Throw(value){for(var item of value)throw close1100Original;}
+        \\function close1100Subject(result,generator,throws){
+        \\ var iterator=generator?(function*(){yield 5;})():{next:function(){return {done:false,value:5};}};
+        \\ Object.defineProperty(iterator,'return',{get:function(){close1100Events.push('get');close1100Gc();return function(){close1100Events.push(this===iterator?'receiver':'wrong');close1100Gc();if(throws)throw close1100MethodError;return result;};}});
+        \\ return {[Symbol.iterator]:function(){return iterator;}};
+        \\}
+        \\var close1100Values=[Symbol('result'),1n,undefined,null,0,true,'x',{},Object(Symbol('boxed')),Object(1n)];
+        \\for(var warm=0;warm<64;warm++){close1100First(close1100Subject({},false,false));close1100Break(close1100Subject({},false,false));close1100Binding(close1100Subject({},false,false));try{close1100Throw(close1100Subject({},false,false));}catch(e){}}
+        \\var close1100Records=[];
+        \\for(var g=0;g<2;g++)for(var k=0;k<close1100Values.length;k++)for(var mode=0;mode<4;mode++){
+        \\ close1100Events=[];var result;
+        \\ try{result=[close1100First,close1100Break,close1100Binding,close1100Throw][mode](close1100Subject(close1100Values[k],!!g,false));}
+        \\ catch(e){result=e===close1100Original?'original':e===close1100MethodError?'method':e.name;}
+        \\ close1100Records.push([g,k,mode,result,close1100Events.join(',')]);
+        \\}
+        \\for(var g=0;g<2;g++)for(var mode=0;mode<4;mode++){
+        \\ close1100Events=[];var result;
+        \\ try{result=[close1100First,close1100Break,close1100Binding,close1100Throw][mode](close1100Subject({},!!g,true));}
+        \\ catch(e){result=e===close1100Original?'original':e===close1100MethodError?'method':e.name;}
+        \\ close1100Records.push([g,10,mode,result,close1100Events.join(',')]);
+        \\}
+        \\close1100Records.reduce(function(passed,row){var expected=row[2]===3?'original':row[1]===10?'method':row[1]<7?'TypeError':row[2]===1?7:5;return passed+(row[3]===expected&&row[4]==='get,receiver'?1:0);},0);
+        ,
+        .expected = 88,
+    },
+    .{
         .name = "synchronous iterator recursive callbacks preserve completion and roots",
         .enable_gc = true,
         .required_bytecode = true,
