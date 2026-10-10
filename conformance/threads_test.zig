@@ -354,6 +354,18 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "sync/condition-notify-all.js")) {
+        // The pinned cooperative-scheduler fixture can notify before main
+        // starts waiting in no-GIL mode. The owned fixture establishes waiter
+        // registration through the lock and retains every notification count.
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &hex, "080c428e2f5f9f3b58927b6820a1822863ab4e0bb926aef8b81e2687b1937fce"))
+            return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, @embedFile("threads/condition-notify-all.js"));
+        return;
+    }
     if (std.mem.eql(u8, name, "cve/mc-jit-stale-base-grow-oob.js")) {
         // The two hot helpers do not observe sloppy-only call-frame behavior.
         // Give them VM activations and use the optimizer's admitted reducible

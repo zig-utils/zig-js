@@ -4843,6 +4843,12 @@
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/condition-notify-all.js",
+      "runner_fixture": {
+        "path": "conformance/threads/condition-notify-all.js",
+        "bytes": 1714,
+        "sha256": "b78ca3b6a0bd12b11de0b22f2572f883d1f9278b79ef66398645ce9b9bb5e0a2",
+        "reason": "Establish waiter registration before notification independently of the thread scheduler; retain all upstream wake-count assertions."
+      },
       "required_shell_hooks": [
         "global:load",
         "option:--useJSThreads=1"

@@ -111,6 +111,22 @@ function validate(inventory: Item): string[] {
     "reference file list/order drift",
   );
   report(new Set(paths).size === paths.length, "duplicate inventory path");
+  const embeddedFixtures = Array.from(
+    readText(RUNNER_SOURCE).matchAll(/@embedFile\("(threads\/[^"\n]+)"\)/g),
+    match => `conformance/${match[1]}`,
+  ).sort();
+  const declaredFixtures = entries.filter(entry => entry.runner_fixture).map(entry => entry.runner_fixture.path).sort();
+  report(JSON.stringify(embeddedFixtures) === JSON.stringify(declaredFixtures), "runner fixture inventory drift");
+  for (const entry of entries.filter(entry => entry.runner_fixture)) {
+    const fixture = entry.runner_fixture;
+    report(embeddedFixtures.includes(fixture.path), `${entry.path}: runner fixture binding drift`);
+    if (!embeddedFixtures.includes(fixture.path)) continue;
+    report(fileExists(fixture.path), `${entry.path}: missing runner fixture`);
+    if (!fileExists(fixture.path)) continue;
+    report(fixture.bytes === byteCount(fixture.path), `${entry.path}: runner fixture byte count drift`);
+    report(fixture.sha256 === sha256File(fixture.path), `${entry.path}: runner fixture SHA-256 drift`);
+    report(typeof fixture.reason === "string" && fixture.reason.length > 0, `${entry.path}: missing runner fixture reason`);
+  }
   const lists = allowlists(),
     promoted = new Set([...lists.serialized, ...lists.parallel]),
     helpers = new Set(HELPERS),
@@ -330,6 +346,12 @@ function main(): void {
     const copy = JSON.parse(JSON.stringify(inventory));
     copy.files[0].sha256 = "0".repeat(64);
     selfTest = validate(copy).some((error) => error.includes("SHA-256 drift"));
+    const fixtureCopy = JSON.parse(JSON.stringify(inventory));
+    fixtureCopy.files.find((entry: Item) => entry.runner_fixture).runner_fixture.sha256 = "0".repeat(64);
+    selfTest = selfTest && validate(fixtureCopy).some(error => error.includes("runner fixture SHA-256 drift"));
+    const missingFixture = JSON.parse(JSON.stringify(inventory));
+    delete missingFixture.files.find((entry: Item) => entry.runner_fixture).runner_fixture;
+    selfTest = selfTest && validate(missingFixture).some(error => error.includes("runner fixture inventory drift"));
   }
   let probeFailures = 0,
     probeResults: Item[] = [];
