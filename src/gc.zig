@@ -2780,46 +2780,150 @@ test "realm root relocation rewrites microtask variants and module graph" {
     try std.testing.expectEqual(&new_objects[15], module.dynamic_waiters.items[0].namespace);
 }
 
-fn traceActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
-    const active = machine.gc_native_roots orelse return;
-    const map = active.currentMap() orelse return;
-    if (active.frame.slots) |slots| {
-        var candidates = map.frame_pointer_slots;
-        while (candidates != 0) {
-            const slot: u6 = @intCast(@ctz(candidates));
-            markValue(v, Value.fromRawBits(slots[slot]));
-            candidates &= candidates - 1;
-        }
+fn traceExecRoots(exec: *vm.Exec, v: anytype) void {
+    if (exec.chunk) |chunk| traceChunk(chunk, v);
+    for (exec.stack.items) |s| markValueInternal(v, "interpreter VM operand stack", s);
+    markValueInternal(v, "interpreter VM accumulator", exec.acc);
+    // #706 activation-local program scratch: same arena-backed precise-root
+    // story as the operand stack above.
+    for (exec.scratch) |s| markValueInternal(v, "interpreter VM activation scratch", s);
+    if (exec.parameter_rest_arguments) |arguments|
+        for (arguments) |argument| markValueInternal(v, "interpreter VM pending rest arguments", argument);
+    for (exec.binding_references) |reference| switch (reference) {
+        .environment => |environment| markManaged(v, environment),
+        .with_object, .global_object => |object| v.mark(object),
+        .empty, .static, .unresolvable => {},
+    };
+    for (exec.handlers.items) |handler|
+        if (handler.environment) |environment| markManaged(v, environment);
+    v.mark(exec.saved_home_object);
+    v.mark(exec.saved_super_ctor);
+    markValue(v, exec.saved_this);
+    markValue(v, exec.saved_nt);
+    v.mark(exec.saved_global);
+    v.mark(exec.saved_imo);
+    v.mark(exec.saved_active_function);
+    if (exec.saved_ims) |slot| v.mark(slot.load());
+    if (exec.saved_this_cell) |cell| markValue(v, cell.value());
+    for ([_]?*Environment{ exec.saved_env, exec.debug_environment }) |maybe_env| if (maybe_env) |env| {
+        markManaged(v, env);
+        traceEnv(env, v);
+    };
+    // The activation's frame slots (and its captured-frame parent chain for
+    // upvalues) are arena-backed locals — invisible to both the precise
+    // object graph and the native-stack scan, exactly like the operand stack
+    // above. Without tracing them an object live only through a VM local is
+    // swept mid-collection (a use-after-free that surfaces as a garbage
+    // `restricted_to` ⇒ spurious ConcurrentAccessError).
+    //
+    // Once a closure captures a frame it is marked `escaped`, and the VM
+    // serializes its slots with `slot_lock` (see `store_local`/`load_upval`).
+    // A cross-thread closure makes this parent-chain walk reach a *running*
+    // peer's live escaped frame, so under a concurrent/parallel trace the
+    // read must take that same lock or it races the mutator's slot store.
+    // Gated on `v.concurrent()` + `escaped`: a stop-the-world trace (no
+    // mutator running) and never-captured frames (the vast majority) lock
+    // nothing.
+    const lock_slots = v.concurrent();
+    var fr: ?*vm.Frame = exec.frame;
+    while (fr) |f| : (fr = f.parent) {
+        if (f.closure_environment) |environment| markManaged(v, environment);
+        if (f.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
+        if (f.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
+        traceFrameMappedParameters(f, v);
+        const held = f.lockSlots(lock_slots);
+        for (f.slots) |slot| markValueInternal(v, "interpreter VM frame slot", slot);
+        f.unlockSlots(held);
     }
-    if (active.frame.scratch) |scratch| {
-        var candidates = map.scratch_pointer_slots;
-        while (candidates != 0) {
-            const slot: u7 = @intCast(@ctz(candidates));
-            markValue(v, Value.fromRawBits(scratch[slot]));
-            candidates &= candidates - 1;
+}
+
+fn traceActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
+    if (machine.gc_native_roots) |*first| {
+        var current: ?*const jit.ActiveNativeRoots = first;
+        while (current) |active| : (current = active.previous) {
+            if (active.frame.bytecode_execution) |raw|
+                traceExecRoots(@ptrCast(@alignCast(raw)), v);
+            const map = active.currentMap() orelse continue;
+            if (active.frame.slots) |slots| {
+                var candidates = map.frame_pointer_slots;
+                while (candidates != 0) {
+                    const slot: u6 = @intCast(@ctz(candidates));
+                    markValue(v, Value.fromRawBits(slots[slot]));
+                    candidates &= candidates - 1;
+                }
+            }
+            if (active.frame.scratch) |scratch| {
+                var candidates = map.scratch_pointer_slots;
+                while (candidates != 0) {
+                    const slot: u7 = @intCast(@ctz(candidates));
+                    markValue(v, Value.fromRawBits(scratch[slot]));
+                    candidates &= candidates - 1;
+                }
+            }
         }
     }
 }
 
-fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
-    const active = machine.gc_native_roots orelse return;
-    const map = active.currentMap() orelse return;
-    if (active.frame.slots) |slots| {
-        var candidates = map.frame_pointer_slots;
-        while (candidates != 0) {
-            const slot: u6 = @intCast(@ctz(candidates));
-            const value_slot: *Value = @ptrCast(@alignCast(&slots[slot]));
-            gc_relocation.rewriteValueSlot(v, value_slot);
-            candidates &= candidates - 1;
-        }
+fn relocateExecRoots(exec: *vm.Exec, v: anytype) void {
+    if (exec.chunk) |chunk| relocateChunk(chunk, v);
+    for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    gc_relocation.rewriteValueSlot(v, &exec.acc);
+    for (exec.scratch) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    if (exec.parameter_rest_arguments) |arguments|
+        for (arguments) |*argument| gc_relocation.rewriteValueSlot(v, argument);
+    for (exec.binding_references) |*reference| switch (reference.*) {
+        .environment => |*environment| gc_relocation.rewriteRequiredSlot(v, Environment, environment),
+        .with_object, .global_object => |*object| gc_relocation.rewriteRequiredSlot(v, Object, object),
+        .empty, .static, .unresolvable => {},
+    };
+    for (exec.handlers.items) |*handler|
+        gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
+    gc_relocation.rewriteValueSlot(v, &exec.saved_this);
+    gc_relocation.rewriteValueSlot(v, &exec.saved_nt);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_global);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_imo);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_active_function);
+    gc_relocation.rewriteOptionalSlot(v, Environment, &exec.saved_env);
+    gc_relocation.rewriteOptionalSlot(v, Environment, &exec.debug_environment);
+    if (exec.saved_ims) |slot| gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
+    if (exec.saved_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
+    var frame = exec.frame;
+    while (frame) |current| : (frame = current.parent) {
+        gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
+        relocateFrameMappedParameters(current, v);
+        for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
     }
-    if (active.frame.scratch) |scratch| {
-        var candidates = map.scratch_pointer_slots;
-        while (candidates != 0) {
-            const slot: u7 = @intCast(@ctz(candidates));
-            const value_slot: *Value = @ptrCast(@alignCast(&scratch[slot]));
-            gc_relocation.rewriteValueSlot(v, value_slot);
-            candidates &= candidates - 1;
+}
+
+fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
+    if (machine.gc_native_roots) |*first| {
+        var current: ?*const jit.ActiveNativeRoots = first;
+        while (current) |active| : (current = active.previous) {
+            if (active.frame.bytecode_execution) |raw|
+                relocateExecRoots(@ptrCast(@alignCast(raw)), v);
+            const map = active.currentMap() orelse continue;
+            if (active.frame.slots) |slots| {
+                var candidates = map.frame_pointer_slots;
+                while (candidates != 0) {
+                    const slot: u6 = @intCast(@ctz(candidates));
+                    const value_slot: *Value = @ptrCast(@alignCast(&slots[slot]));
+                    gc_relocation.rewriteValueSlot(v, value_slot);
+                    candidates &= candidates - 1;
+                }
+            }
+            if (active.frame.scratch) |scratch| {
+                var candidates = map.scratch_pointer_slots;
+                while (candidates != 0) {
+                    const slot: u7 = @intCast(@ctz(candidates));
+                    const value_slot: *Value = @ptrCast(@alignCast(&scratch[slot]));
+                    gc_relocation.rewriteValueSlot(v, value_slot);
+                    candidates &= candidates - 1;
+                }
+            }
         }
     }
 }
@@ -2856,62 +2960,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     // invisible to both the precise object graph and the conservative native
     // stack scan. The VM flushes `acc`/`ip` into each `Exec` at the safepoint
     // before collecting, so these reads are current.
-    for (machine.gc_execs.items) |exec| {
-        if (exec.chunk) |chunk| traceChunk(chunk, v);
-        for (exec.stack.items) |s| markValueInternal(v, "interpreter VM operand stack", s);
-        markValueInternal(v, "interpreter VM accumulator", exec.acc);
-        // #706 activation-local program scratch: same arena-backed precise-root
-        // story as the operand stack above.
-        for (exec.scratch) |s| markValueInternal(v, "interpreter VM activation scratch", s);
-        if (exec.parameter_rest_arguments) |arguments|
-            for (arguments) |argument| markValueInternal(v, "interpreter VM pending rest arguments", argument);
-        for (exec.binding_references) |reference| switch (reference) {
-            .environment => |environment| markManaged(v, environment),
-            .with_object, .global_object => |object| v.mark(object),
-            .empty, .static, .unresolvable => {},
-        };
-        for (exec.handlers.items) |handler|
-            if (handler.environment) |environment| markManaged(v, environment);
-        v.mark(exec.saved_home_object);
-        v.mark(exec.saved_super_ctor);
-        markValue(v, exec.saved_this);
-        markValue(v, exec.saved_nt);
-        v.mark(exec.saved_global);
-        v.mark(exec.saved_imo);
-        v.mark(exec.saved_active_function);
-        if (exec.saved_ims) |slot| v.mark(slot.load());
-        if (exec.saved_this_cell) |cell| markValue(v, cell.value());
-        for ([_]?*Environment{ exec.saved_env, exec.debug_environment }) |maybe_env| if (maybe_env) |env| {
-            markManaged(v, env);
-            traceEnv(env, v);
-        };
-        // The activation's frame slots (and its captured-frame parent chain for
-        // upvalues) are arena-backed locals — invisible to both the precise
-        // object graph and the native-stack scan, exactly like the operand stack
-        // above. Without tracing them an object live only through a VM local is
-        // swept mid-collection (a use-after-free that surfaces as a garbage
-        // `restricted_to` ⇒ spurious ConcurrentAccessError).
-        //
-        // Once a closure captures a frame it is marked `escaped`, and the VM
-        // serializes its slots with `slot_lock` (see `store_local`/`load_upval`).
-        // A cross-thread closure makes this parent-chain walk reach a *running*
-        // peer's live escaped frame, so under a concurrent/parallel trace the
-        // read must take that same lock or it races the mutator's slot store.
-        // Gated on `v.concurrent()` + `escaped`: a stop-the-world trace (no
-        // mutator running) and never-captured frames (the vast majority) lock
-        // nothing.
-        const lock_slots = v.concurrent();
-        var fr: ?*vm.Frame = exec.frame;
-        while (fr) |f| : (fr = f.parent) {
-            if (f.closure_environment) |environment| markManaged(v, environment);
-            if (f.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
-            if (f.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
-            traceFrameMappedParameters(f, v);
-            const held = f.lockSlots(lock_slots);
-            for (f.slots) |slot| markValueInternal(v, "interpreter VM frame slot", slot);
-            f.unlockSlots(held);
-        }
-    }
+    for (machine.gc_execs.items) |exec| traceExecRoots(exec, v);
     for (machine.gc_binding_reference_roots.items) |reference| switch (reference) {
         .environment => |environment| markManaged(v, environment),
         .with_object, .global_object => |object| v.mark(object),
@@ -3052,40 +3101,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, Object, &call.caller_function);
         if (call.caller_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
     }
-    for (machine.gc_execs.items) |exec| {
-        if (exec.chunk) |chunk| relocateChunk(chunk, v);
-        for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
-        gc_relocation.rewriteValueSlot(v, &exec.acc);
-        for (exec.scratch) |*slot| gc_relocation.rewriteValueSlot(v, slot);
-        if (exec.parameter_rest_arguments) |arguments|
-            for (arguments) |*argument| gc_relocation.rewriteValueSlot(v, argument);
-        for (exec.binding_references) |*reference| switch (reference.*) {
-            .environment => |*environment| gc_relocation.rewriteRequiredSlot(v, Environment, environment),
-            .with_object, .global_object => |*object| gc_relocation.rewriteRequiredSlot(v, Object, object),
-            .empty, .static, .unresolvable => {},
-        };
-        for (exec.handlers.items) |*handler|
-            gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
-        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
-        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
-        gc_relocation.rewriteValueSlot(v, &exec.saved_this);
-        gc_relocation.rewriteValueSlot(v, &exec.saved_nt);
-        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_global);
-        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_imo);
-        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_active_function);
-        gc_relocation.rewriteOptionalSlot(v, Environment, &exec.saved_env);
-        gc_relocation.rewriteOptionalSlot(v, Environment, &exec.debug_environment);
-        if (exec.saved_ims) |slot| gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
-        if (exec.saved_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
-        var frame = exec.frame;
-        while (frame) |current| : (frame = current.parent) {
-            gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
-            gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
-            gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
-            relocateFrameMappedParameters(current, v);
-            for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
-        }
-    }
+    for (machine.gc_execs.items) |exec| relocateExecRoots(exec, v);
     for (machine.gc_binding_reference_roots.items) |*reference| switch (reference.*) {
         .environment => |*environment| gc_relocation.rewriteRequiredSlot(v, Environment, environment),
         .with_object, .global_object => |*object| gc_relocation.rewriteRequiredSlot(v, Object, object),

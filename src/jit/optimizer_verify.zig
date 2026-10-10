@@ -25,9 +25,17 @@ fn range(first: usize, count: usize, length: usize) bool {
 
 fn leaf(kind: ir.ValueKind) bool {
     return switch (kind) {
-        .argument, .constant, .undefined, .null, .true, .false => true,
+        .argument, .frame_slot, .constant, .undefined, .null, .true, .false => true,
         else => false,
     };
+}
+
+fn location(graph: *const ir.ValueGraph, id: u32, local_count: u32) ?u32 {
+    if (!graph.canonical_locals or id >= graph.nodes.len) return null;
+    const node = graph.nodes[id];
+    if ((node.kind == .frame_slot or node.kind == .block_argument) and node.immediate < local_count)
+        return @intCast(node.immediate);
+    return null;
 }
 
 fn binary(kind: ir.ValueKind) bool {
@@ -38,13 +46,15 @@ fn binary(kind: ir.ValueKind) bool {
 }
 
 fn primitive(node: ir.ValueNode) bool {
-    if (node.kind == .argument or node.kind == .block_argument or node.kind == .interpreter_value or node.kind == .binding_base) return false;
+    if (node.kind == .argument or node.kind == .frame_slot or node.kind == .block_argument or node.kind == .interpreter_value or node.kind == .binding_base) return false;
     return !node.may_have_effect;
 }
 
 fn operandCount(kind: ir.ValueKind) u2 {
     return switch (kind) {
         .argument,
+        .frame_slot,
+        .make_closure,
         .block_argument,
         .constant,
         .undefined,
@@ -75,6 +85,8 @@ fn operandCount(kind: ir.ValueKind) u2 {
 
         .interpreter_value,
         => 0,
+        .load_frame,
+        .init_frame,
         .store_capture,
         .store_var,
         .def_var,
@@ -101,6 +113,7 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .iter_close,
         => 1,
         .set_index, .init_prop_computed, .init_getter, .init_setter, .iter_close_completion => 3,
+        .store_frame => 2,
         else => 2,
     };
 }
@@ -343,6 +356,14 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         const count = std.math.add(usize, state.local_count, state.stack_count) catch return error.InvalidFrameState;
         if (!range(state.first_value, count, graph.frame_state_values.len) or
             !range(state.first_handler, state.handler_count, graph.handler_states.len)) return error.InvalidFrameState;
+        if (graph.canonical_locals) {
+            for (graph.frame_state_values[state.first_value .. state.first_value + count], 0..) |id, ordinal| {
+                const slot = location(graph, id, state.local_count);
+                if (ordinal < state.local_count) {
+                    if (slot == null or slot.? != ordinal) return error.InvalidFrameState;
+                } else if (slot != null) return error.InvalidFrameState;
+            }
+        }
         const instruction = plan.instructions[state.origin];
         const call_operation = switch (instruction.op) {
             .call,
@@ -408,6 +429,12 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             state.local_count != local_count.? or
             @as(u64, state.local_count) + state.stack_count != edge.argument_count)
             return error.InvalidEdge;
+        if (graph.canonical_locals) for (graph.edge_arguments[edge.first_argument .. edge.first_argument + edge.argument_count], 0..) |id, ordinal| {
+            const slot = location(graph, id, state.local_count);
+            if (ordinal < state.local_count) {
+                if (slot == null or slot.? != ordinal) return error.InvalidEdge;
+            } else if (slot != null) return error.InvalidEdge;
+        };
         if (edge.from != none and !active[edge.from]) return error.InvalidEdge;
         if (active[edge.to]) {
             const entry = graph.frame_states[entries[edge.to]];
@@ -501,7 +528,8 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         if (leaf(node.kind) or node.kind == .block_argument) {
             if (node.may_have_effect) return error.InvalidEffect;
             if (node.block != none and node.block >= plan.blocks.len) return error.InvalidValue;
-            if (node.kind == .argument) {
+            if (node.kind == .argument or node.kind == .frame_slot) {
+                if (node.kind == .frame_slot and !graph.canonical_locals) return error.InvalidValue;
                 if (node.block != none or local_count == null or node.immediate >= local_count.?)
                     return error.InvalidValue;
             } else if (node.kind == .constant) {
@@ -511,6 +539,9 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         } else if (node.kind != .interpreter_value) {
             const op = plan.instructions[node.origin].op;
             const expected: ir.ValueKind = if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
+                .load_local, .load_local_mapped, .load_local_lexical => .load_frame,
+                .store_local, .store_local_mapped, .store_local_lexical => .store_frame,
+                .init_local_lexical => .init_frame,
                 .load_upval, .load_upval_mapped, .load_upval_lexical => .load_capture,
                 .store_upval, .store_upval_mapped, .store_upval_lexical => .store_capture,
                 .new_call => .construct,
@@ -524,11 +555,17 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
                 else => std.meta.stringToEnum(ir.ValueKind, @tagName(op)) orelse return error.InvalidValue,
             };
             if (expected != node.kind) return error.InvalidValue;
+            if (node.kind == .load_frame or node.kind == .store_frame or node.kind == .init_frame) {
+                if (!graph.canonical_locals or local_count == null or location(graph, node.lhs, local_count.?) != plan.instructions[node.origin].a)
+                    return error.InvalidSSA;
+                if (node.kind == .store_frame and location(graph, node.rhs, local_count.?) != null) return error.InvalidSSA;
+            }
             switch (node.kind) {
-                .load_capture, .store_capture, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref => {
+                .load_frame, .store_frame, .init_frame, .load_capture, .store_capture, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref => {
                     const instruction = plan.instructions[node.origin];
                     if (node.immediate != (@as(u64, instruction.a) << 32) | instruction.b) return error.InvalidValue;
                 },
+                .make_closure,
                 .load_var,
                 .get_prop,
                 .set_prop,

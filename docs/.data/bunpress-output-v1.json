@@ -165,8 +165,8 @@
     },
     {
       "path": "optimizing-jit/index.html",
-      "bytes": 287221,
-      "sha256": "f323ccadc319d90693938e95520962ed43a80456341da3f7a4c17769bee74d12"
+      "bytes": 289184,
+      "sha256": "c02b2d1c3e59a51f26fd835b3af2513c7783a2bd3ef3cfe3a1c3220856fbffda"
     },
     {
       "path": "platforms/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "4b8bb244872affda3a4a92b6529cef6bfca75b684821c678bba9ca3109774b56"
+  "tree_sha256": "93d1659e4f14068c98f65d225b7804ff439ee3d9c0d0c7c1db35b87a63b17c02"
 }

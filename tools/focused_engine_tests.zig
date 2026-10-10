@@ -862,6 +862,19 @@ const frontend_error_cases = [_]ErrorCase{
 
 const vm_cases = [_]Case{
     .{
+        .name = "closure allocation retains live mapped and lexical bindings",
+        .source =
+        \\function factory(value){var get=function(){return value;},set=function(v){value=v;};set(11);value++;return get;}
+        \\function lexical(value){let x=value;const get=()=>x;x++;return get;}
+        \\function mapped(value){var get=()=>value;arguments[0]=9;value++;return get;}
+        \\for(var warm=0;warm<64;warm++){factory(warm);lexical(warm);mapped(warm);}
+        \\factory(5)()+lexical(5)()+mapped(5)()
+        ,
+        .expected = 28,
+        .jit_differential = true,
+    },
+
+    .{
         .name = "iterator close primitive results preserve semantic Object and throw precedence",
         .enable_gc = true,
         .required_bytecode = true,

@@ -1167,6 +1167,7 @@ pub const DeoptPoint = struct {
     first_handler: u32 = 0,
     handler_count: u16 = 0,
     accumulator: RecoveryValue,
+    preserve_locals: bool = false,
 };
 
 /// One immutable catch/finally record in outer-to-inner order. The VM rebuilds
@@ -1256,6 +1257,7 @@ pub const StackMapMetadata = struct {
 /// this descriptor visible to root tracing; an unset or malformed map is not
 /// safe to inspect and therefore fails closed.
 pub const ActiveNativeRoots = struct {
+    previous: ?*const ActiveNativeRoots = null,
     frame: *NativeFrame,
     stack_maps: *const StackMapMetadata,
     frame_slot_count: u8,
@@ -1282,7 +1284,7 @@ pub const ActiveNativeRoots = struct {
     }
 };
 
-pub const OsrImportSource = enum(u8) { frame_slot, stack_slot };
+pub const OsrImportSource = enum(u8) { frame_slot, stack_slot, frame_location };
 
 /// One exact VM value imported into an optimizer SSA scratch slot on OSR entry.
 pub const OsrImport = struct {
@@ -1363,13 +1365,14 @@ pub const OsrMetadata = struct {
         for (self.imports[first .. first + count]) |import| {
             if (import.destination >= scratch.len) return false;
             switch (import.source) {
-                .frame_slot => if (import.source_index >= frame_slots.len) return false,
+                .frame_slot, .frame_location => if (import.source_index >= frame_slots.len) return false,
                 .stack_slot => if (import.source_index >= operand_stack.len) return false,
             }
         }
         for (self.imports[first .. first + count]) |import| {
             scratch[import.destination] = switch (import.source) {
                 .frame_slot => frame_slots[import.source_index],
+                .frame_location => import.source_index,
                 .stack_slot => operand_stack[import.source_index],
             };
         }
@@ -1409,6 +1412,9 @@ pub const CompiledCode = struct {
     requires_activation_context: bool = false,
     requires_frame_context: bool = false,
     requires_execution_context: bool = false,
+    canonical_locals: bool = false,
+    /// Borrowed source identity; the owning Chunk outlives its artifact.
+    canonical_chunk: ?*const anyopaque = null,
     /// Machine-frame facts emitted by codegen and consumed only by an opt-in
     /// external publisher. `.none` adds no publication work on the default path.
     unwind: native_observability.UnwindPlan = .none,

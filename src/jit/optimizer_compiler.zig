@@ -28,6 +28,7 @@ const moving_safepoint_backedge_interval: u32 = 32;
 pub const OperationKind = enum {
     copy,
     argument,
+    frame_slot,
     constant,
     add,
     sub,
@@ -180,6 +181,7 @@ pub const Program = struct {
     loop_region_dynamic_checks: bool = false,
     scratch_slots: u8,
     frame_slots: u32,
+    canonical_locals: bool = false,
     required_numeric_slots: u64,
     bytecode_steps: u32,
     deopt_points: []jit.DeoptPoint,
@@ -307,7 +309,7 @@ pub fn buildOsrMetadata(plan: *const optimizer.Plan, allocator: std.mem.Allocato
             if (node.kind != .block_argument or node.block != header.id or value >= jit.numeric_scratch_capacity)
                 return error.UnsupportedChunk;
             try imports.append(allocator, .{
-                .source = if (index < state.local_count) .frame_slot else .stack_slot,
+                .source = if (index < state.local_count) (if (graph.canonical_locals) .frame_location else .frame_slot) else .stack_slot,
                 .source_index = @intCast(if (index < state.local_count) index else index - state.local_count),
                 .destination = @intCast(value),
             });
@@ -638,6 +640,7 @@ fn compactSelectedLoopPlan(
         .graph = .{
             .allocator = allocator,
             .nodes = nodes,
+            .canonical_locals = graph.canonical_locals,
             .edges = owned_edges,
             .edge_arguments = owned_edge_arguments,
             .returns = owned_returns,
@@ -653,7 +656,7 @@ fn compactSelectedLoopPlan(
     return result;
 }
 
-const ValueType = enum { number, boolean, other };
+const ValueType = enum { number, boolean, other, location };
 
 const NativeOperationStepMode = enum { deterministic, block_local };
 
@@ -745,7 +748,7 @@ fn stageNativeOperationDescriptors(
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
                 inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
                 inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
-                inst.op == .array_spread or inst.op == .array_append_hole or inst.op == .iter_of or inst.op == .assert_iter_result or inst.op == .iter_close or inst.op == .iter_close_completion)
+                inst.op == .make_closure or inst.op == .load_local or inst.op == .load_local_mapped or inst.op == .load_local_lexical or inst.op == .store_local or inst.op == .store_local_mapped or inst.op == .store_local_lexical or inst.op == .init_local_lexical or inst.op == .array_spread or inst.op == .array_append_hole or inst.op == .iter_of or inst.op == .assert_iter_result or inst.op == .iter_close or inst.op == .iter_close_completion)
                 break :runtime operation.lhs;
             return error.UnsupportedChunk;
         } else staged: {
@@ -947,7 +950,7 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
         node.kind == .new_object or node.kind == .new_array or node.kind == .init_prop or
         node.kind == .init_proto or node.kind == .init_prop_computed or node.kind == .init_spread or
         node.kind == .init_getter or node.kind == .init_setter or node.kind == .array_append or
-        node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion) and
+        node.kind == .make_closure or node.kind == .load_frame or node.kind == .store_frame or node.kind == .init_frame or node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion) and
         node.block == state.block and
         node.origin == state.origin)
     {
@@ -1013,6 +1016,11 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .binding_base => {
             types[node.id] = .other;
             try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = node.block, .lhs = @intCast(node.lhs), .origin = node.origin });
+        },
+        .frame_slot => {
+            if (!graph.canonical_locals or node.immediate >= chunk.local_count) return error.UnsupportedChunk;
+            types[node.id] = .location;
+            try operations.append(allocator, .{ .kind = .frame_slot, .destination = @intCast(node.id), .block = node.block, .immediate = node.immediate, .origin = node.origin });
         },
         .argument => {
             if (node.immediate >= chunk.param_count or node.immediate >= 64) return error.UnsupportedChunk;
@@ -1177,7 +1185,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -1428,7 +1436,11 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         const first_value: u32 = @intCast(deopt_values.items.len);
         const first: usize = state.first_value;
         const count: usize = state.local_count + state.stack_count;
-        for (graph.frame_state_values[first .. first + count]) |value| {
+        for (graph.frame_state_values[first .. first + count], 0..) |value, ordinal| {
+            if (graph.canonical_locals and ordinal < state.local_count) {
+                try deopt_values.append(allocator, .{ .source = .frame_slot, .index = @intCast(ordinal) });
+                continue;
+            }
             const resolved = try resolveAlias(value, aliases);
             const node = graph.nodes[resolved];
             try deopt_values.append(allocator, if (node.kind == .argument and !numeric_inputs[resolved])
@@ -1456,6 +1468,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             .exit_ip = state.origin,
             .first_value = first_value,
             .local_count = @intCast(state.local_count),
+            .preserve_locals = graph.canonical_locals,
             .stack_count = @intCast(state.stack_count),
             .first_handler = state.first_handler,
             .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
@@ -1568,6 +1581,9 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
             @as(u128, 1) << (std.math.cast(u7, slot) orelse return error.UnsupportedChunk);
     }
+    if (graph.canonical_locals) for (stack_maps) |*map| {
+        map.frame_pointer_slots = 0;
+    };
     const lowered: Program = .{
         .allocator = allocator,
         .operations = owned_operations,
@@ -1579,6 +1595,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .finally_dispatch = finally_dispatch,
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
+        .canonical_locals = graph.canonical_locals,
         .required_numeric_slots = required_numeric_slots,
         .bytecode_steps = bytecode_steps,
         .deopt_points = owned_deopt_points,
@@ -1972,12 +1989,15 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer if (owned_loop_branches.len != 0) allocator.free(owned_loop_branches);
     var local_mask: u64 = 0;
     for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
-        if (import.source != .frame_slot or import.source_index >= 64 or import.destination >= required_numeric.len)
+        if ((import.source != .frame_slot and import.source != .frame_location) or import.source_index >= 64 or import.destination >= required_numeric.len)
             return error.UnsupportedChunk;
         if (required_numeric[import.destination]) local_mask |= @as(u64, 1) << @intCast(import.source_index);
     }
     const exit_steps = std.math.cast(u12, plan.blocks[header].instruction_count) orelse return error.UnsupportedChunk;
     const iteration_steps = std.math.cast(u12, true_steps) orelse return error.UnsupportedChunk;
+    if (graph.canonical_locals) for (stack_maps) |*map| {
+        map.frame_pointer_slots = 0;
+    };
     const lowered: Program = .{
         .allocator = allocator,
         .operations = owned_operations,
@@ -2001,6 +2021,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .loop_branches = owned_loop_branches,
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
+        .canonical_locals = graph.canonical_locals,
         .required_numeric_slots = local_mask,
         .bytecode_steps = true_steps,
         .deopt_points = owned_deopt_points,
@@ -2513,13 +2534,16 @@ fn lowerRegionOsr(
 
     var local_mask: u64 = 0;
     for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
-        if (import.source != .frame_slot or import.source_index >= 64 or import.destination >= required_numeric.len)
+        if ((import.source != .frame_slot and import.source != .frame_location) or import.source_index >= 64 or import.destination >= required_numeric.len)
             return error.UnsupportedChunk;
         if (required_numeric[import.destination]) local_mask |= @as(u64, 1) << @intCast(import.source_index);
     }
     const header_steps = std.math.cast(u12, plan.blocks[header_block].instruction_count) orelse
         return error.UnsupportedChunk;
     const iteration_steps = std.math.cast(u12, maximum_steps) orelse return error.UnsupportedChunk;
+    if (graph.canonical_locals) for (stack_maps) |*map| {
+        map.frame_pointer_slots = 0;
+    };
     const lowered: Program = .{
         .allocator = allocator,
         .operations = owned_operations,
@@ -2542,6 +2566,7 @@ fn lowerRegionOsr(
         .loop_region_dynamic_checks = mode == .fused,
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
+        .canonical_locals = graph.canonical_locals,
         .required_numeric_slots = local_mask,
         .bytecode_steps = maximum_steps,
         .deopt_points = owned_deopt_points,
@@ -2645,6 +2670,12 @@ fn appendPrimitiveLeaves(
     initialized: *[jit.numeric_scratch_capacity]bool,
 ) !void {
     for (graph.nodes) |node| switch (node.kind) {
+        .frame_slot => {
+            if (!graph.canonical_locals) return error.UnsupportedChunk;
+            types[node.id] = .location;
+            try operations.append(allocator, .{ .kind = .frame_slot, .destination = @intCast(node.id), .block = optimizer.Block.none, .immediate = node.immediate, .origin = node.origin });
+            initialized[node.id] = true;
+        },
         .constant => {
             const constant = Value.fromRawBits(node.immediate);
             types[node.id] = if (constant.isNumber()) .number else if (constant.isBoolean()) .boolean else .other;
@@ -2944,7 +2975,7 @@ fn appendBlockOperations(
                 if (!initialized[node.id] or expected == .other) types[node.id] = expected;
                 initialized[node.id] = true;
             },
-            .constant, .true, .false => {}, // emitted once before control flow
+            .constant, .true, .false, .frame_slot => {}, // emitted once before control flow
             .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
                 if (node.lhs >= graph.nodes.len or node.rhs >= graph.nodes.len or
                     types[node.lhs] != .number or types[node.rhs] != .number)
@@ -2989,7 +3020,7 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
                 try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .origin = node.origin });
             },
-            .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
+            .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -3257,7 +3288,11 @@ fn appendEdgeDeopt(
     const handler_count: usize = state.handler_count;
     if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
         return error.UnsupportedChunk;
-    for (graph.edge_arguments[first .. first + count]) |value| {
+    for (graph.edge_arguments[first .. first + count], 0..) |value, ordinal| {
+        if (graph.canonical_locals and ordinal < state.local_count) {
+            try values.append(allocator, .{ .source = .frame_slot, .index = @intCast(ordinal) });
+            continue;
+        }
         if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
         try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
     }
@@ -3266,6 +3301,7 @@ fn appendEdgeDeopt(
         .exit_ip = state.origin,
         .first_value = first_value,
         .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+        .preserve_locals = graph.canonical_locals,
         .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
         .first_handler = state.first_handler,
         .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
@@ -3292,7 +3328,11 @@ fn appendFrameStateDeopt(
     const handler_count: usize = state.handler_count;
     if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
         return error.UnsupportedChunk;
-    for (graph.frame_state_values[first .. first + count]) |value| {
+    for (graph.frame_state_values[first .. first + count], 0..) |value, ordinal| {
+        if (graph.canonical_locals and ordinal < state.local_count) {
+            try values.append(allocator, .{ .source = .frame_slot, .index = @intCast(ordinal) });
+            continue;
+        }
         if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
         try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
     }
@@ -3312,6 +3352,7 @@ fn appendFrameStateDeopt(
         .exit_ip = state.origin,
         .first_value = first_value,
         .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+        .preserve_locals = graph.canonical_locals,
         .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
         .first_handler = state.first_handler,
         .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
@@ -3339,7 +3380,11 @@ fn appendBlockEntryDeopt(
     const handler_count: usize = state.handler_count;
     if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
         return error.UnsupportedChunk;
-    for (graph.frame_state_values[first .. first + count]) |value| {
+    for (graph.frame_state_values[first .. first + count], 0..) |value, ordinal| {
+        if (graph.canonical_locals and ordinal < state.local_count) {
+            try values.append(allocator, .{ .source = .frame_slot, .index = @intCast(ordinal) });
+            continue;
+        }
         if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
         try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
     }
@@ -3348,6 +3393,7 @@ fn appendBlockEntryDeopt(
         .exit_ip = state.origin,
         .first_value = first_value,
         .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+        .preserve_locals = graph.canonical_locals,
         .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
         .first_handler = state.first_handler,
         .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
@@ -3465,7 +3511,9 @@ fn compileWithObservability(
         else => return err,
     };
     defer program.deinit();
-    return compileAarch64WithAllocator(&program, native_observability, scratch_allocator);
+    var code = try compileAarch64WithAllocator(&program, native_observability, scratch_allocator);
+    if (program.canonical_locals) code.canonical_chunk = chunk;
+    return code;
 }
 
 const LoopRegionPatch = struct {
@@ -3928,6 +3976,11 @@ fn compileAarch64WithAllocator(
             requires_activation_context = true;
         }
     }
+    if (program.canonical_locals) {
+        requires_activation_context = true;
+        requires_frame_context = program.frame_slots != 0;
+        requires_execution_context = true;
+    }
     var has_continuation_exits = false;
     for (program.native_operations) |descriptor| if (descriptor.continuation_deopt_index != jit.NativeOperationDescriptor.none and
         descriptor.flags & jit.NativeOperationDescriptor.numeric_result == 0)
@@ -3941,6 +3994,7 @@ fn compileAarch64WithAllocator(
         .requires_activation_context = requires_activation_context,
         .requires_frame_context = requires_frame_context,
         .requires_execution_context = requires_execution_context,
+        .canonical_locals = program.canonical_locals,
         .bytecode_steps = program.bytecode_steps,
         .frame_slots = program.frame_slots,
         .required_numeric_slots = program.required_numeric_slots,
@@ -4057,7 +4111,7 @@ fn emitOperation(
             try assembler.load64(9, 13, try slotOffset(operation.immediate));
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
-        .constant => {
+        .frame_slot, .constant => {
             try assembler.movImmediate64(9, operation.immediate);
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
@@ -5055,7 +5109,7 @@ fn emitDirectNumericDataAccess(
     descriptor: jit.NativeOperationDescriptor,
 ) !?DirectRuntimeAccess {
     const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
-    if (op != .get_prop and op != .load_binding_ref and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical and
+    if (op != .get_prop and op != .load_binding_ref and op != .load_local and op != .load_local_mapped and op != .load_local_lexical and op != .store_local and op != .store_local_mapped and op != .store_local_lexical and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical and
         op != .store_upval and op != .store_upval_mapped and op != .store_upval_lexical) return null;
     var direct = DirectRuntimeAccess{};
     try assembler.load64(17, 12, frameOffset("numeric_data_access"));
@@ -6762,7 +6816,6 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         .{ .op = .dispose_scope, .a = 1 },
         .{ .op = .exit_with },
         .{ .op = .make_regex },
-        .{ .op = .make_closure },
         .{ .op = .template_object },
     };
 
@@ -8893,4 +8946,69 @@ test "optimizer entry regions reject unreachable control after an earlier exit" 
         _ = try chunk.emit(.ret_undef, 0);
         try std.testing.expectError(error.UnsupportedChunk, optimizer.buildEntryRegion(&chunk, std.testing.allocator));
     }
+}
+
+fn lowerCanonicalLocalForTesting(allocator: std.mem.Allocator) !Program {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local_mapped, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, allocator);
+    defer plan.deinit();
+    return lower(&chunk, &plan, allocator);
+}
+
+test "optimizer canonical frame locations reject value use and stale recovery" {
+    var program = try lowerCanonicalLocalForTesting(std.testing.allocator);
+    defer program.deinit();
+    try program.verify();
+    try std.testing.expect(program.canonical_locals);
+    const point = program.deopt_points[0];
+    program.deopt_points[0].preserve_locals = false;
+    try std.testing.expectError(error.InvalidRecovery, program.verify());
+    program.deopt_points[0] = point;
+    const local = program.deopt_values[point.first_value];
+    program.deopt_values[point.first_value] = .{ .source = .constant, .bits = Value.undef().rawBits() };
+    try std.testing.expectError(error.InvalidRecovery, program.verify());
+    program.deopt_values[point.first_value] = local;
+    var location_slot: ?u8 = null;
+    for (program.operations) |operation| if (operation.kind == .frame_slot) {
+        location_slot = operation.destination;
+    };
+    const location = location_slot orelse return error.TestUnexpectedResult;
+    const result = program.result;
+    program.result = location;
+    try std.testing.expectError(error.InvalidOperation, program.verify());
+    program.result = result;
+    program.branch = .{ .condition = location, .false_result = result, .true_result = result, .false_block = 0, .true_block = 0, .origin = 0, .false_return_origin = 0, .true_return_origin = 0 };
+    try std.testing.expectError(error.InvalidOperation, program.verify());
+    program.branch.?.condition = result;
+    program.branch.?.true_result = location;
+    try std.testing.expectError(error.InvalidOperation, program.verify());
+    program.branch = null;
+    const saved_map = program.stack_maps[0];
+    program.stack_maps[0].frame_pointer_slots = 1;
+    try std.testing.expectError(error.InvalidRecovery, program.verify());
+    program.stack_maps[0] = saved_map;
+    for (program.operations, 0..) |operation, index| if (operation.kind == .frame_slot) {
+        program.operations[index].immediate = program.frame_slots;
+        try std.testing.expectError(error.InvalidOperation, program.verify());
+        program.operations[index] = operation;
+        break;
+    };
+    try program.verify();
+}
+
+test "optimizer canonical frame lowering cleans up every allocation failure" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var program = try lowerCanonicalLocalForTesting(allocator);
+            defer program.deinit();
+            try program.verify();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocationFailureBackingForTesting(), Probe.run, .{});
 }

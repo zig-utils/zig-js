@@ -31,6 +31,11 @@ pub const ValueId = u32;
 /// loops deterministic without a sealing or renaming pass.
 pub const ValueKind = enum {
     argument,
+    frame_slot,
+    load_frame,
+    store_frame,
+    init_frame,
+    make_closure,
     block_argument,
     constant,
     undefined,
@@ -203,7 +208,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .register_disposable,
         .import_call,
         .object_rest,
-        .make_closure,
         .async_iter_of,
         .enum_keys,
         .enum_next,
@@ -280,6 +284,7 @@ pub const ValueGraph = struct {
     handler_states: []HandlerState,
     edge_states: []EdgeState,
     exceptional_targets: []ExceptionalTarget,
+    canonical_locals: bool = false,
 
     pub fn deinit(self: *ValueGraph) void {
         self.allocator.free(self.nodes);
@@ -442,6 +447,15 @@ pub const Plan = struct {
     }
 };
 
+fn canonicalLocals(chunk: *const bc.Chunk) bool {
+    if (chunk.arguments_slot != null) return true;
+    for (chunk.code.items) |inst| switch (inst.op) {
+        .make_closure, .load_local_mapped, .store_local_mapped, .load_local_lexical, .store_local_lexical, .init_local_lexical => return true,
+        else => {},
+    };
+    return false;
+}
+
 pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Plan {
     return buildWithEntryExit(chunk, allocator, null);
 }
@@ -465,11 +479,6 @@ fn buildWithEntryExit(chunk: *const bc.Chunk, allocator: std.mem.Allocator, entr
     const code = chunk.code.items;
     if (code.len == 0) return error.EmptyChunk;
     if (code.len > std.math.maxInt(u32)) return error.UnsupportedChunk;
-    // Frame-state construction seeds parameters and ordinary undefined locals.
-    // An arguments slot is instead initialized by VM activation setup with a
-    // managed exotic object, so it must stay on exact bytecode until graph
-    // entries can represent guarded non-parameter activation inputs.
-    if (chunk.arguments_slot != null) return error.UnsupportedChunk;
     // Environment-unwinding jumps mutate interpreter-owned lexical state. They
     // remain exact bytecode exits until native frame states carry that depth.
     for (code) |instruction| {
@@ -566,6 +575,7 @@ fn buildWithEntryExit(chunk: *const bc.Chunk, allocator: std.mem.Allocator, entr
     const blocks = try blocks_list.toOwnedSlice(allocator);
     errdefer allocator.free(blocks);
     var graph = try buildValueGraph(chunk, blocks, allocator, entry_exit);
+    graph.canonical_locals = canonicalLocals(chunk);
     errdefer graph.deinit();
     const result: Plan = .{
         .allocator = allocator,
@@ -596,6 +606,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .load_var_or_undef,
         .load_local,
         .load_local_lexical,
+        .load_local_mapped,
         .load_upval,
         .load_upval_mapped,
         .load_upval_lexical,
@@ -611,7 +622,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => .{ .required = 1, .removed = 0, .added = 0 },
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
         .end_finally => .{ .required = 2, .removed = 2, .added = 0 },
-        .store_var, .store_local, .store_local_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
+        .store_var, .store_local, .store_local_mapped, .store_local_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
         .collect_rest_parameter, .init_declarations, .copy_annex_b => .{ .required = 0, .removed = 0, .added = 0 },
         .store_binding_ref => .{ .required = 1, .removed = 1, .added = 0 },
         .dup => .{ .required = 1, .removed = 0, .added = 1 },
@@ -674,6 +685,7 @@ pub fn nativeOperationStackDepth(inst: bc.Inst, before: u32) ?u32 {
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
     switch (inst.op) {
+        .make_closure, .load_local, .load_local_mapped, .load_local_lexical, .store_local, .store_local_mapped, .store_local_lexical, .init_local_lexical => return depthEffect(inst).required,
         .to_numeric,
         .neg,
         .pos,
@@ -949,7 +961,7 @@ pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: V
         // would push all argument arithmetic through the runtime ABI.
         if (nodes[operand].kind == .get_prop or nodes[operand].kind == .load_var or
             nodes[operand].kind == .load_this or nodes[operand].kind == .load_new_target or
-            nodes[operand].kind == .load_capture or nodes[operand].kind == .store_capture or
+            nodes[operand].kind == .load_frame or nodes[operand].kind == .store_frame or nodes[operand].kind == .load_capture or nodes[operand].kind == .store_capture or
             nodes[operand].kind == .load_var_or_undef or nodes[operand].kind == .load_binding_ref or nodes[operand].kind == .store_var) return true;
     }
     return false;
@@ -957,7 +969,7 @@ pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: V
 
 fn knownSafePrimitive(node: ValueNode) bool {
     return switch (node.kind) {
-        .argument, .block_argument, .binding_base => false,
+        .argument, .frame_slot, .block_argument, .binding_base => false,
         .constant, .undefined, .null, .true, .false => true,
         else => !node.may_have_effect,
     };
@@ -1019,6 +1031,7 @@ fn propagateEntryState(
 
 fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std.mem.Allocator, entry_exit: ?u32) BuildError!ValueGraph {
     const local_count: usize = chunk.local_count;
+    const canonical = canonicalLocals(chunk);
     if (chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
 
     const entry_depths = try allocator.alloc(?u32, blocks.len);
@@ -1131,7 +1144,9 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         if (block_id == 0) {
             const first_argument: u32 = @intCast(builder.edge_arguments.items.len);
             for (0..local_count) |slot| {
-                const source = if (slot < chunk.param_count)
+                const source = if (canonical)
+                    try builder.internLeaf(Block.none, block.start, .frame_slot, slot)
+                else if (slot < chunk.param_count)
                     try builder.appendNode(.{
                         .id = undefined,
                         .block = Block.none,
@@ -1215,14 +1230,51 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 stack[depth] = try builder.internLeaf(0, @intCast(origin), .false, 0);
                 depth += 1;
             },
-            .load_local => {
+            .load_local, .load_local_mapped, .load_local_lexical, .store_local, .store_local_mapped, .store_local_lexical, .init_local_lexical => {
                 if (inst.a >= local_count) return error.InvalidControlFlow;
-                stack[depth] = locals[inst.a];
-                depth += 1;
+                const write = inst.op == .store_local or inst.op == .store_local_mapped or inst.op == .store_local_lexical;
+                const initialize = inst.op == .init_local_lexical;
+                if (write and depth == 0) return error.InvalidControlFlow;
+                if (!canonical) {
+                    if (write) locals[inst.a] = stack[depth - 1] else {
+                        stack[depth] = locals[inst.a];
+                        depth += 1;
+                    }
+                } else {
+                    try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                    try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                    const result = try builder.appendNode(.{
+                        .id = undefined,
+                        .block = @intCast(block_id),
+                        .origin = @intCast(origin),
+                        .kind = if (initialize) .init_frame else if (write) .store_frame else .load_frame,
+                        .lhs = locals[inst.a],
+                        .rhs = if (write) stack[depth - 1] else ValueNode.none,
+                        .immediate = (@as(u64, inst.a) << 32) | inst.b,
+                        .may_have_effect = true,
+                    });
+                    try builder.roots.append(allocator, result);
+                    if (write) stack[depth - 1] = result else if (!initialize) {
+                        stack[depth] = result;
+                        depth += 1;
+                    }
+                }
             },
-            .store_local => {
-                if (inst.a >= local_count or depth == 0) return error.InvalidControlFlow;
-                locals[inst.a] = stack[depth - 1];
+            .make_closure => {
+                if (inst.a >= chunk.fns.items.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .make_closure,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth] = result;
+                depth += 1;
             },
             .pop => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -1954,6 +2006,12 @@ fn supports(op: bc.Op) bool {
         .swap,
         .load_local,
         .store_local,
+        .load_local_mapped,
+        .store_local_mapped,
+        .load_local_lexical,
+        .store_local_lexical,
+        .init_local_lexical,
+        .make_closure,
         .add,
         .sub,
         .mul,
@@ -2099,15 +2157,24 @@ test "optimizer control-flow plans are deterministic" {
     for (first.graph.frame_state_values) |value| try std.testing.expect(value < first.graph.nodes.len);
 }
 
-test "optimizer rejects activation-initialized arguments slots" {
+test "optimizer retains activation-initialized arguments in canonical storage" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
     chunk.local_count = 1;
     chunk.arguments_slot = 0;
-    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.ret, 0);
 
-    try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expect(plan.graph.canonical_locals);
+    var found = false;
+    for (plan.graph.nodes) |node| if (node.kind == .frame_slot and node.immediate == 0) {
+        found = true;
+    };
+    try std.testing.expect(found);
+    try plan.verify(.function);
 }
 
 test "optimizer SSA block arguments close loop backedges" {

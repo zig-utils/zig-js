@@ -4611,6 +4611,36 @@ fn nativeNumericDataAccess(frame: *jit.NativeFrame, operation_id: u32) callconv(
         if (instruction.b & bc.binding_ref_load_retain == 0) active.binding_references[instruction.a] = .empty;
         return true;
     }
+    if (op == .load_local or op == .load_local_mapped or op == .load_local_lexical or
+        op == .store_local or op == .store_local_mapped or op == .store_local_lexical)
+    {
+        const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse return false));
+        const current = active.frame orelse return false;
+        const chunk = active.chunk orelse return false;
+        const write = op == .store_local or op == .store_local_mapped or op == .store_local_lexical;
+        if (descriptor.origin >= chunk.code.items.len or descriptor.operand_a >= current.slots.len or
+            descriptor.input_count != @as(u16, if (write) 1 else 0) or descriptor.first_input >= jit.numeric_scratch_capacity) return false;
+        const instruction = chunk.code.items[descriptor.origin];
+        if (instruction.op != op or instruction.a != descriptor.operand_a or instruction.b != descriptor.operand_b) return false;
+        const parallel = bc.ic_seqlock_enabled.load(.monotonic);
+        var loaded: Value = undefined;
+        if (write) {
+            loaded = Value.fromRawBits(frame.scratch.?[descriptor.first_input]);
+            if (!loaded.isNumber()) return false;
+            if (op == .store_local_lexical) {
+                const held = current.lockSlots(parallel);
+                const refused = vm.isTdz(current.slots[instruction.a]) or instruction.b != 0;
+                if (!refused) current.slots[instruction.a] = loaded;
+                current.unlockSlots(held);
+                if (refused) return false;
+            } else current.writeSlot(instruction.a, loaded, parallel);
+        } else {
+            loaded = current.readSlot(instruction.a, parallel);
+            if (!loaded.isNumber()) return false;
+        }
+        frame.operation_value_bits = loaded.rawBits();
+        return true;
+    }
     if (frame.bytecode_frame == null) return false;
     const write = op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical;
     if (!write and op != .load_upval and op != .load_upval_mapped and op != .load_upval_lexical) return false;
@@ -4729,6 +4759,25 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             storeCapturedBinding(vm, current, inst, Value.fromRawBits(inputs[0]), parallel)
         else
             loadCapturedBinding(vm, current, inst, parallel));
+    }
+    if (op == .make_closure or op == .load_local or op == .load_local_mapped or op == .load_local_lexical or
+        op == .store_local or op == .store_local_mapped or op == .store_local_lexical or op == .init_local_lexical)
+    {
+        const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse return @backingInt(jit.NativeOperationStatus.host_trap)));
+        const frame_pointer: ?*anyopaque = if (active.frame) |current| @ptrCast(current) else null;
+        const chunk = active.chunk orelse return @backingInt(jit.NativeOperationStatus.host_trap);
+        if (descriptor.origin >= chunk.code.items.len or frame_pointer != frame.bytecode_frame) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const inst = chunk.code.items[descriptor.origin];
+        const write = op == .store_local or op == .store_local_mapped or op == .store_local_lexical;
+        if (inst.op != op or inst.a != descriptor.operand_a or inst.b != descriptor.operand_b or inputs.len != @as(usize, if (write) 1 else 0))
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        if (op == .make_closure) {
+            if (inst.a >= chunk.fns.items.len) return @backingInt(jit.NativeOperationStatus.host_trap);
+            return finishNativeOperation(frame, vm, operation_id, makeClosure(vm, chunk.fns.items[inst.a], active.frame));
+        }
+        const current = active.frame orelse return @backingInt(jit.NativeOperationStatus.host_trap);
+        if (inst.a >= current.slots.len) return @backingInt(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(frame, vm, operation_id, executeLocalBinding(vm, current, chunk, inst, if (write) Value.fromRawBits(inputs[0]) else Value.undef(), bc.ic_seqlock_enabled.load(.monotonic)));
     }
     if (op == .iter_of or op == .assert_iter_result or op == .iter_close or op == .iter_close_completion) {
         const expected: usize = if (op == .iter_close_completion) 3 else 1;
@@ -5111,10 +5160,11 @@ fn runNativeWithPublishedRoots(
     native: *const jit.CompiledCode,
     frame: *jit.NativeFrame,
 ) jit.ExitStatus {
-    const saved = vm.gc_native_roots;
+    var saved = vm.gc_native_roots;
     vm.gc_native_roots = null;
     if (native.stack_maps) |stack_maps| vm.gc_native_roots = .{
         .frame = frame,
+        .previous = if (saved) |*parent| parent else null,
         .stack_maps = stack_maps,
         .frame_slot_count = std.math.cast(u8, native.frame_slots) orelse 0,
         .scratch_slot_count = std.math.cast(u8, native.max_stack_depth) orelse 0,
@@ -5146,6 +5196,10 @@ fn reconstructNativeSideExit(
 
     var recovered: [128]Value = undefined;
     for (metadata.values[first .. first + count], 0..) |recovery, index| {
+        if (point.preserve_locals and index < point.local_count) {
+            if (recovery.source != .frame_slot or recovery.index != index) return false;
+            continue;
+        }
         const bits = recovery.materialize(@ptrCast(slots), scratch) orelse return false;
         recovered[index] = Value.fromRawBits(bits);
     }
@@ -5169,7 +5223,7 @@ fn reconstructNativeSideExit(
         exec.stack.appendAssumeCapacity(value_word);
     exec.handlers.clearRetainingCapacity();
     for (recovered_handlers[0..handler_count]) |handler| exec.handlers.appendAssumeCapacity(handler);
-    @memcpy(slots[0..point.local_count], recovered[0..point.local_count]);
+    if (!point.preserve_locals) @memcpy(slots[0..point.local_count], recovered[0..point.local_count]);
     exec.acc = Value.fromRawBits(accumulator_bits);
     exec.ip = point.exit_ip;
     return true;
@@ -5955,6 +6009,14 @@ fn tryRunManagedNativeWithProfileContext(
     exec: ?*Exec,
     profile_chunk: ?*const Chunk,
 ) EvalError!NativeRunOutcome {
+    if (native.canonical_locals) {
+        const active = exec orelse return .miss;
+        if (active.chunk == null or native.canonical_chunk == null or @as(*const anyopaque, active.chunk.?) != native.canonical_chunk.?) return .miss;
+        if (native.frame_slots != 0) {
+            const current = active.frame orelse return .miss;
+            if (current.slots.len < native.frame_slots or slots.len < native.frame_slots or current.slots.ptr != slots.ptr) return .miss;
+        }
+    }
     if (native.requires_execution_context and exec == null) return .miss;
     if (native.requires_frame_context and (exec == null or exec.?.frame == null)) return .miss;
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
@@ -6039,6 +6101,13 @@ fn tryRunOsrNative(
     exec: *Exec,
 ) EvalError!NativeRunOutcome {
     const metadata = native.osr orelse return .miss;
+    if (native.canonical_locals) {
+        if (exec.chunk != chunk or native.canonical_chunk != @as(*const anyopaque, chunk)) return .miss;
+        if (native.frame_slots != 0) {
+            const current = exec.frame orelse return .miss;
+            if (current.slots.ptr != slots.ptr or current.slots.len != slots.len) return .miss;
+        }
+    }
     if (!native.manages_steps or !native.has_side_exits or
         native.max_stack_depth > jit.numeric_scratch_capacity or !nativeSlotGuardsPass(native, slots))
         return .miss;
@@ -6254,7 +6323,7 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, chunk: *c
     const current_frame = frame;
     if (native.frame_slots > 0) {
         const cf = current_frame orelse return .miss;
-        if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return .miss;
+        if (cf.slots.len < native.frame_slots or (!native.canonical_locals and cf.escaped.load(.monotonic))) return .miss;
     }
     var empty_slots: [0]Value = .{};
     const slots: []Value = if (current_frame) |cf| cf.slots else empty_slots[0..];
@@ -6290,7 +6359,7 @@ fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, g
     if (native.osr == null) return .miss;
     if (native.frame_slots > 0) {
         const live_frame = frame orelse return .miss;
-        if (live_frame.slots.len != native.frame_slots or live_frame.escaped.load(.monotonic)) return .miss;
+        if (live_frame.slots.len != native.frame_slots or (!native.canonical_locals and live_frame.escaped.load(.monotonic))) return .miss;
     }
     var empty_slots: [0]Value = .{};
     const slots: []Value = if (frame) |live_frame| live_frame.slots else empty_slots[0..];
@@ -6911,6 +6980,34 @@ fn executeIteratorEffect(vm: *Interpreter, op: bc.Op, iterator: Value, completio
     }
 }
 
+fn executeLocalBinding(vm: *Interpreter, frame: *Frame, chunk: *const Chunk, inst: bc.Inst, stored: Value, parallel: bool) EvalError!Value {
+    switch (inst.op) {
+        .load_local, .load_local_mapped => return frame.readSlot(inst.a, parallel),
+        .store_local, .store_local_mapped => {
+            frame.writeSlot(inst.a, stored, parallel);
+            return stored;
+        },
+        .init_local_lexical => {
+            const held = frame.lockSlots(parallel);
+            frame.slots[inst.a] = Value.obj(vm.tdz_marker.?);
+            frame.unlockSlots(held);
+            return Value.undef();
+        },
+        .load_local_lexical, .store_local_lexical => {
+            const held = frame.lockSlots(parallel);
+            const previous = frame.slots[inst.a];
+            const in_tdz = vm.isTdz(previous);
+            const write = inst.op == .store_local_lexical;
+            if (write and !in_tdz and inst.b == 0) frame.slots[inst.a] = stored;
+            frame.unlockSlots(held);
+            if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
+            if (write and inst.b != 0) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
+            return if (write) stored else previous;
+        },
+        else => unreachable,
+    }
+}
+
 fn executeEnvironmentBinding(
     vm: *Interpreter,
     exec: *Exec,
@@ -7167,10 +7264,7 @@ fn runChunk(
                 if (!parallel_sync) recordQuickGlobalBinding(chunk, ip - 1, vm, name);
                 try stack.append(stack_alloc, v);
             },
-            .load_local_mapped => {
-                const cf = frame.?;
-                try stack.append(stack_alloc, cf.readSlot(inst.a, parallel_sync));
-            },
+            .load_local_mapped => try stack.append(stack_alloc, try executeLocalBinding(vm, frame.?, chunk, inst, Value.undef(), parallel_sync)),
             .load_var_or_undef => try stack.append(stack_alloc, (try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef())).value),
             .store_var => {
                 _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.items[stack.items.len - 1]);
@@ -7201,10 +7295,7 @@ fn runChunk(
             },
 
             .init_local_lexical => {
-                const cf = frame.?;
-                const held = cf.lockSlots(parallel_sync);
-                cf.slots[inst.a] = Value.obj(vm.tdz_marker.?);
-                cf.unlockSlots(held);
+                _ = try executeLocalBinding(vm, frame.?, chunk, inst, Value.undef(), parallel_sync);
             },
             .load_local => {
                 const cf = frame.?;
@@ -7243,44 +7334,11 @@ fn runChunk(
                         }
                     }
                 }
-                const held = cf.lockSlots(parallel_sync);
-                const v = cf.slots[inst.a];
-                cf.unlockSlots(held);
-                try stack.append(stack_alloc, v);
+                try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst, Value.undef(), parallel_sync));
             },
-            .load_local_lexical => {
-                const cf = frame.?;
-                const held = cf.lockSlots(parallel_sync);
-                const v = cf.slots[inst.a];
-                const in_tdz = vm.isTdz(v);
-                cf.unlockSlots(held);
-                if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
-                try stack.append(stack_alloc, v);
-            },
-            .store_local => {
-                const cf = frame.?;
-                const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                if (cf.mapped_arguments != null) {
-                    cf.writeSlot(inst.a, v, parallel_sync);
-                } else {
-                    const held = cf.lockSlots(parallel_sync);
-                    cf.slots[inst.a] = v;
-                    cf.unlockSlots(held);
-                }
-            },
-            .store_local_mapped => {
-                const cf = frame.?;
-                cf.writeSlot(inst.a, stack.items[stack.items.len - 1], parallel_sync);
-            },
-            .store_local_lexical => {
-                const cf = frame.?;
-                const v = stack.items[stack.items.len - 1]; // assignment leaves its value
-                const held = cf.lockSlots(parallel_sync);
-                const in_tdz = vm.isTdz(cf.slots[inst.a]);
-                if (!in_tdz and inst.b == 0) cf.slots[inst.a] = v;
-                cf.unlockSlots(held);
-                if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
-                if (inst.b != 0) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
+            .load_local_lexical => try stack.append(stack_alloc, try executeLocalBinding(vm, frame.?, chunk, inst, Value.undef(), parallel_sync)),
+            .store_local, .store_local_mapped, .store_local_lexical => {
+                _ = try executeLocalBinding(vm, frame.?, chunk, inst, stack.items[stack.items.len - 1], parallel_sync);
             },
             .load_upval, .load_upval_mapped, .load_upval_lexical => {
                 try stack.append(stack_alloc, try loadCapturedBinding(vm, frame, inst, parallel_sync));
@@ -12432,70 +12490,72 @@ test "vm: precise exec root admission fails before bytecode execution" {
 }
 
 test "vm: escaped closure allocation failures preserve frame ownership" {
-    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
-        .enable_gc = true,
-        .enable_jit = false,
-        .bytecode_execution_mode = .required,
-    });
-    defer ctx.destroy();
-    _ = try ctx.evaluate("function escapeActivation(seed){return function(delta){return seed+delta;};}");
-    const function = Interpreter.funcOf(ctx.global_object.getOwn("escapeActivation").?).?;
-    const chunk = function.chunk.?;
-    const saved_active_context = gc_mod.setActiveContext(ctx);
-    defer gc_mod.restoreActiveContext(saved_active_context);
-    var completed = false;
-    var induced_failures: usize = 0;
-    for (0..512) |fail_index| {
-        var machine = ctx.interpreter();
-        machine.vm_inline_calls_disabled = true;
-        const saved_this = Value.num(91);
-        const saved_new_target = Value.num(92);
-        machine.this_value = saved_this;
-        machine.new_target = saved_new_target;
-        var failing: std.testing.FailingAllocator = .init(ctx.arena(), .{
-            .fail_index = fail_index,
-            .resize_fail_index = fail_index,
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
         });
-        machine.arena = failing.allocator();
-        const result = runFunction(&machine, function, chunk, &.{Value.num(13)}, Value.undef(), Value.undef());
-        machine.arena = ctx.arena();
-        try expectActivationDriverRestored(&machine, &ctx.env, saved_this, saved_new_target);
+        defer ctx.destroy();
+        _ = try ctx.evaluate("function escapeActivation(seed){return function(delta){return seed+delta;};}for(var warm=0;warm<64;warm++)escapeActivation(warm);");
+        const function = Interpreter.funcOf(ctx.global_object.getOwn("escapeActivation").?).?;
+        const chunk = function.chunk.?;
+        const saved_active_context = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved_active_context);
+        var completed = false;
+        var induced_failures: usize = 0;
+        for (0..512) |fail_index| {
+            var machine = ctx.interpreter();
+            machine.vm_inline_calls_disabled = true;
+            const saved_this = Value.num(91);
+            const saved_new_target = Value.num(92);
+            machine.this_value = saved_this;
+            machine.new_target = saved_new_target;
+            var failing: std.testing.FailingAllocator = .init(ctx.arena(), .{
+                .fail_index = fail_index,
+                .resize_fail_index = fail_index,
+            });
+            machine.arena = failing.allocator();
+            const result = runFunction(&machine, function, chunk, &.{Value.num(13)}, Value.undef(), Value.undef());
+            machine.arena = ctx.arena();
+            try expectActivationDriverRestored(&machine, &ctx.env, saved_this, saved_new_target);
 
-        var free_count: usize = 0;
-        var next = machine.vm_activation_free;
-        while (next) |raw| {
-            const activation: *Activation = @ptrCast(@alignCast(raw));
-            try std.testing.expect(!activation.frame.escaped.load(.acquire));
-            free_count += 1;
-            next = activation.next_free;
-        }
-        // This function captures one defining frame. That frame is Context-
-        // arena owned and must stay out of the reusable activation pool.
-        try std.testing.expect(free_count <= machine.vm_activation_allocations);
-        try std.testing.expect(machine.vm_activation_allocations - free_count <= 1);
-        if (failing.has_induced_failure) {
-            induced_failures += 1;
-            if (result) |_| {} else |err| {
-                switch (err) {
-                    error.OutOfMemory, error.Throw => {},
-                    else => return err,
-                }
+            var free_count: usize = 0;
+            var next = machine.vm_activation_free;
+            while (next) |raw| {
+                const activation: *Activation = @ptrCast(@alignCast(raw));
+                try std.testing.expect(!activation.frame.escaped.load(.acquire));
+                free_count += 1;
+                next = activation.next_free;
             }
-            continue;
+            // This function captures one defining frame. That frame is Context-
+            // arena owned and must stay out of the reusable activation pool.
+            try std.testing.expect(free_count <= machine.vm_activation_allocations);
+            try std.testing.expect(machine.vm_activation_allocations - free_count <= 1);
+            if (failing.has_induced_failure) {
+                induced_failures += 1;
+                if (result) |_| {} else |err| {
+                    switch (err) {
+                        error.OutOfMemory, error.Throw => {},
+                        else => return err,
+                    }
+                }
+                continue;
+            }
+            const closure = try result;
+            const captured = Interpreter.funcOf(closure).?;
+            const frame: *Frame = @ptrCast(@alignCast(captured.frame.?));
+            try std.testing.expect(frame.escaped.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), machine.vm_activation_allocations - free_count);
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "retainedActivation", closure);
+            try std.testing.expectEqual(@as(f64, 20), (try ctx.evaluate("retainedActivation(7)")).asNum());
+            try std.testing.expectEqual(@as(f64, 14), (try ctx.evaluate("retainedActivation(1)")).asNum());
+            completed = true;
+            break;
         }
-        const closure = try result;
-        const captured = Interpreter.funcOf(closure).?;
-        const frame: *Frame = @ptrCast(@alignCast(captured.frame.?));
-        try std.testing.expect(frame.escaped.load(.acquire));
-        try std.testing.expectEqual(@as(usize, 1), machine.vm_activation_allocations - free_count);
-        try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "retainedActivation", closure);
-        try std.testing.expectEqual(@as(f64, 20), (try ctx.evaluate("retainedActivation(7)")).asNum());
-        try std.testing.expectEqual(@as(f64, 14), (try ctx.evaluate("retainedActivation(1)")).asNum());
-        completed = true;
-        break;
+        try std.testing.expect(completed);
+        try std.testing.expect(induced_failures > 0);
     }
-    try std.testing.expect(completed);
-    try std.testing.expect(induced_failures > 0);
 }
 
 test "vm: activation driver allocation failures restore exact ownership" {
@@ -25603,6 +25663,7 @@ test "vm: optimizer continuation callbacks preserve budgets branches getters loo
     const Context = @import("context.zig").Context;
     const Record = struct { steps: u64, value: u64, error_kind: u8, effect: f64 };
     const cases = [_]struct { body: []const u8, argument: f64, getter: bool = false, loop: bool = false }{
+        .{ .body = "function budgetWrite(rhs,n){var capture=function(){return n;};var value=rhs();n=value;return capture();}", .argument = 1 },
         .{ .body = "function budgetWrite(rhs,n){var value=rhs();return value;}", .argument = 1 },
         .{ .body = "function budgetWrite(rhs,n){var value=rhs();if(n<0)return value;return value;}", .argument = -1 },
         .{ .body = "function budgetWrite(rhs,n){var value=rhs();if(n<0)return value;return value;}", .argument = 1 },
@@ -25658,7 +25719,7 @@ test "vm: optimizer continuation callbacks preserve budgets branches getters loo
             }
         };
     };
-    std.debug.print("callback boundary mismatches: {d}/384\n", .{mismatches});
+    std.debug.print("callback boundary mismatches: {d}/{d}\n", .{ mismatches, cases.len * 2 * 32 });
     try std.testing.expectEqual(@as(usize, 0), mismatches);
 }
 
@@ -26262,4 +26323,321 @@ test "vm: optimizer iterator close primitive results preserve native completion 
             try std.testing.expect(ctx.global_object.getOwn("closeNativeReceiver").?.asBool());
         };
     };
+}
+
+test "vm: optimizer closure allocation observes live defining-frame writes" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = native,
+            .enable_gc = true,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[6,6,6,12,12]", (try ctx.evaluate("function closureGc(){if(typeof $vm!=='undefined')$vm.gc();}\nfunction closureFactory(value){var f=function(){return value;};value=value+1;return f;}\nfunction arrowFactory(value){var f=()=>value;value=value+1;return f;}\nfunction generatorFactory(value){var f=function*(){yield value;};value=value+1;return f;}\nfunction mutateFactory(value){var getter=function(){closureGc();return value;};var setter=function(v){closureGc();value=v;};setter(11);var first=value;value=first+1;return [getter,setter,value];}\nfor(var warm=0;warm<64;warm++){closureFactory(warm);arrowFactory(warm);generatorFactory(warm);mutateFactory(warm);}\nvar observed=mutateFactory(5);\nJSON.stringify([closureFactory(5)(),arrowFactory(5)(),generatorFactory(5)().next().value,observed[0](),observed[2]]);\n")).asStr());
+        if (native and jit.optimizer_supported) for ([_][]const u8{ "closureFactory", "arrowFactory", "generatorFactory", "mutateFactory" }) |name| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(code.entry_enabled and code.canonical_locals and code.requires_execution_context);
+            try std.testing.expect(!code.has_side_exits or code.continuation_only_exits);
+            var allocated = false;
+            for (code.native_operations.?.descriptors) |descriptor| if (descriptor.bytecode_op == @backingInt(bc.Op.make_closure)) {
+                allocated = true;
+            };
+            try std.testing.expect(allocated);
+            var machine = ctx.interpreter();
+            const native_hits = optimizer_native_hits.load(.monotonic);
+            _ = try runFunction(&machine, function, function.chunk.?, &.{Value.num(5)}, Value.undef(), Value.undef());
+            try std.testing.expect(optimizer_native_hits.load(.monotonic) > native_hits);
+        };
+    };
+}
+
+test "vm: optimizer closure allocation preserves function template and lexical contexts" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = native, .bytecode_execution_mode = .required });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[6,6,\"TypeError\",16,[20,true,6],6,7,16,15,\"AsyncFunction\",\"AsyncGeneratorFunction\",true,false,true]", (try ctx.evaluate("function templateGc(){if(typeof $vm!=='undefined')$vm.gc();}\nfunction ordinaryTemplate(value){var f=function(){templateGc();return value;};value++;return f;}\nfunction namedTemplate(value){var f=function named(n){templateGc();return n?named(n-1):value;};value++;return f;}\nfunction immutableTemplate(){var f=function named(){'use strict';try{named=3;}catch(e){return e.name;}};return f;}\nfunction thisTemplate(value){var f=()=>{templateGc();return this.base+value;};value++;return f;}\nfunction ClosureConstructor(value){var f=()=>[this.base,new.target===ClosureConstructor,value];this.base=20;value++;return f;}\nfunction generatorTemplate(value){var f=function* named(){templateGc();yield value;return value+1;};value++;return f;}\nfunction asyncTemplate(value){var f=async function named(){templateGc();return value;};value++;return f;}\nfunction asyncGeneratorTemplate(value){var f=async function* named(){templateGc();yield value;};value++;return f;}\nclass TemplateBase{base(){return 10;}}\nclass TemplateDerived extends TemplateBase{factory(value){var f=()=>super.base()+value;value++;return f;}}\nclass TemplatePrivate{#value=9;factory(value){var f=()=>this.#value+value;value++;return f;}}\nfor(var warm=0;warm<64;warm++){ordinaryTemplate(warm);namedTemplate(warm);immutableTemplate();thisTemplate.call({base:10},warm);new ClosureConstructor(warm);generatorTemplate(warm);asyncTemplate(warm);asyncGeneratorTemplate(warm);new TemplateDerived().factory(warm);new TemplatePrivate().factory(warm);}\nvar generatorProbe=generatorTemplate(5)(),asyncProbe=asyncTemplate(5),asyncGeneratorProbe=asyncGeneratorTemplate(5),asyncTemplateValue=-1,asyncGeneratorTemplateValue=-1;\nasyncProbe().then(function(value){asyncTemplateValue=value;});\nasyncGeneratorProbe().next().then(function(result){asyncGeneratorTemplateValue=result.value;});\nJSON.stringify([ordinaryTemplate(5)(),namedTemplate(5)(3),immutableTemplate()(),thisTemplate.call({base:10},5)(),(new ClosureConstructor(5))(),generatorProbe.next().value,generatorProbe.next().value,new TemplateDerived().factory(5)(),new TemplatePrivate().factory(5)(),asyncProbe.constructor.name,asyncGeneratorProbe.constructor.name,asyncProbe() instanceof Promise,Object.prototype.hasOwnProperty.call(asyncProbe,'prototype'),Object.prototype.hasOwnProperty.call(asyncGeneratorProbe,'prototype')]);\n")).asStr());
+        try std.testing.expectEqual(@as(f64, 6), (try ctx.evaluate("asyncTemplateValue")).asNum());
+        try std.testing.expectEqual(@as(f64, 6), (try ctx.evaluate("asyncGeneratorTemplateValue")).asNum());
+        if (native and jit.optimizer_supported) for ([_][]const u8{ "ordinaryTemplate", "namedTemplate", "immutableTemplate", "thisTemplate", "ClosureConstructor", "generatorTemplate", "asyncTemplate", "asyncGeneratorTemplate" }) |name| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(artifact.entry_enabled and artifact.canonical_locals);
+            try std.testing.expect(!artifact.has_side_exits or artifact.continuation_only_exits);
+        };
+    }
+}
+
+test "vm: optimizer canonical frame storage requires exact activation and admits escaped locals" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const active = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(active);
+    var chunk = bc.Chunk.init(ctx.arena());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local_mapped, 0);
+    _ = try chunk.emit(.ret, 0);
+    var code = try optimizer_compiler.compile(&chunk);
+    defer code.deinit();
+    var slots = [_]Value{Value.num(41)};
+    var other_slots = [_]Value{Value.num(99)};
+    var frame = Frame{ .slots = &slots, .parent = null };
+    frame.escaped.store(true, .release);
+    var exec = Exec{ .chunk = &chunk, .frame = &frame };
+    const steps = machine.steps;
+    try std.testing.expect((try tryRunManagedNative(&machine, &code, &slots, null)) == .miss);
+    try std.testing.expect((try tryRunManagedNative(&machine, &code, &other_slots, &exec)) == .miss);
+    try std.testing.expectEqual(steps, machine.steps);
+    var other_chunk = bc.Chunk.init(ctx.arena());
+    exec.chunk = &other_chunk;
+    try std.testing.expect((try tryRunManagedNative(&machine, &code, &slots, &exec)) == .miss);
+    try std.testing.expectEqual(steps, machine.steps);
+    exec.chunk = &chunk;
+    const outcome = try tryRunManagedNative(&machine, &code, &slots, &exec);
+    try std.testing.expect(outcome == .complete);
+    try std.testing.expectEqual(@as(f64, 41), outcome.complete.asNum());
+    try std.testing.expectEqual(steps + 2, machine.steps);
+}
+
+test "vm: optimizer canonical frame recovery retains live locals without stale writes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const points = [_]jit.DeoptPoint{.{ .kind = .continuation, .exit_ip = 3, .first_value = 0, .local_count = 1, .stack_count = 1, .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() }, .preserve_locals = true }};
+    const values = [_]jit.RecoveryValue{ .{ .source = .frame_slot, .index = 0 }, .{ .source = .scratch_slot, .index = 0 } };
+    const metadata = try jit.DeoptMetadata.create(arena.allocator(), &points, &values, &.{});
+    var slots = [_]Value{Value.num(57)};
+    const scratch = [_]u64{Value.num(9).rawBits()};
+    const native_frame = jit.NativeFrame{ .deopt_index = 0, .exit_ip = 3 };
+    var exec = Exec{};
+    try std.testing.expect(try reconstructNativeSideExit(metadata, &native_frame, &slots, &scratch, &exec, arena.allocator()));
+    try std.testing.expectEqual(@as(f64, 57), slots[0].asNum());
+    try std.testing.expectEqual(@as(f64, 9), exec.stack.items[0].asNum());
+    try std.testing.expectEqual(@as(usize, 3), exec.ip);
+}
+
+test "vm: optimizer closure allocation synchronizes four escaped-frame workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = true,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[160,160]", (try ctx.evaluate(
+            \\function sharedClosureFactory(){
+            \\ var value=0,guard=new Lock();
+            \\ var bump=function(){value=value+1;};
+            \\ var getter=function(){return value;};
+            \\ var lane=function(){for(var index=0;index<32;index++)guard.hold(bump);return 1;};
+            \\ var workers=[];for(var index=0;index<4;index++)workers.push(new Thread(lane));
+            \\ for(var index=0;index<32;index++)guard.hold(bump);
+            \\ for(var index=0;index<4;index++)workers[index].join();
+            \\ return [getter(),value];
+            \\}
+            \\JSON.stringify(sharedClosureFactory());
+        )).asStr());
+    };
+}
+
+test "vm: optimizer canonical frame OSR executes escaped storage without copying locals" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const active = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(active);
+    var chunk = bc.Chunk.init(ctx.arena());
+    chunk.param_count = 1;
+    chunk.local_count = 2;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local_mapped, 1);
+    _ = try chunk.emit(.pop, 0);
+    const header: u32 = @intCast(chunk.code.items.len);
+    _ = try chunk.emit(.load_local_mapped, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    const exit_jump = try chunk.emit(.jump_if_false, 0);
+    _ = try chunk.emit(.load_local_mapped, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local_mapped, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, header);
+    chunk.code.items[exit_jump].a = @intCast(chunk.code.items.len);
+    _ = try chunk.emit(.load_local_mapped, 1);
+    _ = try chunk.emit(.ret, 0);
+    var code = try optimizer_compiler.compile(&chunk);
+    defer code.deinit();
+    try std.testing.expect(code.osr != null and code.canonical_locals);
+    var slots = [_]Value{ Value.num(7), Value.num(2) };
+    var frame = Frame{ .slots = &slots, .parent = null };
+    frame.escaped.store(true, .release);
+    var exec = Exec{ .chunk = &chunk, .frame = &frame, .ip = header };
+    defer exec.stack.deinit(ctx.arena());
+    defer exec.handlers.deinit(ctx.arena());
+    const before = optimizer_native_hits.load(.monotonic);
+    const outcome = try tryRunLoopOsr(&machine, &exec, &chunk, &frame, null);
+    // This hand-owned artifact is not published on the chunk. Execute its
+    // exact OSR contract directly instead of mistaking an owner-table miss
+    // for evidence of native execution.
+    try std.testing.expect(outcome == .miss);
+    const entered = try tryRunOsrNative(&machine, &code, &chunk, &slots, &exec);
+    try std.testing.expect(entered != .miss);
+    try std.testing.expectEqual(@as(f64, 7), slots[1].asNum());
+    if (entered == .complete) {
+        try std.testing.expectEqual(@as(f64, 7), entered.complete.asNum());
+    } else {
+        try std.testing.expect(entered == .deoptimized);
+        var delta = jit.OptimizerProfile.Delta{};
+        try std.testing.expectEqual(@as(f64, 7), (try runChunk(&machine, &exec, &chunk, &frame, null, &delta)).asNum());
+    }
+    try std.testing.expectEqual(before, optimizer_native_hits.load(.monotonic));
+}
+
+test "vm: optimizer canonical frame moving GC retains native parent roots" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = true,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+        });
+        defer ctx.destroy();
+        ctx.collectGarbage();
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const active = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(active);
+        for (0..1024) |_| _ = try machine.newObject();
+        const first = (try machine.newObject()).asObj();
+        const second = (try machine.newObject()).asObj();
+        const third = (try machine.newObject()).asObj();
+        try machine.setProp(first, "value", Value.num(17));
+        try machine.setProp(second, "value", Value.num(29));
+        try machine.setProp(third, "value", Value.num(43));
+        var parent_slots = [_]Value{Value.obj(first)};
+        var child_slots = [_]Value{Value.obj(second)};
+        var parent_storage = Frame{ .slots = &parent_slots, .parent = null };
+        var child_storage = Frame{ .slots = &child_slots, .parent = null };
+        parent_storage.escaped.store(true, .release);
+        child_storage.escaped.store(true, .release);
+        var parent_exec = Exec{ .frame = &parent_storage };
+        var child_exec = Exec{ .frame = &child_storage };
+        var parent_scratch = [_]u64{Value.obj(third).rawBits()};
+        var child_scratch = [_]u64{Value.undef().rawBits()};
+        var parent_native = jit.NativeFrame{ .slots = @ptrCast(&parent_slots), .scratch = &parent_scratch, .bytecode_execution = &parent_exec, .deopt_index = 0 };
+        var child_native = jit.NativeFrame{ .slots = @ptrCast(&child_slots), .scratch = &child_scratch, .bytecode_execution = &child_exec, .deopt_index = 0 };
+        const parent_maps = try jit.StackMapMetadata.create(ctx.arena(), &.{.{ .deopt_index = 0, .frame_pointer_slots = 0, .scratch_pointer_slots = 1 }});
+        defer parent_maps.destroy();
+        const child_maps = try jit.StackMapMetadata.create(ctx.arena(), &.{.{ .deopt_index = 0, .frame_pointer_slots = 0, .scratch_pointer_slots = 0 }});
+        defer child_maps.destroy();
+        const parent_root = jit.ActiveNativeRoots{ .frame = &parent_native, .stack_maps = parent_maps, .frame_slot_count = 1, .scratch_slot_count = 1 };
+        machine.gc_native_roots = .{ .previous = &parent_root, .frame = &child_native, .stack_maps = child_maps, .frame_slot_count = 1, .scratch_slot_count = 1 };
+        defer machine.gc_native_roots = null;
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+        const before = ctx.gc_moving_safepoint_compactions.load(.monotonic);
+        try std.testing.expect(ctx.requestGarbageCompaction());
+        machine.gc_precise_safepoint = true;
+        machine.gc_moving_safepoint = true;
+        machine.gc_safepoint_fn.?(machine.gc_safepoint_ctx.?, &machine);
+        machine.gc_precise_safepoint = false;
+        machine.gc_moving_safepoint = false;
+        try std.testing.expect(ctx.gc_moving_safepoint_compactions.load(.monotonic) > before);
+        try std.testing.expect(first != parent_slots[0].asObj());
+        try std.testing.expect(second != child_slots[0].asObj());
+        try std.testing.expect(third != Value.fromRawBits(parent_scratch[0]).asObj());
+        try std.testing.expectEqual(@as(f64, 17), parent_slots[0].asObj().getOwn("value").?.asNum());
+        try std.testing.expectEqual(@as(f64, 29), child_slots[0].asObj().getOwn("value").?.asNum());
+        try std.testing.expectEqual(@as(f64, 43), Value.fromRawBits(parent_scratch[0]).asObj().getOwn("value").?.asNum());
+    }
+}
+
+test "vm: optimizer closure allocation preserves mapped lexical eval and recursive bindings" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = native, .bytecode_execution_mode = .required });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[[10,10],6,13,\"ReferenceError\",[2,\"TypeError\"],15]", (try ctx.evaluate(
+            \\function mappedFactory(value){var f=function(){return value;};arguments[0]=9;value=value+1;return [f(),arguments[0]];}
+            \\function lexicalFactory(value){let x=value;const f=()=>x;x=x+1;return f;}
+            \\function evalFactory(value){var f=function(){return value;};eval('value=13');return f;}
+            \\function tdzFactory(){var f=()=>x;try{return f();}catch(e){return e.name;}let x;}
+            \\function constFactory(){const x=2;var f=()=>x;try{x=3;}catch(e){return [f(),e.name];}}
+            \\function recursiveFactory(n){var f=()=>n;return n?recursiveFactory(n-1)+f():f();}
+            \\for(var i=0;i<64;i++){mappedFactory(i);lexicalFactory(i);evalFactory(i);tdzFactory();constFactory();recursiveFactory(5);}
+            \\JSON.stringify([mappedFactory(5),lexicalFactory(5)(),evalFactory(5)(),tdzFactory(),constFactory(),recursiveFactory(5)]);
+        )).asStr());
+        if (native and jit.optimizer_supported) {
+            for ([_][]const u8{ "mappedFactory", "lexicalFactory", "constFactory" }) |name| {
+                const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+                const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(artifact.entry_enabled and artifact.canonical_locals);
+            }
+        }
+    }
+}
+
+test "vm: optimizer closure allocation retains realm module and retirement contexts" {
+    const Context = @import("context.zig").Context;
+    const Host = struct {
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = native, .bytecode_execution_mode = .required });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[6,true,true,true]", (try ctx.evaluate(
+            \\var other=$262.createRealm().global;
+            \\var realmFactory=new other.Function('value','var captured=function(){return [value,Array,this];};value++;return captured;');
+            \\for(var warm=0;warm<64;warm++)realmFactory(warm);
+            \\var retainedRealmClosure=realmFactory(5),realmResult=retainedRealmClosure();
+            \\JSON.stringify([realmResult[0],realmResult[1]===other.Array,realmResult[2]===other,Object.getPrototypeOf(retainedRealmClosure)===other.Function.prototype]);
+        )).asStr());
+        var host_state: u8 = 0;
+        _ = try ctx.evaluateModule("closure-module.js",
+            \\var moduleBinding=13;
+            \\globalThis.moduleBinding=99;
+            \\globalThis.moduleMeta=import.meta;
+            \\globalThis.moduleFactory=function(value){var captured=()=>[import.meta===globalThis.moduleMeta,moduleBinding,value];value++;return captured;};
+            \\for(var warm=0;warm<64;warm++)moduleFactory(warm);
+            \\globalThis.moduleCaptured=moduleFactory(5);
+            \\
+        , .{ .ctx = &host_state, .load = Host.load });
+        try std.testing.expectEqualStrings("[true,13,6]", (try ctx.evaluate("JSON.stringify(moduleCaptured())")).asStr());
+        if (native and jit.optimizer_supported) for ([_][]const u8{ "realmFactory", "moduleFactory" }) |name| {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+            const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(artifact.entry_enabled and artifact.canonical_locals);
+        };
+        ctx.clearJitCode();
+        ctx.collectGarbage();
+        try std.testing.expectEqualStrings("[true,13,6]", (try ctx.evaluate("JSON.stringify(moduleCaptured())")).asStr());
+        try std.testing.expect((try ctx.evaluate("retainedRealmClosure()[1]===other.Array && retainedRealmClosure()[2]===other")).asBool());
+    }
 }

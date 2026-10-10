@@ -33,6 +33,11 @@ fn slot(program: *const compiler.Program, index: usize) Error!void {
     if (index >= program.scratch_slots) return error.InvalidOperation;
 }
 
+fn valueSlot(program: *const compiler.Program, index: usize, locations: []const bool) Error!void {
+    try slot(program, index);
+    if (locations[index]) return error.InvalidOperation;
+}
+
 fn point(program: *const compiler.Program, index: usize) Error!void {
     if (index >= program.deopt_points.len) return error.InvalidControl;
 }
@@ -63,14 +68,15 @@ fn primitiveRuntimeResult(op: bc.Op) bool {
     };
 }
 
-fn recovery(program: *const compiler.Program, value: jit.RecoveryValue, map: jit.StackMap, managed: []const bool, defined: []const bool) Error!void {
+fn recovery(program: *const compiler.Program, value: jit.RecoveryValue, map: jit.StackMap, managed: []const bool, defined: []const bool, locations: []const bool) Error!void {
     switch (value.source) {
         .frame_slot => {
+            if (program.canonical_locals) return error.InvalidRecovery;
             if (value.index >= program.frame_slots) return error.InvalidRecovery;
             if (map.frame_pointer_slots & bit(u64, value.index) == 0) return error.MissingRoot;
         },
         .scratch_slot => {
-            if (value.index >= program.scratch_slots or !defined[value.index]) return error.InvalidRecovery;
+            if (value.index >= program.scratch_slots or !defined[value.index] or locations[value.index]) return error.InvalidRecovery;
             if (managed[value.index] and map.scratch_pointer_slots & bit(u128, value.index) == 0) return error.MissingRoot;
         },
         .constant => if (!primitiveConstant(value.bits)) return error.InvalidRecovery,
@@ -88,6 +94,8 @@ pub fn verify(program: *const compiler.Program) Error!void {
     for ([_]usize{ program.native_operation_names.len, program.native_property_caches.len, program.native_call_sites.len, program.native_evaluation_sites.len }) |length|
         if (length != 0 and length != descriptor_count) return error.InvalidDescriptor;
     var managed: [jit.numeric_scratch_capacity]bool = @splat(false);
+    var locations: [jit.numeric_scratch_capacity]bool = @splat(false);
+    if (program.canonical_locals and program.required_numeric_slots != 0) return error.InvalidDimensions;
     var defined: [jit.numeric_scratch_capacity]bool = @splat(false);
     if (program.osr) |osr| {
         if (osr.entries.len == 0) return error.InvalidOsr;
@@ -102,8 +110,13 @@ pub fn verify(program: *const compiler.Program) Error!void {
                 defined[import.destination] = true;
                 switch (import.source) {
                     .frame_slot => {
+                        if (program.canonical_locals) return error.InvalidOsr;
                         if (import.source_index >= entry.local_count) return error.InvalidOsr;
                         if (program.required_numeric_slots & bit(u64, import.source_index) == 0) managed[import.destination] = true;
+                    },
+                    .frame_location => {
+                        if (!program.canonical_locals or import.source_index >= entry.local_count) return error.InvalidOsr;
+                        locations[import.destination] = true;
                     },
                     .stack_slot => {
                         if (import.source_index >= entry.stack_count) return error.InvalidOsr;
@@ -119,6 +132,10 @@ pub fn verify(program: *const compiler.Program) Error!void {
             (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and descriptor.exceptional_target >= program.native_exceptional_targets.len))
             return error.InvalidDescriptor;
         const op = std.enums.fromInt(bc.Op, descriptor.bytecode_op) orelse return error.InvalidDescriptor;
+        switch (op) {
+            .make_closure, .load_local, .load_local_mapped, .load_local_lexical, .store_local, .store_local_mapped, .store_local_lexical, .init_local_lexical => if (!program.canonical_locals) return error.InvalidDescriptor,
+            else => {},
+        }
         const expected_inputs = optimizer.nativeOperationInputCount(.{ .op = op, .a = descriptor.operand_a, .b = descriptor.operand_b }) orelse return error.InvalidDescriptor;
         if (descriptor.input_count != expected_inputs) return error.InvalidDescriptor;
         const origin = program.deopt_points[descriptor.deopt_index];
@@ -152,7 +169,12 @@ pub fn verify(program: *const compiler.Program) Error!void {
         try slot(program, operation.destination);
         defined[operation.destination] = true;
         switch (operation.kind) {
+            .frame_slot => {
+                if (!program.canonical_locals or operation.immediate >= program.frame_slots) return error.InvalidOperation;
+                locations[operation.destination] = true;
+            },
             .argument => {
+                if (program.canonical_locals) return error.InvalidOperation;
                 if (operation.immediate >= program.frame_slots) return error.InvalidOperation;
                 if (program.required_numeric_slots & bit(u64, operation.immediate) == 0) managed[operation.destination] = true;
             },
@@ -201,6 +223,26 @@ pub fn verify(program: *const compiler.Program) Error!void {
             }
         }
     }
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (program.operations) |operation| if (operation.kind == .copy and locations[operation.lhs] and !locations[operation.destination]) {
+            locations[operation.destination] = true;
+            changed = true;
+        };
+    }
+    for (program.operations) |operation| switch (operation.kind) {
+        .copy, .argument, .constant, .frame_slot => {},
+        .runtime_operation => {
+            const descriptor = program.native_operations[operation.immediate];
+            for (descriptor.first_input..descriptor.first_input + descriptor.input_count) |input|
+                if (locations[input]) return error.InvalidOperation;
+        },
+        .runtime_base, .branch_predicate => if (locations[operation.lhs]) return error.InvalidOperation,
+        else => if (locations[operation.lhs] or locations[operation.rhs]) return error.InvalidOperation,
+    };
+    if (program.osr == null and program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null and program.branch == null and
+        (program.result >= program.scratch_slots or locations[program.result])) return error.InvalidOperation;
     for (program.deopt_handlers) |handler| {
         if (handler.catch_ip == jit.RecoveryHandler.none and handler.finally_ip == jit.RecoveryHandler.none) return error.InvalidHandler;
     }
@@ -210,9 +252,13 @@ pub fn verify(program: *const compiler.Program) Error!void {
             !range(entry.first_handler, entry.handler_count, program.deopt_handlers.len)) return error.InvalidRecovery;
         if (map.deopt_index != index or map.frame_pointer_slots & ~mask(u64, program.frame_slots) != 0 or
             map.scratch_pointer_slots & ~mask(u128, program.scratch_slots) != 0) return error.InvalidStackMap;
-        for (program.deopt_values[entry.first_value .. entry.first_value + count]) |value|
-            try recovery(program, value, map, &managed, &defined);
-        try recovery(program, entry.accumulator, map, &managed, &defined);
+        if (entry.preserve_locals != program.canonical_locals or (entry.preserve_locals and map.frame_pointer_slots != 0)) return error.InvalidRecovery;
+        for (program.deopt_values[entry.first_value .. entry.first_value + count], 0..) |value, ordinal| {
+            if (entry.preserve_locals and ordinal < entry.local_count) {
+                if (value.source != .frame_slot or value.index != ordinal) return error.InvalidRecovery;
+            } else try recovery(program, value, map, &managed, &defined, &locations);
+        }
+        try recovery(program, entry.accumulator, map, &managed, &defined, &locations);
     }
     for (program.native_operations) |descriptor| {
         if (descriptor.step_delta == 0) continue;
@@ -228,20 +274,20 @@ pub fn verify(program: *const compiler.Program) Error!void {
     }
     if (program.side_exit) |exit| try point(program, exit.deopt_index);
     if (program.side_exit_branch) |branch| {
-        try slot(program, branch.condition);
+        try valueSlot(program, branch.condition, &locations);
         if (branch.entry_deopt_index) |index| try point(program, index);
         try point(program, branch.false_deopt_index);
         try point(program, branch.true_deopt_index);
     }
     if (program.finally_dispatch) |dispatch| {
         try point(program, dispatch.deopt_index);
-        try slot(program, dispatch.completion_value);
-        try slot(program, dispatch.completion_kind);
+        try valueSlot(program, dispatch.completion_value, &locations);
+        try valueSlot(program, dispatch.completion_kind, &locations);
     }
     if (program.branch) |branch| {
-        try slot(program, branch.condition);
-        try slot(program, branch.false_result);
-        try slot(program, branch.true_result);
+        try valueSlot(program, branch.condition, &locations);
+        try valueSlot(program, branch.false_result, &locations);
+        try valueSlot(program, branch.true_result, &locations);
         if (branch.merge_block) |merge| {
             if (branch.false_block == branch.true_block or merge == branch.false_block or merge == branch.true_block or
                 merge == program.execution_block or branch.false_block == program.execution_block or branch.true_block == program.execution_block or
@@ -254,16 +300,16 @@ pub fn verify(program: *const compiler.Program) Error!void {
                     return error.InvalidControl;
             }
         }
-    } else if (program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null) try slot(program, program.result);
+    } else if (program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null) try valueSlot(program, program.result, &locations);
     for (program.loop_exit_guards) |guard| {
-        try slot(program, guard.condition);
+        try valueSlot(program, guard.condition, &locations);
         try point(program, guard.exit_deopt_index);
     }
-    for (program.loop_latch_guards) |guard| try slot(program, guard.condition);
-    for (program.loop_branches) |branch| try slot(program, branch.condition);
+    for (program.loop_latch_guards) |guard| try valueSlot(program, guard.condition, &locations);
+    for (program.loop_branches) |branch| try valueSlot(program, branch.condition, &locations);
     for (program.loop_region_blocks) |block| {
         if (block.successor_count > block.successors.len) return error.InvalidControl;
-        if (block.successor_count > 1) try slot(program, block.condition);
+        if (block.successor_count > 1) try valueSlot(program, block.condition, &locations);
         try point(program, block.entry_deopt_index);
         for (block.successors[0..block.successor_count]) |target| {
             if (target.kind == .exit) try point(program, target.deopt_index);
