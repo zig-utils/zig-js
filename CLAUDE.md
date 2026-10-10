@@ -54,7 +54,7 @@ differential and benchmark targets, never by the library itself.
 ```
 src/                 the engine
   lexer.zig parser.zig ast.zig      source -> AST
-  interpreter.zig                   tree-walking evaluator (the semantic baseline, ~50k lines)
+  interpreter.zig                   tree-walking evaluator (the semantic baseline, ~64k lines)
   compiler.zig bytecode.zig vm.zig  AST -> bytecode -> stack VM (suspend/resume, deep recursion, tail calls)
   jit.zig jit/                      baseline native tier + optimizing tier (aarch64)
   value.zig value_nb.zig nanbox.zig NaN-boxed Value, Object, coercions
@@ -146,6 +146,23 @@ zig test --dep regex --dep gc -Mroot=src/parser.zig \
   -Mregex=../zig-regex/src/root.zig -Mgc=../zig-gc/src/root.zig -lc \
   --test-filter <substr>          # peaks ~307 MB, names each test it ran
 ```
+
+Zig's optimization and sanitizer options apply to the **next module
+declaration**. Put `-OReleaseSafe` or `-fsanitize-thread` before `-Mroot`, and
+repeat the option before each dependency module that needs the same mode.
+Appending it after `-Mgc` does not qualify the engine root. For example, an
+instrumented engine and both dependencies use:
+
+```bash
+zig test -fsanitize-thread --dep regex --dep gc -Mroot=src/context.zig \
+  -fsanitize-thread -Mregex=../zig-regex/src/root.zig \
+  -fsanitize-thread -Mgc=../zig-gc/src/root.zig -lc \
+  --test-filter <substr>
+```
+
+Before claiming a sanitizer pass, verify that the linked engine test artifact
+contains TSan instrumentation (for example, `__tsan_init` in `nm` output), and
+record whether suppressions were set.
 
 This is a focused probe, not a substitute for the integration gate: it sees only
 the `test` blocks reachable from that root, and CI still runs the full suite.
