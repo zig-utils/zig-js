@@ -14,6 +14,9 @@ const Case = struct {
     name: []const u8,
     source: []const u8,
     expected: f64,
+    enable_gc: bool = false,
+    required_bytecode: bool = false,
+    jit_differential: bool = false,
 };
 
 const ErrorCase = struct {
@@ -858,6 +861,28 @@ const frontend_error_cases = [_]ErrorCase{
 };
 
 const vm_cases = [_]Case{
+    .{
+        .name = "synchronous iterator recursive callbacks preserve completion and roots",
+        .enable_gc = true,
+        .required_bytecode = true,
+        .jit_differential = true,
+        .source =
+        \\var recursiveIteratorEvents=[],recursiveIteratorOriginal={},recursiveIteratorClosing={};
+        \\function recursiveIteratorGc(){if(typeof $vm!=='undefined')$vm.gc();}
+        \\function recursiveIteratorFirst(v){for(var item of v)return item;return 0;}
+        \\function recursiveIteratorThrow(v){for(var item of v)throw recursiveIteratorOriginal;}
+        \\function recursiveIteratorSubject(depth,mode){
+        \\ var it={next:function(){recursiveIteratorEvents.push('next'+depth);recursiveIteratorGc();if(mode===1&&depth)recursiveIteratorFirst(recursiveIteratorSubject(depth-1,mode));return {done:false,value:depth+10};}};
+        \\ Object.defineProperty(it,'return',{get:function(){recursiveIteratorEvents.push('get'+depth);recursiveIteratorGc();if(mode===2&&depth)recursiveIteratorFirst(recursiveIteratorSubject(depth-1,mode));if(mode===4&&depth)try{recursiveIteratorThrow(recursiveIteratorSubject(depth-1,mode));}catch(e){if(e!==recursiveIteratorOriginal)throw e;}return function(){recursiveIteratorEvents.push('close'+depth);recursiveIteratorGc();if(mode===3&&depth)recursiveIteratorFirst(recursiveIteratorSubject(depth-1,mode));if(mode===5)throw recursiveIteratorClosing;return {};};}});
+        \\ return {[Symbol.iterator]:function(){recursiveIteratorEvents.push('iter'+depth);recursiveIteratorGc();if(mode===0&&depth)recursiveIteratorFirst(recursiveIteratorSubject(depth-1,mode));return it;}};
+        \\}
+        \\for(var warm=0;warm<64;warm++){recursiveIteratorFirst([1]);try{recursiveIteratorThrow([1]);}catch(e){}}
+        \\var recursiveIteratorRecords=[];
+        \\for(var mode=0;mode<6;mode++){recursiveIteratorEvents=[];var result;try{result=mode===4?recursiveIteratorThrow(recursiveIteratorSubject(4,mode)):recursiveIteratorFirst(recursiveIteratorSubject(4,mode));}catch(e){result=e===recursiveIteratorOriginal?'original':e===recursiveIteratorClosing?'closing':e.name;}recursiveIteratorRecords.push([mode,result,recursiveIteratorEvents.join(',')]);}
+        \\JSON.stringify(recursiveIteratorRecords) === "[[0,14,\"iter4,iter3,iter2,iter1,iter0,next0,get0,close0,next1,get1,close1,next2,get2,close2,next3,get3,close3,next4,get4,close4\"],[1,14,\"iter4,next4,iter3,next3,iter2,next2,iter1,next1,iter0,next0,get0,close0,get1,close1,get2,close2,get3,close3,get4,close4\"],[2,14,\"iter4,next4,get4,iter3,next3,get3,iter2,next2,get2,iter1,next1,get1,iter0,next0,get0,close0,close1,close2,close3,close4\"],[3,14,\"iter4,next4,get4,close4,iter3,next3,get3,close3,iter2,next2,get2,close2,iter1,next1,get1,close1,iter0,next0,get0,close0\"],[4,\"original\",\"iter4,next4,get4,iter3,next3,get3,iter2,next2,get2,iter1,next1,get1,iter0,next0,get0,close0,close1,close2,close3,close4\"],[5,\"closing\",\"iter4,next4,get4,close4\"]]" ? 1 : 0;
+        ,
+        .expected = 1,
+    },
     .{
         .name = "numeric loop",
         .source = "let s = 0; for (let i = 0; i < 1000; i++) s += i % 17; s",
@@ -2095,10 +2120,12 @@ fn matchesFilter(name: []const u8, filter: []const u8) bool {
 
 fn evaluateNumber(gpa: std.mem.Allocator, case: Case, enable_jit: bool, enable_threads: bool) !f64 {
     const ctx = try js.Context.createWith(gpa, .{
+        .enable_gc = case.enable_gc,
         .enable_jit = enable_jit,
         .enable_threads = enable_threads,
     });
     defer ctx.destroy();
+    if (case.required_bytecode) ctx.setBytecodeExecutionModeForTesting(.required);
     const result = ctx.evaluate(case.source) catch |err| {
         std.debug.print("focused engine test '{s}' threw {s}\n", .{ case.name, @errorName(err) });
         return error.FocusedTestFailed;
@@ -2111,10 +2138,13 @@ fn evaluateNumber(gpa: std.mem.Allocator, case: Case, enable_jit: bool, enable_t
 }
 
 fn expectCase(gpa: std.mem.Allocator, case: Case, enable_jit: bool, enable_threads: bool) !void {
-    const actual = try evaluateNumber(gpa, case, enable_jit, enable_threads);
-    if (actual != case.expected) {
-        std.debug.print("focused engine test '{s}': got {d}, expected {d}\n", .{ case.name, actual, case.expected });
-        return error.FocusedTestFailed;
+    for (0..@as(usize, if (case.jit_differential) 2 else 1)) |mode| {
+        const selected_jit = if (case.jit_differential) mode == 1 else enable_jit;
+        const actual = try evaluateNumber(gpa, case, selected_jit, enable_threads);
+        if (actual != case.expected) {
+            std.debug.print("focused engine test '{s}': got {d}, expected {d}\n", .{ case.name, actual, case.expected });
+            return error.FocusedTestFailed;
+        }
     }
 }
 

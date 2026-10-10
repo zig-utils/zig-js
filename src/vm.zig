@@ -4730,6 +4730,17 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         else
             loadCapturedBinding(vm, current, inst, parallel));
     }
+    if (op == .iter_of or op == .assert_iter_result or op == .iter_close or op == .iter_close_completion) {
+        const expected: usize = if (op == .iter_close_completion) 3 else 1;
+        if (inputs.len != expected) return @backingInt(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(frame, vm, operation_id, executeIteratorEffect(
+            vm,
+            op,
+            Value.fromRawBits(inputs[expected - 1]),
+            if (expected == 3) Value.fromRawBits(inputs[0]) else Value.undef(),
+            if (expected == 3) Value.fromRawBits(inputs[1]) else Value.undef(),
+        ));
+    }
     if (op == .load_var_or_undef or op == .store_var or op == .def_var or op == .def_lex or op == .init_declarations or op == .copy_annex_b or op == .resolve_binding_ref or op == .load_binding_ref or op == .clear_binding_ref or op == .store_binding_ref) {
         const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse return @backingInt(jit.NativeOperationStatus.host_trap)));
         const chunk = active.chunk orelse return @backingInt(jit.NativeOperationStatus.host_trap);
@@ -6871,6 +6882,35 @@ fn storeCapturedBinding(vm: *Interpreter, frame: ?*Frame, inst: bc.Inst, stored:
     return stored;
 }
 
+/// ECMA-262 GetIterator, IteratorComplete's Object assertion, and
+/// IteratorClose. A pending throw wins over a close-time JavaScript throw;
+/// termination and allocation failure still propagate through the host status.
+fn executeIteratorEffect(vm: *Interpreter, op: bc.Op, iterator: Value, completion: Value, kind: Value) EvalError!Value {
+    switch (op) {
+        .iter_of => return vm.getIterator(iterator),
+        .assert_iter_result => {
+            if (!iterator.isObject() or iterator.asObj().is_symbol or iterator.asObj().is_bigint)
+                return vm.throwError("TypeError", "Iterator result interface is not an object");
+            return iterator;
+        },
+        .iter_close, .iter_close_completion => {
+            const is_throw = op == .iter_close_completion and looksLikeCompletionKind(kind) and kind.asNum() == @as(f64, @floatFromInt(@backingInt(Completion.throw)));
+            if (!is_throw) {
+                try vm.iteratorClose(iterator);
+                return Value.undef();
+            }
+            const completion_root = try vm.pushTempRoot(completion);
+            defer vm.restoreTempRoots(completion_root);
+            vm.iteratorClose(iterator) catch |err| {
+                if (err != error.Throw) return err;
+                vm.exception = vm.tempRoot(completion_root, completion);
+            };
+            return Value.undef();
+        },
+        else => unreachable,
+    }
+}
+
 fn executeEnvironmentBinding(
     vm: *Interpreter,
     exec: *Exec,
@@ -8484,15 +8524,11 @@ fn runChunk(
                 return try callValue(vm, callee, args, this_val, vmCallSite(chunk, ip));
             },
             .assert_iter_result => {
-                // Type(result) must be Object — a Symbol/BigInt is object-tagged here
-                // but is not an Object.
-                const r = stack.items[stack.items.len - 1];
-                if (!r.isObject() or r.asObj().is_symbol or r.asObj().is_bigint)
-                    return vm.throwError("TypeError", "Iterator result interface is not an object");
+                _ = try executeIteratorEffect(vm, inst.op, stack.items[stack.items.len - 1], Value.undef(), Value.undef());
             },
             .iter_of => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, try vm.getIterator(v));
+                try stack.append(stack_alloc, try executeIteratorEffect(vm, inst.op, v, Value.undef(), Value.undef()));
             },
             .async_iter_of => {
                 const v = stack.pop().?;
@@ -8539,16 +8575,11 @@ fn runChunk(
                 stack.appendAssumeCapacity(completion_kind);
             },
             .iter_close => {
-                const it = stack.pop().?;
-                try vm.iteratorClose(it);
+                _ = try executeIteratorEffect(vm, inst.op, stack.pop().?, Value.undef(), Value.undef());
             },
             .iter_close_completion => {
                 const it = stack.pop().?;
-                const is_throw = completionKindBelowTop(stack) == .throw;
-                vm.iteratorClose(it) catch |e| {
-                    if (!is_throw or e != error.Throw) return e;
-                    vm.exception = stack.items[stack.items.len - 2];
-                };
+                _ = try executeIteratorEffect(vm, inst.op, it, stack.items[stack.items.len - 2], stack.items[stack.items.len - 1]);
             },
             .async_iter_close, .async_iter_close_completion => {
                 const it = stack.pop().?;
@@ -18584,7 +18615,7 @@ test "vm: optimizer native allocation effect constructs exactly once" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer interpreter-owned iterator exit preserves protocol exceptions" {
+test "vm: optimizer native iterator region preserves protocol exceptions" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -18608,10 +18639,11 @@ test "vm: optimizer interpreter-owned iterator exit preserves protocol exception
     const first_steps = machine.steps;
     const chunk = root.fns.items[0].chunk.?;
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var effect_index: ?usize = null;
-    for (artifact.deopt.?.points, 0..) |point, index| {
-        if (point.kind == .effect) effect_index = index;
-    }
+    for (operations.descriptors) |descriptor| if (descriptor.bytecode_op == @backingInt(bc.Op.iter_of)) {
+        effect_index = descriptor.deopt_index;
+    };
     const index = effect_index orelse return error.TestUnexpectedResult;
     const point = artifact.deopt.?.points[index];
     try std.testing.expectEqual(@as(u16, 1), point.stack_count);
@@ -25974,4 +26006,198 @@ test "vm: optimizer environment binding callable receiver survives post getter c
             }
         };
     }
+}
+
+test "vm: optimizer synchronous iterator effects execute native descriptors" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    var expected_steps: [4]u64 = undefined;
+    for ([_]bc.Op{ .iter_of, .assert_iter_result, .iter_close, .iter_close_completion }, 0..) |op, op_index| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = native });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var iteratorEffects=0;
+            \\var nativeIterator={next:function(){return {done:true};},return:function(){iteratorEffects++;$vm.gc();return {};}};
+            \\var nativeIterable={[Symbol.iterator]:function(){iteratorEffects++;$vm.gc();return nativeIterator;}};
+            \\var iteratorCompletion={};
+        );
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const active = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(active);
+        var chunk = bc.Chunk.init(ctx.arena());
+        const count: u32 = if (op == .iter_close_completion) 3 else 1;
+        chunk.param_count = count;
+        chunk.local_count = count;
+        for (0..count) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emit(op, 0);
+        if (op == .iter_close_completion) _ = try chunk.emit(.pop, 0);
+        _ = try chunk.emit(if (op == .iter_close) .ret_undef else .ret, 0);
+        const completion = ctx.global_object.getOwn("iteratorCompletion").?;
+        const iterator = ctx.global_object.getOwn(if (op == .iter_of) "nativeIterable" else "nativeIterator").?;
+        var slots = [_]Value{ completion, Value.num(1), iterator };
+        const arguments = if (count == 3) slots[0..3] else slots[2..3];
+        var frame = Frame{ .slots = arguments, .parent = null };
+        const result = if (native) result: {
+            var code = try optimizer_compiler.compile(&chunk);
+            defer code.deinit();
+            try std.testing.expect(!code.has_side_exits or code.continuation_only_exits);
+            const metadata = code.native_operations orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), metadata.descriptors.len);
+            try std.testing.expectEqual(@as(u16, @backingInt(op)), metadata.descriptors[0].bytecode_op);
+            var exec = Exec{ .chunk = &chunk, .frame = &frame };
+            const outcome = try tryRunManagedNative(&machine, &code, arguments, &exec);
+            try std.testing.expect(outcome == .complete);
+            break :result outcome.complete;
+        } else try run(&machine, &chunk, &frame);
+        if (!native) expected_steps[op_index] = machine.steps else try std.testing.expectEqual(expected_steps[op_index], machine.steps);
+        if (op == .iter_close) try std.testing.expect(result.isUndefined()) else try std.testing.expectEqual((if (op == .iter_close_completion) completion else ctx.global_object.getOwn("nativeIterator").?).rawBits(), result.rawBits());
+        try std.testing.expectEqual(@as(f64, if (op == .assert_iter_result) 0 else 1), ctx.global_object.getOwn("iteratorEffects").?.asNum());
+    };
+}
+
+test "vm: optimizer synchronous iterator callback budgets preserve exact dispatch" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const Record = struct { steps: u64, error_kind: u8, effects: f64, completed: bool };
+    var expected: [3][2][64]Record = undefined;
+    const ops = [_]bc.Op{ .iter_of, .iter_close, .iter_close_completion };
+    for (ops, 0..) |op, op_index| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = false, .enable_jit = native });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var iteratorEffects=0;
+            \\var iteratorBudget={next:function(){return {done:true};},return:function(){iteratorEffects++;return {};}};
+            \\var iterableBudget={[Symbol.iterator]:function(){iteratorEffects++;return iteratorBudget;}};
+        );
+        var chunk = bc.Chunk.init(ctx.arena());
+        const count: u32 = if (op == .iter_close_completion) 3 else 1;
+        chunk.param_count = count;
+        chunk.local_count = count;
+        for (0..count) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emit(op, 0);
+        // A following write must never happen after a callback has expired
+        // the budget or crossed the cooperative-stop polling boundary.
+        const after_name = try chunk.addName("iteratorAfter");
+        _ = try chunk.emit(.load_true, 0);
+        _ = try chunk.emit(.store_var, after_name);
+        _ = try chunk.emit(.pop, 0);
+        _ = try chunk.emit(.ret_undef, 0);
+        var code: ?jit.CompiledCode = if (native) try optimizer_compiler.compile(&chunk) else null;
+        defer if (code) |*entry| entry.deinit();
+        for (0..2) |mode| for (0..64) |index| {
+            _ = try ctx.evaluate("iteratorEffects=0;iteratorAfter=false;");
+            var machine = ctx.interpreter();
+            machine.steps = 976 + index;
+            machine.step_budget = if (mode == 0) 1024 else 1_000_000;
+            var stop: std.atomic.Value(bool) = .init(mode == 1);
+            machine.stop_flag = &stop;
+            const iterator = ctx.global_object.getOwn(if (op == .iter_of) "iterableBudget" else "iteratorBudget").?;
+            var slots = [_]Value{ Value.num(17), Value.num(2), iterator };
+            const arguments = if (count == 3) slots[0..3] else slots[2..3];
+            var frame = Frame{ .slots = arguments, .parent = null };
+            var record = Record{ .steps = 0, .error_kind = 0, .effects = 0, .completed = false };
+            const result: EvalError!Value = if (code) |*entry| result: {
+                var exec = Exec{ .chunk = &chunk, .frame = &frame };
+                defer exec.stack.deinit(ctx.arena());
+                defer exec.handlers.deinit(ctx.arena());
+                const outcome = tryRunManagedNative(&machine, entry, arguments, &exec) catch |err| break :result err;
+                if (outcome == .complete) break :result outcome.complete;
+                if (outcome == .deoptimized) {
+                    var delta = jit.OptimizerProfile.Delta{};
+                    break :result runChunk(&machine, &exec, &chunk, &frame, null, &delta);
+                }
+                if (outcome == .miss) break :result run(&machine, &chunk, &frame);
+                return error.TestUnexpectedResult;
+            } else run(&machine, &chunk, &frame);
+            if (result) |_| {} else |err| {
+                if (err != error.Throw) return err;
+                const name = machine.exception.asObj().errorName();
+                record.error_kind = if (std.mem.eql(u8, name, "RangeError")) 1 else if (std.mem.eql(u8, name, "Error")) 2 else return error.TestUnexpectedResult;
+            }
+            record.steps = machine.steps;
+            record.effects = ctx.global_object.getOwn("iteratorEffects").?.asNum();
+            record.completed = ctx.global_object.getOwn("iteratorAfter").?.asBool();
+            if (!native) expected[op_index][mode][index] = record else try std.testing.expectEqualDeep(expected[op_index][mode][index], record);
+        };
+    };
+}
+
+test "vm: optimizer synchronous iterator protocol preserves oracle traces in shared modes" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[[0,0,5,\"get-iterator,iterator,get-next,next,get-return,return\"],[0,1,7,\"get-iterator,iterator,get-next,next,get-return,return\"],[0,2,5,\"get-iterator,iterator,get-next,next,next\"],[0,3,5,\"get-iterator,iterator,get-next,next,get-return,return\"],[0,4,\"original\",\"get-iterator,iterator,get-next,next,get-return,return\"],[1,0,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[1,1,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[1,2,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[1,3,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[1,4,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[2,0,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[2,1,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[2,2,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[2,3,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[2,4,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[3,0,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[3,1,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[3,2,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[3,3,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[3,4,\"TypeError\",\"get-iterator,iterator,get-next,next\"],[4,0,\"closing\",\"get-iterator,iterator,get-next,next,get-return\"],[4,1,\"closing\",\"get-iterator,iterator,get-next,next,get-return\"],[4,2,5,\"get-iterator,iterator,get-next,next,next\"],[4,3,\"closing\",\"get-iterator,iterator,get-next,next,get-return\"],[4,4,\"original\",\"get-iterator,iterator,get-next,next,get-return\"],[5,0,5,\"get-iterator,iterator,get-next,next,get-return\"],[5,1,7,\"get-iterator,iterator,get-next,next,get-return\"],[5,2,5,\"get-iterator,iterator,get-next,next,next\"],[5,3,5,\"get-iterator,iterator,get-next,next,get-return\"],[5,4,\"original\",\"get-iterator,iterator,get-next,next,get-return\"],[6,0,\"TypeError\",\"get-iterator,iterator,get-next,next,get-return\"],[6,1,\"TypeError\",\"get-iterator,iterator,get-next,next,get-return\"],[6,2,5,\"get-iterator,iterator,get-next,next,next\"],[6,3,\"TypeError\",\"get-iterator,iterator,get-next,next,get-return\"],[6,4,\"original\",\"get-iterator,iterator,get-next,next,get-return\"],[7,0,\"closing\",\"get-iterator,iterator,get-next,next,get-return,return\"],[7,1,\"closing\",\"get-iterator,iterator,get-next,next,get-return,return\"],[7,2,5,\"get-iterator,iterator,get-next,next,next\"],[7,3,\"closing\",\"get-iterator,iterator,get-next,next,get-return,return\"],[7,4,\"original\",\"get-iterator,iterator,get-next,next,get-return,return\"],[8,0,\"TypeError\",\"get-iterator,iterator,get-next,next,get-return,return\"],[8,1,\"TypeError\",\"get-iterator,iterator,get-next,next,get-return,return\"],[8,2,5,\"get-iterator,iterator,get-next,next,next\"],[8,3,\"TypeError\",\"get-iterator,iterator,get-next,next,get-return,return\"],[8,4,\"original\",\"get-iterator,iterator,get-next,next,get-return,return\"],[9,0,\"closing\",\"get-iterator,iterator\"],[9,1,\"closing\",\"get-iterator,iterator\"],[9,2,\"closing\",\"get-iterator,iterator\"],[9,3,\"closing\",\"get-iterator,iterator\"],[9,4,\"closing\",\"get-iterator,iterator\"],[10,0,\"TypeError\",\"get-iterator,iterator\"],[10,1,\"TypeError\",\"get-iterator,iterator\"],[10,2,\"TypeError\",\"get-iterator,iterator\"],[10,3,\"TypeError\",\"get-iterator,iterator\"],[10,4,\"TypeError\",\"get-iterator,iterator\"]]", (try ctx.evaluate(
+            \\(function(){
+            \\ var events=[],original={},closing={};
+            \\ function gc(){if(typeof $vm!=='undefined')$vm.gc();}
+            \\ function first(value){for(var item of value)return item;return -1;}
+            \\ function stop(value){for(var item of value)break;return 7;}
+            \\ function sum(value){var total=0;for(var item of value)total+=item;return total;}
+            \\ function bind(value){var [item]=value;return item;}
+            \\ function abrupt(value){for(var item of value)throw original;return 0;}
+            \\ function make(mode){
+            \\  var cursor=0, iterator={};
+            \\  Object.defineProperty(iterator,'next',{get:function(){events.push('get-next');gc();return function(){if(this!==iterator)throw closing;events.push('next');gc();return mode===1?3:mode===2?Symbol('x'):mode===3?1n:{done:cursor++>0,value:5};};}});
+            \\  Object.defineProperty(iterator,'return',{get:function(){events.push('get-return');gc();if(mode===4)throw closing;if(mode===5)return null;if(mode===6)return 3;return function(){if(this!==iterator)throw closing;events.push('return');gc();if(mode===7)throw closing;return mode===8?3:{};};}});
+            \\  return new Proxy({[Symbol.iterator]:function(){events.push('iterator');gc();if(mode===9)throw closing;if(mode===10)return 3;return iterator;}},{get:function(t,k,r){if(k===Symbol.iterator)events.push('get-iterator');return Reflect.get(t,k,r);}});
+            \\ }
+            \\ for(var warm=0;warm<64;warm++){first([1,2]);stop([1,2]);sum([1,2]);bind([1,2]);try{abrupt([1,2]);}catch(e){}}
+            \\ var records=[];
+            \\ for(var mode=0;mode<11;mode++)for(var index=0;index<5;index++){
+            \\  events=[];var outcome;
+            \\  try{outcome=[first,stop,sum,bind,abrupt][index](make(mode));}catch(e){outcome=e===original?'original':e===closing?'closing':e.name;}
+            \\  records.push([mode,index,outcome,events.join(',')]);
+            \\ }
+            \\ return JSON.stringify(records);
+            \\})()
+        )).asStr());
+    };
+}
+
+test "vm: optimizer synchronous iterator seeded serialized and four worker effects" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = native,
+            .enable_threads = true,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const source =
+            \\function iteratorSeeded(seed){
+            \\ var state=seed>>>0,closed=0,got=0,nexts=0,hash=0;
+            \\ function first(v){for(var item of v)return item;return 0;}
+            \\ function stop(v){for(var item of v)break;return 7;}
+            \\ function total(v){var result=0;for(var item of v)result+=item;return result;}
+            \\ function binding(v){var [item]=v;return item;}
+            \\ function subject(n){var index=0;var it={next:function(){nexts++;return {done:index>=3,value:n+index++};},return:function(){closed++;return {};}};return {[Symbol.iterator]:function(){got++;return it;}};}
+            \\ for(var warm=0;warm<64;warm++){first(subject(1));stop(subject(1));total(subject(1));binding(subject(1));}
+            \\ closed=0;got=0;nexts=0;
+            \\ for(var index=0;index<256;index++){state=(Math.imul(state,1664525)+1013904223)>>>0;var which=state&3,n=(state>>>2)%100;var result=[first,stop,total,binding][which](subject(n));hash=(Math.imul(hash,33)+result)>>>0;}
+            \\ return JSON.stringify([hash,closed,got,nexts]);
+            \\}
+            \\JSON.stringify([1,17,73,999,12345,65537,7654321,2147483647].map(iteratorSeeded));
+        ;
+        try std.testing.expectEqualStrings("[\"[3241086308,192,256,448]\",\"[1873456036,192,256,448]\",\"[3738087496,192,256,448]\",\"[2378662480,192,256,448]\",\"[3801422452,192,256,448]\",\"[1586693588,192,256,448]\",\"[3395606204,192,256,448]\",\"[3158893036,192,256,448]\"]", (try ctx.evaluate(source)).asStr());
+        try std.testing.expectEqualStrings("true", (try ctx.evaluate(
+            \\var iteratorWorkers=[];
+            \\for(var index=0;index<4;index++){var thread=new Thread(function(){return [1,17,73,999,12345,65537,7654321,2147483647].map(iteratorSeeded);});iteratorWorkers.push(thread);}
+            \\var iteratorWorkerExpected=[1,17,73,999,12345,65537,7654321,2147483647].map(iteratorSeeded);
+            \\JSON.stringify(iteratorWorkers.every(function(thread){return JSON.stringify(thread.join())===JSON.stringify(iteratorWorkerExpected);}));
+        )).asStr());
+    };
 }

@@ -87,6 +87,10 @@ pub const ValueKind = enum {
     array_append,
     array_spread,
     array_append_hole,
+    iter_of,
+    assert_iter_result,
+    iter_close,
+    iter_close_completion,
     get_prop,
     get_index,
     set_prop,
@@ -200,14 +204,10 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .import_call,
         .object_rest,
         .make_closure,
-        .assert_iter_result,
-        .iter_of,
         .async_iter_of,
         .enum_keys,
         .enum_next,
         .enum_end_completion,
-        .iter_close,
-        .iter_close_completion,
         .async_iter_close,
         .async_iter_close_completion,
         .prepare_class_heritage,
@@ -313,6 +313,7 @@ pub const Plan = struct {
     blocks: []Block,
     instructions: []Instruction,
     graph: ValueGraph,
+    entry_region_exit: ?u32 = null,
 
     pub fn verify(self: *const Plan, mode: verification.Mode) verification.Error!void {
         return verification.verify(self, mode);
@@ -442,6 +443,25 @@ pub const Plan = struct {
 };
 
 pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Plan {
+    return buildWithEntryExit(chunk, allocator, null);
+}
+
+/// A bounded entry region ends before its first control transfer. Bytecode
+/// and handler coordinates remain untouched; the exit publishes the complete
+/// block-entry state before that instruction executes.
+pub fn buildEntryRegion(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Plan {
+    for (chunk.code.items, 0..) |inst, origin| switch (inst.op) {
+        .jump, .jump_if_false, .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => {
+            if (origin == 0) return error.UnsupportedChunk;
+            return buildWithEntryExit(chunk, allocator, @intCast(origin));
+        },
+        .ret, .ret_undef => return error.UnsupportedChunk,
+        else => if (terminalFrameStateKind(inst.op) != null) return error.UnsupportedChunk,
+    };
+    return error.UnsupportedChunk;
+}
+
+fn buildWithEntryExit(chunk: *const bc.Chunk, allocator: std.mem.Allocator, entry_exit: ?u32) BuildError!Plan {
     const code = chunk.code.items;
     if (code.len == 0) return error.EmptyChunk;
     if (code.len > std.math.maxInt(u32)) return error.UnsupportedChunk;
@@ -465,6 +485,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     defer allocator.free(starts);
     @memset(starts, false);
     starts[0] = true;
+    if (entry_exit) |origin| starts[origin] = true;
     for (code, 0..) |inst, ip| switch (inst.op) {
         .jump, .jump_if_false, .jump_if_true_peek, .jump_if_false_peek, .jump_if_nullish_peek, .jump_if_not_nullish_peek => {
             if (inst.a >= code.len) return error.InvalidControlFlow;
@@ -518,6 +539,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     }
 
     for (blocks_list.items, 0..) |*block, index| {
+        if (entry_exit == block.start) continue;
         const last = code[block.end - 1];
         switch (last.op) {
             .jump => addSuccessor(block, block_at[last.a]),
@@ -543,13 +565,14 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
 
     const blocks = try blocks_list.toOwnedSlice(allocator);
     errdefer allocator.free(blocks);
-    var graph = try buildValueGraph(chunk, blocks, allocator);
+    var graph = try buildValueGraph(chunk, blocks, allocator, entry_exit);
     errdefer graph.deinit();
     const result: Plan = .{
         .allocator = allocator,
         .blocks = blocks,
         .instructions = instructions,
         .graph = graph,
+        .entry_region_exit = entry_exit,
     };
     if (builtin.is_test) try result.verifyForTesting(.function);
     return result;
@@ -730,6 +753,10 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .array_append,
         .array_spread,
         .array_append_hole,
+        .iter_of,
+        .assert_iter_result,
+        .iter_close,
+        .iter_close_completion,
         => return depthEffect(inst).required,
         else => {},
     }
@@ -990,7 +1017,7 @@ fn propagateEntryState(
     try queue.append(allocator, target);
 }
 
-fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std.mem.Allocator) BuildError!ValueGraph {
+fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std.mem.Allocator, entry_exit: ?u32) BuildError!ValueGraph {
     const local_count: usize = chunk.local_count;
     if (chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
 
@@ -1019,6 +1046,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         try active_handlers.appendSlice(allocator, entry_handlers[block_id].?);
         var depth = entry_depths[block_id] orelse return error.InvalidControlFlow;
         max_stack_depth = @max(max_stack_depth, depth);
+        if (entry_exit == block.start) continue;
         for (chunk.code.items[block.start..block.end]) |inst| {
             if (!supports(inst.op)) return error.UnsupportedChunk;
             switch (inst.op) {
@@ -1143,6 +1171,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         handlers.clearRetainingCapacity();
         try handlers.appendSlice(allocator, entry_handlers[block_id].?);
         try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth], handlers.items);
+        if (entry_exit == block.start) continue;
 
         for (chunk.code.items[block.start..block.end], block.start..) |inst, origin| switch (operation: {
             // Re-entry consumes child dispatch. Preserve the completed effect
@@ -1290,6 +1319,38 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     stack[depth] = result;
                     depth += 1;
                 }
+            },
+            .iter_of, .assert_iter_result, .iter_close, .iter_close_completion => {
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const first = depth - effect.required;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = switch (inst.op) {
+                        .iter_of => .iter_of,
+                        .assert_iter_result => .assert_iter_result,
+                        .iter_close => .iter_close,
+                        .iter_close_completion => .iter_close_completion,
+                        else => unreachable,
+                    },
+                    .lhs = stack[first],
+                    .rhs = if (effect.required == 3) stack[first + 1] else ValueNode.none,
+                    .third = if (effect.required == 3) stack[first + 2] else ValueNode.none,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                depth -= effect.removed;
+                if (inst.op == .iter_of) {
+                    stack[depth] = result;
+                    depth += 1;
+                }
+                if (inst.op == .assert_iter_result) stack[depth - 1] = result;
+                // IteratorClose consumes only the iterator. The completion
+                // value/kind remain the original SSA values, even after reentry.
             },
             .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical => {
                 const write = inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical;
@@ -1985,6 +2046,10 @@ fn supports(op: bc.Op) bool {
         .array_append,
         .array_spread,
         .array_append_hole,
+        .iter_of,
+        .assert_iter_result,
+        .iter_close,
+        .iter_close_completion,
         => true,
         else => false,
     };

@@ -745,7 +745,7 @@ fn stageNativeOperationDescriptors(
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
                 inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
                 inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
-                inst.op == .array_spread or inst.op == .array_append_hole)
+                inst.op == .array_spread or inst.op == .array_append_hole or inst.op == .iter_of or inst.op == .assert_iter_result or inst.op == .iter_close or inst.op == .iter_close_completion)
                 break :runtime operation.lhs;
             return error.UnsupportedChunk;
         } else staged: {
@@ -947,7 +947,7 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
         node.kind == .new_object or node.kind == .new_array or node.kind == .init_prop or
         node.kind == .init_proto or node.kind == .init_prop_computed or node.kind == .init_spread or
         node.kind == .init_getter or node.kind == .init_setter or node.kind == .array_append or
-        node.kind == .array_spread or node.kind == .array_append_hole) and
+        node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion) and
         node.block == state.block and
         node.origin == state.origin)
     {
@@ -1177,7 +1177,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -1278,6 +1278,11 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             deterministic_path = true;
         } else if (graph.returns.len == 0) {
             var terminal_index: ?u16 = null;
+            if (plan.entry_region_exit) |exit_ip| for (graph.frame_states, 0..) |state, index| {
+                if (state.kind != .block_entry or state.origin != exit_ip) continue;
+                terminal_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
+                bytecode_steps = try deterministicPathSteps(plan, state.block, 0);
+            };
             for (graph.frame_states, 0..) |state, index| if ((state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .abrupt_jump or state.kind == .call or state.kind == .effect) and
                 !frameStateHasRuntimeValue(graph, state))
             {
@@ -2984,7 +2989,7 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
                 try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .origin = node.origin });
             },
-            .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
+            .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -3435,7 +3440,22 @@ fn compileWithObservability(
         error.UnsupportedChunk => lowerFusedLoopOsr(chunk, &plan, scratch_allocator) catch |fused_err| switch (fused_err) {
             error.UnsupportedChunk => lowerLoopOsr(chunk, &plan, scratch_allocator) catch |loop_err| switch (loop_err) {
                 error.UnsupportedChunk => lowerGeneralLoopOsr(chunk, &plan, scratch_allocator) catch |general_err| switch (general_err) {
-                    error.UnsupportedChunk => try lowerCompactedLoop(chunk, &plan, scratch_allocator),
+                    error.UnsupportedChunk => lowerCompactedLoop(chunk, &plan, scratch_allocator) catch |compact_err| switch (compact_err) {
+                        error.UnsupportedChunk => entry: {
+                            var entry_plan = try optimizer.buildEntryRegion(chunk, scratch_allocator);
+                            defer entry_plan.deinit();
+                            var region = try lower(chunk, &entry_plan, scratch_allocator);
+                            // A dispatch-only numeric prefix adds an entry/exit
+                            // without covering a runtime effect. Keep the full
+                            // numeric-region admission policy in that case.
+                            if (region.native_operations.len == 0) {
+                                region.deinit();
+                                return error.UnsupportedChunk;
+                            }
+                            break :entry region;
+                        },
+                        else => return compact_err,
+                    },
                     else => return general_err,
                 },
                 else => return loop_err,
@@ -6691,14 +6711,10 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .register_disposable, .inputs = 1, .kind = .effect },
         .{ .op = .import_call, .inputs = 2, .kind = .effect },
         .{ .op = .object_rest, .a = 2, .inputs = 3, .kind = .effect },
-        .{ .op = .assert_iter_result, .inputs = 1, .kind = .effect },
-        .{ .op = .iter_of, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_of, .inputs = 1, .kind = .effect },
         .{ .op = .enum_keys, .inputs = 1, .kind = .effect },
         .{ .op = .enum_next, .inputs = 3, .kind = .effect },
         .{ .op = .enum_end_completion, .inputs = 5, .kind = .effect },
-        .{ .op = .iter_close, .inputs = 1, .kind = .effect },
-        .{ .op = .iter_close_completion, .inputs = 3, .kind = .effect },
         .{ .op = .async_iter_close, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_close_completion, .inputs = 3, .kind = .effect },
         .{ .op = .prepare_class_heritage, .inputs = 1, .kind = .effect },
@@ -8754,5 +8770,127 @@ test "optimizer environment binding peek diamonds preserve all branch modes and 
             try std.testing.expectEqual((if (taken) input else slots[1]).bits, frame.result_bits);
             try std.testing.expectEqual(@as(u64, if (taken) 4 else 6), steps);
         }
+    }
+}
+fn lowerIteratorEffectForTesting(allocator: std.mem.Allocator, op: bc.Op) !Program {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const inputs: u32 = if (op == .iter_close_completion) 3 else 1;
+    chunk.param_count = inputs;
+    chunk.local_count = inputs;
+    for (0..inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+    _ = try chunk.emit(op, 0);
+    if (op == .iter_close_completion) _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(if (op == .iter_close) .ret_undef else .ret, 0);
+    var plan = try optimizer.build(&chunk, allocator);
+    defer plan.deinit();
+    return lower(&chunk, &plan, allocator);
+}
+
+test "optimizer synchronous iterator roots continuations and allocation failures" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, op: bc.Op) !void {
+            var program = try lowerIteratorEffectForTesting(allocator, op);
+            defer program.deinit();
+            try program.verify();
+            try std.testing.expect(program.side_exit == null);
+        }
+    };
+    for ([_]bc.Op{ .iter_of, .assert_iter_result, .iter_close, .iter_close_completion }) |op| {
+        var program = try lowerIteratorEffectForTesting(std.testing.allocator, op);
+        defer program.deinit();
+        try program.verify();
+        const descriptor = program.native_operations[0];
+        try std.testing.expect(descriptor.continuation_deopt_index != jit.NativeOperationDescriptor.none);
+        if (op == .iter_close_completion) {
+            const state = program.deopt_points[descriptor.continuation_deopt_index];
+            try std.testing.expectEqual(@as(u16, 2), state.stack_count);
+            program.deopt_points[descriptor.continuation_deopt_index].stack_count = 1;
+            try std.testing.expectError(error.InvalidDescriptor, program.verify());
+            program.deopt_points[descriptor.continuation_deopt_index] = state;
+        }
+        try std.testing.checkAllAllocationFailures(allocationFailureBackingForTesting(), Probe.run, .{op});
+    }
+}
+
+test "optimizer entry regions stop before control and preserve handler state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emitAB(.push_handler, 8, std.math.maxInt(u32));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.iter_of, 0);
+    _ = try chunk.emit(.assert_iter_result, 0);
+    _ = try chunk.emit(.jump_if_false, 7);
+    _ = try chunk.emit(.load_true, 0);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.buildEntryRegion(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(?u32, 4), plan.entry_region_exit);
+    try std.testing.expectEqual(@as(usize, 0), plan.graph.branches.len);
+    const saved = plan.entry_region_exit;
+    plan.entry_region_exit = 3;
+    try std.testing.expectError(error.InvalidFrameState, plan.verify(.function));
+    plan.entry_region_exit = saved;
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+    const exit = program.side_exit orelse return error.TestUnexpectedResult;
+    const point = program.deopt_points[exit.deopt_index];
+    try std.testing.expectEqual(@as(u32, 4), point.exit_ip);
+    try std.testing.expectEqual(@as(u16, 1), point.stack_count);
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    try std.testing.expectEqual(@as(u32, 4), program.bytecode_steps);
+    try std.testing.expectEqual(@as(usize, 2), program.native_operations.len);
+    var actual: usize = 0;
+    for (program.operations) |operation| if (operation.kind == .runtime_operation) {
+        actual += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), actual);
+}
+
+test "optimizer bounded entry region allocation failures release plans and recovery" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var chunk = bc.Chunk.init(arena.allocator());
+            chunk.param_count = 1;
+            chunk.local_count = 1;
+            _ = try chunk.emit(.load_local, 0);
+            _ = try chunk.emit(.iter_of, 0);
+            _ = try chunk.emit(.jump_if_false, 5);
+            _ = try chunk.emit(.load_true, 0);
+            _ = try chunk.emit(.ret, 0);
+            _ = try chunk.emit(.ret_undef, 0);
+            var plan = try optimizer.buildEntryRegion(&chunk, allocator);
+            defer plan.deinit();
+            var program = try lower(&chunk, &plan, allocator);
+            defer program.deinit();
+            try program.verify();
+            try std.testing.expect(program.side_exit != null);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocationFailureBackingForTesting(), Probe.run, .{});
+}
+
+test "optimizer entry regions reject unreachable control after an earlier exit" {
+    for ([_]bc.Op{ .ret, .make_regex }) |terminal| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.iter_of, 0);
+        _ = try chunk.emit(terminal, 0);
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.jump_if_false, 0);
+        _ = try chunk.emit(.ret_undef, 0);
+        try std.testing.expectError(error.UnsupportedChunk, optimizer.buildEntryRegion(&chunk, std.testing.allocator));
     }
 }

@@ -96,8 +96,11 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .get_prop,
         .private_in,
         .array_append_hole,
+        .iter_of,
+        .assert_iter_result,
+        .iter_close,
         => 1,
-        .set_index, .init_prop_computed, .init_getter, .init_setter => 3,
+        .set_index, .init_prop_computed, .init_getter, .init_setter, .iter_close_completion => 3,
         else => 2,
     };
 }
@@ -293,6 +296,21 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         next_instruction = block.end;
     }
     if (next_instruction != plan.instructions.len) return error.InvalidBlock;
+    if (plan.entry_region_exit) |exit_ip| {
+        if (exit_ip == 0 or exit_ip >= plan.instructions.len) return error.InvalidFrameState;
+        var exit_block: ?u32 = null;
+        for (plan.blocks) |block| if (block.start == exit_ip and block.successor_count == 0) {
+            exit_block = block.id;
+        };
+        const boundary = exit_block orelse return error.InvalidFrameState;
+        var found_entry = false;
+        for (graph.frame_states) |state| if (state.block == boundary) {
+            if (state.kind != .block_entry or state.origin != exit_ip) return error.InvalidFrameState;
+            found_entry = true;
+        };
+        if (!found_entry) return error.InvalidFrameState;
+        for (graph.nodes) |node| if (node.block == boundary and node.kind != .block_argument) return error.InvalidFrameState;
+    }
     const entries = try allocator.alloc(u32, plan.blocks.len);
     defer allocator.free(entries);
     @memset(entries, none);
@@ -612,10 +630,12 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         if (previous.block != state.block or expected != state.stack_count or inputs > previous.stack_count or
             !sameHandlers(graph, previous.first_handler, previous.handler_count, state.first_handler, state.handler_count))
             return error.InvalidFrameState;
-        const prefix = previous.local_count + previous.stack_count - inputs;
+        // Close observes the completion pair but preserves it unchanged.
+        const preserved_completion = inst.op == .iter_close_completion;
+        const prefix = previous.local_count + previous.stack_count - (if (preserved_completion) @as(u32, 1) else inputs);
         if (!std.mem.eql(u32, graph.frame_state_values[previous.first_value..][0..prefix], graph.frame_state_values[state.first_value..][0..prefix]))
             return error.InvalidFrameState;
-        if (state.stack_count > previous.stack_count - inputs) {
+        if (!preserved_completion and state.stack_count > previous.stack_count - inputs) {
             const result = graph.frame_state_values[state.first_value + state.local_count + state.stack_count - 1];
             if (result >= graph.nodes.len) return error.InvalidValue;
             const producer = graph.nodes[result];
@@ -929,4 +949,29 @@ test "optimizer verifier bounds scratch allocation on deep CFG chains" {
         if (prior != 0) try std.testing.expect(tracked.requested <= prior * 22 / 10);
         prior = tracked.requested;
     }
+}
+
+test "optimizer verifier rejects changed iterator completion recovery values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 3;
+    chunk.local_count = 3;
+    for (0..3) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+    _ = try chunk.emit(.iter_close_completion, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try ir.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var found = false;
+    for (plan.graph.frame_states) |state| if (state.kind == .continuation and state.origin == 4) {
+        const first = state.first_value + state.local_count;
+        const saved = plan.graph.frame_state_values[first + 1];
+        plan.graph.frame_state_values[first + 1] = plan.graph.frame_state_values[first];
+        try std.testing.expectError(error.InvalidFrameState, plan.verify(.function));
+        plan.graph.frame_state_values[first + 1] = saved;
+        try plan.verify(.function);
+        found = true;
+    };
+    try std.testing.expect(found);
 }
