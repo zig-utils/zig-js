@@ -30473,6 +30473,87 @@ test "moving GC preserves required-bytecode for-in enumeration roots" {
     try std.testing.expect(admission.count(.template_plain_compiled) >= 1);
 }
 
+test "native for-in preserves exact state through moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    // The repository's ../zig-gc package is intentionally a measurement-only
+    // shim. This witness needs the real relocation visitor, so keep it out of
+    // the ordinary shim-backed suite while making the real-collector gate
+    // explicit when this test root is wired to the production package.
+    if (!@hasDecl(@import("gc"), "RelocationVisitor")) return error.SkipZigTest;
+
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const ctx: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            ctx.gc.?.nursery_threshold_bytes = 1;
+            ctx.gc_moving_checkpoint_requested.store(true, .release);
+            return Value.undef();
+        }
+    };
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+    {
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        const arm = try gc_mod.allocObj(ctx.arena());
+        arm.* = .{ .native = Host.arm };
+        try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "forInArm", Value.obj(arm));
+        try ctx.env.put("forInArm", Value.obj(arm));
+    }
+
+    _ = try ctx.evaluate(
+        \\function nativeForIn(object) {
+        \\  var count = 0;
+        \\  for (var key in object) count += 1;
+        \\  return count;
+        \\}
+        \\for (var warm = 0; warm < 12; warm++) nativeForIn({ a: 1, b: 2 });
+    );
+
+    const function_object = ctx.global_object.getOwn("nativeForIn").?.asObj().jsFunction() orelse
+        return error.TestUnexpectedResult;
+    const function_value: *interp.Function = @ptrCast(@alignCast(function_object));
+    const chunk = function_value.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.OptimizerTierState.ready, chunk.optimizer_tier.state.load(.acquire));
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_enum_next = false;
+    for (operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_next)) {
+            saw_enum_next = true;
+            try std.testing.expectEqual(@as(u8, 4), descriptor.result_count);
+        }
+    }
+    try std.testing.expect(saw_enum_next);
+
+    ctx.collectGarbage();
+    ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\var moveNow = false;
+        \\var hasHits = 0;
+        \\var forInTarget = { a: 1, b: 2 };
+        \\var forInProxy = new Proxy(forInTarget, {
+        \\  has: function (target, key) {
+        \\    hasHits += 1;
+        \\    if (moveNow) { moveNow = false; forInArm(); }
+        \\    return Reflect.has(target, key);
+        \\  }
+        \\});
+    );
+    const moving_before = ctx.gc.?.accounting().moving_minor_collections;
+    const result = try ctx.evaluate("moveNow = true; nativeForIn(forInProxy);");
+    try std.testing.expectEqual(@as(f64, 2), result.asNum());
+    try std.testing.expect((try ctx.evaluate("hasHits")).asNum() > 0);
+    try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
+    try std.testing.expect(ctx.gc.?.accounting().total_minor_moved_cells > 0);
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+}
+
 test "forced tree-walker and required bytecode agree on property deletion" {
     const source =
         \\var deleteLog = "";
