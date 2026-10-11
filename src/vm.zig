@@ -6150,7 +6150,7 @@ test "vm: native and baseline for-in control paths agree" {
         \\function makeSubject() { var proto = { p: 1 }; var object = Object.create(proto); object.a = 1; object.b = 2; object.c = 3; return object; }
         \\function sweep(object) { var out = ""; for (var key in object) { out += key; } return out; }
         \\function first(object) { for (var key in object) return key; return ""; }
-        \\function stop(object) { var out = ""; for (var key in object) { out += key; break; } return out; }
+        \\function stop(object) { for (var key in object) { break; } return 1; }
         \\function throwing(object) { try { for (var key in object) { if (key === "a") throw 7; } } catch (error) { return error; } finally {} return 0; }
         \\function cleanup(object) { var out = ""; try { for (var key in object) { out += key; break; } } finally { out += "!"; } return out; }
         \\function nested(object) { var out = ""; for (var outer in object) { for (var inner in object) { out += outer + inner; break; } } return out; }
@@ -6202,7 +6202,7 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|a|a|7|a!|aabacapa|kbaba|abcp|01|ap", native.asStr());
+    try std.testing.expectEqualStrings("abcp|a|1|7|a!|aabacapa|kbaba|abcp|01|ap", native.asStr());
 
     const first_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
     const first_artifact = first_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
@@ -6226,6 +6226,9 @@ test "vm: native and baseline for-in control paths agree" {
     try std.testing.expect(saw_enum_keys);
     try std.testing.expect(saw_enum_next);
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
+
+    const stop_chunk = native_program.fns.items[3].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(stop_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
