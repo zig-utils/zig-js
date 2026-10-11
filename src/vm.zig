@@ -6493,6 +6493,90 @@ test "vm: native for-in preserves proxy trap order" {
     try std.testing.expectEqual(@as(u64, 2), runtime.count(.enum_next));
 }
 
+test "vm: native for-in next publishes one proxy throw" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    });
+    const source =
+        \\var calls = 0;
+        \\var proxy = new Proxy({ a: 1 }, { has: function() { calls = calls + 1; throw 91; } });
+        \\proxy
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    const proxy = try run(&machine, program, null);
+    try std.testing.expect(proxy.isObject());
+
+    const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_keys),
+            .first_input = 0,
+            .input_count = 1,
+            .deopt_index = 0,
+            .step_delta = 1,
+            .origin = 1,
+            .result_count = 3,
+        },
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_next),
+            .first_input = 3,
+            .input_count = 3,
+            .exceptional_target = 0,
+            .deopt_index = 1,
+            .step_delta = 1,
+            .origin = 2,
+            .result_count = 4,
+        },
+    }, &.{.{
+        .target_ip = 7,
+        .first_handler = 0,
+        .unwind_stack_depth = 0,
+        .target_stack_depth = 1,
+        .handler_count = 1,
+        .kind = .catch_,
+    }});
+    defer metadata.destroy();
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    scratch[0] = proxy.rawBits();
+    var frame = jit.NativeFrame{
+        .scratch = &scratch,
+        .runtime_context = &machine,
+        .operation_context = metadata,
+        .exit_ip = 1,
+        .deopt_index = 0,
+        .operation_detail = 0,
+    };
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    scratch[3] = frame.operation_result_bits[0];
+    scratch[4] = frame.operation_result_bits[1];
+    scratch[5] = frame.operation_result_bits[2];
+    frame.exit_ip = 2;
+    frame.deopt_index = 1;
+    frame.operation_detail = 1;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.catchable_exception),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqual(Value.num(91).rawBits(), frame.operation_value_bits);
+    try std.testing.expectEqual(Value.num(91).rawBits(), machine.exception.rawBits());
+    try std.testing.expectEqual(@as(f64, 1), env.get("calls").?.asNum());
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_next));
+}
+
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
