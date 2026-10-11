@@ -6377,6 +6377,30 @@ test "vm: native for-in termination preserves the checkpoint boundary" {
     try std.testing.expectEqualStrings("Error", machine.exception.asObj().errorName());
     try std.testing.expectEqualStrings("worker terminated", (try machine.getProperty(machine.exception, "message")).asStr());
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
+
+    var watchdog_check: std.atomic.Value(bool) = .init(true);
+    var watchdog_deadline: std.atomic.Value(u64) = .init(1);
+    var watchdog_termination: std.atomic.Value(bool) = .init(false);
+    var watchdog_inventory: interp.ExecutionTierInventory = .{};
+    var watchdog_machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &watchdog_inventory,
+        .watchdog_check_flag = &watchdog_check,
+        .watchdog_deadline_ns = &watchdog_deadline,
+        .termination_request_flag = &watchdog_termination,
+    });
+    try std.testing.expectError(
+        error.Throw,
+        runFunction(&watchdog_machine, function, function_chunk, &.{target}, Value.undef(), Value.undef()),
+    );
+    try std.testing.expect(!watchdog_check.load(.acquire));
+    try std.testing.expect(watchdog_termination.load(.acquire));
+    try std.testing.expectEqualStrings("Error", watchdog_machine.exception.asObj().errorName());
+    try std.testing.expectEqualStrings("worker terminated", (try watchdog_machine.getProperty(watchdog_machine.exception, "message")).asStr());
+    try std.testing.expect(watchdog_inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
 }
 
 test "vm: native for-in preserves proxy trap order" {
