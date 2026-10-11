@@ -1692,7 +1692,6 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     const osr = try selectLoopOsrMetadata(plan, allocator, false);
     errdefer osr.destroy();
     const entry = osr.entries[0];
-    if (entry.stack_count != 0) return error.UnsupportedChunk;
     var header_block: ?u32 = null;
     for (plan.blocks) |block| if (block.start == entry.entry_ip) {
         if (header_block != null) return error.UnsupportedChunk;
@@ -2126,7 +2125,7 @@ fn lowerRegionOsr(
 
     const osr = try selectLoopOsrMetadata(plan, allocator, mode == .fused);
     errdefer osr.destroy();
-    if (osr.entries.len != 1 or osr.entries[0].stack_count != 0) return error.UnsupportedChunk;
+    if (osr.entries.len != 1) return error.UnsupportedChunk;
     const entry = osr.entries[0];
 
     var header: ?u32 = null;
@@ -2999,7 +2998,7 @@ fn appendBlockOperations(
                 const expected: ValueType = if (required_numeric[node.id]) .number else .other;
                 if (initialized[node.id] and required_numeric[node.id] and types[node.id] != .number)
                     return error.UnsupportedChunk;
-                if (!initialized[node.id] or expected == .other) types[node.id] = expected;
+                if (!initialized[node.id]) types[node.id] = expected;
                 initialized[node.id] = true;
             },
             .constant, .true, .false, .frame_slot => {}, // emitted once before control flow
@@ -3287,7 +3286,23 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
             },
             .enum_result => {
-                if (node.immediate >= 4) return error.UnsupportedChunk;
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                if (node.immediate >= 4 or node.origin >= runtime.chunk.code.items.len)
+                    return error.UnsupportedChunk;
+                types[node.id] = switch (runtime.chunk.code.items[node.origin].op) {
+                    .enum_keys => switch (node.immediate) {
+                        0, 1 => .other,
+                        2 => .number,
+                        else => return error.UnsupportedChunk,
+                    },
+                    .enum_next => switch (node.immediate) {
+                        0 => .number,
+                        1 => .other,
+                        2, 3 => .boolean,
+                        else => return error.UnsupportedChunk,
+                    },
+                    else => return error.UnsupportedChunk,
+                };
                 try operations.append(allocator, .{
                     .kind = .runtime_result,
                     .destination = @intCast(node.id),
@@ -6828,9 +6843,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .import_call, .inputs = 2, .kind = .effect },
         .{ .op = .object_rest, .a = 2, .inputs = 3, .kind = .effect },
         .{ .op = .async_iter_of, .inputs = 1, .kind = .effect },
-        .{ .op = .enum_keys, .inputs = 1, .kind = .effect },
-        .{ .op = .enum_next, .inputs = 3, .kind = .effect },
-        .{ .op = .enum_end_completion, .inputs = 5, .kind = .effect },
         .{ .op = .async_iter_close, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_close_completion, .inputs = 3, .kind = .effect },
         .{ .op = .prepare_class_heritage, .inputs = 1, .kind = .effect },
@@ -6904,6 +6916,46 @@ test "optimizer lowering publishes exact for-in result transport" {
         };
         try std.testing.expectEqual(case.result_nodes, result_nodes);
     }
+}
+
+test "optimizer lowering admits a resumable for-in loop" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.enum_keys, 0);
+    _ = try chunk.emit(.enum_next, 0);
+    _ = try chunk.emit(.jump_if_false, 9);
+    _ = try chunk.emit(.jump_if_false, 7);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_true, 0);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var loop_program = try lowerGeneralLoopOsr(&chunk, &plan, std.testing.allocator);
+    defer loop_program.deinit();
+    var artifact = try compileWithAllocator(&chunk, std.testing.allocator);
+    defer artifact.deinit();
+    try std.testing.expect(!artifact.entry_enabled);
+    try std.testing.expect(artifact.osr != null and artifact.has_side_exits);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_next = false;
+    for (operations.descriptors) |descriptor| {
+        saw_next = saw_next or descriptor.bytecode_op == @backingInt(bc.Op.enum_next);
+    }
+    try std.testing.expect(saw_next);
 }
 
 test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
