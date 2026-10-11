@@ -6154,9 +6154,13 @@ test "vm: native and baseline for-in control paths agree" {
         \\function throwing(object) { try { for (var key in object) { if (key === "a") throw 7; } } catch (error) { return error; } finally {} return 0; }
         \\function cleanup(object) { var out = ""; try { for (var key in object) { out += key; break; } } finally { out += "!"; } return out; }
         \\function nested(object) { var out = ""; for (var outer in object) { for (var inner in object) { out += outer + inner; break; } } return out; }
+        \\function proxyOrder(object) { var log = ""; var proxy = new Proxy(object, { ownKeys: function() { log += "k"; return ["b", "a"]; }, getOwnPropertyDescriptor: function(target, key) { log += key; return { enumerable: true, configurable: true }; } }); for (var key in proxy) log += key; return log; }
+        \\function changing(object) { var out = ""; for (var key in object) { out += key; object = { z: 1 }; } return out; }
+        \\function primitive(value) { var out = ""; for (var key in value) out += key; return out; }
+        \\function captured(object) { var first = null; var second = null; for (let key in object) { if (first === null) first = function() { return key; }; else second = function() { return key; }; } return first() + second(); }
         \\var result = "";
         \\for (var warm = 0; warm < 12; warm = warm + 1) {
-        \\  result = sweep(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject());
+        \\  result = sweep(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject());
         \\}
         \\result
     ;
@@ -6198,7 +6202,7 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|a|a|7|a!|aabacapa", native.asStr());
+    try std.testing.expectEqualStrings("abcp|a|a|7|a!|aabacapa|kbaba|abcp|01|ap", native.asStr());
 
     const first_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
     const first_artifact = first_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
