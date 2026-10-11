@@ -5935,8 +5935,63 @@ test "vm: native operation dispatcher transports for-in results exactly" {
         @backingInt(jit.NativeOperationStatus.value),
         nativeOperationDispatch(&frame, 2),
     );
-    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_keys));
-    try std.testing.expectEqual(@as(u64, 3), inventory.runtimeOperationSnapshot().count(.enum_next));
+    scratch[0] = Value.nul().rawBits();
+    frame.exit_ip = 1;
+    frame.deopt_index = 0;
+    frame.operation_detail = 0;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    try std.testing.expectEqual(Value.nul().rawBits(), frame.operation_result_bits[0]);
+    const null_keys = Value.fromRawBits(frame.operation_result_bits[1]);
+    try std.testing.expect(null_keys.isObject());
+    try std.testing.expectEqual(Value.num(0).rawBits(), frame.operation_result_bits[2]);
+    scratch[3] = frame.operation_result_bits[0];
+    scratch[4] = frame.operation_result_bits[1];
+    scratch[5] = frame.operation_result_bits[2];
+    frame.exit_ip = 2;
+    frame.deopt_index = 1;
+    frame.operation_detail = 1;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqual(Value.num(0).rawBits(), frame.operation_result_bits[0]);
+    try std.testing.expect(Value.fromRawBits(frame.operation_result_bits[1]).isUndefined());
+    try std.testing.expectEqual(Value.boolVal(false).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqual(Value.boolVal(false).rawBits(), frame.operation_result_bits[3]);
+
+    const primitive = try Value.strAlloc(arena.allocator(), "ab");
+    scratch[0] = primitive.rawBits();
+    frame.exit_ip = 1;
+    frame.deopt_index = 0;
+    frame.operation_detail = 0;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    const primitive_target = Value.fromRawBits(frame.operation_result_bits[0]);
+    try std.testing.expect(primitive_target.isObject());
+    const primitive_keys = Value.fromRawBits(frame.operation_result_bits[1]);
+    try std.testing.expect(primitive_keys.isObject());
+    scratch[3] = frame.operation_result_bits[0];
+    scratch[4] = frame.operation_result_bits[1];
+    scratch[5] = frame.operation_result_bits[2];
+    frame.exit_ip = 2;
+    frame.deopt_index = 1;
+    frame.operation_detail = 1;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqual(Value.num(1).rawBits(), frame.operation_result_bits[0]);
+    try std.testing.expectEqualStrings("0", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[3]);
+
+    try std.testing.expectEqual(@as(u64, 3), inventory.runtimeOperationSnapshot().count(.enum_keys));
+    try std.testing.expectEqual(@as(u64, 5), inventory.runtimeOperationSnapshot().count(.enum_next));
     try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_end_completion));
 }
 
