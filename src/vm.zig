@@ -6332,7 +6332,7 @@ test "vm: native for-in preserves proxy trap order" {
     const source =
         \\var proxyLog = "";
         \\var proxyTarget = { a: 1, b: 2 };
-        \\new Proxy(proxyTarget, { ownKeys: function() { proxyLog += "k"; return ["b", "a"]; }, getOwnPropertyDescriptor: function(target, key) { proxyLog += key; return { enumerable: true, configurable: true }; } })
+        \\new Proxy(proxyTarget, { ownKeys: function() { proxyLog += "k"; return ["b", "a"]; }, getOwnPropertyDescriptor: function(target, key) { proxyLog += key; return { enumerable: true, configurable: true }; }, has: function(target, key) { proxyLog += "h" + key; return key in target; } })
     ;
     var parser = try Parser.init(allocator, source);
     const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
@@ -6389,6 +6389,7 @@ test "vm: native for-in preserves proxy trap order" {
     );
     try std.testing.expectEqualStrings("b", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqualStrings("kbahb", env.get("proxyLog").?.asStr());
     scratch[3] = target_bits;
     scratch[4] = keys_bits;
     scratch[5] = frame.operation_result_bits[0];
@@ -6398,7 +6399,7 @@ test "vm: native for-in preserves proxy trap order" {
     );
     try std.testing.expectEqualStrings("a", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
-    try std.testing.expectEqualStrings("kba", env.get("proxyLog").?.asStr());
+    try std.testing.expectEqualStrings("kbahbha", env.get("proxyLog").?.asStr());
     const runtime = inventory.runtimeOperationSnapshot();
     try std.testing.expectEqual(@as(u64, 1), runtime.count(.enum_keys));
     try std.testing.expectEqual(@as(u64, 2), runtime.count(.enum_next));
