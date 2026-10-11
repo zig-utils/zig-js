@@ -111,7 +111,10 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .iter_of,
         .assert_iter_result,
         .iter_close,
+        .enum_keys,
         => 1,
+        .enum_next => 3,
+        .enum_end_completion, .enum_result => 0,
         .set_index, .init_prop_computed, .init_getter, .init_setter, .iter_close_completion => 3,
         .store_frame => 2,
         else => 2,
@@ -538,7 +541,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             }
         } else if (node.kind != .interpreter_value) {
             const op = plan.instructions[node.origin].op;
-            const expected: ir.ValueKind = if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
+            const expected: ir.ValueKind = if (node.kind == .enum_result) .enum_result else if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
                 .load_local, .load_local_mapped, .load_local_lexical => .load_frame,
                 .store_local, .store_local_mapped, .store_local_lexical => .store_frame,
                 .init_local_lexical => .init_frame,
@@ -667,11 +670,23 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         if (previous.block != state.block or expected != state.stack_count or inputs > previous.stack_count or
             !sameHandlers(graph, previous.first_handler, previous.handler_count, state.first_handler, state.handler_count))
             return error.InvalidFrameState;
-        // Close observes the completion pair but preserves it unchanged.
-        const preserved_completion = inst.op == .iter_close_completion;
-        const prefix = previous.local_count + previous.stack_count - (if (preserved_completion) @as(u32, 1) else inputs);
-        if (!std.mem.eql(u32, graph.frame_state_values[previous.first_value..][0..prefix], graph.frame_state_values[state.first_value..][0..prefix]))
-            return error.InvalidFrameState;
+        // Close observes the completion pair but preserves it unchanged. A
+        // for-in completion also removes its three private enumeration words
+        // while retaining the final value/kind pair, so compare those two
+        // projections rather than pretending the effect has one contiguous
+        // prefix.
+        const enum_end = inst.op == .enum_end_completion;
+        const preserved_completion = inst.op == .iter_close_completion or enum_end;
+        if (enum_end) {
+            if (state.stack_count != previous.stack_count - 3 or
+                !std.mem.eql(u32, graph.frame_state_values[previous.first_value .. previous.first_value + previous.local_count], graph.frame_state_values[state.first_value .. state.first_value + state.local_count]) or
+                !std.mem.eql(u32, graph.frame_state_values[previous.first_value + previous.local_count + previous.stack_count - 2 ..][0..2], graph.frame_state_values[state.first_value + state.local_count + state.stack_count - 2 ..][0..2]))
+                return error.InvalidFrameState;
+        } else {
+            const prefix = previous.local_count + previous.stack_count - (if (preserved_completion) @as(u32, 1) else inputs);
+            if (!std.mem.eql(u32, graph.frame_state_values[previous.first_value..][0..prefix], graph.frame_state_values[state.first_value..][0..prefix]))
+                return error.InvalidFrameState;
+        }
         if (!preserved_completion and state.stack_count > previous.stack_count - inputs) {
             const result = graph.frame_state_values[state.first_value + state.local_count + state.stack_count - 1];
             if (result >= graph.nodes.len) return error.InvalidValue;

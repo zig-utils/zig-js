@@ -124,6 +124,10 @@ pub const ValueKind = enum {
     load_binding_ref,
     clear_binding_ref,
     store_binding_ref,
+    enum_keys,
+    enum_next,
+    enum_end_completion,
+    enum_result,
     binding_base,
     branch_predicate,
     /// A value produced by exact bytecode but deliberately not embedded in the
@@ -209,9 +213,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .import_call,
         .object_rest,
         .async_iter_of,
-        .enum_keys,
-        .enum_next,
-        .enum_end_completion,
         .async_iter_close,
         .async_iter_close_completion,
         .prepare_class_heritage,
@@ -769,6 +770,9 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .assert_iter_result,
         .iter_close,
         .iter_close_completion,
+        .enum_keys,
+        .enum_next,
+        .enum_end_completion,
         => return depthEffect(inst).required,
         else => {},
     }
@@ -1403,6 +1407,76 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 if (inst.op == .assert_iter_result) stack[depth - 1] = result;
                 // IteratorClose consumes only the iterator. The completion
                 // value/kind remain the original SSA values, even after reentry.
+            },
+            .enum_keys, .enum_next, .enum_end_completion => {
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const first = depth - effect.required;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = switch (inst.op) {
+                        .enum_keys => .enum_keys,
+                        .enum_next => .enum_next,
+                        .enum_end_completion => .enum_end_completion,
+                        else => unreachable,
+                    },
+                    .lhs = if (inst.op == .enum_end_completion) ValueNode.none else stack[first],
+                    .rhs = if (inst.op != .enum_end_completion and effect.required >= 2) stack[first + 1] else ValueNode.none,
+                    .third = if (inst.op != .enum_end_completion and effect.required >= 3) stack[first + 2] else ValueNode.none,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                depth -= effect.removed;
+                switch (inst.op) {
+                    .enum_keys => {
+                        stack[depth] = result;
+                        depth += 1;
+                        for (1..3) |result_index| {
+                            const value = try builder.appendNode(.{
+                                .id = undefined,
+                                .block = @intCast(block_id),
+                                .origin = @intCast(origin),
+                                .kind = .enum_result,
+                                .immediate = result_index,
+                                .may_have_effect = true,
+                            });
+                            try builder.roots.append(allocator, value);
+                            stack[depth] = value;
+                            depth += 1;
+                        }
+                    },
+                    .enum_next => {
+                        // The updated cursor replaces the retained state word;
+                        // key, presence, and candidate are appended in order.
+                        stack[first + 2] = result;
+                        for (1..4) |result_index| {
+                            const value = try builder.appendNode(.{
+                                .id = undefined,
+                                .block = @intCast(block_id),
+                                .origin = @intCast(origin),
+                                .kind = .enum_result,
+                                .immediate = result_index,
+                                .may_have_effect = true,
+                            });
+                            try builder.roots.append(allocator, value);
+                            stack[depth] = value;
+                            depth += 1;
+                        }
+                    },
+                    .enum_end_completion => {
+                        // The VM shrinks the private [target, keys, cursor]
+                        // prefix and appends the completion pair. Move that
+                        // pair in the SSA stack model before the continuation
+                        // state is recorded.
+                        stack[first] = stack[first + 3];
+                        stack[first + 1] = stack[first + 4];
+                    },
+                    else => unreachable,
+                }
             },
             .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical => {
                 const write = inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical;
@@ -2108,6 +2182,9 @@ fn supports(op: bc.Op) bool {
         .assert_iter_result,
         .iter_close,
         .iter_close_completion,
+        .enum_keys,
+        .enum_next,
+        .enum_end_completion,
         => true,
         else => false,
     };

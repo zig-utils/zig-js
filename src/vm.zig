@@ -2478,7 +2478,20 @@ fn finishNativeOperation(
     operation_id: u32,
     result: EvalError!Value,
 ) u32 {
-    const value_word = result catch |err| return switch (err) {
+    const value_word = result catch |err| return finishNativeOperationError(frame, vm, operation_id, err);
+    frame.operation_value_bits = value_word.rawBits();
+    frame.operation_detail = operation_id;
+    return @backingInt(jit.NativeOperationStatus.value);
+}
+
+fn finishNativeOperationError(
+    frame: *jit.NativeFrame,
+    vm: *Interpreter,
+    operation_id: u32,
+    err: EvalError,
+) u32 {
+    _ = operation_id;
+    return switch (err) {
         error.Throw => thrown: {
             frame.operation_value_bits = vm.exception.rawBits();
             break :thrown @backingInt(jit.NativeOperationStatus.catchable_exception);
@@ -2486,9 +2499,6 @@ fn finishNativeOperation(
         error.OutOfMemory => @backingInt(jit.NativeOperationStatus.out_of_memory),
         error.OptShortCircuit => @backingInt(jit.NativeOperationStatus.host_trap),
     };
-    frame.operation_value_bits = value_word.rawBits();
-    frame.operation_detail = operation_id;
-    return @backingInt(jit.NativeOperationStatus.value);
 }
 
 fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
@@ -4468,6 +4478,7 @@ fn nativeOperationCanElideLegacyFrame(
     const op: bc.Op = @fromBackingInt(@intCast(@as(u8, @intCast(descriptor.bytecode_op))));
     const values: []const Value = @ptrCast(inputs);
     switch (op) {
+        .enum_keys, .enum_next, .enum_end_completion => return false,
         .not, .typeof_op => return values.len == 1,
         .to_numeric,
         .neg,
@@ -4698,6 +4709,66 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         !nativeOperationCanElideLegacyFrame(vm, metadata, operation_id, descriptor, inputs))
         return @backingInt(jit.NativeOperationStatus.invalidated);
     recordRuntimeOperation(vm, descriptor.bytecode_op);
+    if (descriptor.bytecode_op == @backingInt(bc.Op.enum_keys) and inputs.len == 1) {
+        if (descriptor.result_count != 3) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const state = vm.prepareForIn(Value.fromRawBits(inputs[0])) catch |err|
+            return finishNativeOperationError(frame, vm, operation_id, err);
+        frame.operation_result_bits[0] = state.target.rawBits();
+        frame.operation_result_bits[1] = state.keys.rawBits();
+        frame.operation_result_bits[2] = Value.num(0).rawBits();
+        frame.operation_detail = operation_id;
+        return @backingInt(jit.NativeOperationStatus.value);
+    }
+    if (descriptor.bytecode_op == @backingInt(bc.Op.enum_next) and inputs.len == 3) {
+        if (descriptor.result_count != 4) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const target = Value.fromRawBits(inputs[0]);
+        const keys_value = Value.fromRawBits(inputs[1]);
+        const cursor_value = Value.fromRawBits(inputs[2]);
+        if (!keys_value.isObject() or !cursor_value.isNumber())
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        const cursor_number = cursor_value.asNum();
+        if (!std.math.isFinite(cursor_number) or cursor_number < 0 or @trunc(cursor_number) != cursor_number)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        const target_root = vm.pushTempRoot(target) catch |err|
+            return finishNativeOperationError(frame, vm, operation_id, err);
+        defer vm.restoreTempRoots(target_root);
+        const keys_root = vm.pushTempRoot(keys_value) catch |err|
+            return finishNativeOperationError(frame, vm, operation_id, err);
+        defer vm.restoreTempRoots(keys_root);
+        if (cursor_number > @as(f64, @floatFromInt(std.math.maxInt(usize))))
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        var index: usize = @intFromFloat(cursor_number);
+        var key = Value.undef();
+        var present = false;
+        var has_candidate = false;
+        const keys = vm.tempRoot(keys_root, keys_value).asObj();
+        if (index < keys.elementsLen()) {
+            key = keys.denseElement(index) orelse return @backingInt(jit.NativeOperationStatus.host_trap);
+            index += 1;
+            has_candidate = true;
+            const key_root = vm.pushTempRoot(key) catch |err|
+                return finishNativeOperationError(frame, vm, operation_id, err);
+            defer vm.restoreTempRoots(key_root);
+            const property = propKey(vm, vm.tempRoot(key_root, key)) catch |err|
+                return finishNativeOperationError(frame, vm, operation_id, err);
+            const rooted_target = vm.tempRoot(target_root, target);
+            if (!rooted_target.isObject()) return @backingInt(jit.NativeOperationStatus.host_trap);
+            present = vm.hasPropertyResult(rooted_target.asObj(), property) catch |err|
+                return finishNativeOperationError(frame, vm, operation_id, err);
+            key = vm.tempRoot(key_root, key);
+        }
+        frame.operation_result_bits[0] = Value.num(@floatFromInt(index)).rawBits();
+        frame.operation_result_bits[1] = key.rawBits();
+        frame.operation_result_bits[2] = Value.boolVal(present).rawBits();
+        frame.operation_result_bits[3] = Value.boolVal(has_candidate).rawBits();
+        frame.operation_detail = operation_id;
+        return @backingInt(jit.NativeOperationStatus.value);
+    }
+    if (descriptor.bytecode_op == @backingInt(bc.Op.enum_end_completion) and inputs.len == 5) {
+        if (descriptor.result_count != 0) return @backingInt(jit.NativeOperationStatus.host_trap);
+        frame.operation_detail = operation_id;
+        return @backingInt(jit.NativeOperationStatus.value);
+    }
     if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericValue(Value.fromRawBits(inputs[0])));
     if ((descriptor.bytecode_op == @backingInt(bc.Op.neg) or
@@ -5743,6 +5814,103 @@ test "vm: native operation dispatcher preserves explicit this and arguments" {
         nativeOperationDispatch(&frame, 0),
     );
     try std.testing.expectEqual(Value.obj(&receiver).rawBits(), frame.operation_value_bits);
+}
+
+test "vm: native operation dispatcher transports for-in results exactly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var env = Environment{ .arena = arena.allocator(), .fn_scope = true };
+    const root_shape = try Shape.createRoot(arena.allocator());
+    var inventory = interp.ExecutionTierInventory{};
+    var machine = try initTestInterpreter(.{
+        .arena = arena.allocator(),
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    });
+    const target = try machine.newObject();
+    try machine.setProp(target.asObj(), "a", Value.num(1));
+    try machine.setProp(target.asObj(), "b", Value.num(2));
+    const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_keys),
+            .first_input = 0,
+            .input_count = 1,
+            .deopt_index = 0,
+            .step_delta = 1,
+            .origin = 1,
+            .result_count = 3,
+        },
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_next),
+            .first_input = 3,
+            .input_count = 3,
+            .deopt_index = 1,
+            .step_delta = 1,
+            .origin = 2,
+            .result_count = 4,
+        },
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_end_completion),
+            .first_input = 6,
+            .input_count = 5,
+            .deopt_index = 2,
+            .step_delta = 1,
+            .origin = 3,
+            .result_count = 0,
+        },
+    }, &.{});
+    defer metadata.destroy();
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    scratch[0] = target.rawBits();
+    var frame = jit.NativeFrame{
+        .scratch = &scratch,
+        .runtime_context = &machine,
+        .operation_context = metadata,
+        .exit_ip = 1,
+        .deopt_index = 0,
+        .operation_detail = 0,
+    };
+
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    try std.testing.expectEqual(target.rawBits(), frame.operation_result_bits[0]);
+    const keys = Value.fromRawBits(frame.operation_result_bits[1]);
+    try std.testing.expect(keys.isObject());
+    try std.testing.expectEqual(Value.num(0).rawBits(), frame.operation_result_bits[2]);
+
+    scratch[3] = frame.operation_result_bits[0];
+    scratch[4] = frame.operation_result_bits[1];
+    scratch[5] = frame.operation_result_bits[2];
+    frame.exit_ip = 2;
+    frame.deopt_index = 1;
+    frame.operation_detail = 1;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqual(Value.num(1).rawBits(), frame.operation_result_bits[0]);
+    try std.testing.expectEqualStrings("a", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[3]);
+
+    scratch[6] = scratch[3];
+    scratch[7] = scratch[4];
+    scratch[8] = frame.operation_result_bits[0];
+    scratch[9] = Value.num(17).rawBits();
+    scratch[10] = Value.num(0).rawBits();
+    frame.exit_ip = 3;
+    frame.deopt_index = 2;
+    frame.operation_detail = 2;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 2),
+    );
+    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_keys));
+    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_next));
+    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_end_completion));
 }
 
 test "vm: native operation dispatcher executes invocation forms including tail calls" {

@@ -373,6 +373,10 @@ pub const NativeOperationDescriptor = extern struct {
     continuation_deopt_index: u16 = none,
     continuation_steps: u32 = 0,
     block_prefix_steps: u32 = 0,
+    /// Number of values written to `NativeFrame.operation_result_bits` by
+    /// this runtime operation. One is the ordinary scalar result; zero is a
+    /// completion-only operation.
+    result_count: u8 = 1,
 
     pub const none = std.math.maxInt(u16);
     pub const numeric_result: u16 = 1 << 0;
@@ -770,6 +774,9 @@ pub const NativeFrame = extern struct {
     operation: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) u32 = null,
     operation_context: ?*anyopaque = null,
     operation_value_bits: u64 = 0,
+    /// Exact fixed-width transport for the multi-result for-in effects. The
+    /// descriptor publishes how many entries are live for each operation.
+    operation_result_bits: [4]u64 = @splat(0),
     /// Status-specific immutable/runtime detail, such as a trap or watchdog
     /// reason. Generated code must not interpret it unless the descriptor's
     /// operation kind defines that status.

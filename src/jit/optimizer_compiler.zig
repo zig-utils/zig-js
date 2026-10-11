@@ -42,6 +42,7 @@ pub const OperationKind = enum {
     eq,
     neq,
     runtime_operation,
+    runtime_result,
     runtime_base,
     branch_predicate,
 };
@@ -733,6 +734,8 @@ fn stageNativeOperationDescriptors(
                 inst.op == .shl or inst.op == .shr or inst.op == .ushr or inst.op == .in_op or
                 inst.op == .instance_of) and input_count == 2) break :runtime operation.lhs;
             if (inst.op == .set_index and input_count == 3) break :runtime operation.lhs;
+            if (inst.op == .enum_keys or inst.op == .enum_next or inst.op == .enum_end_completion)
+                break :runtime operation.lhs;
             if (inst.op == .call or inst.op == .call_eval or inst.op == .call_method or
                 inst.op == .call_spread or inst.op == .call_eval_spread or
                 inst.op == .call_with_this_spread or inst.op == .call_with_this or
@@ -838,8 +841,21 @@ fn stageNativeOperationDescriptors(
             .continuation_deopt_index = continuation_index,
             .continuation_steps = continuation_steps,
             .block_prefix_steps = state.origin - plan.blocks[state.block].start + 1,
+            .result_count = switch (inst.op) {
+                .enum_keys => 3,
+                .enum_next => 4,
+                .enum_end_completion => 0,
+                else => 1,
+            },
         });
-        if (runtime_operation) |operation| operation.immediate = descriptor_index;
+        if (runtime_operation) |operation| {
+            operation.immediate = descriptor_index;
+            for (operations.items) |*result| if (result.kind == .runtime_result and
+                result.block == state.block and result.origin == state.origin)
+            {
+                result.immediate = descriptor_index;
+            };
+        }
     }
     return descriptors.toOwnedSlice(allocator);
 }
@@ -950,7 +966,7 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
         node.kind == .new_object or node.kind == .new_array or node.kind == .init_prop or
         node.kind == .init_proto or node.kind == .init_prop_computed or node.kind == .init_spread or
         node.kind == .init_getter or node.kind == .init_setter or node.kind == .array_append or
-        node.kind == .make_closure or node.kind == .load_frame or node.kind == .store_frame or node.kind == .init_frame or node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion) and
+        node.kind == .make_closure or node.kind == .load_frame or node.kind == .store_frame or node.kind == .init_frame or node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion or node.kind == .enum_keys or node.kind == .enum_next or node.kind == .enum_end_completion) and
         node.block == state.block and
         node.origin == state.origin)
     {
@@ -1185,7 +1201,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -1221,6 +1237,17 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block = node.block,
                 .lhs = @intCast(first_input),
                 .immediate = node.origin,
+                .origin = node.origin,
+            });
+        },
+        .enum_result => {
+            if (node.immediate >= 4) return error.UnsupportedChunk;
+            types[node.id] = .other;
+            try operations.append(allocator, .{
+                .kind = .runtime_result,
+                .destination = @intCast(node.id),
+                .block = node.block,
+                .lhs = @intCast(node.immediate),
                 .origin = node.origin,
             });
         },
@@ -3020,7 +3047,7 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
                 try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .origin = node.origin });
             },
-            .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
+            .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -3254,6 +3281,18 @@ fn appendBlockOperations(
                     .destination = @intCast(node.id),
                     .block = block,
                     .lhs = first_input,
+                    .immediate = node.origin,
+                    .origin = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .enum_result => {
+                if (node.immediate >= 4) return error.UnsupportedChunk;
+                try operations.append(allocator, .{
+                    .kind = .runtime_result,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = @intCast(node.immediate),
                     .immediate = node.origin,
                     .origin = node.origin,
                 });
@@ -4158,6 +4197,7 @@ fn emitOperation(
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
         .runtime_operation => try emitRuntimeOperation(assembler, returns, program, operation),
+        .runtime_result => try emitRuntimeResult(assembler, program, operation),
         .branch_predicate => {
             const op: bc.Op = @fromBackingInt(@intCast(operation.immediate));
             const nullish = op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek;
@@ -5133,6 +5173,22 @@ fn emitDirectNumericDataAccess(
     return direct;
 }
 
+fn emitRuntimeResult(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+) !void {
+    if (operation.immediate >= program.native_operations.len or operation.lhs >= 4)
+        return error.UnsupportedChunk;
+    const descriptor = program.native_operations[operation.immediate];
+    if (descriptor.result_count <= operation.lhs or descriptor.result_count > 4)
+        return error.UnsupportedChunk;
+    const offset = @offsetOf(jit.NativeFrame, "operation_result_bits") +
+        @as(usize, operation.lhs) * @sizeOf(u64);
+    try assembler.load64(9, 12, std.math.cast(u15, offset) orelse return error.UnsupportedChunk);
+    try assembler.store64(9, 14, try slotOffset(operation.destination));
+}
+
 fn emitRuntimeOperation(
     assembler: *aarch64.Assembler,
     returns: *aarch64.ReturnBranches,
@@ -5246,8 +5302,14 @@ fn emitRuntimeOperation(
 
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.value));
     const non_value = try assembler.branchConditionPlaceholder(.ne);
-    try assembler.load64(9, 12, frameOffset("operation_value_bits"));
-    try assembler.store64(9, 14, try slotOffset(operation.destination));
+    if (descriptor.result_count != 0) {
+        const result_offset = if (descriptor.result_count == 1)
+            frameOffset("operation_value_bits")
+        else
+            std.math.cast(u15, @offsetOf(jit.NativeFrame, "operation_result_bits")) orelse return error.UnsupportedChunk;
+        try assembler.load64(9, 12, result_offset);
+        try assembler.store64(9, 14, try slotOffset(operation.destination));
+    }
     const done = try assembler.branchPlaceholder();
 
     try assembler.patchConditionBranch(non_value, assembler.position());
@@ -6797,6 +6859,50 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         const expected_roots = (@as(u64, 1) << @intCast(case.inputs)) - 1;
         try std.testing.expectEqual(expected_roots, program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
         try std.testing.expectEqual(@as(u128, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
+    }
+}
+
+test "optimizer lowering publishes exact for-in result transport" {
+    const Case = struct {
+        op: bc.Op,
+        inputs: u32,
+        result_count: u8,
+        result_nodes: u8,
+    };
+    const cases = [_]Case{
+        .{ .op = .enum_keys, .inputs = 1, .result_count = 3, .result_nodes = 2 },
+        .{ .op = .enum_next, .inputs = 3, .result_count = 4, .result_nodes = 3 },
+        .{ .op = .enum_end_completion, .inputs = 5, .result_count = 0, .result_nodes = 0 },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = case.inputs;
+        chunk.local_count = case.inputs;
+        for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emit(case.op, 0);
+        _ = try chunk.emit(.ret, 0);
+
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const descriptor = program.native_operations[0];
+        try std.testing.expectEqual(case.result_count, descriptor.result_count);
+        try std.testing.expectEqual(@as(u16, @backingInt(case.op)), descriptor.bytecode_op);
+
+        var result_nodes: u8 = 0;
+        for (program.operations) |operation| if (operation.kind == .runtime_result) {
+            result_nodes += 1;
+            try std.testing.expectEqual(@as(u64, 0), operation.immediate);
+            try std.testing.expect(operation.lhs < descriptor.result_count);
+        };
+        try std.testing.expectEqual(case.result_nodes, result_nodes);
     }
 }
 
