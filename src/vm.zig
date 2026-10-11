@@ -6584,6 +6584,81 @@ test "vm: native for-in next publishes one proxy throw" {
     try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_next));
 }
 
+test "vm: optimizer native for-in next deoptimizes one proxy throw into catch" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    });
+    const source =
+        \\var calls = 0;
+        \\var proxy = new Proxy({ a: 1 }, { has: function() { calls = calls + 1; throw 91; } });
+        \\proxy
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    const proxy = try run(&machine, program, null);
+    const state = try machine.prepareForIn(proxy);
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 3;
+    chunk.local_count = 3;
+    _ = try chunk.emitAB(.push_handler, 14, Handler.none);
+    for (0..3) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+    _ = try chunk.emit(.enum_next, 0);
+    for (0..6) |_| _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop_handler, 0);
+    const normal = try chunk.addConst(Value.num(0));
+    _ = try chunk.emit(.load_const, normal);
+    _ = try chunk.emit(.jump, 17);
+    _ = try chunk.emit(.pop, 0);
+    const caught = try chunk.addConst(Value.num(99));
+    _ = try chunk.emit(.load_const, caught);
+    _ = try chunk.emit(.jump, 17);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    var enum_next: ?jit.NativeOperationDescriptor = null;
+    for (operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_next)) enum_next = descriptor;
+    }
+    const descriptor = enum_next orelse return error.TestUnexpectedResult;
+    try std.testing.expect(descriptor.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expectEqual(
+        jit.NativeExceptionalTargetKind.catch_,
+        operations.exceptional_targets[descriptor.exceptional_target].kind,
+    );
+
+    var slots = [_]Value{ state.target, state.keys, Value.num(0) };
+    var frame = Frame{ .slots = &slots, .parent = null };
+    var exec = Exec{ .chunk = &chunk, .frame = &frame, .ip = 0 };
+    defer exec.stack.deinit(allocator);
+    defer exec.handlers.deinit(allocator);
+    const outcome = try tryRunManagedNative(&machine, &compiled, &slots, &exec);
+    try std.testing.expectEqual(NativeRunOutcome.deoptimized, outcome);
+    try std.testing.expectEqual(@as(usize, 14), exec.ip);
+    try std.testing.expectEqual(@as(usize, 1), exec.stack.items.len);
+    try std.testing.expectEqual(Value.num(91).rawBits(), exec.stack.items[0].rawBits());
+    try std.testing.expectEqual(@as(f64, 1), env.get("calls").?.asNum());
+    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_next));
+
+    var delta: jit.OptimizerProfile.Delta = .{};
+    const result = try runChunk(&machine, &exec, &chunk, &frame, null, &delta);
+    try std.testing.expectEqual(Value.num(99).rawBits(), result.rawBits());
+    try std.testing.expectEqual(@as(f64, 1), env.get("calls").?.asNum());
+}
+
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
