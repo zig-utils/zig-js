@@ -6037,6 +6037,53 @@ test "vm: optimizer native for-in next executes one candidate" {
     try std.testing.expect(exhausted.complete.isBoolean() and !exhausted.complete.asBool());
 }
 
+test "vm: optimizer native for-in result recovery executes" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const target = try machine.newObject();
+    try machine.setProp(target.asObj(), "a", Value.num(1));
+
+    var keys_chunk = bc.Chunk.init(allocator);
+    keys_chunk.param_count = 1;
+    keys_chunk.local_count = 1;
+    _ = try keys_chunk.emit(.load_local, 0);
+    _ = try keys_chunk.emit(.enum_keys, 0);
+    _ = try keys_chunk.emit(.ret, 0);
+    var keys_compiled = try optimizer_compiler.compile(&keys_chunk);
+    defer keys_compiled.deinit();
+    const keys_operations = keys_compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), keys_operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.enum_keys)), keys_operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u8, 3), keys_operations.descriptors[0].result_count);
+    var key_slots = [_]Value{Value.obj(target.asObj())};
+    const keys_result = try tryRunManagedNative(&machine, &keys_compiled, &key_slots, null);
+    try std.testing.expect(keys_result == .complete);
+    try std.testing.expect(keys_result.complete.isNumber() and keys_result.complete.asNum() == 0);
+
+    const state = try machine.prepareForIn(Value.obj(target.asObj()));
+    var end_chunk = bc.Chunk.init(allocator);
+    end_chunk.param_count = 5;
+    end_chunk.local_count = 5;
+    for (0..5) |slot| _ = try end_chunk.emit(.load_local, @intCast(slot));
+    _ = try end_chunk.emit(.enum_end_completion, 0);
+    _ = try end_chunk.emit(.ret, 0);
+    var end_compiled = try optimizer_compiler.compile(&end_chunk);
+    defer end_compiled.deinit();
+    const end_operations = end_compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), end_operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.enum_end_completion)), end_operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u8, 0), end_operations.descriptors[0].result_count);
+    var end_slots = [_]Value{ state.target, state.keys, Value.num(0), Value.num(7), Value.num(2) };
+    const end_result = try tryRunManagedNative(&machine, &end_compiled, &end_slots, null);
+    try std.testing.expect(end_result == .complete);
+    try std.testing.expect(end_result.complete.isNumber() and end_result.complete.asNum() == 2);
+}
+
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
