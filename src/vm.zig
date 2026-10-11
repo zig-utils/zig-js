@@ -5880,10 +5880,13 @@ test "vm: native operation dispatcher transports for-in results exactly" {
     const keys = Value.fromRawBits(frame.operation_result_bits[1]);
     try std.testing.expect(keys.isObject());
     try std.testing.expectEqual(Value.num(0).rawBits(), frame.operation_result_bits[2]);
+    const target_bits = frame.operation_result_bits[0];
+    const keys_bits = frame.operation_result_bits[1];
 
-    scratch[3] = frame.operation_result_bits[0];
-    scratch[4] = frame.operation_result_bits[1];
+    scratch[3] = target_bits;
+    scratch[4] = keys_bits;
     scratch[5] = frame.operation_result_bits[2];
+    try std.testing.expect(try machine.deleteOwn(target.asObj(), "a"));
     frame.exit_ip = 2;
     frame.deopt_index = 1;
     frame.operation_detail = 1;
@@ -5893,8 +5896,32 @@ test "vm: native operation dispatcher transports for-in results exactly" {
     );
     try std.testing.expectEqual(Value.num(1).rawBits(), frame.operation_result_bits[0]);
     try std.testing.expectEqualStrings("a", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
+    try std.testing.expectEqual(Value.boolVal(false).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[3]);
+
+    scratch[3] = target_bits;
+    scratch[4] = keys_bits;
+    scratch[5] = frame.operation_result_bits[0];
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqual(Value.num(2).rawBits(), frame.operation_result_bits[0]);
+    try std.testing.expectEqualStrings("b", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[3]);
+
+    scratch[3] = target_bits;
+    scratch[4] = keys_bits;
+    scratch[5] = frame.operation_result_bits[0];
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqual(Value.num(2).rawBits(), frame.operation_result_bits[0]);
+    try std.testing.expect(Value.fromRawBits(frame.operation_result_bits[1]).isUndefined());
+    try std.testing.expectEqual(Value.boolVal(false).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqual(Value.boolVal(false).rawBits(), frame.operation_result_bits[3]);
 
     scratch[6] = scratch[3];
     scratch[7] = scratch[4];
@@ -5909,7 +5936,7 @@ test "vm: native operation dispatcher transports for-in results exactly" {
         nativeOperationDispatch(&frame, 2),
     );
     try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_keys));
-    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_next));
+    try std.testing.expectEqual(@as(u64, 3), inventory.runtimeOperationSnapshot().count(.enum_next));
     try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_end_completion));
 }
 
