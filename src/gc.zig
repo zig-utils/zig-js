@@ -2852,6 +2852,12 @@ fn traceActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
                     candidates &= candidates - 1;
                 }
             }
+            var results = map.operation_result_pointer_slots;
+            while (results != 0) {
+                const slot: u2 = @intCast(@ctz(results));
+                markValue(v, Value.fromRawBits(active.frame.operation_result_bits[slot]));
+                results &= results - 1;
+            }
             if (active.frame.scratch) |scratch| {
                 var candidates = map.scratch_pointer_slots;
                 while (candidates != 0) {
@@ -2914,6 +2920,13 @@ fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
                     gc_relocation.rewriteValueSlot(v, value_slot);
                     candidates &= candidates - 1;
                 }
+            }
+            var results = map.operation_result_pointer_slots;
+            while (results != 0) {
+                const slot: u2 = @intCast(@ctz(results));
+                const value_slot: *Value = @ptrCast(@alignCast(&active.frame.operation_result_bits[slot]));
+                gc_relocation.rewriteValueSlot(v, value_slot);
+                results &= results - 1;
             }
             if (active.frame.scratch) |scratch| {
                 var candidates = map.scratch_pointer_slots;

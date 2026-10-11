@@ -132,6 +132,13 @@ pub fn verify(program: *const compiler.Program) Error!void {
             (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and descriptor.exceptional_target >= program.native_exceptional_targets.len))
             return error.InvalidDescriptor;
         const op = std.enums.fromInt(bc.Op, descriptor.bytecode_op) orelse return error.InvalidDescriptor;
+        const result_count: u8 = switch (op) {
+            .enum_keys => 3,
+            .enum_next => 4,
+            .enum_end_completion => 0,
+            else => 1,
+        };
+        if (descriptor.result_count != result_count) return error.InvalidDescriptor;
         switch (op) {
             .make_closure, .load_local, .load_local_mapped, .load_local_lexical, .store_local, .store_local_mapped, .store_local_lexical, .init_local_lexical => if (!program.canonical_locals) return error.InvalidDescriptor,
             else => {},
@@ -263,6 +270,10 @@ pub fn verify(program: *const compiler.Program) Error!void {
     for (program.native_operations) |descriptor| {
         if (descriptor.step_delta == 0) continue;
         const map = program.stack_maps[descriptor.deopt_index];
+        if (descriptor.result_count > 1) {
+            if (descriptor.result_count > 4 or map.operation_result_pointer_slots !=
+                @as(u4, @intCast((@as(u8, 1) << @intCast(descriptor.result_count)) - 1))) return error.MissingRoot;
+        }
         for (descriptor.first_input..descriptor.first_input + descriptor.input_count) |input| {
             if (!defined[input] or map.scratch_pointer_slots & bit(u128, input) == 0) return error.MissingRoot;
         }
@@ -498,4 +509,32 @@ test "optimizer native metadata verifier validates completed effect continuation
     try std.testing.expectError(error.InvalidDescriptor, verify(&program));
     program.native_operations[0] = descriptor;
     try verify(&program);
+}
+
+test "optimizer native metadata verifier requires exact enumeration transport roots" {
+    for ([_]bc.Op{ .enum_keys, .enum_next }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        const count: u32 = if (op == .enum_keys) 1 else 3;
+        chunk.param_count = count;
+        chunk.local_count = count;
+        for (0..count) |argument_index| _ = try chunk.emit(.load_local, @intCast(argument_index));
+        _ = try chunk.emit(op, 0);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try compiler.lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+        const descriptor = program.native_operations[0];
+        const original = program.stack_maps[descriptor.deopt_index];
+        try std.testing.expectEqual(@as(u4, if (op == .enum_keys) 7 else 15), original.operation_result_pointer_slots);
+        program.stack_maps[descriptor.deopt_index].operation_result_pointer_slots &= ~@as(u4, 2);
+        try std.testing.expectError(error.MissingRoot, verify(&program));
+        program.stack_maps[descriptor.deopt_index] = original;
+        program.native_operations[0].result_count = 1;
+        try std.testing.expectError(error.InvalidDescriptor, verify(&program));
+        program.native_operations[0] = descriptor;
+        try verify(&program);
+    }
 }

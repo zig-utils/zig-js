@@ -27555,3 +27555,119 @@ test "vm: optimizer closure allocation retains realm module and retirement conte
         try std.testing.expect((try ctx.evaluate("retainedRealmClosure()[1]===other.Array && retainedRealmClosure()[2]===other")).asBool());
     }
 }
+
+test "vm: optimizer enumeration checkpoints recover every result" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const Probe = struct {
+        move: bool,
+        moved: bool = false,
+        before_copy: bool,
+        transport_rooted: bool = false,
+        result_bits: [4]u64 = @splat(0),
+        fn operation(frame: *jit.NativeFrame, id: u32) callconv(.c) u32 {
+            const status = nativeOperationDispatch(frame, id);
+            const self: *@This() = @ptrCast(@alignCast(@constCast(frame.profile_bytecode_context.?)));
+            self.result_bits = frame.operation_result_bits;
+            if (self.move and self.before_copy) {
+                self.collect(frame);
+                const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context.?));
+                if (metadata.descriptors[id].bytecode_op == @backingInt(bc.Op.enum_keys)) {
+                    self.transport_rooted = frame.operation_result_bits[0] == frame.slots.?[0] and frame.operation_result_bits[0] != self.result_bits[0];
+                } else {
+                    const keys = Value.fromRawBits(frame.slots.?[1]).asObj();
+                    self.transport_rooted = frame.operation_result_bits[1] == keys.denseElement(0).?.rawBits() and machineMap(frame).operation_result_pointer_slots == 15;
+                }
+            }
+            const machine: *Interpreter = @ptrCast(@alignCast(frame.runtime_context.?));
+            machine.steps += 10;
+            return status;
+        }
+        fn machineMap(frame: *jit.NativeFrame) jit.StackMap {
+            const machine: *Interpreter = @ptrCast(@alignCast(frame.runtime_context.?));
+            return machine.gc_native_roots.?.currentMap().?;
+        }
+        fn collect(self: *@This(), frame: *jit.NativeFrame) void {
+            {
+                const machine: *Interpreter = @ptrCast(@alignCast(frame.runtime_context.?));
+                const context: *Context = @ptrCast(@alignCast(machine.gc_safepoint_ctx.?));
+                const before = context.gc_moving_safepoint_compactions.load(.monotonic);
+                if (!context.requestGarbageCompaction()) return;
+                const precise = machine.gc_precise_safepoint;
+                const moving = machine.gc_moving_safepoint;
+                machine.gc_precise_safepoint = true;
+                machine.gc_moving_safepoint = true;
+                machine.gc_safepoint_fn.?(machine.gc_safepoint_ctx.?, machine);
+                machine.gc_precise_safepoint = precise;
+                machine.gc_moving_safepoint = moving;
+                self.moved = context.gc_moving_safepoint_compactions.load(.monotonic) > before;
+            }
+        }
+        fn checkpoint(frame: *jit.NativeFrame, _: u32) callconv(.c) bool {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(frame.profile_bytecode_context.?)));
+            if (self.move and !self.before_copy) self.collect(frame);
+            return false;
+        }
+    };
+    for ([_]bool{ false, true }) |parallel| for (0..3) |stage| for ([_]bc.Op{ .enum_keys, .enum_next }) |op| {
+        const move = stage != 0;
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true, .enable_threads = parallel, .parallel_gc = parallel, .parallel_js = parallel });
+        defer ctx.destroy();
+        ctx.collectGarbage();
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const active = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(active);
+        for (0..1024) |_| _ = try machine.newObject();
+        const target = try machine.newObject();
+        try machine.setProp(target.asObj(), "a", Value.num(17));
+        const prepared = try machine.prepareForIn(target);
+        var chunk = bc.Chunk.init(ctx.arena());
+        const count: u32 = if (op == .enum_keys) 1 else 3;
+        chunk.param_count = count;
+        chunk.local_count = count;
+        for (0..count) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emit(op, 0);
+        _ = try chunk.emit(.ret, 0);
+        var code = try optimizer_compiler.compile(&chunk);
+        defer code.deinit();
+        var slots = [_]Value{ prepared.target, prepared.keys, Value.num(0) };
+        var scratch: [jit.numeric_scratch_capacity]u64 = @splat(Value.undef().rawBits());
+        var probe = Probe{ .move = move, .before_copy = stage == 1 };
+        var frame = jit.NativeFrame{
+            .profile_bytecode_context = &probe,
+            .slots = @ptrCast(&slots),
+            .scratch = &scratch,
+            .steps = &machine.steps,
+            .runtime_context = &machine,
+            .operation_context = code.native_operations.?,
+            .operation = Probe.operation,
+            .continuation_checkpoint = Probe.checkpoint,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, runNativeWithPublishedRoots(&machine, &code, &frame));
+        if (stage == 1) try std.testing.expect(probe.transport_rooted);
+        var exec = Exec{ .chunk = &chunk };
+        defer exec.stack.deinit(ctx.arena());
+        try std.testing.expect(try reconstructNativeSideExit(code.deopt.?, &frame, slots[0..count], &scratch, &exec, ctx.arena()));
+        const first: usize = if (op == .enum_keys) 0 else 2;
+        const results: usize = if (op == .enum_keys) 3 else 4;
+        try std.testing.expectEqual(first + results, exec.stack.items.len);
+        if (!move) {
+            for (exec.stack.items[first..], probe.result_bits[0..results]) |recovered, expected|
+                try std.testing.expectEqual(expected, recovered.rawBits());
+        } else {
+            try std.testing.expect(probe.moved);
+            if (op == .enum_keys) {
+                try std.testing.expect(exec.stack.items[0].rawBits() != probe.result_bits[0]);
+                try std.testing.expectEqual(@as(f64, 17), exec.stack.items[0].asObj().getOwn("a").?.asNum());
+                try std.testing.expectEqualStrings("a", exec.stack.items[1].asObj().denseElement(0).?.asStr());
+                try std.testing.expectEqual(@as(f64, 0), exec.stack.items[2].asNum());
+            } else {
+                try std.testing.expectEqual(@as(f64, 1), exec.stack.items[2].asNum());
+                try std.testing.expectEqualStrings("a", exec.stack.items[3].asStr());
+                try std.testing.expect(exec.stack.items[4].asBool() and exec.stack.items[5].asBool());
+            }
+        }
+    };
+}

@@ -1234,6 +1234,8 @@ pub const StackMap = struct {
     deopt_index: u16,
     frame_pointer_slots: u64 = 0,
     scratch_pointer_slots: u128 = 0,
+    /// Live fixed-width callback results before publication into scratch.
+    operation_result_pointer_slots: u4 = 0,
 };
 
 pub const StackMapMetadata = struct {

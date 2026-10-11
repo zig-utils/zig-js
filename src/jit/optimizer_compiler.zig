@@ -1607,6 +1607,11 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         if (end > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
         for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
             @as(u128, 1) << (std.math.cast(u7, slot) orelse return error.UnsupportedChunk);
+        if (descriptor.result_count > 1) {
+            if (descriptor.result_count > 4) return error.UnsupportedChunk;
+            stack_maps[descriptor.deopt_index].operation_result_pointer_slots =
+                @intCast((@as(u8, 1) << @intCast(descriptor.result_count)) - 1);
+        }
     }
     if (graph.canonical_locals) for (stack_maps) |*map| {
         map.frame_pointer_slots = 0;
@@ -2556,6 +2561,11 @@ fn lowerRegionOsr(
         if (end > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
         for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
             @as(u128, 1) << (std.math.cast(u7, slot) orelse return error.UnsupportedChunk);
+        if (descriptor.result_count > 1) {
+            if (descriptor.result_count > 4) return error.UnsupportedChunk;
+            stack_maps[descriptor.deopt_index].operation_result_pointer_slots =
+                @intCast((@as(u8, 1) << @intCast(descriptor.result_count)) - 1);
+        }
     }
 
     var local_mask: u64 = 0;
@@ -4131,8 +4141,27 @@ fn emitMappedOperation(
     if (operation.kind == .runtime_operation) {
         if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
         const descriptor = program.native_operations[operation.immediate];
-        if (descriptor.bytecode_op != @backingInt(bc.Op.load_binding_ref) or descriptor.operand_b & bc.binding_ref_load_with_base == 0)
+        if (descriptor.result_count <= 1 and
+            (descriptor.bytecode_op != @backingInt(bc.Op.load_binding_ref) or descriptor.operand_b & bc.binding_ref_load_with_base == 0))
             producer = operation;
+    } else if (operation.kind == .runtime_result) {
+        if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
+        const descriptor = program.native_operations[operation.immediate];
+        // Recovery describes the entire enumeration tuple. Publish every
+        // projection into traced scratch before a callback can exit or move it.
+        if (operation.lhs + 1 == descriptor.result_count) {
+            for (program.operations) |candidate| {
+                if (candidate.kind != .runtime_operation or candidate.immediate != operation.immediate or candidate.origin != operation.origin) continue;
+                if (producer != null) return error.UnsupportedChunk;
+                producer = candidate;
+            }
+            if (producer == null) return error.UnsupportedChunk;
+            // Scratch now owns every live result; transport must not retain
+            // dead targets or snapshots across a later operation/checkpoint.
+            try assembler.movImmediate64(9, Value.undef().rawBits());
+            for (0..descriptor.result_count) |ordinal|
+                try assembler.store64(9, 12, std.math.cast(u15, @offsetOf(jit.NativeFrame, "operation_result_bits") + ordinal * @sizeOf(u64)) orelse return error.UnsupportedChunk);
+        }
     } else if (operation.kind == .runtime_base) {
         for (program.operations) |candidate| {
             if (candidate.kind != .runtime_operation or candidate.destination != operation.lhs or candidate.origin != operation.origin) continue;
@@ -5217,6 +5246,15 @@ fn emitRuntimeOperation(
             descriptor.exceptional_target >= program.native_exceptional_targets.len))
         return error.UnsupportedChunk;
 
+    // The pre-effect map exposes result storage during callback reentry.
+    // Publish undefined before installing it, so first entry and failed effects
+    // cannot expose uninitialized or stale transport words to the collector.
+    if (descriptor.result_count > 1) {
+        if (descriptor.result_count > 4) return error.UnsupportedChunk;
+        try assembler.movImmediate64(9, Value.undef().rawBits());
+        for (0..descriptor.result_count) |ordinal|
+            try assembler.store64(9, 12, std.math.cast(u15, @offsetOf(jit.NativeFrame, "operation_result_bits") + ordinal * @sizeOf(u64)) orelse return error.UnsupportedChunk);
+    }
     try assembler.movImmediate64(9, descriptor.origin);
     try assembler.store64(9, 12, frameOffset("exit_ip"));
     try assembler.movImmediate64(9, descriptor.deopt_index);
