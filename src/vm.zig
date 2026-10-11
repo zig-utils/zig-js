@@ -6315,6 +6315,95 @@ test "vm: native and baseline for-in control paths agree" {
     try std.testing.expect(finally_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
+test "vm: native for-in preserves proxy trap order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    });
+    const source =
+        \\var proxyLog = "";
+        \\var proxyTarget = { a: 1, b: 2 };
+        \\new Proxy(proxyTarget, { ownKeys: function() { proxyLog += "k"; return ["b", "a"]; }, getOwnPropertyDescriptor: function(target, key) { proxyLog += key; return { enumerable: true, configurable: true }; } })
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    const proxy = try run(&machine, program, null);
+    try std.testing.expect(proxy.isObject());
+
+    const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_keys),
+            .first_input = 0,
+            .input_count = 1,
+            .deopt_index = 0,
+            .step_delta = 1,
+            .origin = 1,
+            .result_count = 3,
+        },
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_next),
+            .first_input = 3,
+            .input_count = 3,
+            .deopt_index = 1,
+            .step_delta = 1,
+            .origin = 2,
+            .result_count = 4,
+        },
+    }, &.{});
+    defer metadata.destroy();
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    scratch[0] = proxy.rawBits();
+    var frame = jit.NativeFrame{
+        .scratch = &scratch,
+        .runtime_context = &machine,
+        .operation_context = metadata,
+        .exit_ip = 1,
+        .deopt_index = 0,
+        .operation_detail = 0,
+    };
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    try std.testing.expectEqualStrings("kba", env.get("proxyLog").?.asStr());
+    const target_bits = frame.operation_result_bits[0];
+    const keys_bits = frame.operation_result_bits[1];
+    scratch[3] = target_bits;
+    scratch[4] = keys_bits;
+    scratch[5] = frame.operation_result_bits[2];
+    frame.exit_ip = 2;
+    frame.deopt_index = 1;
+    frame.operation_detail = 1;
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqualStrings("b", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
+    scratch[3] = target_bits;
+    scratch[4] = keys_bits;
+    scratch[5] = frame.operation_result_bits[0];
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 1),
+    );
+    try std.testing.expectEqualStrings("a", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqualStrings("kba", env.get("proxyLog").?.asStr());
+    const runtime = inventory.runtimeOperationSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), runtime.count(.enum_keys));
+    try std.testing.expectEqual(@as(u64, 2), runtime.count(.enum_next));
+}
+
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
