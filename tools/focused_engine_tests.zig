@@ -706,6 +706,19 @@ const frontend_cases = [_]Case{
         .source = "function Box(value) { this.value = value; } function constructs(Ctor, direct = new Ctor(3), nested = new Ctor(direct.value + 1)) { return direct.value + nested.value; } constructs(Box)",
         .expected = 7,
     },
+    .{
+        .name = "strict tree-walker tail expressions keep bounded activation depth",
+        .source =
+        \\function focusedTail(n, value) {
+        \\  "use strict";
+        \\  arguments.length;
+        \\  if (n === 0) return value;
+        \\  return (n & 1) ? (0, focusedTail(n - 1, value + 1)) : true && focusedTail(n - 1, value + 1);
+        \\}
+        \\focusedTail(20000, 42)
+        ,
+        .expected = 20042,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

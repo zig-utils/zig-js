@@ -3381,6 +3381,11 @@ fn asyncRejectionAdmission(reason: Compiler.AsyncRejection) BytecodeAdmissionRea
 const TreeTailCall = struct {
     callee: Value,
     args: []const Value,
+    this_value: Value,
+    site: CallSite,
+    /// Ordinary member calls retain the engine's synthesized-method fallback
+    /// (Array#push, Date#getTime, ...). Null means this is a direct [[Call]].
+    resolved_method_name: ?[]const u8 = null,
 };
 
 /// A JS-defined function value: parameter names, body AST, and the environment
@@ -6701,8 +6706,8 @@ pub const Interpreter = struct {
                 break :blk try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
             },
 
-            .call => |c| try self.evalCall(c.callee, c.args, c.optional, .{ .source = .{ .text = c.source, .callee_len = c.callee_len } }),
-            .tagged_template => |t| try self.evalTaggedTemplate(node, t.tag, t.exprs),
+            .call => |c| try self.evalCall(c.callee, c.args, c.optional, .{ .source = .{ .text = c.source, .callee_len = c.callee_len } }, false),
+            .tagged_template => |t| try self.evalTaggedTemplate(node, t.tag, t.exprs, false),
             .new_expr => |n| try self.evalNew(n.callee, n.args, .{ .source = n.source }),
             .member => |m| blk: {
                 const obj = try self.eval(m.object);
@@ -6892,11 +6897,10 @@ pub const Interpreter = struct {
             .return_stmt => |maybe| blk: {
                 if (maybe) |e| {
                     if (self.tree_tail_allowed) {
-                        if (try self.prepareTreeTailCall(e)) |v| {
-                            self.ret_value = v;
-                            self.signal = .ret;
-                            break :blk v;
-                        }
+                        const v = try self.evalTreeTailExpression(e);
+                        self.ret_value = v;
+                        self.signal = .ret;
+                        break :blk v;
                     }
                 }
                 const v: Value = if (maybe) |e| try self.eval(e) else Value.undef();
@@ -9971,7 +9975,39 @@ pub const Interpreter = struct {
         return ok;
     }
 
-    fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool, site: CallSite) EvalError!Value {
+    fn finishEvaluatedCall(
+        self: *Interpreter,
+        callee: Value,
+        args: []const Value,
+        this_value: Value,
+        site: CallSite,
+        tail_position: bool,
+        direct_eval: bool,
+        resolved_method_name: ?[]const u8,
+    ) EvalError!Value {
+        // Perform a direct eval while its caller's lexical environment is still
+        // active. Every other strict tail call may discard that activation before
+        // [[Call]], which the enclosing callFunctionNT trampoline performs.
+        if (tail_position and !direct_eval) {
+            self.tree_tail_call = .{
+                .callee = callee,
+                .args = args,
+                .this_value = this_value,
+                .site = site,
+                .resolved_method_name = resolved_method_name,
+            };
+            return Value.undef();
+        }
+
+        const saved_direct_eval = self.direct_eval_call;
+        self.direct_eval_call = direct_eval;
+        defer self.direct_eval_call = saved_direct_eval;
+        if (resolved_method_name) |name|
+            return self.callResolvedMethod(this_value, name, callee, args, site);
+        return self.callValueWithThisAtSite(callee, args, this_value, site);
+    }
+
+    fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool, site: CallSite, tail_position: bool) EvalError!Value {
         if (callee_node.* == .optional_chain and callee_node.optional_chain.* == .member) {
             const m = callee_node.optional_chain.member;
             const recv_opt: ?Value = self.eval(m.object) catch |err|
@@ -9983,20 +10019,20 @@ pub const Interpreter = struct {
                 // throws for calling undefined. Do not leak OptShortCircuit past
                 // the wrapper or accidentally retain the pre-short-circuit base.
                 if (optional) return error.OptShortCircuit;
-                return self.callValueWithThisAtSite(Value.undef(), try self.evalArgs(arg_nodes), Value.undef(), site);
+                return self.finishEvaluatedCall(Value.undef(), try self.evalArgs(arg_nodes), Value.undef(), site, tail_position, false, null);
             }
             const recv = recv_opt.?;
             const key = try self.memberKey(m.property, m.computed);
             if (optional) {
                 const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
-                return self.callValueWithThisAtSite(method, try self.evalArgs(arg_nodes), recv, site);
+                return self.finishEvaluatedCall(method, try self.evalArgs(arg_nodes), recv, site, tail_position, false, null);
             }
             // Evaluate the MemberExpression's Get before its Arguments. Keep the
             // resolved value so an accessor/proxy is observed exactly once.
             const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
             const args = try self.evalArgs(arg_nodes);
-            return self.callResolvedMethod(recv, key, method, args, site);
+            return self.finishEvaluatedCall(method, args, recv, site, tail_position, false, key);
         }
         // Method call `obj.m(...)`: evaluate the receiver once so it can both
         // resolve the method and bind `this`. Array/string builtins (push,
@@ -10021,14 +10057,14 @@ pub const Interpreter = struct {
             if (optional) {
                 const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
-                return self.callValueWithThisAtSite(method, try self.evalArgs(arg_nodes), recv, site);
+                return self.finishEvaluatedCall(method, try self.evalArgs(arg_nodes), recv, site, tail_position, false, null);
             }
             // Evaluate the MemberExpression's Get before its Arguments (ECMA-262
             // EvaluateCall), then retain that exact reference through argument
             // expansion. Re-reading here would duplicate getters/proxy traps.
             const method = try self.getPropertyAtSite(recv, key, .{ .source = m.source });
             const args = try self.evalArgs(arg_nodes);
-            return self.callResolvedMethod(recv, key, method, args, site);
+            return self.finishEvaluatedCall(method, args, recv, site, tail_position, false, key);
         }
         // `super.m(args)`: look the method up on the home object's prototype,
         // but invoke it with the current `this`.
@@ -10044,7 +10080,7 @@ pub const Interpreter = struct {
             const key = if (key_val) |kv| try self.keyOf(kv) else sm.property;
             const method = try self.getProperty(Value.obj(parent), key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callValueWithThisAtSite(method, args, self.this_value, site);
+            return self.finishEvaluatedCall(method, args, self.this_value, site, tail_position, false, null);
         }
         // A bare identifier carries its exact WithBaseObject out of the same
         // ResolveBinding/GetValue operation. Root both Values across argument
@@ -10063,35 +10099,57 @@ pub const Interpreter = struct {
         const args = try self.evalArgs(arg_nodes);
         const rooted_callee = self.tempRoot(callee_root, resolved.value);
         const rooted_with_base = self.tempRoot(with_base_root, resolved.with_base);
-        const saved_direct_eval = self.direct_eval_call;
         // A direct eval requires the callee to be THIS realm's %eval% intrinsic.
         // A syntactic `eval(...)` whose binding resolves to another realm's eval
         // (or a reassigned `eval`) is an *indirect* eval — it runs as global code
         // in that eval's own realm, not in the caller's scope.
         const eval_named = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
-        self.direct_eval_call = eval_named and self.isDirectEvalCallee(rooted_callee);
-        defer self.direct_eval_call = saved_direct_eval;
-        return self.callValueWithThisAtSite(rooted_callee, args, rooted_with_base, site);
+        const direct_eval = eval_named and self.isDirectEvalCallee(rooted_callee);
+        return self.finishEvaluatedCall(rooted_callee, args, rooted_with_base, site, tail_position, direct_eval, null);
     }
 
-    fn prepareTreeTailCall(self: *Interpreter, node: *Node) EvalError!?Value {
-        if (node.* != .call) return null;
-        const c = node.call;
-        if (c.optional or c.callee.* != .identifier) return null;
-        const eval_named = std.mem.eql(u8, c.callee.identifier, "eval");
-        if (!eval_named) return null;
-        // Tree-tail reuse does not currently carry an explicit receiver. Leave
-        // any active `with` call to the ordinary path before running observable
-        // HasBinding, so it resolves exactly once with the correct base.
-        var environment: ?*Environment = self.env;
-        while (environment) |current| : (environment = current.parent)
-            if (current.with_object != null) return null;
-        try self.beginNodeEvaluation(c.callee);
-        const callee = (try self.resolveBindingValue(c.callee.identifier, false)).value;
-        if (self.isDirectEvalCallee(callee)) return null;
-        const args = try self.evalArgs(c.args);
-        self.tree_tail_call = .{ .callee = callee, .args = args };
-        return Value.undef();
+    /// Evaluate exactly the expression positions for which HasCallInTailPosition
+    /// is true. The selected CallExpression/TaggedTemplate is prepared under the
+    /// current activation; callFunctionNT performs [[Call]] after discarding it.
+    fn evalTreeTailExpression(self: *Interpreter, node: *Node) EvalError!Value {
+        return switch (node.*) {
+            .call => |c| blk: {
+                try self.beginNodeEvaluation(node);
+                break :blk try self.evalCall(c.callee, c.args, c.optional, .{ .source = .{ .text = c.source, .callee_len = c.callee_len } }, true);
+            },
+            .tagged_template => |t| blk: {
+                try self.beginNodeEvaluation(node);
+                break :blk try self.evalTaggedTemplate(node, t.tag, t.exprs, true);
+            },
+            .sequence => |sequence| blk: {
+                try self.beginNodeEvaluation(node);
+                _ = try self.eval(sequence.first);
+                break :blk try self.evalTreeTailExpression(sequence.second);
+            },
+            .logical => |logical| blk: {
+                try self.beginNodeEvaluation(node);
+                const left = try self.eval(logical.left);
+                const evaluate_right = switch (logical.op) {
+                    .@"and" => left.toBoolean(),
+                    .@"or" => !left.toBoolean(),
+                    .nullish => left.isNull() or left.isUndefined(),
+                };
+                break :blk if (evaluate_right) try self.evalTreeTailExpression(logical.right) else left;
+            },
+            .conditional => |conditional| blk: {
+                try self.beginNodeEvaluation(node);
+                break :blk if ((try self.eval(conditional.cond)).toBoolean())
+                    try self.evalTreeTailExpression(conditional.consequent)
+                else
+                    try self.evalTreeTailExpression(conditional.alternate);
+            },
+            .optional_chain => |inner| blk: {
+                try self.beginNodeEvaluation(node);
+                break :blk self.evalTreeTailExpression(inner) catch |err|
+                    if (err == error.OptShortCircuit) Value.undef() else return err;
+            },
+            else => self.eval(node),
+        };
     }
 
     /// `tag`a${x}b`` → `tag(strings, x)` where `strings` is the frozen cooked
@@ -10116,7 +10174,7 @@ pub const Interpreter = struct {
         return s;
     }
 
-    fn evalTaggedTemplate(self: *Interpreter, site: *const Node, tag_node: *Node, expr_nodes: []*Node) EvalError!Value {
+    fn evalTaggedTemplate(self: *Interpreter, site: *const Node, tag_node: *Node, expr_nodes: []*Node, tail_position: bool) EvalError!Value {
         // TaggedTemplate evaluates the tag Reference and GetValue before
         // GetTemplateObject or any substitution. Capture the receiver now so a
         // member/super tag cannot be re-resolved after observable expressions.
@@ -10167,15 +10225,15 @@ pub const Interpreter = struct {
             .none
         else
             .{ .source = .{ .text = site.tagged_template.source, .kind = .tagged_template } };
-        return if (receiver != null)
-            self.callValueWithThisAtSite(
-                self.tempRoot(callee_root, callee),
-                args.items,
-                self.tempRoot(receiver_root, receiver_fallback),
-                call_site,
-            )
-        else
-            self.callValueWithThisAtSite(self.tempRoot(callee_root, callee), args.items, Value.undef(), call_site);
+        return self.finishEvaluatedCall(
+            self.tempRoot(callee_root, callee),
+            args.items,
+            self.tempRoot(receiver_root, receiver_fallback),
+            call_site,
+            tail_position,
+            false,
+            null,
+        );
     }
 
     fn freezeTemplateArray(self: *Interpreter, obj: *value.Object) EvalError!void {
@@ -10608,18 +10666,24 @@ pub const Interpreter = struct {
             const rv = try self.callPlain(cur_func, cur_args, cur_this, cur_new_target);
             const tail = self.tree_tail_call orelse return rv;
             self.tree_tail_call = null;
-            if (!tail.callee.isObject()) return self.callValue(tail.callee, tail.args);
+            if (tail.resolved_method_name) |name| {
+                if (!tail.callee.isObject() or !tail.callee.asObj().isCallableObject())
+                    return self.callResolvedMethod(tail.this_value, name, tail.callee, tail.args, tail.site);
+            }
+            if (!tail.callee.isObject())
+                return self.callValueWithThisAtSite(tail.callee, tail.args, tail.this_value, tail.site);
             const obj = tail.callee.asObj();
-            const erased = obj.jsFunction() orelse return self.callValue(tail.callee, tail.args);
+            const erased = obj.jsFunction() orelse
+                return self.callValueWithThisAtSite(tail.callee, tail.args, tail.this_value, tail.site);
             const next_func: *Function = @ptrCast(@alignCast(erased));
             if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
-                return self.callValue(tail.callee, tail.args);
-            if (next_func.chunk) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, Value.undef(), Value.undef());
+                return self.callValueWithThisAtSite(tail.callee, tail.args, tail.this_value, tail.site);
+            if (next_func.chunk) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, tail.this_value, Value.undef());
             if (next_func.bytecode_execution_mode == .required)
                 return self.throwMissingRequiredChunk(next_func, "plain");
             cur_func = next_func;
             cur_args = tail.args;
-            cur_this = Value.undef();
+            cur_this = tail.this_value;
             cur_new_target = Value.undef();
         }
     }
@@ -10781,8 +10845,11 @@ pub const Interpreter = struct {
         }
         self.signal = .none;
         self.strict = func.is_strict;
+        // Async/generator bodies have their own completion wrappers. A prepared
+        // call cannot escape through the ordinary synchronous trampoline without
+        // bypassing promise/generator completion semantics.
         self.tree_tail_allowed = func.is_strict and new_target.isUndefined() and
-            std.mem.indexOf(u8, func.source, "eval") != null;
+            !func.is_async and !func.is_generator;
         self.tree_tail_call = null;
         self.import_meta_slot = func.import_meta_slot;
         self.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
@@ -10904,7 +10971,11 @@ pub const Interpreter = struct {
         // async-flagged and skipped.
         if (func.is_async and func.is_generator) return self.newObject();
 
-        if (func.is_expr_body) return self.eval(func.body);
+        if (func.is_expr_body)
+            return if (self.tree_tail_allowed)
+                self.evalTreeTailExpression(func.body)
+            else
+                self.eval(func.body);
         // FunctionDeclarationInstantiation: when the formals contain a parameter
         // expression (a default Initializer), the body runs in a SEPARATE variable
         // environment, so a closure created in the parameter list cannot see the
@@ -22115,6 +22186,13 @@ pub const Interpreter = struct {
     }
 
     fn evalTry(self: *Interpreter, t: *ast.TryNode) EvalError!Value {
+        // A call under a live catch/finally obligation is not in tail position:
+        // its abrupt completion must return through this activation. A catch with
+        // no pending finally and the currently executing finally body may tail
+        // call, matching the compiler's try_depth/finally_depth distinction.
+        const saved_tree_tail_allowed = self.tree_tail_allowed;
+        self.tree_tail_allowed = false;
+        defer self.tree_tail_allowed = saved_tree_tail_allowed;
         // Evaluate the try block (and catch, on a caught throw), capturing its
         // completion — a value, a pending signal (break/continue/return), or a
         // held error — so finally can run with a clean slate and override it.
@@ -22169,6 +22247,7 @@ pub const Interpreter = struct {
                     self.tempEnvRoot(reserved_catch_env_root_mark, fallback)
                 else
                     null;
+                self.tree_tail_allowed = saved_tree_tail_allowed and t.finally_block == null;
                 const catch_result = self.evalCatchClause(t.catch_param, t.catch_block.?, exc, current_reserved_catch_env);
                 if (catch_result) |v| {
                     result = v;
@@ -22186,6 +22265,7 @@ pub const Interpreter = struct {
         }
         if (t.finally_block) |fb| {
             self.env = self.tempEnvRoot(try_env_root, try_env);
+            self.tree_tail_allowed = saved_tree_tail_allowed;
             // The try/catch completion may have left an abrupt signal pending; a
             // statement list short-circuits on it, so clear it before running
             // finally and hold it aside. If finally completes normally the held

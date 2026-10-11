@@ -6629,7 +6629,7 @@ pub const Compiler = struct {
             };
             try sub_c.emitParameterBodyCopies();
             if (fnode.is_expr_body) {
-                sub_c.compileExpr(fnode.body) catch |e| switch (e) {
+                sub_c.compileTailExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
                         if (self.scope == null) {
                             template_admission = .plain_unsupported_lowering;
@@ -6640,7 +6640,6 @@ pub const Compiler = struct {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.StackExhausted => return error.StackExhausted,
                 };
-                _ = try compiled.emit(.ret, 0);
             } else {
                 sub_c.compileStmt(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
@@ -9079,6 +9078,43 @@ test "compiler lowers proper tail calls with spread arguments across tiers" {
         };
         try std.testing.expect(saw_ordinary_spread);
     }
+
+    var sync_concise_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "\"use strict\"; var concise = (fn, args) => fn(...args);",
+    );
+    const sync_concise_program = try sync_concise_parser.parseProgram();
+    const sync_concise_node = sync_concise_program.program[1].var_decl.init orelse return error.TestUnexpectedResult;
+    if (sync_concise_node.* != .function) return error.TestUnexpectedResult;
+    try std.testing.expect(sync_concise_node.function.is_strict and sync_concise_node.function.is_expr_body);
+    const sync_concise = switch (try Compiler.admitPlainFunction(arena.allocator(), sync_concise_node.function)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_concise_tail_spread = false;
+    for (sync_concise.code.items) |instruction|
+        saw_concise_tail_spread = saw_concise_tail_spread or instruction.op == .tail_call_spread;
+    try std.testing.expect(saw_concise_tail_spread);
+
+    var nested_concise_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "\"use strict\"; var recurse; recurse = (n) => n === 0 ? 1 : recurse(n - 1);",
+    );
+    const nested_concise_program = try nested_concise_parser.parseProgram();
+    const nested_concise_chunk = switch (try Compiler.admitProgram(arena.allocator(), nested_concise_program)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), nested_concise_chunk.fns.items.len);
+    const nested_concise = nested_concise_chunk.fns.items[0];
+    try std.testing.expect(nested_concise.is_arrow and nested_concise.is_strict);
+    var saw_nested_concise_tail = false;
+    for (nested_concise.chunk.?.code.items) |instruction| switch (instruction.op) {
+        .tail_call, .tail_call_with_this => saw_nested_concise_tail = true,
+        else => {},
+    };
+    try std.testing.expect(saw_nested_concise_tail);
+
     var saw_eval_spread = false;
     for (generated_eval.code.items) |inst| switch (inst.op) {
         .call_eval_spread => saw_eval_spread = true,

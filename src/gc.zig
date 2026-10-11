@@ -2956,6 +2956,15 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         v.mark(call.caller_function);
         if (call.caller_this_cell) |cell| markValue(v, cell.value());
     }
+    // A tree tail call is prepared after its owning call's root record has been
+    // published, but is consumed after that record is retired. Keep the pending
+    // [[Call]] inputs live across that handoff (including a callee that triggers
+    // collection before reading its arguments).
+    if (machine.tree_tail_call) |tail| {
+        markValue(v, tail.callee);
+        for (tail.args) |argument| markValue(v, argument);
+        markValue(v, tail.this_value);
+    }
     // Active VM operand stacks: arena-backed, so their live `Value`s are
     // invisible to both the precise object graph and the conservative native
     // stack scan. The VM flushes `acc`/`ip` into each `Exec` at the safepoint
@@ -3102,6 +3111,11 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (call.caller_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
     }
     for (machine.gc_execs.items) |exec| relocateExecRoots(exec, v);
+    if (machine.tree_tail_call) |*tail| {
+        gc_relocation.rewriteValueSlot(v, &tail.callee);
+        for (@constCast(tail.args)) |*argument| gc_relocation.rewriteValueSlot(v, argument);
+        gc_relocation.rewriteValueSlot(v, &tail.this_value);
+    }
     for (machine.gc_binding_reference_roots.items) |*reference| switch (reference.*) {
         .environment => |*environment| gc_relocation.rewriteRequiredSlot(v, Environment, environment),
         .with_object, .global_object => |*object| gc_relocation.rewriteRequiredSlot(v, Object, object),

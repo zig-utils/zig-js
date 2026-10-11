@@ -31694,6 +31694,103 @@ test "proper tail calls with spread preserve references and bounded activation d
     try std.testing.expectEqual(shallow_results[0], shallow_results[1]);
 }
 
+test "proper tail calls agree across tree-walker expression forms and required bytecode" {
+    const source =
+        \\var depth = 20000;
+        \\function direct(n) { "use strict"; if (n === 0) return 1; return direct(n - 1); }
+        \\function sequence(n) { "use strict"; if (n === 0) return 2; return 0, sequence(n - 1); }
+        \\function logicalAnd(n) { "use strict"; if (n === 0) return 3; return true && logicalAnd(n - 1); }
+        \\function logicalOr(n) { "use strict"; if (n === 0) return 4; return false || logicalOr(n - 1); }
+        \\function nullish(n) { "use strict"; if (n === 0) return 5; return null ?? nullish(n - 1); }
+        \\function conditional(n) { "use strict"; if (n === 0) return 6; return n < 0 ? 0 : conditional(n - 1); }
+        \\function optional(n) { "use strict"; if (n === 0) return 7; return optional?.(n - 1); }
+        \\function dynamic(n) { "use strict"; if (n === 0) return 8; return (function () { return dynamic; })()(n - 1); }
+        \\var holder = {
+        \\  bonus: 9,
+        \\  method: function (n) { "use strict"; if (n === 0) return this.bonus; return this.method(n - 1); },
+        \\  tag: function (strings, n) { "use strict"; if (n === 0) return this.bonus + 1; return this.tag`${n - 1}`; }
+        \\};
+        \\function tag(strings, n) { "use strict"; if (n === 0) return 11; return tag`${n - 1}`; }
+        \\var arrow = (function () {
+        \\  "use strict";
+        \\  var recurse;
+        \\  recurse = (n) => n === 0 ? 21 : recurse(n - 1);
+        \\  return recurse;
+        \\}());
+        \\var scope = {}, withTail;
+        \\with (scope) {
+        \\  withTail = function (n) {
+        \\    "use strict";
+        \\    if (n === 0) return this === scope ? 12 : 0;
+        \\    return eval(n - 1);
+        \\  };
+        \\}
+        \\scope.eval = withTail;
+        \\function directEval() { "use strict"; let local = 13; return eval("local"); }
+        \\function give() { return 14; }
+        \\var finalLog = "";
+        \\function finalized() { "use strict"; try { return give(); } finally { finalLog += "f"; } }
+        \\function fail() { throw 15; }
+        \\function caught() { "use strict"; try { return fail(); } catch (error) { return error; } }
+        \\function fallback() { "use strict"; var list = []; return list.push(16); }
+        \\function collectSink(box) { "use strict"; gc(); return box.value; }
+        \\function collectPass(box) { "use strict"; return collectSink(box); }
+        \\function catchTail(n) {
+        \\  "use strict";
+        \\  if (n === 0) return 18;
+        \\  try { throw null; } catch (error) { return catchTail(n - 1); }
+        \\}
+        \\function finallyTail(n) {
+        \\  "use strict";
+        \\  if (n === 0) return 19;
+        \\  try {} finally { return finallyTail(n - 1); }
+        \\}
+        \\function catchFinallyTail(n) {
+        \\  "use strict";
+        \\  if (n === 0) return 20;
+        \\  try {} catch (error) {} finally { return catchFinallyTail(n - 1); }
+        \\}
+        \\function moving(n, box) {
+        \\  "use strict";
+        \\  if (n === 0) return box.value;
+        \\  if ((n & 255) === 0) gc();
+        \\  return moving(n - 1, { value: box.value + 1 });
+        \\}
+        \\function bad(value) { "use strict"; return value(); }
+        \\var badMessage = "";
+        \\try { bad(17); } catch (error) { badMessage = error.message; }
+        \\[
+        \\  direct(depth), sequence(depth), logicalAnd(depth), logicalOr(depth), nullish(depth),
+        \\  conditional(depth), optional(depth), dynamic(depth), holder.method(depth),
+        \\  holder.tag(null, depth), tag(null, depth), withTail.call(scope, depth), directEval(),
+        \\  finalized(), finalLog === "f" ? 1 : 0, caught(), fallback(), collectPass({ value: 17 }), moving(2048, { value: 0 }),
+        \\  catchTail(10000), finallyTail(10000), catchFinallyTail(10000),
+        \\  arrow(depth),
+        \\  badMessage
+        \\].join(",");
+    ;
+    const expected = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,1,15,1,17,2048,18,19,20,21,value is not a function. (In 'value()', 'value' is 17)";
+
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        try std.testing.expectEqualStrings(expected, result.asStr());
+        const inventory = ctx.bytecodeAdmissionSnapshot();
+        if (mode == .tree_walker) {
+            try std.testing.expect(inventory.count(.plain_forced_tree_walker) > 0);
+        } else {
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 19);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+}
+
 test "parser-derived arguments use preserves forced execution tiers" {
     const source =
         \\function scopeOwner(box) {
