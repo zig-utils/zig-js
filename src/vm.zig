@@ -6149,6 +6149,7 @@ test "vm: native and baseline for-in control paths agree" {
     const source =
         \\function makeSubject() { var proto = { p: 1 }; var object = Object.create(proto); object.a = 1; object.b = 2; object.c = 3; return object; }
         \\function sweep(object) { var out = ""; for (var key in object) { out += key; } return out; }
+        \\function count(object) { var total = 0; for (var key in object) total = total + 1; return total; }
         \\function first(object) { for (var key in object) return key; return ""; }
         \\function stop(object) { for (var key in object) { break; } return 1; }
         \\function throwing(object) { try { for (var key in object) { if (key === "a") throw 7; } } catch (error) { return error; } finally {} return 0; }
@@ -6160,7 +6161,7 @@ test "vm: native and baseline for-in control paths agree" {
         \\function captured(object) { var first = null; var second = null; for (let key in object) { if (first === null) first = function() { return key; }; else second = function() { return key; }; } return first() + second(); }
         \\var result = "";
         \\for (var warm = 0; warm < 12; warm = warm + 1) {
-        \\  result = sweep(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject());
+        \\  result = sweep(makeSubject()) + "|" + count(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject());
         \\}
         \\result
     ;
@@ -6202,9 +6203,12 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|a|1|7|a!|aabacapa|kbaba|abcp|01|ap", native.asStr());
+    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbaba|abcp|01|ap", native.asStr());
 
-    const first_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
+    const count_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(count_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+
+    const first_chunk = native_program.fns.items[3].chunk orelse return error.TestUnexpectedResult;
     const first_artifact = first_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     const first_operations = first_artifact.native_operations orelse return error.TestUnexpectedResult;
@@ -6227,7 +6231,7 @@ test "vm: native and baseline for-in control paths agree" {
     try std.testing.expect(saw_enum_next);
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
 
-    const stop_chunk = native_program.fns.items[3].chunk orelse return error.TestUnexpectedResult;
+    const stop_chunk = native_program.fns.items[4].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(stop_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
