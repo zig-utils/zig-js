@@ -6144,6 +6144,67 @@ test "vm: optimizer native for-in loop resumes exact exhaustion" {
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
 }
 
+test "vm: native and baseline for-in control paths agree" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const source =
+        \\function makeSubject() { var proto = { p: 1 }; var object = Object.create(proto); object.a = 1; object.b = 2; object.c = 3; return object; }
+        \\function sweep(object) { var out = ""; for (var key in object) { out += key; } return out; }
+        \\function first(object) { for (var key in object) return key; return ""; }
+        \\function stop(object) { var out = ""; for (var key in object) { out += key; break; } return out; }
+        \\function throwing(object) { try { for (var key in object) { if (key === "a") throw 7; } } catch (error) { return error; } finally {} return 0; }
+        \\function cleanup(object) { var out = ""; try { for (var key in object) { out += key; break; } } finally { out += "!"; } return out; }
+        \\function nested(object) { var out = ""; for (var outer in object) { for (var inner in object) { out += outer + inner; break; } } return out; }
+        \\var result = "";
+        \\for (var warm = 0; warm < 12; warm = warm + 1) {
+        \\  result = sweep(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject());
+        \\}
+        \\result
+    ;
+
+    var baseline_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer baseline_arena.deinit();
+    const baseline_allocator = baseline_arena.allocator();
+    var baseline_parser = try Parser.init(baseline_allocator, source);
+    const baseline_program = try Compiler.compileProgram(baseline_allocator, try baseline_parser.parseProgram());
+    var baseline_env = Environment{ .arena = baseline_allocator, .fn_scope = true };
+    const baseline_shape = try Shape.createRoot(baseline_allocator);
+    try interp.installGlobals(&baseline_env, baseline_shape);
+    var baseline_machine = try initTestInterpreter(.{
+        .arena = baseline_allocator,
+        .env = &baseline_env,
+        .root_shape = baseline_shape,
+    });
+    const baseline = try run(&baseline_machine, baseline_program, null);
+    try std.testing.expect(baseline.isString());
+
+    var native_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer native_arena.deinit();
+    const native_allocator = native_arena.allocator();
+    var native_parser = try Parser.init(native_allocator, source);
+    const native_program = try Compiler.compileProgram(native_allocator, try native_parser.parseProgram());
+    var native_owner = jit.Owner.init(std.testing.allocator);
+    defer native_owner.deinit();
+    var native_env = Environment{ .arena = native_allocator, .fn_scope = true };
+    const native_shape = try Shape.createRoot(native_allocator);
+    try interp.installGlobals(&native_env, native_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var native_machine = try initTestInterpreter(.{
+        .arena = native_allocator,
+        .env = &native_env,
+        .root_shape = native_shape,
+        .jit_owner = &native_owner,
+        .execution_tier_inventory = &inventory,
+    });
+    const native = try run(&native_machine, native_program, null);
+    try std.testing.expect(native.isString());
+    try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
+    try std.testing.expectEqualStrings("abcp|a|a|7|a!|aabacapa", native.asStr());
+
+    const first_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
+}
+
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
