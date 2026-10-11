@@ -5995,6 +5995,48 @@ test "vm: native operation dispatcher transports for-in results exactly" {
     try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_end_completion));
 }
 
+test "vm: optimizer native for-in next executes one candidate" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const target = try machine.newObject();
+    try machine.setProp(target.asObj(), "a", Value.num(1));
+    try machine.setProp(target.asObj(), "b", Value.num(2));
+    const state = try machine.prepareForIn(target);
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 3;
+    chunk.local_count = 3;
+    for (0..3) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+    _ = try chunk.emit(.enum_next, 0);
+    _ = try chunk.emit(.ret, 0);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.enum_next)), operations.descriptors[0].bytecode_op);
+
+    var slots = [_]Value{ state.target, state.keys, Value.num(0) };
+    const first = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    try std.testing.expect(first == .complete);
+    try std.testing.expect(first.complete.isBoolean() and first.complete.asBool());
+
+    try std.testing.expect(try machine.deleteOwn(target.asObj(), "a"));
+    slots[2] = Value.num(1);
+    const deleted = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    try std.testing.expect(deleted == .complete);
+    try std.testing.expect(deleted.complete.isBoolean() and deleted.complete.asBool());
+
+    slots[2] = Value.num(2);
+    const exhausted = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    try std.testing.expect(exhausted == .complete);
+    try std.testing.expect(exhausted.complete.isBoolean() and !exhausted.complete.asBool());
+}
+
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
