@@ -6007,6 +6007,7 @@ test "vm: optimizer native for-in next executes one candidate" {
     try machine.setProp(target.asObj(), "a", Value.num(1));
     try machine.setProp(target.asObj(), "b", Value.num(2));
     const state = try machine.prepareForIn(target);
+    try std.testing.expect(try machine.deleteOwn(target.asObj(), "a"));
 
     var chunk = bc.Chunk.init(allocator);
     chunk.param_count = 3;
@@ -6025,7 +6026,6 @@ test "vm: optimizer native for-in next executes one candidate" {
     try std.testing.expect(first == .complete);
     try std.testing.expect(first.complete.isBoolean() and first.complete.asBool());
 
-    try std.testing.expect(try machine.deleteOwn(target.asObj(), "a"));
     slots[2] = Value.num(1);
     const deleted = try tryRunManagedNative(&machine, &compiled, &slots, null);
     try std.testing.expect(deleted == .complete);
@@ -6082,6 +6082,66 @@ test "vm: optimizer native for-in result recovery executes" {
     const end_result = try tryRunManagedNative(&machine, &end_compiled, &end_slots, null);
     try std.testing.expect(end_result == .complete);
     try std.testing.expect(end_result.complete.isNumber() and end_result.complete.asNum() == 2);
+}
+
+test "vm: optimizer native for-in loop resumes exact exhaustion" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    });
+    const target = try machine.newObject();
+    try machine.setProp(target.asObj(), "a", Value.num(1));
+    try machine.setProp(target.asObj(), "b", Value.num(2));
+    const state = try machine.prepareForIn(target);
+    try std.testing.expect(try machine.deleteOwn(target.asObj(), "a"));
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.enum_keys, 0);
+    _ = try chunk.emit(.enum_next, 0);
+    _ = try chunk.emit(.jump_if_false, 9);
+    _ = try chunk.emit(.jump_if_false, 7);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_true, 0);
+    _ = try chunk.emit(.ret, 0);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expect(compiled.osr != null and compiled.has_side_exits);
+
+    var slots = [_]Value{state.target};
+    var frame = Frame{ .slots = &slots, .parent = null };
+    var exec = Exec{ .chunk = &chunk, .frame = &frame, .ip = 2 };
+    defer exec.stack.deinit(allocator);
+    try exec.stack.append(allocator, state.target);
+    try exec.stack.append(allocator, state.keys);
+    try exec.stack.append(allocator, Value.num(0));
+    var delta: jit.OptimizerProfile.Delta = .{};
+    const native = try tryRunOsrNative(&machine, &compiled, &chunk, &slots, &exec);
+    try std.testing.expect(native == .deoptimized);
+    try std.testing.expectEqual(@as(usize, 9), exec.ip);
+    try std.testing.expectEqual(@as(usize, 5), exec.stack.items.len);
+    const result = try runChunk(&machine, &exec, &chunk, &frame, null, &delta);
+    try std.testing.expect(result.isBoolean() and result.asBool());
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
 }
 
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
