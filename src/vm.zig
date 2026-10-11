@@ -6159,9 +6159,12 @@ test "vm: native and baseline for-in control paths agree" {
         \\function changing(object) { var out = ""; for (var key in object) { out += key; object = { z: 1 }; } return out; }
         \\function primitive(value) { var out = ""; for (var key in value) out += key; return out; }
         \\function captured(object) { var first = null; var second = null; for (let key in object) { if (first === null) first = function() { return key; }; else second = function() { return key; }; } return first() + second(); }
+        \\function throwLoop(object) { for (var key in object) throw 7; return 0; }
+        \\function catchLoop(object) { try { return throwLoop(object); } catch (error) { return error; } }
+        \\function finallyLoop(object) { try { for (var key in object) { break; } } finally {} return 1; }
         \\var result = "";
         \\for (var warm = 0; warm < 12; warm = warm + 1) {
-        \\  result = sweep(makeSubject()) + "|" + count(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject());
+        \\  result = sweep(makeSubject()) + "|" + count(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject()) + "|" + catchLoop(makeSubject()) + "|" + finallyLoop(makeSubject());
         \\}
         \\result
     ;
@@ -6203,7 +6206,7 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbaba|abcp|01|ap", native.asStr());
+    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbaba|abcp|01|ap|7|1", native.asStr());
 
     const count_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(count_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
@@ -6233,6 +6236,11 @@ test "vm: native and baseline for-in control paths agree" {
 
     const stop_chunk = native_program.fns.items[4].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(stop_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+
+    const throw_chunk = native_program.fns.items[12].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(throw_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+    const finally_chunk = native_program.fns.items[14].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(finally_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
 test "vm: native operation dispatcher executes invocation forms including tail calls" {
