@@ -6116,7 +6116,13 @@ test "vm: optimizer native for-in result recovery executes" {
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    });
     const target = try machine.newObject();
     try machine.setProp(target.asObj(), "a", Value.num(1));
 
@@ -6154,6 +6160,7 @@ test "vm: optimizer native for-in result recovery executes" {
     const end_result = try tryRunManagedNative(&machine, &end_compiled, &end_slots, null);
     try std.testing.expect(end_result == .complete);
     try std.testing.expect(end_result.complete.isNumber() and end_result.complete.asNum() == 2);
+    try std.testing.expectEqual(@as(u64, 1), inventory.runtimeOperationSnapshot().count(.enum_end_completion));
 }
 
 test "vm: optimizer native for-in loop resumes exact exhaustion" {
