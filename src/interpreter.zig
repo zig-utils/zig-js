@@ -4354,12 +4354,15 @@ pub const Interpreter = struct {
     /// longer reachable through `self.env`'s parent chain, such as a `for` head
     /// environment that keeps `using` resources until loop exit.
     gc_env_roots: std.ArrayListUnmanaged(*Environment) = .empty,
-    /// One fully-cleared, uncaptured block Environment retained by this
+    /// One uncaptured block Environment with cleared values retained by this
     /// interpreter. Fresh block identity is observable only through capture;
-    /// keeping the empty cell here avoids repeating a GC-cell allocation while
-    /// preserving distinct environments for every captured entry. The precise
-    /// tracer and relocator treat this optional pointer as an ordinary root.
+    /// retaining its owned static binding layout avoids repeated cell/key/table
+    /// allocation for the same block. The precise tracer and relocator treat
+    /// this optional pointer as an ordinary root.
     reusable_block_env: ?*Environment = null,
+    /// Exact statement-list identity whose layout is retained in the block
+    /// cache. Like reusable_call_body, AST storage is arena-stable/non-moving.
+    reusable_block_statements: ?[]const *Node = null,
     /// One fully-cleared, uncaptured function activation retained by this
     /// interpreter. A completed private activation has no observable identity;
     /// closures and mapped arguments mark it captured before either can escape,
@@ -5777,8 +5780,13 @@ pub const Interpreter = struct {
         };
     }
 
-    fn acquireBlockEnvironment(self: *Interpreter, parent: *Environment) EvalError!*Environment {
+    fn acquireBlockEnvironment(self: *Interpreter, parent: *Environment, stmts: []const *Node) EvalError!*Environment {
         if (self.reusable_block_env) |env| {
+            const same_block = if (self.reusable_block_statements) |cached|
+                cached.ptr == stmts.ptr and cached.len == stmts.len
+            else
+                false;
+            if (!same_block) env.resetForBlockReuse();
             // Unlike a fresh nursery cell, the cache can be observed by a
             // concurrent marker and can already be tenured. Preserve its mutex,
             // reinitialize the empty payload under that mutex, and barrier the
@@ -5790,7 +5798,7 @@ pub const Interpreter = struct {
             env.arena = self.arena;
             env.bindings_allocator = self.gc_side_storage;
             env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
-            env.binding_hash_state = .{ .realm_shape = self.root_shape };
+            if (!same_block) env.binding_hash_state = .{ .realm_shape = self.root_shape };
             env.parent = parent;
             // Cell ownership is fixed by allocEnv. In particular, a concurrent
             // marker can read this bit through a different Environment edge,
@@ -5849,7 +5857,7 @@ pub const Interpreter = struct {
         return env;
     }
 
-    fn releaseBlockEnvironment(self: *Interpreter, env: *Environment) void {
+    fn releaseBlockEnvironment(self: *Interpreter, env: *Environment, stmts: []const *Node) void {
         // Arena environments cannot release their side storage, function-body
         // environments retain special declaration-instantiation state, and a
         // captured environment has observable identity. All three keep their
@@ -5857,11 +5865,20 @@ pub const Interpreter = struct {
         if (env.bindings_allocator == null or env.fn_body or env.captured.load(.acquire) or
             env.disposables.items.len != 0 or env.dispose_pending != null)
             return;
-        env.resetForBlockReuse();
-        // Nested block exit can find the slot occupied by an already-cleared
-        // inner environment. Reclaim this environment's side storage anyway and
-        // let its empty cell die; one retained cell is sufficient.
-        if (self.reusable_block_env == null) self.reusable_block_env = env;
+        // Dynamic eval bindings and aliases do not have a static block layout.
+        // Clear them fully; only the declaration tables of one exact AST survive.
+        const retain_layout = env.aliases.count() == 0 and env.deletable.count() == 0;
+        if (self.reusable_block_env == null and retain_layout) {
+            env.resetForCallReuse();
+            self.reusable_block_env = env;
+            self.reusable_block_statements = stmts;
+        } else {
+            env.resetForBlockReuse();
+            if (self.reusable_block_env == null) {
+                self.reusable_block_env = env;
+                self.reusable_block_statements = null;
+            }
+        }
     }
 
     fn releaseCallEnvironment(self: *Interpreter, env: *Environment, func: *Function) void {
@@ -5923,7 +5940,7 @@ pub const Interpreter = struct {
         const saved_env = self.env;
         const saved_env_root = try self.pushTempEnvRoot(saved_env);
         defer self.restoreTempEnvRoots(saved_env_root);
-        var block_env = try self.acquireBlockEnvironment(self.env);
+        var block_env = try self.acquireBlockEnvironment(self.env, stmts);
         const block_env_root = try self.pushTempEnvRoot(block_env);
         if (self.mark_fn_body) {
             block_env.fn_body = true;
@@ -5936,7 +5953,7 @@ pub const Interpreter = struct {
         block_env = self.tempEnvRoot(block_env_root, block_env);
         if (block_env.disposables.items.len == 0) {
             if (result) |val| {
-                self.releaseBlockEnvironment(block_env);
+                self.releaseBlockEnvironment(block_env, stmts);
                 return val;
             } else |err| {
                 // A JavaScript throw has a fully-instantiated environment and
@@ -5944,7 +5961,7 @@ pub const Interpreter = struct {
                 // Allocator failures can interrupt a binding insertion, so leave
                 // those environments to the GC finalizer instead of recycling a
                 // possibly partial table.
-                if (err == error.Throw) self.releaseBlockEnvironment(block_env);
+                if (err == error.Throw) self.releaseBlockEnvironment(block_env, stmts);
                 return err;
             }
         }
@@ -5958,10 +5975,10 @@ pub const Interpreter = struct {
         defer self.restoreTempRoots(result_root);
         if (try self.disposeScope(block_env, body_err)) |err| {
             self.exception = err;
-            self.releaseBlockEnvironment(self.tempEnvRoot(block_env_root, block_env));
+            self.releaseBlockEnvironment(self.tempEnvRoot(block_env_root, block_env), stmts);
             return error.Throw;
         }
-        self.releaseBlockEnvironment(self.tempEnvRoot(block_env_root, block_env));
+        self.releaseBlockEnvironment(self.tempEnvRoot(block_env_root, block_env), stmts);
         return self.tempRoot(result_root, val);
     }
 
@@ -57964,6 +57981,31 @@ test "ToString canonicalizes object-produced StringData" {
             "let object = { [key]: 693 }; object['caf\xc3\xa9'] + '|' + log",
     );
     try std.testing.expectEqualStrings("693|s", try result.asWtf8(allocator));
+}
+
+test "block cache retains owned layout without allocation or stale values" {
+    var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var env = Environment{
+        .arena = measured.allocator(),
+        .bindings_allocator = measured.allocator(),
+    };
+    defer env.finalizeOwnedBindingStorage();
+    try env.put("mutable", Value.num(1));
+    try env.putConst("immutable", Value.num(2));
+    const allocations = measured.allocations;
+    for (0..1000) |i| {
+        env.resetForCallReuse();
+        try std.testing.expect(env.getLocal("mutable").?.isUndefined());
+        try std.testing.expect(env.getLocal("immutable").?.isUndefined());
+        try env.put("mutable", Value.num(@floatFromInt(i)));
+        try env.putConst("immutable", Value.num(@floatFromInt(i + 1)));
+    }
+    try std.testing.expectEqual(allocations, measured.allocations);
+    try std.testing.expectEqual(@as(f64, 1000), env.getLocal("immutable").?.asNum());
+    env.resetForBlockReuse();
+    try std.testing.expectEqual(@as(usize, 0), env.vars.count());
+    try std.testing.expectEqual(@as(usize, 0), env.consts.count());
+    try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
 }
 
 test "Environment binding maps share one lazy secure exact-byte context" {

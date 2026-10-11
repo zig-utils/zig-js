@@ -28460,6 +28460,46 @@ test "block scope: uncaptured lexical environments reuse bounded owned storage" 
     try std.testing.expect(allocations_after - allocations_before < 64);
 }
 
+test "block scope: retained layouts preserve TDZ capture eval and abrupt exits" {
+    const expected = "ReferenceError,TypeError,1,ReferenceError,TypeError,3,ReferenceError,TypeError,5,ReferenceError,TypeError,7,undefined,0,undefined,1,undefined,2,0,1,2,0,1,2,2";
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .automatic }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function run() {
+            \\  var forceTree = arguments.length;
+            \\  var log = [], captured = [];
+            \\  for (var i = 0; i < 4; ++i) {
+            \\    try { log.push(x); } catch (e) { log.push(e.name); }
+            \\    let x = i;
+            \\    const y = x + 1;
+            \\    try { y = 9; } catch (e) { log.push(e.name); }
+            \\    log.push(x + y);
+            \\    if (i === 2) captured.push(() => x);
+            \\  }
+            \\  for (var j = 0; j < 3; ++j) {
+            \\    let other = j;
+            \\    log.push(typeof x, other);
+            \\  }
+            \\  for (var k = 0; k < 3; ++k) {
+            \\    let current = k;
+            \\    log.push(eval("current"));
+            \\  }
+            \\  for (var m = 0; m < 3; ++m) {
+            \\    try { let thrown = m; throw thrown; } catch (e) { log.push(e); }
+            \\  }
+            \\  log.push(captured[0]());
+            \\  return log.join(",");
+            \\}
+            \\run();
+        );
+        try std.testing.expectEqualStrings(expected, result.asStr());
+    }
+}
+
 test "function calls: completed private activations reuse bounded owned storage" {
     // #653: a completed tree-walker call activation is observable only through
     // a closure or mapped arguments object. Reuse the uncaptured hot-call cell,
