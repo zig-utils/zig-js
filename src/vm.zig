@@ -6315,6 +6315,70 @@ test "vm: native and baseline for-in control paths agree" {
     try std.testing.expect(finally_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
+test "vm: native for-in termination preserves the checkpoint boundary" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function count(object) {
+        \\  var total = 0;
+        \\  for (var round = 0; round < 256; round = round + 1) {
+        \\    for (var key in object) total = total + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\var target = { a: 1, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1 };
+        \\target
+    );
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var stop_requested: std.atomic.Value(bool) = .init(false);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+        .stop_flag = &stop_requested,
+    });
+    const target = try run(&machine, program, null);
+    try std.testing.expect(target.isObject());
+    const function = Interpreter.funcOf(env.get("count") orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+
+    for (0..12) |_| {
+        try std.testing.expectEqual(@as(f64, 2048),
+            (try runFunction(&machine, function, function_chunk, &.{target}, Value.undef(), Value.undef())).asNum());
+    }
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_enum_next = false;
+    for (operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_next)) {
+            saw_enum_next = true;
+            try std.testing.expectEqual(@as(u8, 4), descriptor.result_count);
+        }
+    }
+    try std.testing.expect(saw_enum_next);
+
+    stop_requested.store(true, .release);
+    machine.steps = 0;
+    const terminated = runFunction(&machine, function, function_chunk, &.{target}, Value.undef(), Value.undef());
+    try std.testing.expectError(error.Throw, terminated);
+    try std.testing.expect(stop_requested.load(.acquire));
+    try std.testing.expectEqualStrings("Error", machine.exception.asObj().errorName());
+    try std.testing.expectEqualStrings("worker terminated", (try machine.getProperty(machine.exception, "message")).asStr());
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
+}
+
 test "vm: native for-in preserves proxy trap order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
