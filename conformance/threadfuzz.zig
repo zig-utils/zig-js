@@ -14851,6 +14851,9 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
     };
     defer ctx.destroy();
 
+    // Finite waits may expire before the allocation sweep finishes. Retain
+    // their root graphs until main publishes sweep completion; liveness must
+    // not depend on the host completing this workload before the timeout.
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -14861,7 +14864,7 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    globalThis.__midgcSyncTimeoutCleanupSum += held;
         \\  }});
         \\  const registry = globalThis.__midgcSyncTimeoutRegistry;
-        \\  const gate = {{ ready: 0 }};
+        \\  const gate = {{ ready: 0, release: 0 }};
         \\  for (let i = 0; i < {d}; i++)
         \\    gate['prop' + i] = 0;
         \\  const cond = new Atomics.Condition();
@@ -14880,6 +14883,10 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\        throw new Error('midgc sync-timeout property result ' + r);
         \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
         \\        throw new Error('midgc sync-timeout property root lost ' + id);
+        \\      while (Atomics.load(gate, 'release') === 0)
+        \\        Atomics.wait(gate, 'release', 0);
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('midgc sync-timeout root lost after parked sweep ' + id);
         \\      target = null;
         \\      root.target = null;
         \\      return marker;
@@ -14908,6 +14915,10 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\        throw new Error('midgc sync-timeout condition root lost ' + id);
         \\      if (!token.unlock() || token.locked)
         \\        throw new Error('midgc sync-timeout token did not unlock');
+        \\      while (Atomics.load(gate, 'release') === 0)
+        \\        Atomics.wait(gate, 'release', 0);
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('midgc sync-timeout root lost after parked sweep ' + id);
         \\      target = null;
         \\      root.target = null;
         \\      return marker;
@@ -14931,7 +14942,9 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  if (typeof gc === 'function') gc();
         \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncTimeoutCleanupCount !== 0)
-        \\    throw new Error('midgc sync-timeout cleanup fired while timeout peers were parked');
+        \\    throw new Error('midgc sync-timeout cleanup fired before the parked-root release');
+        \\  Atomics.store(gate, 'release', 1);
+        \\  Atomics.notify(gate, 'release');
         \\  let joinSum = 0;
         \\  for (const t of threads)
         \\    joinSum += t.join();
