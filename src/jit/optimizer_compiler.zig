@@ -320,6 +320,7 @@ pub fn buildOsrMetadata(plan: *const optimizer.Plan, allocator: std.mem.Allocato
             .first_import = first_import,
             .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
             .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+            .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
             .accumulator_bits = Value.undef().rawBits(),
         });
     }
@@ -663,7 +664,7 @@ const NativeOperationStepMode = enum { deterministic, block_local };
 
 fn operationMayConsumeChildSteps(op: bc.Op) bool {
     return switch (op) {
-        .load_this, .load_new_target, .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical, .new_object, .new_array, .array_append, .array_append_hole, .tail_call, .tail_call_eval, .tail_call_eval_with_this, .tail_call_method, .tail_call_with_this, .tail_call_spread, .tail_call_with_this_spread => false,
+        .load_const, .load_this, .load_new_target, .load_upval, .load_upval_mapped, .load_upval_lexical, .store_upval, .store_upval_mapped, .store_upval_lexical, .new_object, .new_array, .array_append, .array_append_hole, .tail_call, .tail_call_eval, .tail_call_eval_with_this, .tail_call_method, .tail_call_with_this, .tail_call_spread, .tail_call_with_this_spread => false,
         else => true,
     };
 }
@@ -744,7 +745,7 @@ fn stageNativeOperationDescriptors(
                 inst.op == .tail_call_with_this or inst.op == .tail_call_spread or
                 inst.op == .tail_call_with_this_spread)
                 break :runtime operation.lhs;
-            if (inst.op == .load_var_or_undef or inst.op == .store_var or inst.op == .def_var or inst.op == .def_lex or inst.op == .init_declarations or inst.op == .copy_annex_b or inst.op == .resolve_binding_ref or inst.op == .load_binding_ref or inst.op == .clear_binding_ref or inst.op == .store_binding_ref or
+            if (inst.op == .load_const or inst.op == .load_var_or_undef or inst.op == .store_var or inst.op == .def_var or inst.op == .def_lex or inst.op == .init_declarations or inst.op == .copy_annex_b or inst.op == .resolve_binding_ref or inst.op == .load_binding_ref or inst.op == .clear_binding_ref or inst.op == .store_binding_ref or
                 inst.op == .load_upval or inst.op == .load_upval_mapped or inst.op == .load_upval_lexical or
                 inst.op == .store_upval or inst.op == .store_upval_mapped or inst.op == .store_upval_lexical or
                 inst.op == .load_var or inst.op == .load_this or inst.op == .load_new_target or
@@ -966,7 +967,7 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
         node.kind == .new_object or node.kind == .new_array or node.kind == .init_prop or
         node.kind == .init_proto or node.kind == .init_prop_computed or node.kind == .init_spread or
         node.kind == .init_getter or node.kind == .init_setter or node.kind == .array_append or
-        node.kind == .make_closure or node.kind == .load_frame or node.kind == .store_frame or node.kind == .init_frame or node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion or node.kind == .enum_keys or node.kind == .enum_next or node.kind == .enum_end_completion) and
+        node.kind == .load_managed_constant or node.kind == .make_closure or node.kind == .load_frame or node.kind == .store_frame or node.kind == .init_frame or node.kind == .array_spread or node.kind == .array_append_hole or node.kind == .iter_of or node.kind == .assert_iter_result or node.kind == .iter_close or node.kind == .iter_close_completion or node.kind == .enum_keys or node.kind == .enum_next or node.kind == .enum_end_completion) and
         node.block == state.block and
         node.origin == state.origin)
     {
@@ -1201,7 +1202,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .load_managed_constant, .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -1916,6 +1917,9 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
     const required_numeric = try numericRequirements(graph);
+    for (osr.imports[entry.first_import + entry.local_count .. entry.first_import + entry.local_count + entry.stack_count]) |import|
+        if (import.source != .stack_slot or import.destination >= required_numeric.len or required_numeric[import.destination])
+            return error.UnsupportedChunk;
     var scratch_slots = graph.nodes.len;
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
@@ -2288,6 +2292,9 @@ fn lowerRegionOsr(
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
     const required_numeric = try numericRequirements(graph);
+    for (osr.imports[entry.first_import + entry.local_count .. entry.first_import + entry.local_count + entry.stack_count]) |import|
+        if (import.source != .stack_slot or import.destination >= required_numeric.len or required_numeric[import.destination])
+            return error.UnsupportedChunk;
     var scratch_slots = graph.nodes.len;
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
@@ -3056,7 +3063,7 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
                 try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .origin = node.origin });
             },
-            .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
+            .load_managed_constant, .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -4024,7 +4031,7 @@ fn compileAarch64WithAllocator(
     var requires_execution_context = false;
     for (program.native_operations) |descriptor| {
         const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
-        if (op == .load_var_or_undef or op == .store_var or op == .def_var or op == .def_lex or op == .init_declarations or op == .copy_annex_b or op == .resolve_binding_ref or op == .load_binding_ref or op == .clear_binding_ref or op == .store_binding_ref) {
+        if (op == .load_const or op == .load_var_or_undef or op == .store_var or op == .def_var or op == .def_lex or op == .init_declarations or op == .copy_annex_b or op == .resolve_binding_ref or op == .load_binding_ref or op == .clear_binding_ref or op == .store_binding_ref) {
             requires_execution_context = true;
             requires_activation_context = true;
         }
@@ -7555,7 +7562,7 @@ test "optimizer loop OSR imports managed constants from the exact VM frame" {
     defer plan.deinit();
     var found_managed_constant = false;
     for (plan.graph.nodes) |node| {
-        if (node.kind == .interpreter_value and node.origin == 0) found_managed_constant = true;
+        if (node.kind == .load_managed_constant and node.origin == 0 and node.immediate == marker_index) found_managed_constant = true;
     }
     try std.testing.expect(found_managed_constant);
 

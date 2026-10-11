@@ -4729,38 +4729,13 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         const cursor_number = cursor_value.asNum();
         if (!std.math.isFinite(cursor_number) or cursor_number < 0 or @trunc(cursor_number) != cursor_number)
             return @backingInt(jit.NativeOperationStatus.host_trap);
-        const target_root = vm.pushTempRoot(target) catch |err|
-            return finishNativeOperationError(frame, vm, operation_id, err);
-        defer vm.restoreTempRoots(target_root);
-        const keys_root = vm.pushTempRoot(keys_value) catch |err|
-            return finishNativeOperationError(frame, vm, operation_id, err);
-        defer vm.restoreTempRoots(keys_root);
-        if (cursor_number > @as(f64, @floatFromInt(std.math.maxInt(usize))))
+        if (cursor_number >= @as(f64, @floatFromInt(std.math.maxInt(usize))))
             return @backingInt(jit.NativeOperationStatus.host_trap);
-        var index: usize = @intFromFloat(cursor_number);
-        var key = Value.undef();
-        var present = false;
-        var has_candidate = false;
-        const keys = vm.tempRoot(keys_root, keys_value).asObj();
-        if (index < keys.elementsLen()) {
-            key = keys.denseElement(index) orelse return @backingInt(jit.NativeOperationStatus.host_trap);
-            index += 1;
-            has_candidate = true;
-            const key_root = vm.pushTempRoot(key) catch |err|
-                return finishNativeOperationError(frame, vm, operation_id, err);
-            defer vm.restoreTempRoots(key_root);
-            const property = propKey(vm, vm.tempRoot(key_root, key)) catch |err|
-                return finishNativeOperationError(frame, vm, operation_id, err);
-            const rooted_target = vm.tempRoot(target_root, target);
-            if (!rooted_target.isObject()) return @backingInt(jit.NativeOperationStatus.host_trap);
-            present = vm.hasPropertyResult(rooted_target.asObj(), property) catch |err|
-                return finishNativeOperationError(frame, vm, operation_id, err);
-            key = vm.tempRoot(key_root, key);
-        }
-        frame.operation_result_bits[0] = Value.num(@floatFromInt(index)).rawBits();
-        frame.operation_result_bits[1] = key.rawBits();
-        frame.operation_result_bits[2] = Value.boolVal(present).rawBits();
-        frame.operation_result_bits[3] = Value.boolVal(has_candidate).rawBits();
+        if (!target.isObject() and cursor_number < @as(f64, @floatFromInt(keys_value.asObj().elementsLen())))
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        const step = executeEnumerationNext(vm, target, keys_value, cursor_value) catch |err|
+            return finishNativeOperationError(frame, vm, operation_id, err);
+        frame.operation_result_bits = .{ step.index.rawBits(), step.key.rawBits(), step.present.rawBits(), step.has_candidate.rawBits() };
         frame.operation_detail = operation_id;
         return @backingInt(jit.NativeOperationStatus.value);
     }
@@ -4849,6 +4824,15 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         const current = active.frame orelse return @backingInt(jit.NativeOperationStatus.host_trap);
         if (inst.a >= current.slots.len) return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, executeLocalBinding(vm, current, chunk, inst, if (write) Value.fromRawBits(inputs[0]) else Value.undef(), bc.ic_seqlock_enabled.load(.monotonic)));
+    }
+    if (op == .load_const) {
+        const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse return @backingInt(jit.NativeOperationStatus.host_trap)));
+        const chunk = active.chunk orelse return @backingInt(jit.NativeOperationStatus.host_trap);
+        if (inputs.len != 0 or descriptor.origin >= chunk.code.items.len or descriptor.operand_a >= chunk.consts.items.len)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        const inst = chunk.code.items[descriptor.origin];
+        if (inst.op != .load_const or inst.a != descriptor.operand_a) return @backingInt(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(frame, vm, operation_id, chunk.consts.items[inst.a]);
     }
     if (op == .iter_of or op == .assert_iter_result or op == .iter_close or op == .iter_close_completion) {
         const expected: usize = if (op == .iter_close_completion) 3 else 1;
@@ -6361,8 +6345,7 @@ test "vm: native for-in termination preserves the checkpoint boundary" {
     const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
 
     for (0..12) |_| {
-        try std.testing.expectEqual(@as(f64, 2048),
-            (try runFunction(&machine, function, function_chunk, &.{target}, Value.undef(), Value.undef())).asNum());
+        try std.testing.expectEqual(@as(f64, 2048), (try runFunction(&machine, function, function_chunk, &.{target}, Value.undef(), Value.undef())).asNum());
     }
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
@@ -7863,6 +7846,40 @@ fn storeCapturedBinding(vm: *Interpreter, frame: ?*Frame, inst: bc.Inst, stored:
         if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
     } else target.writeSlot(slot, stored, parallel);
     return stored;
+}
+
+const EnumerationStep = struct {
+    index: Value,
+    key: Value,
+    present: Value,
+    has_candidate: Value,
+};
+
+fn executeEnumerationNext(vm: *Interpreter, target: Value, keys_value: Value, index_value: Value) EvalError!EnumerationStep {
+    // One candidate per opcode retains the VM/native polling cadence. Keep
+    // the receiver and candidate movable across Proxy [[HasProperty]] reentry.
+    var index: usize = @intFromFloat(index_value.asNum());
+    const keys = keys_value.asObj();
+    if (index >= keys.elementsLen()) return .{
+        .index = index_value,
+        .key = Value.undef(),
+        .present = Value.boolVal(false),
+        .has_candidate = Value.boolVal(false),
+    };
+    const roots = vm.gc_temp_roots.items.len;
+    defer vm.restoreTempRoots(roots);
+    const target_root = try vm.pushTempRoot(target);
+    const key = keys.denseElement(index).?;
+    const key_root = try vm.pushTempRoot(key);
+    index += 1;
+    const property = try propKey(vm, key);
+    const present = try vm.hasPropertyResult(vm.tempRoot(target_root, target).asObj(), property);
+    return .{
+        .index = Value.num(@floatFromInt(index)),
+        .key = vm.tempRoot(key_root, key),
+        .present = Value.boolVal(present),
+        .has_candidate = Value.boolVal(true),
+    };
 }
 
 /// ECMA-262 GetIterator, IteratorComplete's Object assertion, and
@@ -9521,22 +9538,12 @@ fn runChunk(
                 const base = stack.items.len - 3;
                 const target = stack.items[base];
                 const keys = stack.items[base + 1].asObj();
-                var index: usize = @intFromFloat(stack.items[base + 2].asNum());
                 try stack.ensureTotalCapacity(stack_alloc, stack.items.len + 3);
-
-                var key = Value.undef();
-                var has_candidate = false;
-                var present = false;
-                if (index < keys.elementsLen()) {
-                    key = keys.denseElement(index).?;
-                    index += 1;
-                    has_candidate = true;
-                    present = try vm.hasPropertyResult(target.asObj(), try propKey(vm, key));
-                }
-                stack.items[base + 2] = Value.num(@floatFromInt(index));
-                stack.appendAssumeCapacity(key);
-                stack.appendAssumeCapacity(Value.boolVal(present));
-                stack.appendAssumeCapacity(Value.boolVal(has_candidate));
+                const step = try executeEnumerationNext(vm, target, Value.obj(keys), stack.items[base + 2]);
+                stack.items[base + 2] = step.index;
+                stack.appendAssumeCapacity(step.key);
+                stack.appendAssumeCapacity(step.present);
+                stack.appendAssumeCapacity(step.has_candidate);
             },
             .enum_end_completion => {
                 const base = stack.items.len - 5;
@@ -27554,6 +27561,157 @@ test "vm: optimizer closure allocation retains realm module and retirement conte
         try std.testing.expectEqualStrings("[true,13,6]", (try ctx.evaluate("JSON.stringify(moduleCaptured())")).asStr());
         try std.testing.expect((try ctx.evaluate("retainedRealmClosure()[1]===other.Array && retainedRealmClosure()[2]===other")).asBool());
     }
+}
+
+test "vm: optimizer enumeration preserves oracle controls in shared modes" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| for ([_]bool{ false, true }) |gc| {
+        if (parallel and !gc) continue;
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = gc, .enable_threads = parallel, .parallel_gc = parallel, .enable_jit = native, .parallel_js = parallel, .profile_execution_tiers = true, .bytecode_execution_mode = .required });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function enumCount(object){var count=0;for(var key in object)count++;return count;}
+            \\function enumEarly(object){for(var key in object)return key;return "empty";}
+            \\function enumBreak(object){var result="";for(var key in object){result+=key;break;}return result;}
+            \\function enumAbrupt(object){try{for(var key in object){if(key==="b")throw key;}}catch(e){return "caught:"+e;}finally{finals++;}return "none";}
+            \\function enumCapture(object){var captures=[];for(let key in object)captures.push(()=>key);return captures.map(f=>f()).join(",");}
+            \\var wide={};for(var i=0;i<200;i++)wide["k"+i]=i;
+            \\for(var warm=0;warm<64;warm++){enumCount(wide);enumEarly(wide);enumBreak(wide);}
+            \\var proto={inherited:1,shadowed:1};var shaded=Object.create(proto);shaded.own=2;Object.defineProperty(shaded,"shadowed",{value:2,enumerable:false});
+            \\var log=[];var target={a:1,b:2,c:3};var proxy=new Proxy(target,{ownKeys(t){log.push("keys");return Reflect.ownKeys(t);},getOwnPropertyDescriptor(t,k){log.push("desc:"+k);return Reflect.getOwnPropertyDescriptor(t,k);}});
+            \\var finals=0;
+            \\JSON.stringify([enumCount(wide),enumCount("xy"),enumCount(null),enumCount(undefined),enumCount(shaded),enumEarly({a:1,b:2}),enumBreak({a:1,b:2}),enumAbrupt({a:1,b:2}),finals,enumCapture({a:1,b:2,c:3}),enumCount(proxy),log]);
+        );
+        try std.testing.expectEqualStrings("[200,2,0,0,2,\"a\",\"a\",\"caught:b\",1,\"a,b,c\",3,[\"keys\",\"desc:a\",\"desc:b\",\"desc:c\"]]", result.asStr());
+        const snapshot = ctx.tierAttributionSnapshot();
+        if (native and jit.optimizer_supported) {
+            try std.testing.expect(snapshot.execution.count(.optimizer_osr_entries) > 0);
+            try std.testing.expect(snapshot.runtime_operations.count(.enum_keys) > 0);
+            try std.testing.expect(snapshot.runtime_operations.count(.enum_next) > 0);
+            for ([_][]const u8{ "enumEarly", "enumBreak" }) |name| {
+                const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
+                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(code.entry_enabled);
+            }
+        }
+    };
+}
+
+test "vm: optimizer enumeration callback budgets preserve exact dispatch" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const Record = struct { steps: u64, error_kind: u8, effects: f64, completed: bool };
+    var expected: [2][2][64]Record = undefined;
+    const ops = [_]bc.Op{ .enum_keys, .enum_next };
+    for (ops, 0..) |op, op_index| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = false, .enable_jit = native });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var enumEffects=0;
+            \\var enumBudget=new Proxy({a:1},{ownKeys:function(t){enumEffects++;return Reflect.ownKeys(t);},has:function(t,k){enumEffects++;return Reflect.has(t,k);}});
+        );
+        var preparation_machine = ctx.interpreter();
+        const state = try preparation_machine.prepareForIn(ctx.global_object.getOwn("enumBudget").?);
+        var chunk = bc.Chunk.init(ctx.arena());
+        const count: u32 = if (op == .enum_keys) 1 else 3;
+        chunk.param_count = count;
+        chunk.local_count = count;
+        for (0..count) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emit(op, 0);
+        // A following write must never happen after a callback has expired
+        // the budget or crossed the cooperative-stop polling boundary.
+        const after_name = try chunk.addName("enumAfter");
+        _ = try chunk.emit(.load_true, 0);
+        _ = try chunk.emit(.store_var, after_name);
+        _ = try chunk.emit(.pop, 0);
+        _ = try chunk.emit(.ret_undef, 0);
+        var code: ?jit.CompiledCode = if (native) try optimizer_compiler.compile(&chunk) else null;
+        defer if (code) |*entry| entry.deinit();
+        for (0..2) |mode| for (0..64) |index| {
+            _ = try ctx.evaluate("enumEffects=0;enumAfter=false;");
+            var machine = ctx.interpreter();
+            machine.steps = 976 + index;
+            machine.step_budget = if (mode == 0) 1024 else 1_000_000;
+            var stop: std.atomic.Value(bool) = .init(mode == 1);
+            machine.stop_flag = &stop;
+            var slots = [_]Value{ state.target, state.keys, Value.num(0) };
+            const arguments = slots[0..count];
+            var frame = Frame{ .slots = arguments, .parent = null };
+            var record = Record{ .steps = 0, .error_kind = 0, .effects = 0, .completed = false };
+            const result: EvalError!Value = if (code) |*entry| result: {
+                var exec = Exec{ .chunk = &chunk, .frame = &frame };
+                defer exec.stack.deinit(ctx.arena());
+                defer exec.handlers.deinit(ctx.arena());
+                const outcome = tryRunManagedNative(&machine, entry, arguments, &exec) catch |err| break :result err;
+                if (outcome == .complete) break :result outcome.complete;
+                if (outcome == .deoptimized) {
+                    var delta = jit.OptimizerProfile.Delta{};
+                    break :result runChunk(&machine, &exec, &chunk, &frame, null, &delta);
+                }
+                if (outcome == .miss) break :result run(&machine, &chunk, &frame);
+                return error.TestUnexpectedResult;
+            } else run(&machine, &chunk, &frame);
+            if (result) |_| {} else |err| {
+                if (err != error.Throw) return err;
+                const name = machine.exception.asObj().errorName();
+                record.error_kind = if (std.mem.eql(u8, name, "RangeError")) 1 else if (std.mem.eql(u8, name, "Error")) 2 else return error.TestUnexpectedResult;
+            }
+            record.steps = machine.steps;
+            record.effects = ctx.global_object.getOwn("enumEffects").?.asNum();
+            record.completed = ctx.global_object.getOwn("enumAfter").?.asBool();
+            if (!native) expected[op_index][mode][index] = record else try std.testing.expectEqualDeep(expected[op_index][mode][index], record);
+        };
+    };
+}
+
+test "vm: optimizer enumeration preserves abrupt nested and changing-target completion" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = native, .enable_threads = parallel, .parallel_gc = parallel, .parallel_js = parallel, .bytecode_execution_mode = .required });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[true,1,\"a\",[\"finally\"],1,4,[2,\"b\"],[\"a\",\"c\"]]", (try ctx.evaluate(
+            \\var events=[];
+            \\function enCount(o){var n=0;for(var k in o)n++;return n;}
+            \\function enFirst(o){for(var k in o)return k;return "empty";}
+            \\function enStop(o){var n=0;for(var k in o){n++;break;}return n;}
+            \\function enFinally(o){try{for(var k in o)return k;}finally{events.push("finally");}return "empty";}
+            \\function enNested(o){var n=0;for(var a in o){for(var b in o)n++;}return n;}
+            \\function enChange(o){var n=0;for(o.key in {a:1,b:2})n++;return [n,o.key];}
+            \\for(var warm=0;warm<64;warm++){enCount({a:1,b:2});enFirst({a:1});enStop({a:1});enFinally({a:1});enNested({a:1,b:2});}
+            \\events=[];
+            \\var marker={};var gets=0;var throwing=new Proxy({a:1},{getOwnPropertyDescriptor(t,k){gets++;throw marker;}});
+            \\var thrown;try{enCount(throwing);}catch(e){thrown=e===marker;}
+            \\var changing={a:1,b:2,c:3};var chosen=[];for(var key in changing){chosen.push(key);if(key==="a")delete changing.b;}
+            \\JSON.stringify([thrown,gets,enFinally({a:1}),events,enStop({a:1}),enNested({a:1,b:2}),enChange({}),chosen]);
+        )).asStr());
+    };
+}
+
+test "vm: optimizer managed constant reads the live traced chunk" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const active = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(active);
+    var chunk = bc.Chunk.init(ctx.arena());
+    const first = try machine.newObject();
+    const second = try machine.newObject();
+    const index = try chunk.addConst(first);
+    _ = try chunk.emit(.load_const, index);
+    _ = try chunk.emit(.ret, 0);
+    var code = try optimizer_compiler.compile(&chunk);
+    defer code.deinit();
+    try std.testing.expect(code.requires_execution_context);
+    var exec = Exec{ .chunk = &chunk };
+    try std.testing.expect((try tryRunManagedNative(&machine, &code, &.{}, null)) == .miss);
+    chunk.consts.items[index] = second;
+    const outcome = try tryRunManagedNative(&machine, &code, &.{}, &exec);
+    try std.testing.expect(outcome == .complete);
+    try std.testing.expectEqual(second.rawBits(), outcome.complete.rawBits());
 }
 
 test "vm: optimizer enumeration checkpoints recover every result" {

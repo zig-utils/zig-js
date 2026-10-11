@@ -7321,8 +7321,12 @@ pub const Interpreter = struct {
         const scratch = self.scratch_allocator orelse self.arena;
         var visited: SecureStringMembership = .{};
         defer visited.deinit(scratch);
-        var cur: ?*value.Object = start;
-        while (cur) |o| {
+        const roots = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(roots);
+        var current = Value.obj(start);
+        const current_root = try self.pushTempRoot(current);
+        while (self.tempRoot(current_root, current).isObject()) {
+            var o = self.tempRoot(current_root, current).asObj();
             // A String wrapper's own enumerable character indices "0".."len-1".
             if (o.boxedPrimitive()) |p| if (p.isString()) {
                 const plen = utf16LenOfValue(p);
@@ -7361,7 +7365,9 @@ pub const Interpreter = struct {
                 try self.objectOwnKeysList(o)
             else
                 try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena);
+            o = self.tempRoot(current_root, current).asObj();
             for (own_keys) |k| {
+                o = self.tempRoot(current_root, current).asObj();
                 if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
                 if (try visited.getOrPutSecure(self, scratch, k)) continue;
                 const enumerable = if (moduleNsOf(o) != null) blk: {
@@ -7373,7 +7379,9 @@ pub const Interpreter = struct {
                 } else o.getAttr(k).enumerable;
                 if (enumerable) try out.append(self.arena, k);
             }
-            cur = o.protoAtomic();
+            o = self.tempRoot(current_root, current).asObj();
+            current = if (o.protoAtomic()) |parent| Value.obj(parent) else Value.undef();
+            self.setTempRoot(current_root, current);
         }
         return out.items;
     }
@@ -7415,14 +7423,21 @@ pub const Interpreter = struct {
     /// exactly once per ForIn/OfHeadEvaluation and the fresh dense key array is
     /// never exposed to JavaScript or driven through the iterator protocol.
     pub fn prepareForIn(self: *Interpreter, v: Value) EvalError!ForInPreparation {
-        const arr = (try self.newArray()).asObj();
+        const roots = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(roots);
+        const input_root = try self.pushTempRoot(v);
+        const keys = try self.newArray();
+        const keys_root = try self.pushTempRoot(keys);
         // ForIn/OfHeadEvaluation: undefined/null enumerate nothing; any other
         // value is ToObject'd first (so a primitive string yields its indices).
-        if (v.isUndefined() or v.isNull()) return .{ .target = v, .keys = Value.obj(arr) };
-        const target = try self.toObject(v);
-        for (try self.forInKeyList(target)) |k|
-            try arr.appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
-        return .{ .target = Value.obj(target), .keys = Value.obj(arr) };
+        if (v.isUndefined() or v.isNull()) return .{ .target = v, .keys = self.tempRoot(keys_root, keys) };
+        const target = Value.obj(try self.toObject(self.tempRoot(input_root, v)));
+        const target_root = try self.pushTempRoot(target);
+        for (try self.forInKeyList(target.asObj())) |k| {
+            const key = try Value.strAlloc(self.arena, value.decodeStringKey(k));
+            try self.tempRoot(keys_root, keys).asObj().appendElement(self.arena, key);
+        }
+        return .{ .target = self.tempRoot(target_root, target), .keys = self.tempRoot(keys_root, keys) };
     }
 
     /// Bind one iteration's value to the loop target: a declaration declares

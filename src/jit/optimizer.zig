@@ -128,6 +128,7 @@ pub const ValueKind = enum {
     enum_next,
     enum_end_completion,
     enum_result,
+    load_managed_constant,
     binding_base,
     branch_predicate,
     /// A value produced by exact bytecode but deliberately not embedded in the
@@ -686,6 +687,7 @@ pub fn nativeOperationStackDepth(inst: bc.Inst, before: u32) ?u32 {
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
     switch (inst.op) {
+        .load_const => return 0,
         .make_closure, .load_local, .load_local_mapped, .load_local_lexical, .store_local, .store_local_mapped, .store_local_lexical, .init_local_lexical => return depthEffect(inst).required,
         .to_numeric,
         .neg,
@@ -1201,21 +1203,21 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .load_const => {
                 if (inst.a >= chunk.consts.items.len) return error.InvalidControlFlow;
                 const constant: RuntimeValue = chunk.consts.items[inst.a];
-                // A compiled artifact can outlive the bytecode chunk that owns
-                // this traced constant. Keep managed values opaque instead of
-                // embedding an untraced pointer. Whole-entry lowering refuses
-                // the node, while loop OSR can import its exact live value from
-                // the VM frame after bytecode has materialized it.
-                stack[depth] = if (constant.isObject() or constant.isString())
-                    try builder.appendNode(.{
+                if (constant.isObject() or constant.isString()) {
+                    // Read the traced constant through the live Exec/chunk;
+                    // executable code never embeds a managed pointer.
+                    try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                    try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                    stack[depth] = try builder.appendNode(.{
                         .id = undefined,
                         .block = @intCast(block_id),
                         .origin = @intCast(origin),
-                        .kind = .interpreter_value,
+                        .kind = .load_managed_constant,
+                        .immediate = inst.a,
                         .may_have_effect = true,
-                    })
-                else
-                    try builder.internLeaf(0, @intCast(origin), .constant, constant.rawBits());
+                    });
+                    try builder.roots.append(allocator, stack[depth]);
+                } else stack[depth] = try builder.internLeaf(0, @intCast(origin), .constant, constant.rawBits());
                 depth += 1;
             },
             .load_undefined => {

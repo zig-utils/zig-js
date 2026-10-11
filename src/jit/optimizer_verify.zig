@@ -55,6 +55,7 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .argument,
         .frame_slot,
         .make_closure,
+        .load_managed_constant,
         .block_argument,
         .constant,
         .undefined,
@@ -542,6 +543,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
         } else if (node.kind != .interpreter_value) {
             const op = plan.instructions[node.origin].op;
             const expected: ir.ValueKind = if (node.kind == .enum_result) .enum_result else if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
+                .load_const => .load_managed_constant,
                 .load_local, .load_local_mapped, .load_local_lexical => .load_frame,
                 .store_local, .store_local_mapped, .store_local_lexical => .store_frame,
                 .init_local_lexical => .init_frame,
@@ -568,6 +570,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
                     const instruction = plan.instructions[node.origin];
                     if (node.immediate != (@as(u64, instruction.a) << 32) | instruction.b) return error.InvalidValue;
                 },
+                .load_managed_constant,
                 .make_closure,
                 .load_var,
                 .get_prop,
