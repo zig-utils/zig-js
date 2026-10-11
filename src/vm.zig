@@ -6201,7 +6201,26 @@ test "vm: native and baseline for-in control paths agree" {
     try std.testing.expectEqualStrings("abcp|a|a|7|a!|aabacapa", native.asStr());
 
     const first_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
-    try std.testing.expect(first_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+    const first_artifact = first_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const first_operations = first_artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_enum_keys = false;
+    var saw_enum_next = false;
+    for (first_operations.descriptors) |descriptor| {
+        switch (std.enums.fromInt(bc.Op, descriptor.bytecode_op) orelse continue) {
+            .enum_keys => {
+                saw_enum_keys = true;
+                try std.testing.expectEqual(@as(u8, 3), descriptor.result_count);
+            },
+            .enum_next => {
+                saw_enum_next = true;
+                try std.testing.expectEqual(@as(u8, 4), descriptor.result_count);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_enum_keys);
+    try std.testing.expect(saw_enum_next);
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
 }
 
