@@ -27856,6 +27856,7 @@ test "vm: optimizer managed constant reads the live traced chunk" {
 
 test "vm: optimizer enumeration checkpoints recover every result" {
     if (!jit.optimizer_supported) return error.SkipZigTest;
+    if (!@hasDecl(@import("gc"), "RelocationVisitor")) return error.SkipZigTest;
     const Context = @import("context.zig").Context;
     const Probe = struct {
         move: bool,
