@@ -7,10 +7,10 @@ description: Compile zig-js and run the test262 conformance suite.
 
 ## Prerequisites
 
-zig-js requires **Zig 0.17.0-dev**. The 0.16 release will **not** build it.
+zig-js requires **Zig 0.18.0-dev**. Zig 0.17 and earlier are outside the supported toolchain contract.
 
 > [!IMPORTANT]
-> If your system `zig` is 0.16, use a pinned 0.17-dev toolchain (e.g. installed under `~/.local/share/zig-0.17-dev/zig`). The `bun run docs:data` script below auto-detects that path.
+> If your system `zig` is older than 0.18-dev, use the CI-pinned 0.18-dev toolchain (for example, `0.18.0-dev.146+35accc06e`).
 
 > [!IMPORTANT]
 > zig-js resolves two sibling Zig packages by **local path** — `../zig-regex` and `../zig-gc` (see `build.zig.zon`). Both must be checked out next to your `zig-js` directory or the build cannot resolve its dependencies; CI provisions them from the `zig-utils` org.

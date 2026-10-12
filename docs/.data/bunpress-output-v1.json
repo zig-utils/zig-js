@@ -130,8 +130,8 @@
     },
     {
       "path": "guide/building/index.html",
-      "bytes": 229643,
-      "sha256": "fee1f96afc71e0e53299104b49307068660ce79733775f7f4a1e0bf8d2baaf2e"
+      "bytes": 229590,
+      "sha256": "a1a643bc7661d3bcff74053808238fb76b04b9b8954b2dac8a8c86345b479cad"
     },
     {
       "path": "guide/contributing/index.html",
@@ -180,8 +180,8 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 274478,
-      "sha256": "2a282d671c9a8c6d015ce4f6b8b1e92e51d4611777b9bc91134b93e4bc520a6d"
+      "bytes": 274454,
+      "sha256": "971078fdf8b7e25808f734d55f95ecf4ba3d628fe9534a5db1538946b2f0f16d"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "30c862db9d46bc24e5d40d6ac62c1ac1ebb63d39cc6f8b8d7435af749d39e07b"
+  "tree_sha256": "e92c0089522f2e3d78e9e2d4a2e1aa1c4929e8ba39af6d43835f30511e16d350"
 }
