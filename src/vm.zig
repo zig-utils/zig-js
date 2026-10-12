@@ -6379,6 +6379,7 @@ test "vm: native and baseline for-in control paths agree" {
     }
     try std.testing.expect(saw_enum_keys);
     try std.testing.expect(saw_enum_next);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_keys) > 0);
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_next) > 0);
 
     const stop_chunk = native_program.fns.items[4].chunk orelse return error.TestUnexpectedResult;
