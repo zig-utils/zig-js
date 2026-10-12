@@ -8772,6 +8772,9 @@ fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     };
     defer ctx.destroy();
 
+    // A finite wait may expire while main constructs late join records. Its
+    // result is checked, but roots stay live until the collection phase releases
+    // the gate; host scheduling cannot end the parked-root window early.
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -8793,8 +8796,15 @@ fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      Atomics.add(gate, 'ready', 1);
         \\      Atomics.notify(gate, 'ready');
         \\      const r = Atomics.wait(gate, 'state', 0, timeout);
-        \\      if (r !== 'ok' && r !== 'not-equal')
+        \\      if (r !== 'ok' && r !== 'not-equal' && r !== 'timed-out')
         \\        throw new Error('midgc late asyncJoin waiter result ' + r);
+        \\      while (Atomics.load(gate, 'state') === 0) {{
+        \\        const released = Atomics.wait(gate, 'state', 0);
+        \\        if (released !== 'ok' && released !== 'not-equal')
+        \\          throw new Error('midgc late asyncJoin release waiter result ' + released);
+        \\      }}
+        \\      if (root.marker !== marker || root.nested.label !== 'midgc-late-asyncjoin-waiter-root')
+        \\        throw new Error('midgc late asyncJoin waiter root lost after release');
         \\      return root.marker;
         \\    }}, gate, marker, {d}));
         \\  }}
@@ -9028,6 +9038,9 @@ fn runMidScriptLateAsyncJoinRejectCleanupGc(gpa: std.mem.Allocator, seed: u64) !
     };
     defer ctx.destroy();
 
+    // A finite wait may expire while main constructs late join records. Its
+    // result is checked, but roots stay live until the collection phase releases
+    // the gate; host scheduling cannot end the parked-root window early.
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -9049,8 +9062,15 @@ fn runMidScriptLateAsyncJoinRejectCleanupGc(gpa: std.mem.Allocator, seed: u64) !
         \\      Atomics.add(gate, 'ready', 1);
         \\      Atomics.notify(gate, 'ready');
         \\      const r = Atomics.wait(gate, 'state', 0, timeout);
-        \\      if (r !== 'ok' && r !== 'not-equal')
+        \\      if (r !== 'ok' && r !== 'not-equal' && r !== 'timed-out')
         \\        throw new Error('midgc late asyncJoin reject waiter result ' + r);
+        \\      while (Atomics.load(gate, 'state') === 0) {{
+        \\        const released = Atomics.wait(gate, 'state', 0);
+        \\        if (released !== 'ok' && released !== 'not-equal')
+        \\          throw new Error('midgc late asyncJoin reject release waiter result ' + released);
+        \\      }}
+        \\      if (root.marker !== marker || root.nested.label !== 'midgc-late-asyncjoin-reject-waiter-root')
+        \\        throw new Error('midgc late asyncJoin reject waiter root lost after release');
         \\      return root.marker;
         \\    }}, gate, marker, {d}));
         \\  }}
