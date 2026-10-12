@@ -6218,6 +6218,8 @@ test "vm: native and baseline for-in control paths agree" {
         \\function throwing(object) { try { for (var key in object) { if (key === "a") throw 7; } } catch (error) { return error; } finally {} return 0; }
         \\function cleanup(object) { var out = ""; try { for (var key in object) { out += key; break; } } finally { out += "!"; } return out; }
         \\function nested(object) { var out = ""; for (var outer in object) { for (var inner in object) { out += outer + inner; break; } } return out; }
+        \\function deleted(object) { var out = ""; for (var key in object) { out += key; delete object.b; } return out; }
+        \\function shadowed() { var proto = { a: 1, b: 1 }; var object = Object.create(proto); object.a = 2; object.c = 3; var out = ""; for (var key in object) out += key; return out; }
         \\function proxyOrder(object) { var log = ""; var proxy = new Proxy(object, { ownKeys: function() { log += "k"; return ["b", "a"]; }, getOwnPropertyDescriptor: function(target, key) { log += key; return { enumerable: true, configurable: true }; } }); for (var key in proxy) log += key; return log; }
         \\function changing(object) { var out = ""; for (var key in object) { out += key; object = { z: 1 }; } return out; }
         \\function primitive(value) { var out = ""; for (var key in value) out += key; return out; }
@@ -6229,7 +6231,7 @@ test "vm: native and baseline for-in control paths agree" {
         \\function proxyEscape(object) { for (var key in object) {} return 0; }
         \\var result = "";
         \\for (var warm = 0; warm < 12; warm = warm + 1) {
-        \\  result = sweep(makeSubject()) + "|" + count(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject()) + "|" + catchLoop(makeSubject()) + "|" + finallyLoop(makeSubject());
+        \\  result = sweep(makeSubject()) + "|" + count(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + deleted({ a: 1, b: 2, c: 3 }) + "|" + shadowed() + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + ":" + primitive(null) + "|" + captured(makeSubject()) + "|" + catchLoop(makeSubject()) + "|" + finallyLoop(makeSubject());
         \\}
         \\for (var proxyWarm = 0; proxyWarm < 12; proxyWarm = proxyWarm + 1) proxyThrow(makeSubject());
         \\for (var escapeWarm = 0; escapeWarm < 12; escapeWarm = escapeWarm + 1) proxyEscape(makeSubject());
@@ -6281,7 +6283,7 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbbaapp|abcp|01|ap|7|1|9|2|9|2", native.asStr());
+    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|ac|acb|kbbaapp|abcp|01:|ap|7|1|9|2|9|2", native.asStr());
 
     const count_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(count_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
