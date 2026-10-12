@@ -101,7 +101,7 @@
     }
   ],
   "test_only_direct_spawns": [
-    { "path": "src/agent.zig", "count": 3 },
+    { "path": "src/agent.zig", "count": 5 },
     { "path": "src/bytecode.zig", "count": 12 },
     { "path": "src/c_api.zig", "count": 11 },
     { "path": "src/context.zig", "count": 37 },
@@ -122,7 +122,7 @@
     { "path": "src/strcell.zig", "count": 4 },
     { "path": "src/structured_clone.zig", "count": 1 },
     { "path": "src/value.zig", "count": 20 },
-    { "path": "src/vm.zig", "count": 8 },
+    { "path": "src/vm.zig", "count": 19 },
     { "path": "src/wasm/exec.zig", "count": 8 },
     { "path": "src/worker.zig", "count": 2 }
   ]
