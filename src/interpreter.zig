@@ -7284,17 +7284,19 @@ pub const Interpreter = struct {
             switch (iter.kind()) {
                 .undefined, .null => {}, // iterating null/undefined is a no-op
                 else => {
-                    const o = try self.toObject(iter);
+                    const receiver = Value.obj(try self.toObject(iter));
+                    const receiver_root = try self.pushTempRoot(receiver);
+                    defer self.restoreTempRoots(receiver_root);
                     var ienv: IterEnvState = .{};
                     const iter_env_mark = self.gc_env_roots.items.len;
                     defer self.gc_env_roots.shrinkRetainingCapacity(iter_env_mark);
                     // EnumerateObjectProperties: own + inherited enumerable string
                     // keys with prototype-chain shadowing (see forInKeyList).
-                    for (try self.forInKeyList(o)) |k| {
+                    for (try self.forInKeyList(self.tempRoot(receiver_root, receiver).asObj())) |k| {
                         // A property deleted (or made non-enumerable) before it is
                         // reached must not be visited: the key list is a snapshot,
                         // so re-check the property still exists on the chain.
-                        if (!try self.hasPropertyResult(o, k)) continue;
+                        if (!try self.forInCandidateIsEnumerable(self.tempRoot(receiver_root, receiver), k)) continue;
                         const saved_env = self.tempEnvRoot(outer_env_root, outer_env);
                         defer self.env = self.tempEnvRoot(outer_env_root, outer_env);
                         // for-in has no per-iteration `using` resource, so the
@@ -7370,20 +7372,39 @@ pub const Interpreter = struct {
                 o = self.tempRoot(current_root, current).asObj();
                 if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
                 if (try visited.getOrPutSecure(self, scratch, k)) continue;
-                const enumerable = if (moduleNsOf(o) != null) blk: {
-                    const desc = try moduleNsDesc(self, o, k);
-                    break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
-                } else if (o.proxyHandler() != null or o.proxy_revoked) blk: {
-                    const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), try self.keyToValue(k) });
-                    break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
-                } else o.getAttr(k).enumerable;
-                if (enumerable) try out.append(self.arena, k);
+                // Exotic descriptors are observable and must run only when
+                // this candidate is reached, after preceding loop bodies.
+                if (o.proxyHandler() != null or o.proxy_revoked or moduleNsOf(o) != null or
+                    try self.propertyIsEnumerableResult(o, k)) try out.append(self.arena, k);
             }
             o = self.tempRoot(current_root, current).asObj();
-            current = if (o.protoAtomic()) |parent| Value.obj(parent) else Value.undef();
+            current = try self.getPrototypeOfObject(o);
             self.setTempRoot(current_root, current);
         }
         return out.items;
+    }
+
+    /// EnumerateObjectProperties uses [[GetOwnProperty]], never [[HasProperty]].
+    /// Recheck the live chain at each candidate: a non-enumerable own property
+    /// shadows inherited properties, while deletion permits an inherited match.
+    pub fn forInCandidateIsEnumerable(self: *Interpreter, receiver: Value, key: []const u8) EvalError!bool {
+        const roots = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(roots);
+        const current_root = try self.pushTempRoot(receiver);
+        var current = receiver;
+        while (self.tempRoot(current_root, current).isObject()) {
+            const object = self.tempRoot(current_root, current).asObj();
+            try self.checkRestricted(object);
+            if (object.proxyHandler() != null or object.proxy_revoked or moduleNsOf(object) != null) {
+                const descriptor = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ self.tempRoot(current_root, current), try self.keyToValue(key) });
+                if (descriptor.isObject()) return if (descriptor.asObj().getOwn("enumerable")) |enumerable| enumerable.toBoolean() else false;
+            } else if (objectHasOwn(object, key)) {
+                return self.propertyIsEnumerableResult(object, key);
+            }
+            current = try self.getPrototypeOfObject(self.tempRoot(current_root, current).asObj());
+            self.setTempRoot(current_root, current);
+        }
+        return false;
     }
 
     /// JavaScriptCore's `JSObjectCopyPropertyNames` snapshot: enumerable string

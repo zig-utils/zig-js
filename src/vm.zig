@@ -6269,7 +6269,7 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbaba|abcp|01|ap|7|1", native.asStr());
+    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbbaapp|abcp|01|ap|7|1", native.asStr());
 
     const count_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(count_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
@@ -6452,7 +6452,7 @@ test "vm: native for-in preserves proxy trap order" {
         @backingInt(jit.NativeOperationStatus.value),
         nativeOperationDispatch(&frame, 0),
     );
-    try std.testing.expectEqualStrings("kba", env.get("proxyLog").?.asStr());
+    try std.testing.expectEqualStrings("k", env.get("proxyLog").?.asStr());
     const target_bits = frame.operation_result_bits[0];
     const keys_bits = frame.operation_result_bits[1];
     scratch[3] = target_bits;
@@ -6467,7 +6467,7 @@ test "vm: native for-in preserves proxy trap order" {
     );
     try std.testing.expectEqualStrings("b", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
-    try std.testing.expectEqualStrings("kbahb", env.get("proxyLog").?.asStr());
+    try std.testing.expectEqualStrings("kb", env.get("proxyLog").?.asStr());
     scratch[3] = target_bits;
     scratch[4] = keys_bits;
     scratch[5] = frame.operation_result_bits[0];
@@ -6477,7 +6477,7 @@ test "vm: native for-in preserves proxy trap order" {
     );
     try std.testing.expectEqualStrings("a", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
-    try std.testing.expectEqualStrings("kbahbha", env.get("proxyLog").?.asStr());
+    try std.testing.expectEqualStrings("kba", env.get("proxyLog").?.asStr());
     const runtime = inventory.runtimeOperationSnapshot();
     try std.testing.expectEqual(@as(u64, 1), runtime.count(.enum_keys));
     try std.testing.expectEqual(@as(u64, 2), runtime.count(.enum_next));
@@ -6499,7 +6499,7 @@ test "vm: native for-in next publishes one proxy throw" {
     });
     const source =
         \\var calls = 0;
-        \\var proxy = new Proxy({ a: 1 }, { has: function() { calls = calls + 1; throw 91; } });
+        \\var proxy = new Proxy({ a: 1 }, { getOwnPropertyDescriptor: function() { calls = calls + 1; throw 91; } });
         \\proxy
     ;
     var parser = try Parser.init(allocator, source);
@@ -6584,7 +6584,7 @@ test "vm: optimizer native for-in next deoptimizes one proxy throw into catch" {
     });
     const source =
         \\var calls = 0;
-        \\var proxy = new Proxy({ a: 1 }, { has: function() { calls = calls + 1; throw 91; } });
+        \\var proxy = new Proxy({ a: 1 }, { getOwnPropertyDescriptor: function() { calls = calls + 1; throw 91; } });
         \\proxy
     ;
     var parser = try Parser.init(allocator, source);
@@ -7857,7 +7857,7 @@ const EnumerationStep = struct {
 
 fn executeEnumerationNext(vm: *Interpreter, target: Value, keys_value: Value, index_value: Value) EvalError!EnumerationStep {
     // One candidate per opcode retains the VM/native polling cadence. Keep
-    // the receiver and candidate movable across Proxy [[HasProperty]] reentry.
+    // the receiver and candidate movable across enumeration descriptor reentry.
     var index: usize = @intFromFloat(index_value.asNum());
     const keys = keys_value.asObj();
     if (index >= keys.elementsLen()) return .{
@@ -7873,7 +7873,7 @@ fn executeEnumerationNext(vm: *Interpreter, target: Value, keys_value: Value, in
     const key_root = try vm.pushTempRoot(key);
     index += 1;
     const property = try propKey(vm, key);
-    const present = try vm.hasPropertyResult(vm.tempRoot(target_root, target).asObj(), property);
+    const present = try vm.forInCandidateIsEnumerable(vm.tempRoot(target_root, target), property);
     return .{
         .index = Value.num(@floatFromInt(index)),
         .key = vm.tempRoot(key_root, key),
@@ -27608,7 +27608,7 @@ test "vm: optimizer enumeration callback budgets preserve exact dispatch" {
         defer ctx.destroy();
         _ = try ctx.evaluate(
             \\var enumEffects=0;
-            \\var enumBudget=new Proxy({a:1},{ownKeys:function(t){enumEffects++;return Reflect.ownKeys(t);},has:function(t,k){enumEffects++;return Reflect.has(t,k);}});
+            \\var enumBudget=new Proxy({a:1},{ownKeys:function(t){enumEffects++;return Reflect.ownKeys(t);},getOwnPropertyDescriptor:function(t,k){enumEffects++;return Reflect.getOwnPropertyDescriptor(t,k);}});
         );
         var preparation_machine = ctx.interpreter();
         const state = try preparation_machine.prepareForIn(ctx.global_object.getOwn("enumBudget").?);
@@ -27827,5 +27827,39 @@ test "vm: optimizer enumeration checkpoints recover every result" {
                 try std.testing.expect(exec.stack.items[4].asBool() and exec.stack.items[5].asBool());
             }
         }
+    };
+}
+
+test "vm: for-in honors proxy prototypes and candidate descriptors in every mode" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| for ([_]bool{ false, true }) |bytecode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+            .enable_jit = native,
+            .bytecode_execution_mode = if (bytecode) .required else .tree_walker,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("[[[\"own\",\"inherited\"],true],[[\"own\"],[\"desc:own\"],null],[\"keys\",\"proto\",\"desc:a\",\"body:a\",\"desc:b\",\"proto\"],[\"b\"],true,1,true,true]", (try ctx.evaluate(
+            \\function enumerate(x){var keys=[];for(var k in x)keys.push(k);return keys;}
+            \\for(var warm=0;warm<64;warm++)enumerate({a:1,b:2});
+            \\var proto={inherited:2},calls=0;
+            \\var reported=new Proxy({own:1},{getPrototypeOf(){calls++;return proto;},has(){throw "has";}});
+            \\var first=[enumerate(reported),calls>0];
+            \\var trace=[];var own=new Proxy({own:1},{has(){trace.push("has");throw "unexpected has";},getOwnPropertyDescriptor(t,k){trace.push("desc:"+k);return Reflect.getOwnPropertyDescriptor(t,k);}});
+            \\var keys=[],thrown=null;try{keys=enumerate(own);}catch(e){thrown=e;}
+            \\var second=[keys,trace,thrown];
+            \\var log=[],target={a:1,b:2};var deleting=new Proxy(target,{ownKeys(t){log.push("keys");return Reflect.ownKeys(t);},getOwnPropertyDescriptor(t,k){log.push("desc:"+k);return Reflect.getOwnPropertyDescriptor(t,k);},getPrototypeOf(){log.push("proto");return null;},has(){throw "has";}});
+            \\for(var k in deleting){log.push("body:"+k);if(k==="a")delete target.b;}
+            \\var inherited={a:1,b:2};var shadow=Object.create(inherited);Object.defineProperty(shadow,"a",{value:3,enumerable:false,configurable:true});
+            \\var shaded=new Proxy(shadow,{getPrototypeOf(){return inherited;},has(){throw "has";}});
+            \\var sentinel={},abruptCalls=0;var abrupt=new Proxy({a:1},{getPrototypeOf(){abruptCalls++;throw sentinel;}});
+            \\var abruptMatch=false;try{enumerate(abrupt);}catch(e){abruptMatch=e===sentinel;}
+            \\var fixed=Object.preventExtensions({a:1});var invalid=new Proxy(fixed,{getPrototypeOf(){return {};}});var invariant=false;try{enumerate(invalid);}catch(e){invariant=e instanceof TypeError;}
+            \\var record;var handler={get getPrototypeOf(){record.revoke();return function(t){return null;};}};record=Proxy.revocable({},handler);var revoked=enumerate(record.proxy).length===0;
+            \\JSON.stringify([first,second,log,enumerate(shaded),abruptMatch,abruptCalls,invariant,revoked]);
+        )).asStr());
     };
 }

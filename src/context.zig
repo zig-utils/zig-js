@@ -30375,7 +30375,7 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
         \\function returnForIn(object) { for (var key in object) return key; return "none"; }
         \\function outerContinueForIn() { var out = ""; outer: for (var i = 0; i < 2; i++) { for (var key in { a: 1, b: 2 }) { out += i + key; continue outer; } } return out; }
         \\function throwingForIn() {
-        \\  var object = new Proxy({ a: 1 }, { has: function (target, key) { throw new Error("has:" + key); } });
+        \\  var object = new Proxy({ a: 1 }, { getOwnPropertyDescriptor: function (target, key) { throw new Error("desc:" + key); } });
         \\  try { for (var key in object) {} } catch (error) { return error.message; }
         \\  return "missed";
         \\}
@@ -30408,7 +30408,7 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
         \\forInProgram === "ab" && forInProgramLexical === "ce" && forInProgramCaptures[0]() + forInProgramCaptures[1]() === "pq" &&
         \\  forInProgramHolder.key === "z" && forInProgramMemberKeyHits === 1 && forInProgramAssigned === "u" &&
         \\  forInPlain === "ac|x|df|2a|h|x|a,c" && forInPatternLog === "K" && forInPrimitive === "01" &&
-        \\  forInPrototype === "own,inherited" && forInReturn === "r" && forInOuterContinue === "0a1a" && forInThrown === "has:a" &&
+        \\  forInPrototype === "own,inherited" && forInReturn === "r" && forInOuterContinue === "0a1a" && forInThrown === "desc:a" &&
         \\  forInProxyOut === "a" && forInGenerated === "g,h,true" && forInIteratorHits === 0 && forInSecureMembership;
     ;
 
@@ -30430,7 +30430,7 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
     const state = "forInProgram + '#' + forInProgramLexical + '#' + forInProgramCaptures[0]() + forInProgramCaptures[1]() + '#' + forInProgramHolder.key + '#' + forInProgramMemberKeyHits + '#' + forInProgramAssigned + '#' + forInPlain + '#' + forInPatternLog + '#' + forInPrimitive + '#' + forInPrototype + '#' + forInReturn + '#' + forInOuterContinue + '#' + forInThrown + '#' + forInProxyOut + '#' + forInProxyLog + '#' + forInGenerated + '#' + forInAsync + '#' + forInIteratorHits + '#' + forInSecureMembership";
     const tree_state = (try tree_ctx.evaluate(state)).asStr();
     const bytecode_state = (try bytecode_ctx.evaluate(state)).asStr();
-    try std.testing.expectEqualStrings("ab#ce#pq#z#1#u#ac|x|df|2a|h|x|a,c#K#01#own,inherited#r#0a1a#has:a#a#ODaDbHaHb#g,h,true#mn#0#true", tree_state);
+    try std.testing.expectEqualStrings("ab#ce#pq#z#1#u#ac|x|df|2a|h|x|a,c#K#01#own,inherited#r#0a1a#desc:a#a#ODaDb#g,h,true#mn#0#true", tree_state);
     try std.testing.expectEqualStrings(tree_state, bytecode_state);
     const tree = tree_ctx.bytecodeAdmissionSnapshot();
     try std.testing.expect(tree.count(.plain_forced_tree_walker) >= 2);
@@ -30535,20 +30535,20 @@ test "native for-in preserves exact state through moving nursery" {
     ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
     _ = try ctx.evaluate(
         \\var moveNow = false;
-        \\var hasHits = 0;
+        \\var descriptorHits = 0;
         \\var forInTarget = { a: 1, b: 2 };
         \\var forInProxy = new Proxy(forInTarget, {
-        \\  has: function (target, key) {
-        \\    hasHits += 1;
+        \\  getOwnPropertyDescriptor: function (target, key) {
+        \\    descriptorHits += 1;
         \\    if (moveNow) { moveNow = false; forInArm(); }
-        \\    return Reflect.has(target, key);
+        \\    return Reflect.getOwnPropertyDescriptor(target, key);
         \\  }
         \\});
     );
     const moving_before = ctx.gc.?.accounting().moving_minor_collections;
     const result = try ctx.evaluate("moveNow = true; nativeForIn(forInProxy);");
     try std.testing.expectEqual(@as(f64, 2), result.asNum());
-    try std.testing.expect((try ctx.evaluate("hasHits")).asNum() > 0);
+    try std.testing.expect((try ctx.evaluate("descriptorHits")).asNum() > 0);
     try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
     try std.testing.expect(ctx.gc.?.accounting().total_minor_moved_cells > 0);
     try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
@@ -34790,6 +34790,14 @@ fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, e
         if (mode == .required)
             try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
     }
+}
+
+test "for-in moving proxy prototype lookup" {
+    try expectProxyMetadataMoving("var target={own:1};var handler={get getPrototypeOf(){proxyMovingLoop(20000);return function(t){if(t!==target||this!==handler)throw new Error('identity');return proxySubject;};}};proxySubject.inherited=2;var proxy=new Proxy(target,handler);", "(function(){var keys=[];for(var key in proxy)keys.push(key);return keys.join(',')==='own,marker,inherited';})()");
+}
+
+test "for-in moving proxy candidate descriptor" {
+    try expectProxyMetadataMoving("var target={own:proxySubject};var proxy=new Proxy(target,{getOwnPropertyDescriptor(t,k){proxyMovingLoop(20000);return Reflect.getOwnPropertyDescriptor(t,k);},has(){throw new Error('has');}});", "(function(){var keys=[];for(var key in proxy)keys.push(key);return keys.join(',')==='own'&&target.own===proxySubject;})()");
 }
 
 test "Proxy metadata moving prototype revocation" {
