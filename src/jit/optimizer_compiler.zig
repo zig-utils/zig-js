@@ -1700,9 +1700,11 @@ fn publishEnumExceptionalCleanup(
         } else continue;
         if (exceptional.target >= plan.blocks.len) continue;
         const cleanup_block = plan.blocks[exceptional.target];
-        if (cleanup_block.instruction_count != 2 or cleanup_block.start + 1 >= chunk.code.items.len or
-            chunk.code.items[cleanup_block.start].op != .enum_end_completion or
-            chunk.code.items[cleanup_block.start + 1].op != .end_finally)
+        // The interpreter-owned cleanup always starts by removing the
+        // private for-in state. It may then end immediately or run user
+        // finally code before dispatching the original completion.
+        if (cleanup_block.instruction_count < 2 or cleanup_block.start + 1 >= chunk.code.items.len or
+            chunk.code.items[cleanup_block.start].op != .enum_end_completion)
             continue;
 
         try candidates.append(allocator, .{

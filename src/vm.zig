@@ -27991,8 +27991,15 @@ test "vm: optimizer nested for-in publishes cleanup for every enum_next" {
             \\  try { for (var second in object) {} } catch (error) { return error; }
             \\  return 0;
             \\}
+            \\var finallyEffects = 0;
+            \\function finallyThrow(object) {
+            \\  try { for (var key in object) {} } finally { finallyEffects = finallyEffects + 1; }
+            \\  return 0;
+            \\}
             \\for (var warm = 0; warm < 16; warm++) nestedThrow({ a: 1, b: 2 });
             \\for (var warm = 0; warm < 16; warm++) sequentialThrow({ a: 1, b: 2 });
+            \\for (var warm = 0; warm < 16; warm++) finallyThrow({ a: 1, b: 2 });
+            \\finallyEffects = 0;
             \\var calls = 0;
             \\var proxy = new Proxy({ a: 1, b: 1 }, { getOwnPropertyDescriptor: function(target, key) {
             \\  calls = calls + 1;
@@ -28005,11 +28012,19 @@ test "vm: optimizer nested for-in publishes cleanup for every enum_next" {
             \\  if (sequentialCalls === 2) throw 9;
             \\  return Reflect.getOwnPropertyDescriptor(target, key);
             \\} });
-            \\nestedThrow(proxy) + "|" + calls + "|" + sequentialThrow(sequentialProxy) + "|" + sequentialCalls;
+            \\var finallyCalls = 0;
+            \\var finallyProxy = new Proxy({ a: 1, b: 1 }, { getOwnPropertyDescriptor: function(target, key) {
+            \\  finallyCalls = finallyCalls + 1;
+            \\  if (finallyCalls === 2) throw 9;
+            \\  return Reflect.getOwnPropertyDescriptor(target, key);
+            \\} });
+            \\var finallyError = 0;
+            \\try { finallyThrow(finallyProxy); } catch (error) { finallyError = error; }
+            \\nestedThrow(proxy) + "|" + calls + "|" + sequentialThrow(sequentialProxy) + "|" + sequentialCalls + "|" + finallyEffects + "|" + finallyError;
         );
-        try std.testing.expectEqualStrings("9|2|9|2", result.asStr());
+        try std.testing.expectEqualStrings("9|2|9|2|1|9", result.asStr());
         if (native) {
-            for ([_][]const u8{ "nestedThrow", "sequentialThrow" }) |name| {
+            for ([_][]const u8{ "nestedThrow", "sequentialThrow", "finallyThrow" }) |name| {
                 const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?) orelse
                     return error.TestUnexpectedResult;
                 const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
