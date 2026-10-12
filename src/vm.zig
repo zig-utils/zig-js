@@ -27970,6 +27970,66 @@ test "vm: optimizer enumeration checkpoints recover every result" {
     };
 }
 
+test "vm: optimizer nested for-in publishes cleanup for every enum_next" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |native| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = false,
+            .enable_jit = native,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function nestedThrow(object) {
+            \\  try { for (var outer in object) { for (var inner in object) {} } }
+            \\  catch (error) { return error; }
+            \\  return 0;
+            \\}
+            \\function sequentialThrow(object) {
+            \\  try { for (var first in object) {} } catch (error) { return error; }
+            \\  try { for (var second in object) {} } catch (error) { return error; }
+            \\  return 0;
+            \\}
+            \\for (var warm = 0; warm < 16; warm++) nestedThrow({ a: 1, b: 2 });
+            \\for (var warm = 0; warm < 16; warm++) sequentialThrow({ a: 1, b: 2 });
+            \\var calls = 0;
+            \\var proxy = new Proxy({ a: 1, b: 1 }, { getOwnPropertyDescriptor: function(target, key) {
+            \\  calls = calls + 1;
+            \\  if (calls === 2) throw 9;
+            \\  return Reflect.getOwnPropertyDescriptor(target, key);
+            \\} });
+            \\var sequentialCalls = 0;
+            \\var sequentialProxy = new Proxy({ a: 1, b: 1 }, { getOwnPropertyDescriptor: function(target, key) {
+            \\  sequentialCalls = sequentialCalls + 1;
+            \\  if (sequentialCalls === 2) throw 9;
+            \\  return Reflect.getOwnPropertyDescriptor(target, key);
+            \\} });
+            \\nestedThrow(proxy) + "|" + calls + "|" + sequentialThrow(sequentialProxy) + "|" + sequentialCalls;
+        );
+        try std.testing.expectEqualStrings("9|2|9|2", result.asStr());
+        if (native) {
+            for ([_][]const u8{ "nestedThrow", "sequentialThrow" }) |name| {
+                const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?) orelse
+                    return error.TestUnexpectedResult;
+                const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+                    return error.TestUnexpectedResult;
+                const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+                var enum_next_count: usize = 0;
+                var cleanup_count: usize = 0;
+                for (operations.descriptors) |descriptor| {
+                    if (descriptor.bytecode_op != @backingInt(bc.Op.enum_next)) continue;
+                    enum_next_count += 1;
+                    if (descriptor.exception_cleanup_operation != jit.NativeOperationDescriptor.none)
+                        cleanup_count += 1;
+                }
+                try std.testing.expect(enum_next_count >= 1);
+                try std.testing.expectEqual(enum_next_count, cleanup_count);
+            }
+        }
+    }
+}
+
 test "vm: for-in honors proxy prototypes and candidate descriptors in every mode" {
     const Context = @import("context.zig").Context;
     for ([_]bool{ false, true }) |parallel| for ([_]bool{ false, true }) |native| for ([_]bool{ false, true }) |bytecode| {

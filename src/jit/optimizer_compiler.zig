@@ -1677,11 +1677,16 @@ fn publishEnumExceptionalCleanup(
     deopt_values: *std.ArrayListUnmanaged(jit.RecoveryValue),
     descriptors: []jit.NativeOperationDescriptor,
 ) !EnumCleanupPublication {
-    var native_operations = descriptors;
-    var cleanup_dispatch_deopt: u16 = jit.NativeOperationDescriptor.none;
-    var cleanup_dispatch_exit_ip: u32 = 0;
-    var cleanup_step_count: u32 = 0;
-    for (native_operations, 0..) |*descriptor, operation_index| {
+    const Candidate = struct {
+        operation_index: usize,
+        cleanup_start: u32,
+        first_handler: u32,
+        handler_count: u16,
+    };
+    var candidates: std.ArrayListUnmanaged(Candidate) = .empty;
+    defer candidates.deinit(allocator);
+
+    for (descriptors, 0..) |descriptor, operation_index| {
         if (descriptor.bytecode_op != @backingInt(bc.Op.enum_next)) continue;
         const effect_state = for (graph.frame_states) |state| {
             if (state.kind == .effect and state.origin == descriptor.origin and
@@ -1700,6 +1705,27 @@ fn publishEnumExceptionalCleanup(
             chunk.code.items[cleanup_block.start + 1].op != .end_finally)
             continue;
 
+        try candidates.append(allocator, .{
+            .operation_index = operation_index,
+            .cleanup_start = cleanup_block.start,
+            .first_handler = exceptional.first_handler,
+            .handler_count = std.math.cast(u16, exceptional.handler_count) orelse return error.UnsupportedChunk,
+        });
+    }
+
+    if (candidates.items.len == 0) return .{ .descriptors = descriptors };
+
+    const original_count = descriptors.len;
+    const extended_count = std.math.add(usize, original_count, candidates.items.len) catch return error.UnsupportedChunk;
+    var native_operations = try allocator.alloc(jit.NativeOperationDescriptor, extended_count);
+    errdefer allocator.free(native_operations);
+    @memcpy(native_operations[0..original_count], descriptors);
+
+    var cleanup_step_count: u32 = 0;
+    for (candidates.items, 0..) |candidate, cleanup_number| {
+        const descriptor = &native_operations[candidate.operation_index];
+        const cleanup_start = candidate.cleanup_start;
+
         const source_deopt = descriptor.deopt_index;
         const enum_next_first_input = descriptor.first_input;
         if (source_deopt >= deopt_points.items.len) return error.UnsupportedChunk;
@@ -1713,7 +1739,7 @@ fn publishEnumExceptionalCleanup(
             .destination = @intCast(extra_first),
             .block = optimizer.Block.none,
             .immediate = Value.undef().rawBits(),
-            .origin = cleanup_block.start,
+            .origin = cleanup_start,
         });
         try operations.append(allocator, .{
             .kind = .constant,
@@ -1722,7 +1748,7 @@ fn publishEnumExceptionalCleanup(
             // Completion.throw is the bytecode completion discriminator (1).
             // Keep this lowering independent of vm.zig's private enum.
             .immediate = Value.num(1).rawBits(),
-            .origin = cleanup_block.start,
+            .origin = cleanup_start,
         });
         types[extra_first] = .other;
         types[extra_first + 1] = .other;
@@ -1741,13 +1767,13 @@ fn publishEnumExceptionalCleanup(
         const cleanup_deopt = std.math.cast(u16, deopt_points.items.len) orelse return error.UnsupportedChunk;
         try deopt_points.append(allocator, .{
             .kind = .effect,
-            .exit_ip = cleanup_block.start,
+            .exit_ip = cleanup_start,
             .first_value = cleanup_first_value,
             .local_count = source_point.local_count,
             .preserve_locals = source_point.preserve_locals,
             .stack_count = 5,
-            .first_handler = exceptional.first_handler,
-            .handler_count = std.math.cast(u16, exceptional.handler_count) orelse return error.UnsupportedChunk,
+            .first_handler = candidate.first_handler,
+            .handler_count = candidate.handler_count,
             .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
         });
 
@@ -1755,8 +1781,8 @@ fn publishEnumExceptionalCleanup(
         for (source_values[0..source_point.local_count]) |value| try deopt_values.append(allocator, value);
         try deopt_values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(extra_first) });
         try deopt_values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(extra_first + 1) });
-        cleanup_dispatch_deopt = std.math.cast(u16, deopt_points.items.len) orelse return error.UnsupportedChunk;
-        cleanup_dispatch_exit_ip = cleanup_block.start + 1;
+        const cleanup_dispatch_deopt = std.math.cast(u16, deopt_points.items.len) orelse return error.UnsupportedChunk;
+        const cleanup_dispatch_exit_ip = cleanup_start + 1;
         try deopt_points.append(allocator, .{
             .kind = .finally_dispatch,
             .exit_ip = cleanup_dispatch_exit_ip,
@@ -1764,31 +1790,27 @@ fn publishEnumExceptionalCleanup(
             .local_count = source_point.local_count,
             .preserve_locals = source_point.preserve_locals,
             .stack_count = 2,
-            .first_handler = exceptional.first_handler,
-            .handler_count = std.math.cast(u16, exceptional.handler_count) orelse return error.UnsupportedChunk,
+            .first_handler = candidate.first_handler,
+            .handler_count = candidate.handler_count,
             .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
         });
 
-        const cleanup_index = std.math.cast(u16, native_operations.len) orelse return error.UnsupportedChunk;
-        const extended = try allocator.alloc(jit.NativeOperationDescriptor, native_operations.len + 1);
-        @memcpy(extended[0..native_operations.len], native_operations);
-        allocator.free(native_operations);
-        native_operations = extended;
+        const cleanup_index = std.math.cast(u16, original_count + cleanup_number) orelse return error.UnsupportedChunk;
         native_operations[cleanup_index] = .{
             .bytecode_op = @backingInt(bc.Op.enum_end_completion),
             .first_input = enum_next_first_input,
             .input_count = 5,
             .deopt_index = cleanup_deopt,
             .step_delta = 1,
-            .origin = cleanup_block.start,
+            .origin = cleanup_start,
             .result_count = 0,
         };
-        native_operations[operation_index].exception_cleanup_operation = cleanup_index;
-        native_operations[operation_index].exception_cleanup_deopt_index = cleanup_dispatch_deopt;
-        native_operations[operation_index].exception_cleanup_exit_ip = cleanup_dispatch_exit_ip;
-        cleanup_step_count = 1;
-        break;
+        descriptor.exception_cleanup_operation = cleanup_index;
+        descriptor.exception_cleanup_deopt_index = cleanup_dispatch_deopt;
+        descriptor.exception_cleanup_exit_ip = cleanup_dispatch_exit_ip;
+        cleanup_step_count = std.math.add(u32, cleanup_step_count, 1) catch return error.UnsupportedChunk;
     }
+    allocator.free(descriptors);
     return .{ .descriptors = native_operations, .step_count = cleanup_step_count };
 }
 

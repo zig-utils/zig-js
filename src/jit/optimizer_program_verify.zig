@@ -255,16 +255,26 @@ pub fn verify(program: *const compiler.Program) Error!void {
             changed = true;
         };
     }
-    for (program.operations) |operation| switch (operation.kind) {
-        .copy, .argument, .constant, .frame_slot => {},
-        .runtime_operation => {
+    for (program.operations) |operation| {
+        switch (operation.kind) {
+            .copy, .argument, .constant, .frame_slot => {},
+            .runtime_operation => {
             const descriptor = program.native_operations[operation.immediate];
-            for (descriptor.first_input..descriptor.first_input + descriptor.input_count) |input|
+            for (descriptor.first_input..descriptor.first_input + descriptor.input_count) |input| {
                 if (locations[input]) return error.InvalidOperation;
-        },
-        .runtime_base, .branch_predicate => if (locations[operation.lhs]) return error.InvalidOperation,
-        else => if (locations[operation.lhs] or locations[operation.rhs]) return error.InvalidOperation,
-    };
+            }
+            },
+            // runtime_result.lhs is a result ordinal, not a scratch-slot
+            // operand. It must not participate in location safety checks.
+            .runtime_result => {},
+            .runtime_base, .branch_predicate => if (locations[operation.lhs]) {
+                return error.InvalidOperation;
+            },
+            else => if (locations[operation.lhs] or locations[operation.rhs]) {
+                return error.InvalidOperation;
+            },
+        }
+    }
     if (program.osr == null and program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null and program.branch == null and
         (program.result >= program.scratch_slots or locations[program.result])) return error.InvalidOperation;
     for (program.deopt_handlers) |handler| {
