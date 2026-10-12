@@ -80,7 +80,7 @@ body:
     id: zig
     attributes:
       label: Zig version
-      description: "`zig version` — the tree requires 0.17.0-dev.956 or newer"
+      description: "`zig version` — the tree requires 0.18.0-dev or newer"
     validations:
       required: true
 

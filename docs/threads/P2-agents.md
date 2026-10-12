@@ -10,7 +10,7 @@ bindings audit (`bindings.md`).
 
 ## Primitives
 
-This zig-0.17-dev's `std.Thread` has spawn/join/Id only; Mutex/Condition
+This zig-0.18-dev's `std.Thread` has spawn/join/Id only; Mutex/Condition
 moved to `std.Io` and require an `Io` instance (vtable with
 `futexWait`/`futexWake`). `std.Io.Threaded` is the blocking implementation
 with real futex waits and timeouts. Decision: one engine-global

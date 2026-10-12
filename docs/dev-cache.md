@@ -78,7 +78,7 @@ home-tool run tools/zig-cache-tool.ts prune --dry-run # preview removal
 home-tool run tools/zig-cache-tool.ts prune           # remove caches
 ```
 
-`prune` removes the repository-local cache as one coherent unit. Zig 0.17's
+`prune` removes the repository-local cache as one coherent unit. Zig's
 `c/`, `h/`, and `z/` metadata retains references to compiled `o/` artifacts, so
 keeping that metadata while deleting only the apparent bulk can make the next
 build fail with `CacheCheckFailed`. A fully cold cache is both reproducible and

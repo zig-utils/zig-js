@@ -18,7 +18,7 @@
       "status": "allowed",
       "scope": "build and runtime compilation",
       "locator": "Zig compiler and standard library",
-      "pin": "minimum 0.17.0-dev.956; CI 0.17.0-dev.1818+7051f8e73",
+      "pin": "minimum 0.18.0-dev; CI 0.18.0-dev.146+35accc06e",
       "license": "MIT",
       "affects_runtime_semantics": true,
       "runtime_semantics": "Compiler, standard library, target ABI, and atomics define the produced engine binary."

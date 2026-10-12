@@ -1,7 +1,7 @@
 # Thread Testing
 
-Thread support is verified with Zig `0.17-dev`. The package declares this in
-`build.zig.zon`, and the build options below use the Zig 0.17 build API.
+Thread support is verified with Zig `0.18-dev`. The package declares this in
+`build.zig.zon`, and the build options below use the Zig 0.18 build API.
 
 ## Required Checks
 
