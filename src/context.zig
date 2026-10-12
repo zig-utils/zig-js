@@ -30442,6 +30442,7 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
 }
 
 test "moving GC preserves required-bytecode for-in enumeration roots" {
+    if (!@hasDecl(@import("gc"), "RelocationVisitor")) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
         .enable_jit = false,
