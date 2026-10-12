@@ -6225,10 +6225,22 @@ test "vm: native and baseline for-in control paths agree" {
         \\function throwLoop(object) { for (var key in object) throw 7; return 0; }
         \\function catchLoop(object) { try { return throwLoop(object); } catch (error) { return error; } }
         \\function finallyLoop(object) { try { for (var key in object) { break; } } finally {} return 1; }
+        \\function proxyThrow(object) { try { for (var key in object) {} } catch (error) { return error; } return 0; }
+        \\function proxyEscape(object) { for (var key in object) {} return 0; }
         \\var result = "";
         \\for (var warm = 0; warm < 12; warm = warm + 1) {
         \\  result = sweep(makeSubject()) + "|" + count(makeSubject()) + "|" + first(makeSubject()) + "|" + stop(makeSubject()) + "|" + throwing(makeSubject()) + "|" + cleanup(makeSubject()) + "|" + nested(makeSubject()) + "|" + proxyOrder(makeSubject()) + "|" + changing(makeSubject()) + "|" + primitive("ab") + "|" + captured(makeSubject()) + "|" + catchLoop(makeSubject()) + "|" + finallyLoop(makeSubject());
         \\}
+        \\for (var proxyWarm = 0; proxyWarm < 12; proxyWarm = proxyWarm + 1) proxyThrow(makeSubject());
+        \\for (var escapeWarm = 0; escapeWarm < 12; escapeWarm = escapeWarm + 1) proxyEscape(makeSubject());
+        \\var trapCount = 0;
+        \\var proxy = new Proxy({ a: 1, b: 1 }, { has: function(target, key) { trapCount = trapCount + 1; if (trapCount === 2) throw 9; return key in target; } });
+        \\result = result + "|" + proxyThrow(proxy) + "|" + trapCount;
+        \\var escapeTrapCount = 0;
+        \\var escapeProxy = new Proxy({ a: 1, b: 1 }, { has: function(target, key) { escapeTrapCount = escapeTrapCount + 1; if (escapeTrapCount === 2) throw 9; return key in target; } });
+        \\var escaped = 0;
+        \\try { escaped = proxyEscape(escapeProxy); } catch (error) { escaped = error; }
+        \\result = result + "|" + escaped + "|" + escapeTrapCount;
         \\result
     ;
 
@@ -6269,7 +6281,7 @@ test "vm: native and baseline for-in control paths agree" {
     const native = try run(&native_machine, native_program, null);
     try std.testing.expect(native.isString());
     try std.testing.expectEqualStrings(baseline.asStr(), native.asStr());
-    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbbaapp|abcp|01|ap|7|1", native.asStr());
+    try std.testing.expectEqualStrings("abcp|4|a|1|7|a!|aabacapa|kbbaapp|abcp|01|ap|7|1|9|2|9|2", native.asStr());
 
     const count_chunk = native_program.fns.items[2].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(count_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
@@ -6304,6 +6316,39 @@ test "vm: native and baseline for-in control paths agree" {
     try std.testing.expect(throw_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
     const finally_chunk = native_program.fns.items[14].chunk orelse return error.TestUnexpectedResult;
     try std.testing.expect(finally_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
+    const proxy_throw_function = Interpreter.funcOf(native_env.get("proxyThrow") orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+    const proxy_throw_chunk = proxy_throw_function.chunk orelse return error.TestUnexpectedResult;
+    const proxy_throw_artifact = proxy_throw_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const proxy_throw_operations = proxy_throw_artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_cleanup = false;
+    for (proxy_throw_operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_end_completion)) {
+            saw_cleanup = true;
+            try std.testing.expectEqual(@as(u16, 5), descriptor.input_count);
+        }
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_next))
+            try std.testing.expect(descriptor.exception_cleanup_operation != jit.NativeOperationDescriptor.none);
+    }
+    try std.testing.expect(saw_cleanup);
+    const proxy_escape_function = Interpreter.funcOf(native_env.get("proxyEscape") orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+    const proxy_escape_chunk = proxy_escape_function.chunk orelse return error.TestUnexpectedResult;
+    const proxy_escape_artifact = proxy_escape_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const proxy_escape_operations = proxy_escape_artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_escape_cleanup = false;
+    for (proxy_escape_operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_end_completion)) {
+            saw_escape_cleanup = true;
+            try std.testing.expectEqual(@as(u16, 5), descriptor.input_count);
+        }
+        if (descriptor.bytecode_op == @backingInt(bc.Op.enum_next))
+            try std.testing.expect(descriptor.exception_cleanup_operation != jit.NativeOperationDescriptor.none);
+    }
+    try std.testing.expect(saw_escape_cleanup);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.enum_end_completion) > 0);
 }
 
 test "vm: native for-in termination preserves the checkpoint boundary" {
@@ -7265,6 +7310,25 @@ fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, g
     if (builtin.is_test and outcome == .complete) _ = optimizer_native_hits.fetchAdd(1, .monotonic);
     if (builtin.is_test and outcome == .deoptimized) _ = optimizer_osr_entries.fetchAdd(1, .monotonic);
     return outcome;
+}
+
+fn tryRunLoopOsrAtBackedge(
+    vm: *Interpreter,
+    exec: *Exec,
+    chunk: *Chunk,
+    frame: ?*Frame,
+    gen: ?*Generator,
+    target: u32,
+    instruction: usize,
+    acc: Value,
+) EvalError!?Value {
+    if (@as(usize, target) > instruction) return null;
+    exec.acc = acc;
+    exec.ip = target;
+    return switch (try tryRunLoopOsr(vm, exec, chunk, frame, gen)) {
+        .miss, .deoptimized => null,
+        .complete => |result| try finishChunkResult(vm, exec, chunk, result),
+    };
 }
 
 /// Native entry and OSR exits carry the raw ECMAScript return value. Derived
@@ -8360,23 +8424,19 @@ fn runChunk(
             },
 
             .jump => {
-                const is_backedge = inst.a <= ip - 1;
+                const instruction = ip - 1;
+                const is_backedge = inst.a <= instruction;
                 if (is_backedge) optimizer_delta.observeBackedge();
                 ip = inst.a;
                 if (is_backedge) {
-                    exec.acc = acc;
-                    exec.ip = ip;
-                    switch (try tryRunLoopOsr(vm, exec, chunk, frame, gen)) {
-                        .miss => {},
-                        .deoptimized => {
-                            acc = exec.acc;
-                            ip = exec.ip;
-                        },
-                        .complete => |result| {
-                            const completion = try finishChunkResult(vm, exec, chunk, result);
-                            optimizer_delta.observeValue(optimizerProfileKind(completion));
-                            return completion;
-                        },
+                    const osr_result = try tryRunLoopOsrAtBackedge(
+                        vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                    );
+                    acc = exec.acc;
+                    ip = exec.ip;
+                    if (osr_result) |result| {
+                        optimizer_delta.observeValue(optimizerProfileKind(result));
+                        return result;
                     }
                 }
             },
@@ -8387,29 +8447,109 @@ fn runChunk(
             .jump_if_false => {
                 const taken = !stack.pop().?.toBoolean();
                 optimizer_delta.observeBranch(taken);
-                if (taken) ip = inst.a;
+                if (taken) {
+                    const instruction = ip - 1;
+                    const is_backedge = inst.a <= instruction;
+                    if (is_backedge) optimizer_delta.observeBackedge();
+                    ip = inst.a;
+                    if (is_backedge) {
+                        const osr_result = try tryRunLoopOsrAtBackedge(
+                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                        );
+                        acc = exec.acc;
+                        ip = exec.ip;
+                        if (osr_result) |result| {
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
+                        }
+                    }
+                }
             },
             .jump_if_true_peek => {
                 const taken = stack.items[stack.items.len - 1].toBoolean();
                 optimizer_delta.observeBranch(taken);
-                if (taken) ip = inst.a;
+                if (taken) {
+                    const instruction = ip - 1;
+                    const is_backedge = inst.a <= instruction;
+                    if (is_backedge) optimizer_delta.observeBackedge();
+                    ip = inst.a;
+                    if (is_backedge) {
+                        const osr_result = try tryRunLoopOsrAtBackedge(
+                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                        );
+                        acc = exec.acc;
+                        ip = exec.ip;
+                        if (osr_result) |result| {
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
+                        }
+                    }
+                }
             },
             .jump_if_false_peek => {
                 const taken = !stack.items[stack.items.len - 1].toBoolean();
                 optimizer_delta.observeBranch(taken);
-                if (taken) ip = inst.a;
+                if (taken) {
+                    const instruction = ip - 1;
+                    const is_backedge = inst.a <= instruction;
+                    if (is_backedge) optimizer_delta.observeBackedge();
+                    ip = inst.a;
+                    if (is_backedge) {
+                        const osr_result = try tryRunLoopOsrAtBackedge(
+                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                        );
+                        acc = exec.acc;
+                        ip = exec.ip;
+                        if (osr_result) |result| {
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
+                        }
+                    }
+                }
             },
             .jump_if_nullish_peek => {
                 const v = stack.items[stack.items.len - 1];
                 const taken = v.isNull() or v.isUndefined();
                 optimizer_delta.observeBranch(taken);
-                if (taken) ip = inst.a;
+                if (taken) {
+                    const instruction = ip - 1;
+                    const is_backedge = inst.a <= instruction;
+                    if (is_backedge) optimizer_delta.observeBackedge();
+                    ip = inst.a;
+                    if (is_backedge) {
+                        const osr_result = try tryRunLoopOsrAtBackedge(
+                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                        );
+                        acc = exec.acc;
+                        ip = exec.ip;
+                        if (osr_result) |result| {
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
+                        }
+                    }
+                }
             },
             .jump_if_not_nullish_peek => {
                 const v = stack.items[stack.items.len - 1];
                 const taken = !v.isNull() and !v.isUndefined();
                 optimizer_delta.observeBranch(taken);
-                if (taken) ip = inst.a;
+                if (taken) {
+                    const instruction = ip - 1;
+                    const is_backedge = inst.a <= instruction;
+                    if (is_backedge) optimizer_delta.observeBackedge();
+                    ip = inst.a;
+                    if (is_backedge) {
+                        const osr_result = try tryRunLoopOsrAtBackedge(
+                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                        );
+                        acc = exec.acc;
+                        ip = exec.ip;
+                        if (osr_result) |result| {
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
+                        }
+                    }
+                }
             },
 
             .load_this => {

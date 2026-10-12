@@ -377,6 +377,14 @@ pub const NativeOperationDescriptor = extern struct {
     /// this runtime operation. One is the ordinary scalar result; zero is a
     /// completion-only operation.
     result_count: u8 = 1,
+    /// A for-in `enum_next` exception may enter an interpreter-owned cleanup
+    /// block whose first operation is `enum_end_completion`. Native lowering
+    /// invokes that completion-only operation before publishing the exact
+    /// two-word `end_finally` state. These fields are immutable artifact
+    /// metadata; `none` keeps the ordinary exceptional-edge behavior.
+    exception_cleanup_operation: u16 = none,
+    exception_cleanup_deopt_index: u16 = none,
+    exception_cleanup_exit_ip: u32 = 0,
 
     pub const none = std.math.maxInt(u16);
     pub const numeric_result: u16 = 1 << 0;

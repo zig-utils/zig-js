@@ -160,6 +160,23 @@ pub fn verify(program: *const compiler.Program) Error!void {
         }
         if (descriptor.flags & ~(jit.NativeOperationDescriptor.numeric_result | jit.NativeOperationDescriptor.literal_function_method |
             jit.NativeOperationDescriptor.literal_function_anonymous) != 0) return error.InvalidDescriptor;
+        if (descriptor.exception_cleanup_operation != jit.NativeOperationDescriptor.none) {
+            if (op != .enum_next or descriptor.exceptional_target == jit.NativeOperationDescriptor.none or
+                descriptor.exception_cleanup_operation >= program.native_operations.len or
+                descriptor.exception_cleanup_deopt_index >= program.deopt_points.len)
+                return error.InvalidDescriptor;
+            const cleanup = program.native_operations[descriptor.exception_cleanup_operation];
+            if (cleanup.bytecode_op != @backingInt(bc.Op.enum_end_completion) or cleanup.input_count != 5 or
+                cleanup.result_count != 0 or cleanup.first_input != descriptor.first_input or
+                cleanup.deopt_index >= program.deopt_points.len)
+                return error.InvalidDescriptor;
+            const dispatch = program.deopt_points[descriptor.exception_cleanup_deopt_index];
+            if (dispatch.kind != .finally_dispatch or dispatch.exit_ip != descriptor.exception_cleanup_exit_ip or
+                dispatch.stack_count != 2)
+                return error.InvalidDescriptor;
+        } else if (descriptor.exception_cleanup_deopt_index != jit.NativeOperationDescriptor.none) {
+            return error.InvalidDescriptor;
+        }
         switch (op) {
             .load_upval, .load_upval_mapped, .load_upval_lexical => if (descriptor.input_count != 0) return error.InvalidDescriptor,
             .load_var_or_undef, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref => if (descriptor.input_count != 0) return error.InvalidDescriptor,
