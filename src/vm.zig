@@ -6234,10 +6234,10 @@ test "vm: native and baseline for-in control paths agree" {
         \\for (var proxyWarm = 0; proxyWarm < 12; proxyWarm = proxyWarm + 1) proxyThrow(makeSubject());
         \\for (var escapeWarm = 0; escapeWarm < 12; escapeWarm = escapeWarm + 1) proxyEscape(makeSubject());
         \\var trapCount = 0;
-        \\var proxy = new Proxy({ a: 1, b: 1 }, { has: function(target, key) { trapCount = trapCount + 1; if (trapCount === 2) throw 9; return key in target; } });
+        \\var proxy = new Proxy({ a: 1, b: 1 }, { getOwnPropertyDescriptor: function(target, key) { trapCount = trapCount + 1; if (trapCount === 2) throw 9; return Reflect.getOwnPropertyDescriptor(target, key); } });
         \\result = result + "|" + proxyThrow(proxy) + "|" + trapCount;
         \\var escapeTrapCount = 0;
-        \\var escapeProxy = new Proxy({ a: 1, b: 1 }, { has: function(target, key) { escapeTrapCount = escapeTrapCount + 1; if (escapeTrapCount === 2) throw 9; return key in target; } });
+        \\var escapeProxy = new Proxy({ a: 1, b: 1 }, { getOwnPropertyDescriptor: function(target, key) { escapeTrapCount = escapeTrapCount + 1; if (escapeTrapCount === 2) throw 9; return Reflect.getOwnPropertyDescriptor(target, key); } });
         \\var escaped = 0;
         \\try { escaped = proxyEscape(escapeProxy); } catch (error) { escaped = error; }
         \\result = result + "|" + escaped + "|" + escapeTrapCount;
