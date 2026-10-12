@@ -21076,6 +21076,54 @@ test "vm: direct native calls reject non-simple parameter entry" {
     );
 }
 
+test "vm: direct native calls refuse activation-aware for-in artifacts" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = false,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectEqualStrings("ab", (try ctx.evaluate(
+        \\function directForIn(object) {
+        \\  var result = "";
+        \\  for (var key in object) result += key;
+        \\  return result;
+        \\}
+        \\var directForInSubject = { a: 1, b: 2 };
+        \\for (var warm = 0; warm < 64; warm++) directForIn(directForInSubject);
+        \\directForIn(directForInSubject);
+    )).asStr());
+
+    const function = Interpreter.funcOf(ctx.global_object.getOwn("directForIn").?) orelse
+        return error.TestUnexpectedResult;
+    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(artifact.requires_activation_context);
+    try std.testing.expect(artifact.requires_execution_context);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_enum_keys = false;
+    var saw_enum_next = false;
+    for (operations.descriptors) |descriptor| switch (std.enums.fromInt(bc.Op, descriptor.bytecode_op) orelse continue) {
+        .enum_keys => saw_enum_keys = true,
+        .enum_next => saw_enum_next = true,
+        else => {},
+    };
+    try std.testing.expect(saw_enum_keys and saw_enum_next);
+
+    const subject = ctx.global_object.getOwn("directForInSubject").?;
+    var machine = ctx.interpreter();
+    machine.jit_execution_allowed = true;
+    defer machine.jit_execution_allowed = false;
+    const before_hits = optimizer_native_hits.load(.monotonic);
+    try std.testing.expect((try tryRunNativeDirectCall(&machine, function, &.{subject})) == null);
+    try std.testing.expectEqual(before_hits, optimizer_native_hits.load(.monotonic));
+}
+
 test "vm: call and closure execution preserves the no-JIT baseline in shared contexts" {
     for ([_]bool{ false, true }) |parallel| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
