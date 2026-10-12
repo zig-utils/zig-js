@@ -16192,16 +16192,26 @@ pub const Interpreter = struct {
     pub fn proxyGetProto(self: *Interpreter, o: *value.Object) EvalError!Value {
         try self.proxyDepth();
         const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
-        const trap = (try self.proxyTrap(o, "getPrototypeOf")) orelse return self.ordinaryProtoValue(target);
-        const res = try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxyHandler().?));
+        const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Cannot perform 'getPrototypeOf' on a revoked proxy");
+        const roots = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(roots);
+        const target_root = try self.pushTempRoot(Value.obj(target));
+        const handler_root = try self.pushTempRoot(Value.obj(handler));
+        // ValidateNonRevokedProxy captures the slots before GetMethod; a getter
+        // can revoke the wrapper while the captured target/handler remain live.
+        const trap = (try self.proxyTrapFromHandler(self.tempRoot(handler_root, Value.obj(handler)), "getPrototypeOf")) orelse
+            return self.ordinaryProtoValue(self.tempRoot(target_root, Value.obj(target)).asObj());
+        const res = try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)));
+        const result_root = try self.pushTempRoot(res);
         if (!res.isNull() and (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint))
             return self.throwError("TypeError", "Proxy handler's 'getPrototypeOf' trap should either return an object or null");
-        if (!try self.ordinaryIsExtensible(target)) {
-            const tp = try self.ordinaryProtoValue(target);
-            const same = (res.isNull() and tp.isNull()) or (res.isObject() and tp.isObject() and res.asObj() == tp.asObj());
+        if (!try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj())) {
+            const tp = try self.ordinaryProtoValue(self.tempRoot(target_root, Value.obj(target)).asObj());
+            const reported = self.tempRoot(result_root, res);
+            const same = (reported.isNull() and tp.isNull()) or (reported.isObject() and tp.isObject() and reported.asObj() == tp.asObj());
             if (!same) return self.throwError("TypeError", "Proxy's 'getPrototypeOf' trap for a non-extensible target should return the same value as the target's prototype");
         }
-        return res;
+        return self.tempRoot(result_root, res);
     }
 
     /// [[IsExtensible]] honoring a Proxy target.

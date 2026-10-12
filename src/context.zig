@@ -34792,6 +34792,10 @@ fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, e
     }
 }
 
+test "Proxy metadata moving prototype revocation" {
+    try expectProxyMetadataMoving("var target=Object.create(proxySubject);Object.preventExtensions(target);var record;var handler={get getPrototypeOf(){record.revoke();proxyMovingLoop(20000);return function(t){if(t!==target||this!==handler)throw new Error('identity');return proxySubject;};}};record=Proxy.revocable(target,handler);", "Object.getPrototypeOf(record.proxy)===proxySubject");
+}
+
 test "Proxy metadata moving own_keys_lookup" {
     try expectProxyMetadataMoving("var target={value:proxySubject};var handler={get ownKeys(){proxyMovingLoop(20000);return function(t){if(t!==target||this!==handler)throw new Error('identity');return ['value'];};}};var proxy=new Proxy(target,handler);", "Reflect.ownKeys(proxy).join(',')==='value'");
 }
