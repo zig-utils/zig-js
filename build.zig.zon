@@ -2,7 +2,7 @@
     .name = .zig_js,
     .version = "0.0.1",
     .fingerprint = 0x18569fa43f653b80,
-    .minimum_zig_version = "0.17.0-dev",
+    .minimum_zig_version = "0.18.0-dev",
     .dependencies = .{
         // Homegrown regex engine, reused to back JS RegExp (pantry: zig-regex).
         .zig_regex = .{ .path = "../zig-regex" },

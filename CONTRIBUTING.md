@@ -17,7 +17,7 @@ have cost real time here.
 
 | Requirement | Notes |
 | --- | --- |
-| **Zig `0.17.0-dev`**, at least `0.17.0-dev.956` | Zig 0.16 will **not** build this tree. CI resolves the current `0.17.0-dev` master through pantry's action. |
+| **Zig `0.18.0-dev`**, currently CI-pinned to `0.18.0-dev.146+35accc06e` | Zig 0.17 and earlier are outside the supported toolchain contract. CI resolves this exact 0.18-dev compiler through pantry's action. |
 | **Home `home-tool`** | Runs every repository TypeScript gate, audit, generator, and corpus driver with zig-js by default or JSC when configured. |
 | **`bun`** | Builds the documentation site. |
 | macOS + Xcode CLT | Only for the Objective-C bridge, the JSC differential targets, and the JSC benchmark comparison. |
