@@ -6051,6 +6051,76 @@ test "vm: native for-in preparation allocation failure recovers" {
     try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[3]);
 }
 
+test "vm: native for-in next allocation failure recovers without replay" {
+    const saved_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(saved_heap);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+    const source =
+        \\var calls = 0;
+        \\var proxy = new Proxy({ a: 1 }, { getOwnPropertyDescriptor: function() {
+        \\  calls = calls + 1;
+        \\  return { enumerable: true, configurable: true };
+        \\} });
+        \\proxy
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    const proxy = try run(&machine, program, null);
+    const state = try machine.prepareForIn(proxy);
+
+    const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{
+        .{
+            .bytecode_op = @backingInt(bc.Op.enum_next),
+            .first_input = 0,
+            .input_count = 3,
+            .deopt_index = 0,
+            .step_delta = 1,
+            .origin = 1,
+            .result_count = 4,
+        },
+    }, &.{});
+    defer metadata.destroy();
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    scratch[0] = state.target.rawBits();
+    scratch[1] = state.keys.rawBits();
+    scratch[2] = Value.num(0).rawBits();
+    var frame = jit.NativeFrame{
+        .scratch = &scratch,
+        .runtime_context = &machine,
+        .operation_context = metadata,
+        .exit_ip = 1,
+        .deopt_index = 0,
+        .operation_detail = 0,
+    };
+
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = failing.allocator();
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.out_of_memory),
+        nativeOperationDispatch(&frame, 0),
+    );
+    machine.arena = allocator;
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(f64, 0), env.get("calls").?.asNum());
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+
+    try std.testing.expectEqual(
+        @backingInt(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    try std.testing.expectEqual(@as(f64, 1), env.get("calls").?.asNum());
+    try std.testing.expectEqual(Value.num(1).rawBits(), frame.operation_result_bits[0]);
+    try std.testing.expectEqualStrings("a", Value.fromRawBits(frame.operation_result_bits[1]).asStr());
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[2]);
+    try std.testing.expectEqual(Value.boolVal(true).rawBits(), frame.operation_result_bits[3]);
+}
+
 test "vm: optimizer native for-in next executes one candidate" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
