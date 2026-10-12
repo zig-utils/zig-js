@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/dependency_audit.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_dependency_audit = b.addRunArtifact(dependency_audit);
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/runtime_thread_audit.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_runtime_thread_audit = b.addRunArtifact(runtime_thread_audit);
@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/independent_suite_inventory.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_independent_suite_audit = b.addRunArtifact(independent_suite_audit);
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/independent_suite_inventory.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_independent_suite_audit_tests = b.addRunArtifact(independent_suite_audit_tests);
@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/docs_link_check.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_docs_link_check = b.addRunArtifact(docs_link_check);
@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/docs_link_check.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_docs_link_check_tests = b.addRunArtifact(docs_link_check_tests);
@@ -156,6 +156,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
+            // Keep the shipped library and the primary unit root on the same
+            // no-libc configuration; tests must exercise the shipped branch.
+            .link_libc = false,
             .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "regex", .module = regex_mod },
@@ -172,7 +175,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/native_observability_lldb.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
             // LLDB scans the linked symbol table for the GDB-JIT globals.
             // A debug map also contributes an undefined descriptor row, which
             // makes its address selection nondeterministic; the generated
@@ -519,7 +522,7 @@ pub fn build(b: *std.Build) void {
             .name = "objc-abi-benchmark",
             .root_module = b.createModule(.{
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = std.builtin.OptimizeMode.fast,
                 .link_libc = true,
             }),
         });
@@ -1450,6 +1453,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = false,
             .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "regex", .module = regex_mod },
@@ -2010,7 +2014,7 @@ pub fn build(b: *std.Build) void {
     const bench_js_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = std.builtin.OptimizeMode.fast,
         .imports = &.{
             .{ .name = "regex", .module = regex_mod },
             .{ .name = "gc", .module = gc_mod },
@@ -2021,7 +2025,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
@@ -2037,7 +2041,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/independent_suite_zig_js.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .link_libc = true,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
@@ -2061,7 +2065,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/independent_suite_octane.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = std.builtin.OptimizeMode.debug,
         }),
     });
     const run_independent_suite_octane_tests = b.addRunArtifact(independent_suite_octane_tests);
@@ -2072,7 +2076,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("bench/independent_suite_jsc.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = std.builtin.OptimizeMode.fast,
                 .link_libc = true,
             }),
         });
@@ -2291,7 +2295,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/frontend_parse.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .link_libc = target.result.os.tag == .macos,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
@@ -2311,7 +2315,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/compiler_pressure.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .link_libc = true,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
@@ -2349,7 +2353,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("bench/comparison_zig_js.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = std.builtin.OptimizeMode.fast,
                 .link_libc = true,
                 .imports = &.{.{ .name = "js", .module = bench_js_mod }},
             }),
@@ -2364,7 +2368,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("bench/comparison_jsc.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = std.builtin.OptimizeMode.fast,
                 .link_libc = true,
             }),
         });
@@ -2491,7 +2495,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/threads.zig"),
             .target = target,
-            .optimize = if (threads_profile_debug) .Debug else .ReleaseFast,
+            .optimize = if (threads_profile_debug) std.builtin.OptimizeMode.debug else std.builtin.OptimizeMode.fast,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
@@ -2514,7 +2518,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/midgc.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
@@ -2529,7 +2533,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/gc.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
@@ -2547,7 +2551,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/gc_compaction.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .link_libc = true,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
@@ -2573,7 +2577,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/gc_generation.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.fast,
             .link_libc = true,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),

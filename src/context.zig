@@ -162,8 +162,9 @@ test "runtime module string indexes are keyed lazy and failure atomic" {
     try std.testing.expectEqual(@as(usize, 0), empty.index.capacity());
 }
 
-// Zig 0.17 renamed the builtin optimization enum tags from title case to
-// lowercase. Keep the declared dev.956+ compiler window source-compatible.
+// Zig 0.18 uses lowercase builtin optimization enum tags. Keep this check
+// case-insensitive because builtin.mode is an enum tag whose spelling is a
+// compiler detail rather than an engine semantic.
 const debug_build = std.ascii.eqlIgnoreCase(@tagName(builtin.mode), "debug");
 
 const finalization_cleanup_queue_reserve_granularity = 16;
