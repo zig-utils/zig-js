@@ -107,7 +107,7 @@ Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 ## Build And Test
 
 <!-- release-compatibility:build-test:start -->
-Requires Zig 0.17.0-dev.
+Requires Zig 0.18.0-dev.
 
 ```sh
 zig build                       # library and headers

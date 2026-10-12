@@ -12,8 +12,8 @@ rest of the site.
 
 ## Get it building
 
-1. **Zig `0.17.0-dev`**, at least `0.17.0-dev.956`. Zig 0.16 will not build the
-   tree.
+1. **Zig `0.18.0-dev`**. Zig 0.17 and earlier are outside the supported
+   toolchain contract.
 2. **Sibling checkouts** of `zig-regex` and `zig-gc` next to your `zig-js`
    directory — `build.zig.zon` resolves them by local path, so without them
    dependency resolution fails before anything compiles.

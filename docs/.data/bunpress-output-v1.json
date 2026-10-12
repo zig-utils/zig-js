@@ -135,8 +135,8 @@
     },
     {
       "path": "guide/contributing/index.html",
-      "bytes": 222530,
-      "sha256": "b2af3e11b598477fdcca348078c2a03538081d10a10147f059302111b0648752"
+      "bytes": 222525,
+      "sha256": "3b37a1e882b3ecf8bbeb5f2b6c9f31807fe40df27cb7ced3d67f979b491ebb34"
     },
     {
       "path": "guide/index.html",
@@ -180,8 +180,8 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 274449,
-      "sha256": "8969a6630d4ceb7fe1086a5d21bdec791e5f384f834d39955a624f34e693eedf"
+      "bytes": 274457,
+      "sha256": "a3adbf9a06794e7d8671ce867ba8378455c1846298074310fe984adb88811c90"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "bb851e0e3b106d37d94c139d0975451802c4b941648fcfab07dfffe18c760865"
+  "tree_sha256": "2ff12ae64e2ecb9774a3bffedbce8beaa1115e3e5a9cc60ea8b309c8d491e84c"
 }

@@ -17,7 +17,9 @@ const EXPECTED = [
   "readme_generation",
 ].sort();
 const BENCHMARK_START = "<!-- benchmark-comparison:start -->",
-  BENCHMARK_END = "<!-- benchmark-comparison:end -->";
+  BENCHMARK_END = "<!-- benchmark-comparison:end -->",
+  BUILD_TEST_START = "<!-- release-compatibility:build-test:start -->",
+  BUILD_TEST_END = "<!-- release-compatibility:build-test:end -->";
 const HOME_TOOL =
   process.env.HOME_TOOL ||
   `${process.env.HOME || ""}/Code/Home/lang/zig-out/bin/home-tool`;
@@ -72,6 +74,9 @@ function main(): void {
     else throw new Error(`unknown argument: ${arg}`);
   }
   const matrix = JSON.parse(readText(matrixPath));
+  const zon = readText("build.zig.zon"),
+    minimumVersion = zon.match(/\.minimum_zig_version\s*=\s*"([^"]+)"/u)?.[1];
+  requireValue(!!minimumVersion, "build.zig.zon must declare minimum_zig_version");
   requireValue(
     matrix.schema_version === 1 &&
       matrix.kind === "zig_js_release_compatibility_matrix",
@@ -219,8 +224,20 @@ function main(): void {
     "all_green/readme policy drift",
   );
   let readme = readText(matrix.readme_policy.path);
+  const buildTest = [
+    `Requires Zig ${minimumVersion}.`,
+    "",
+    "```sh",
+    "zig build                       # library and headers",
+    "zig build test                  # main test root",
+    "zig build test262               # configured tc39/test262 corpus",
+    "zig build test-c-api            # C and C++ embedding fixtures",
+    "zig build benchmark-comparison  # zig-js single/multithread vs JSC",
+    "```",
+  ].join("\n");
   if (update) {
     readme = replaceBlock(readme, BENCHMARK_START, BENCHMARK_END, scorecard);
+    readme = replaceBlock(readme, BUILD_TEST_START, BUILD_TEST_END, buildTest);
     writeText(matrix.readme_policy.path, readme);
   }
   requireValue(
@@ -231,6 +248,10 @@ function main(): void {
   requireValue(
     !readme.includes(heading) === allGreen,
     "README missing-surface section does not match release state",
+  );
+  requireValue(
+    readme.includes(`${BUILD_TEST_START}\n${buildTest}\n${BUILD_TEST_END}`),
+    "README build-test toolchain block drift",
   );
   for (const marker of [
     "overview",
