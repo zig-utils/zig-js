@@ -1,5 +1,5 @@
 //! Compatibility shims for `std.Io` primitives that this engine's threading
-//! code targets but that are absent from the pinned Zig 0.17-dev std on some
+//! code targets but that are absent from the pinned Zig 0.18-dev std on some
 //! checkouts.
 //!
 //! `std.Io.Condition.waitTimeout` — a timed condition wait — is the one the

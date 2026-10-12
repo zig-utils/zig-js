@@ -71,7 +71,7 @@ rules.
 ## Reading Order
 
 - [Thread API](./api.md) - supported shared-realm JavaScript surface.
-- [Testing](./testing.md) - exact Zig `0.17-dev` verification commands and
+- [Testing](./testing.md) - exact Zig `0.18-dev` verification commands and
   CI gates.
 - [Memory Model](./memory-model.md) - JS program races, engine-state races, and
   the TSan suppression boundary.

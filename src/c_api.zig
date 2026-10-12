@@ -45,8 +45,9 @@ const strcell = @import("strcell.zig");
 const text_codec = @import("text_codec.zig");
 const fetch_headers = @import("fetch_headers.zig");
 
-// Zig 0.17 renamed the builtin optimization enum tags from title case to
-// lowercase. Keep the declared dev.956+ compiler window source-compatible.
+// Zig 0.18 uses lowercase builtin optimization enum tags. Keep this check
+// case-insensitive because builtin.mode is an enum tag whose spelling is a
+// compiler detail rather than an engine semantic.
 const debug_build = std.ascii.eqlIgnoreCase(@tagName(builtin.mode), "debug");
 const wasm_api = @import("wasm/api.zig");
 const parser_mod = @import("parser.zig");
