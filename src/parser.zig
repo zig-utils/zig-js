@@ -7251,7 +7251,9 @@ test "parser source locations map byte offsets to one-based line columns" {
 }
 
 test "parser accepts yield before a template continuation" {
-    var parser = try Parser.init(std.testing.allocator, "function* g() { str = `1${ yield }3${ 4 }5`; }");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try Parser.init(arena.allocator(), "function* g() { str = `1${ yield }3${ 4 }5`; }");
     _ = try parser.parseProgram();
 }
 
