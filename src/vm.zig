@@ -16701,6 +16701,94 @@ test "vm: optimizer executes native class definition effects" {
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.prepare_class_heritage) > 0);
 }
 
+test "vm: optimizer preserves computed class names and static blocks" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function make(key) {
+        \\  class Base { [key]() { return 4; } }
+        \\  class Derived extends Base {
+        \\    static [key] = 3;
+        \\    #value = 5;
+        \\    [key]() { return super[key]() + this.#value + Derived[key]; }
+        \\    static { this.ready = 1; }
+        \\  }
+        \\  return new Derived()[key]() + Derived.ready;
+        \\}
+        \\for (var i = 0; i < 12; i++) make("read");
+        \\make("read")
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    try std.testing.expectEqual(@as(f64, 13), (try run(&machine, program, null)).asNum());
+    const function = Interpreter.funcOf(env.get("make").?) orelse return error.TestUnexpectedResult;
+    const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_eval = false;
+    for (artifact.native_operations.?.descriptors) |descriptor| {
+        if (@as(bc.Op, @fromBackingInt(@intCast(descriptor.bytecode_op))) == .eval_class) saw_eval = true;
+    }
+    try std.testing.expect(saw_eval);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
+}
+
+test "vm: native class exception resumes without replaying static effects" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\var count = 0;
+        \\function fail() {
+        \\  class Broken { static { count++; throw 7; } }
+        \\}
+        \\for (var i = 0; i < 12; i++) {
+        \\  try { fail(); } catch (error) { if (error !== 7) count = -100; }
+        \\}
+        \\count
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    try std.testing.expectEqual(@as(f64, 12), (try run(&machine, program, null)).asNum());
+    const function = Interpreter.funcOf(env.get("fail").?) orelse return error.TestUnexpectedResult;
+    const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_eval = false;
+    for (artifact.native_operations.?.descriptors) |descriptor| {
+        if (@as(bc.Op, @fromBackingInt(@intCast(descriptor.bytecode_op))) == .eval_class) saw_eval = true;
+    }
+    try std.testing.expect(saw_eval);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
+}
+
 test "vm: optimizer object and array construction resumes a spread throw once" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
