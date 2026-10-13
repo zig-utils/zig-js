@@ -12200,6 +12200,7 @@ test "computed class private environment survives an actual moving collection" {
     const context = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
         .enable_jit = true,
+        .profile_execution_tiers = true,
         .bytecode_execution_mode = .required,
     });
     defer context.destroy();
@@ -12222,6 +12223,7 @@ test "computed class private environment survives an actual moving collection" {
         \\  }
         \\  return privateClassRead(new Box());
         \\}
+        \\for (var classWarm = 0; classWarm < 12; classWarm++) buildMovingPrivateClass();
     );
     const loop: *interp.Function = @ptrCast(@alignCast(context.global_object.getOwn("privateClassMovingLoop").?.asObj().jsFunction().?));
     try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
@@ -12229,10 +12231,20 @@ test "computed class private environment survives an actual moving collection" {
     context.collectGarbage();
     _ = try context.evaluate("globalThis.privateClassMovingSubject = { marker: 1 };");
     const subject_before = context.global_object.getOwn("privateClassMovingSubject").?.asObj();
+    const class_builder = Interpreter.funcOf(context.global_object.getOwn("buildMovingPrivateClass").?) orelse
+        return error.TestUnexpectedResult;
+    const class_artifact = class_builder.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_native_class = false;
+    for (class_artifact.native_operations.?.descriptors) |descriptor| {
+        if (@as(bc.Op, @fromBackingInt(@intCast(descriptor.bytecode_op))) == .eval_class) saw_native_class = true;
+    }
+    try std.testing.expect(saw_native_class);
     const heap = context.gc.?;
     const moving_before = heap.accounting().moving_minor_collections;
     try std.testing.expectEqual(@as(f64, 41), (try context.evaluate("buildMovingPrivateClass()")).asNum());
     try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expect(context.tierAttributionSnapshot().runtime_operations.count(.eval_class) > 0);
     try std.testing.expect(subject_before != context.global_object.getOwn("privateClassMovingSubject").?.asObj());
     try std.testing.expect(!context.gc_relocation_active.load(.acquire));
 }
