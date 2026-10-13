@@ -4461,7 +4461,7 @@ pub const Parser = struct {
     /// terminators as non-starters.
     fn startsExpression(self: *Parser) bool {
         return switch (self.cur().kind) {
-            .rparen, .rbracket, .rbrace, .comma, .semicolon, .colon, .eof => false,
+            .rparen, .rbracket, .rbrace, .template_middle, .template_tail, .comma, .semicolon, .colon, .eof => false,
             else => true,
         };
     }
@@ -7248,6 +7248,11 @@ test "parser source locations map byte offsets to one-based line columns" {
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 7, .line = 2, .column = 1 }, sourceLocationAt(src, 7));
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 14, .line = 3, .column = 1 }, sourceLocationAt(src, 14));
     try std.testing.expectEqual(SourceLocation{ .byte_offset = src.len, .line = 3, .column = 6 }, sourceLocationAt(src, src.len + 99));
+}
+
+test "parser accepts yield before a template continuation" {
+    var parser = try Parser.init(std.testing.allocator, "function* g() { str = `1${ yield }3${ 4 }5`; }");
+    _ = try parser.parseProgram();
 }
 
 test "parser binding keyword table preserves exact reserved memberships" {
