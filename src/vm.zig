@@ -5074,11 +5074,12 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call_spread) or
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this_spread))
     {
-        // A native call inside the heap driver cannot recurse through
-        // callValue: that would create a nested native stack/driver chain and
-        // defeat the trampoline's bounded-stack contract. Re-enter bytecode,
-        // where the driver publishes the callee as a heap activation.
-        if (vm.driver_active)
+        // A native call inside the heap driver may recurse through callValue
+        // for ordinary callback depth, but it must not grow a native
+        // stack/driver chain without bound. Once nested native execution
+        // reaches the existing inline-call limit, re-enter bytecode so the
+        // driver publishes the callee as a heap activation.
+        if (vm.driver_active and vm.jit_execution_depth >= inline_call_depth_limit)
             return @backingInt(jit.NativeOperationStatus.invalidated);
         const values: []const Value = @ptrCast(inputs);
         if (builtin.is_test and descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and
@@ -13445,12 +13446,9 @@ fn runActivationStep(vm: *Interpreter, act: *Activation) EvalError!Value {
 /// the native stack — the trampoline's whole point).
 fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
     const saved_active = vm.driver_active;
-    const saved_inline_calls_disabled = vm.vm_inline_calls_disabled;
     vm.driver_active = true;
-    vm.vm_inline_calls_disabled = true;
     defer {
         vm.driver_active = saved_active;
-        vm.vm_inline_calls_disabled = saved_inline_calls_disabled;
     }
 
     var acts: std.ArrayListUnmanaged(*Activation) = .empty;
