@@ -2501,6 +2501,72 @@ fn finishNativeOperationError(
     };
 }
 
+fn nativeEnterBlock(vm: *Interpreter, exec: *Exec, flags: u32) EvalError!Value {
+    const environment = try gc_mod.allocEnv(vm.arena);
+    vm.initEnvironment(environment, vm.env, false);
+    environment.is_catch_param = flags & bc.block_environment_simple_catch != 0;
+    vm.env = environment;
+    exec.environment_depth += 1;
+    if (flags & bc.block_environment_class != 0) {
+        exec.class_strict_depth += 1;
+        vm.strict = true;
+    }
+    return Value.undef();
+}
+
+fn nativeExitBlock(vm: *Interpreter, exec: *Exec, flags: u32) EvalError!Value {
+    if (exec.environment_depth == 0) return vm.throwError("InternalError", "class block environment underflow");
+    if (vm.env.parent == null) return vm.throwError("InternalError", "class block environment has no parent");
+    if (vm.env.class_private_environment_active)
+        vm.current_private_map = vm.env.class_outer_private_map;
+    vm.env = vm.env.parent.?;
+    exec.environment_depth -= 1;
+    if (flags & bc.block_environment_class != 0) {
+        if (exec.class_strict_depth == 0) return vm.throwError("InternalError", "class strict depth underflow");
+        exec.class_strict_depth -= 1;
+        vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
+    }
+    return Value.undef();
+}
+
+fn nativePrepareClassPrivateEnvironment(vm: *Interpreter, exec: *Exec, template: *const bc.ClassTemplate) EvalError!Value {
+    if (vm.env.class_private_environment_active)
+        return vm.throwError("InternalError", "class PrivateEnvironment was prepared twice");
+    const outer_private_map = vm.current_private_map;
+    const private_map = try vm.prepareClassPrivateEnvironment(template.node.class_expr.members);
+    vm.env.class_outer_private_map = outer_private_map;
+    vm.env.class_private_environment_active = true;
+    vm.current_private_map = private_map;
+    _ = exec;
+    return Value.undef();
+}
+
+fn nativeEvalClass(
+    vm: *Interpreter,
+    exec: *Exec,
+    template: *const bc.ClassTemplate,
+    inputs: []const Value,
+) EvalError!Value {
+    const class = template.node.class_expr;
+    const heritage_count: usize = if (class.superclass != null) 2 else 0;
+    const name_count: usize = @intFromBool(template.name_from_stack);
+    if (inputs.len < heritage_count + name_count) return vm.throwError("InternalError", "class input transport underflow");
+    const computed_count = inputs.len - heritage_count - name_count;
+    const heritage: ?Interpreter.PreparedClassHeritage = if (class.superclass != null) .{
+        .constructor = inputs[0],
+        .prototype = inputs[1],
+    } else null;
+    const name_key = if (template.name_from_stack) inputs[heritage_count] else null;
+    return evalClassTemplate(
+        vm,
+        template,
+        exec.frame,
+        heritage,
+        inputs[heritage_count + name_count .. heritage_count + name_count + computed_count],
+        name_key,
+    );
+}
+
 fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
     return nativeGetIndexAtSite(vm, object, key, .none);
 }
@@ -4752,6 +4818,68 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         if (descriptor.result_count != 0) return @backingInt(jit.NativeOperationStatus.host_trap);
         frame.operation_detail = operation_id;
         return @backingInt(jit.NativeOperationStatus.value);
+    }
+    if (bytecode_op == .enter_block or bytecode_op == .exit_block or
+        bytecode_op == .prepare_class_private_environment or bytecode_op == .prepare_class_heritage or
+        bytecode_op == .eval_class)
+    {
+        const active: *Exec = @ptrCast(@alignCast(frame.bytecode_execution orelse
+            return @backingInt(jit.NativeOperationStatus.host_trap)));
+        const chunk = active.chunk orelse return @backingInt(jit.NativeOperationStatus.host_trap);
+        if (descriptor.origin >= chunk.code.items.len) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const instruction = chunk.code.items[descriptor.origin];
+        if (instruction.op != bytecode_op or instruction.a != descriptor.operand_a or instruction.b != descriptor.operand_b)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        if (bytecode_op == .enter_block or bytecode_op == .exit_block) {
+            if (descriptor.result_count != 0 or inputs.len != 0) return @backingInt(jit.NativeOperationStatus.host_trap);
+            const result = if (bytecode_op == .enter_block)
+                nativeEnterBlock(vm, active, instruction.a)
+            else
+                nativeExitBlock(vm, active, instruction.a);
+            return finishNativeOperation(frame, vm, operation_id, result);
+        }
+        if (bytecode_op == .prepare_class_private_environment) {
+            if (descriptor.result_count != 0 or inputs.len != 0 or instruction.a >= chunk.classes.items.len)
+                return @backingInt(jit.NativeOperationStatus.host_trap);
+            return finishNativeOperation(
+                frame,
+                vm,
+                operation_id,
+                nativePrepareClassPrivateEnvironment(vm, active, &chunk.classes.items[instruction.a]),
+            );
+        }
+        if (bytecode_op == .prepare_class_heritage) {
+            if (descriptor.result_count != 2 or inputs.len != 1) return @backingInt(jit.NativeOperationStatus.host_trap);
+            const values: []const Value = @ptrCast(inputs);
+            const roots = vm.pushTempRootSlice(values) catch |err|
+                return finishNativeOperationError(frame, vm, operation_id, err);
+            defer vm.restoreTempRoots(roots);
+            const raw = vm.tempRoot(roots, values[0]);
+            const prepared = vm.prepareClassHeritage(raw) catch |err|
+                return finishNativeOperationError(frame, vm, operation_id, err);
+            frame.operation_result_bits[0] = prepared.constructor.rawBits();
+            frame.operation_result_bits[1] = prepared.prototype.rawBits();
+            frame.operation_detail = operation_id;
+            return @backingInt(jit.NativeOperationStatus.value);
+        }
+        if (bytecode_op == .eval_class) {
+            if (instruction.a >= chunk.classes.items.len or descriptor.result_count != 1 or inputs.len != instruction.b)
+                return @backingInt(jit.NativeOperationStatus.host_trap);
+            const values: []const Value = @ptrCast(inputs);
+            const roots = vm.pushTempRootSlice(values) catch |err|
+                return finishNativeOperationError(frame, vm, operation_id, err);
+            defer vm.restoreTempRoots(roots);
+            const rooted_values: []const Value = if (vm.gc != null)
+                vm.gc_temp_roots.items[roots .. roots + values.len]
+            else
+                values;
+            return finishNativeOperation(
+                frame,
+                vm,
+                operation_id,
+                nativeEvalClass(vm, active, &chunk.classes.items[instruction.a], rooted_values),
+            );
+        }
     }
     if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericValue(Value.fromRawBits(inputs[0])));
@@ -16513,6 +16641,64 @@ test "vm: optimizer executes native object and array construction effects" {
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer executes native class definition effects" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function make(value) {
+        \\  class Base { readBase() { return 2; } }
+        \\  class Box extends Base {
+        \\    #value = value;
+        \\    static tag = 3;
+        \\    read() { return super.readBase() + this.#value + Box.tag; }
+        \\  }
+        \\  return new Box().read();
+        \\}
+        \\for (var i = 0; i < 12; i++) make(i);
+        \\make(5)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    try std.testing.expectEqual(@as(f64, 10), (try run(&machine, program, null)).asNum());
+    const function = Interpreter.funcOf(env.get("make").?) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_enter = false;
+    var saw_heritage = false;
+    var saw_private = false;
+    var saw_eval = false;
+    var saw_exit = false;
+    for (operations.descriptors) |descriptor| {
+        switch (@as(bc.Op, @fromBackingInt(@intCast(descriptor.bytecode_op)))) {
+            .enter_block => saw_enter = true,
+            .prepare_class_heritage => saw_heritage = true,
+            .prepare_class_private_environment => saw_private = true,
+            .eval_class => saw_eval = true,
+            .exit_block => saw_exit = true,
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_enter and saw_heritage and saw_private and saw_eval and saw_exit);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.prepare_class_heritage) > 0);
 }
 
 test "vm: optimizer object and array construction resumes a spread throw once" {

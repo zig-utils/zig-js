@@ -84,6 +84,12 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .load_binding_ref,
         .clear_binding_ref,
 
+        .enter_block,
+        .exit_block,
+        .prepare_class_private_environment,
+        .eval_class,
+        .class_result,
+
         .interpreter_value,
         => 0,
         .load_frame,
@@ -113,6 +119,7 @@ fn operandCount(kind: ir.ValueKind) u2 {
         .assert_iter_result,
         .iter_close,
         .enum_keys,
+        .prepare_class_heritage,
         => 1,
         .enum_next => 3,
         .enum_end_completion, .enum_result => 0,
@@ -542,7 +549,7 @@ pub fn verify(plan: *const ir.Plan, mode: Mode) Error!void {
             }
         } else if (node.kind != .interpreter_value) {
             const op = plan.instructions[node.origin].op;
-            const expected: ir.ValueKind = if (node.kind == .enum_result) .enum_result else if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
+            const expected: ir.ValueKind = if (node.kind == .enum_result or node.kind == .class_result) node.kind else if (node.kind == .branch_predicate and (op == .jump_if_true_peek or op == .jump_if_false_peek or op == .jump_if_nullish_peek or op == .jump_if_not_nullish_peek)) .branch_predicate else if (node.kind == .binding_base and op == .load_binding_ref and plan.instructions[node.origin].b & bc.binding_ref_load_with_base != 0) .binding_base else switch (op) {
                 .load_const => .load_managed_constant,
                 .load_local, .load_local_mapped, .load_local_lexical => .load_frame,
                 .store_local, .store_local_mapped, .store_local_lexical => .store_frame,
