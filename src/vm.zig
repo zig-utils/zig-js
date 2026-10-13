@@ -5074,6 +5074,12 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call_spread) or
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this_spread))
     {
+        // A native call inside the heap driver cannot recurse through
+        // callValue: that would create a nested native stack/driver chain and
+        // defeat the trampoline's bounded-stack contract. Re-enter bytecode,
+        // where the driver publishes the callee as a heap activation.
+        if (vm.driver_active)
+            return @backingInt(jit.NativeOperationStatus.invalidated);
         const values: []const Value = @ptrCast(inputs);
         if (builtin.is_test and descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and
             values.len == 3 and Interpreter.isIntrinsicArrayPush(values[0]))
@@ -9260,6 +9266,21 @@ fn runChunk(
                         }
                     }
                 }
+                // A driver-owned plain JS call must become a heap activation
+                // before any native or inline fast path can recurse on the
+                // host stack. The quick-arguments leaf above is side-effect
+                // free; every other JS-chunk call belongs to the trampoline.
+                if (vm.driver_active) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        act.result_base = base - 1;
+                        stack.shrinkRetainingCapacity(base - 1);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        return acc; // driver reads pending_activation and ignores this value
+                    }
+                }
                 if (!debug_execution) {
                     if (jsChunkFn(callee)) |func| {
                         if (try tryRunNativeDirectCall(vm, func, stack.items[base..])) |result| {
@@ -9276,21 +9297,6 @@ fn runChunk(
                             try stack.append(stack_alloc, result);
                             continue;
                         }
-                    }
-                }
-                // Trampoline plain JS→JS calls under the driver: build the callee
-                // activation, clear callee+args off this stack (the result lands
-                // where the callee was), flush acc/ip, and yield to `runDriver`
-                // via `pending_activation` instead of recursing natively.
-                if (vm.driver_active) {
-                    if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
-                        act.result_base = base - 1;
-                        stack.shrinkRetainingCapacity(base - 1);
-                        exec.acc = acc;
-                        exec.ip = ip;
-                        vm.pending_activation = act;
-                        return acc; // driver reads `pending_activation` and ignores this value
                     }
                 }
                 const result = try callValue(vm, callee, stack.items[base..], Value.undef(), vmCallSite(chunk, ip));
@@ -13439,8 +13445,13 @@ fn runActivationStep(vm: *Interpreter, act: *Activation) EvalError!Value {
 /// the native stack — the trampoline's whole point).
 fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
     const saved_active = vm.driver_active;
+    const saved_inline_calls_disabled = vm.vm_inline_calls_disabled;
     vm.driver_active = true;
-    defer vm.driver_active = saved_active;
+    vm.vm_inline_calls_disabled = true;
+    defer {
+        vm.driver_active = saved_active;
+        vm.vm_inline_calls_disabled = saved_inline_calls_disabled;
+    }
 
     var acts: std.ArrayListUnmanaged(*Activation) = .empty;
     defer acts.deinit(vm.arena);
@@ -21529,10 +21540,11 @@ test "vm: explicit native caller entry misses before reentrant leaf effects" {
     for ([_][]const u8{ "callerCapture", "callerReceiver" }) |name| {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
         const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(artifact.entry_enabled and !artifact.has_side_exits);
+        try std.testing.expect(artifact.entry_enabled and (!artifact.has_side_exits or artifact.continuation_only_exits));
         const attempts_before = optimizer_native_attempts.load(.monotonic);
         try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, function, &arguments));
-        try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+        if (!artifact.continuation_only_exits)
+            try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
     }
     try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate("calls")).asNum());
     try std.testing.expect((try ctx.evaluate("callerCapture(7) === 114 && callerReceiver(7) === 114 && calls === 2")).asBool());
