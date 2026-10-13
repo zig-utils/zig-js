@@ -4682,6 +4682,13 @@ fn nativeNumericDataAccess(frame: *jit.NativeFrame, operation_id: u32) callconv(
     return true;
 }
 
+fn nativeOperationBytecodeOp(raw: u16) ?bc.Op {
+    for (std.enums.values(bc.Op)) |op| {
+        if (raw == @as(u16, @intFromEnum(op))) return op;
+    }
+    return null;
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @backingInt(jit.NativeOperationStatus.host_trap)));
@@ -4694,6 +4701,8 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         frame.deopt_index != descriptor.deopt_index or descriptor.step_delta == 0 or
         (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
             descriptor.exceptional_target >= metadata.exceptional_targets.len))
+        return @backingInt(jit.NativeOperationStatus.host_trap);
+    const bytecode_op = nativeOperationBytecodeOp(descriptor.bytecode_op) orelse
         return @backingInt(jit.NativeOperationStatus.host_trap);
     const first: usize = descriptor.first_input;
     const count: usize = descriptor.input_count;
@@ -4788,7 +4797,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             applyBinaryEffect(vm, op, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
     }
-    const op: bc.Op = @fromBackingInt(@intCast(descriptor.bytecode_op));
+    const op = bytecode_op;
     if (op == .load_upval or op == .load_upval_mapped or op == .load_upval_lexical or
         op == .store_upval or op == .store_upval_mapped or op == .store_upval_lexical)
     {
