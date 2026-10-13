@@ -33374,13 +33374,17 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         } else {
             const is_instant = t_obj != null and t_obj.?.kind == .instant;
             if (is_instant) temporal_kind = .instant;
-            const ms: f64 = if (is_instant)
+            const raw_ms: f64 = if (is_instant)
                 @as(f64, @floatFromInt(@divFloor(t_obj.?.epoch_ns, 1_000_000)))
             else if (args.len == 0 or args[0].isUndefined())
                 0
             else
                 try self.toNumberV(args[0]);
-            if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid Date");
+            // PartitionDateTimePattern applies TimeClip before converting the
+            // clipped instant to local civil fields. Applying the offset first
+            // would turn values such as -0.9 into the preceding second.
+            const ms = Interpreter.dateTimeClip(raw_ms);
+            if (std.math.isNan(ms)) return self.throwError("RangeError", "Invalid Date");
             const day_ms: i64 = 86_400_000;
             const total_ms: i64 = @intFromFloat(@trunc(ms + @as(f64, @floatFromInt(dtfTimeZoneOffsetMs(this, ms)))));
             const epoch_days = @divFloor(total_ms, day_ms);
