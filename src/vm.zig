@@ -16801,6 +16801,80 @@ test "vm: native class exception resumes without replaying static effects" {
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
 }
 
+test "vm: native class step exhaustion resumes without replaying static effects" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const State = struct {
+        arm_budget: bool = false,
+        calls: usize = 0,
+    };
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const state: *State = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            state.calls += 1;
+            if (state.arm_budget) machine.step_budget = machine.steps;
+            return Value.undef();
+        }
+    };
+    const source =
+        \\var count = 0;
+        \\function build() {
+        \\  class Box { static { count++; classBudgetArm(); count++; } }
+        \\  return count;
+        \\}
+        \\for (var warm = 0; warm < 12; warm++) build();
+        \\0
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .execution_tier_inventory = &inventory,
+    });
+    var state = State{};
+    const native = try gc_mod.allocObj(allocator);
+    native.* = .{ .native = Host.arm, .private_data = &state };
+    try env.put("classBudgetArm", Value.obj(native));
+    try std.testing.expectEqual(@as(f64, 0), (try run(&machine, program, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 24), env.get("count").?.asNum());
+
+    const function = Interpreter.funcOf(env.get("build").?) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_eval = false;
+    for (artifact.native_operations.?.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.eval_class)) saw_eval = true;
+    }
+    try std.testing.expect(saw_eval);
+    state.calls = 0;
+    state.arm_budget = true;
+    try std.testing.expectError(error.Throw, runFunction(
+        &machine,
+        function,
+        function_chunk,
+        &.{},
+        Value.undef(),
+        Value.undef(),
+    ));
+    try std.testing.expectEqualStrings("RangeError", machine.exception.asObj().errorName());
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expectEqual(@as(f64, 25), env.get("count").?.asNum());
+    try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
+}
+
 test "vm: class definitions agree across tree bytecode and native parents" {
     const Context = @import("context.zig").Context;
     const configurations = [_]struct { mode: interp.BytecodeExecutionMode, native: bool }{
