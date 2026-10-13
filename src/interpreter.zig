@@ -27195,16 +27195,27 @@ fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const realm = try enterNativeMethodRealm(self);
     defer leaveNativeMethodRealm(self, realm);
-    if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.toArray called on a non-object");
+    const roots = try self.pushTempRootSlice(&.{ this, Value.undef(), Value.undef(), Value.undef() });
+    defer self.restoreTempRoots(roots);
+    if (!self.tempRoot(roots, this).isObject()) return self.throwError("TypeError", "Iterator.prototype.toArray called on a non-object");
     // GetIteratorDirect captures `next` once (a `next` accessor runs a single time).
-    const next_method = try self.getProperty(this, "next");
-    const arr = (try self.newArray()).asObj();
+    const next_method = try self.getProperty(self.tempRoot(roots, this), "next");
+    self.setTempRoot(roots + 1, next_method);
+    const arr = try self.newArray();
+    self.setTempRoot(roots + 2, arr);
     while (true) {
-        const s = try self.iterStepM(this, next_method);
+        const s = try self.iterStepM(
+            self.tempRoot(roots, this),
+            self.tempRoot(roots + 1, next_method),
+        );
         if (s.done) break;
-        try arr.appendElement(self.arena, s.value);
+        self.setTempRoot(roots + 3, s.value);
+        try self.tempRoot(roots + 2, arr).asObj().appendElement(
+            self.arena,
+            self.tempRoot(roots + 3, s.value),
+        );
     }
-    return Value.obj(arr);
+    return self.tempRoot(roots + 2, arr);
 }
 fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
