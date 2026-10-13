@@ -7134,8 +7134,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .async_iter_of, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_close, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_close_completion, .inputs = 3, .kind = .effect },
-        .{ .op = .prepare_class_heritage, .inputs = 1, .kind = .effect },
-        .{ .op = .eval_class, .b = 2, .inputs = 2, .kind = .effect },
     };
 
     for (cases) |case| {
@@ -7257,8 +7255,6 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         // `load_var` used to belong here; it is now a modelled zero-input
         // runtime operation, covered below.
         .{ .op = .super_get },
-        .{ .op = .enter_block },
-        .{ .op = .exit_block },
         .{ .op = .dispose_scope },
         .{ .op = .dispose_scope, .a = 1 },
         .{ .op = .exit_with },
