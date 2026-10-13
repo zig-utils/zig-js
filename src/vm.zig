@@ -16801,6 +16801,50 @@ test "vm: native class exception resumes without replaying static effects" {
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
 }
 
+test "vm: class definitions agree across tree bytecode and native parents" {
+    const Context = @import("context.zig").Context;
+    const configurations = [_]struct { mode: interp.BytecodeExecutionMode, native: bool }{
+        .{ .mode = .tree_walker, .native = false },
+        .{ .mode = .required, .native = false },
+        .{ .mode = .required, .native = true },
+    };
+    const source =
+        \\function make(key) {
+        \\  class Base { [key]() { return 4; } }
+        \\  class Derived extends Base {
+        \\    static [key] = 3;
+        \\    #value = 5;
+        \\    [key]() { return super[key]() + this.#value + Derived[key]; }
+        \\    static { this.ready = 1; }
+        \\  }
+        \\  return new Derived()[key]() + Derived.ready;
+        \\}
+        \\for (var i = 0; i < 12; i++) make("read");
+        \\make("read")
+    ;
+    for (configurations) |configuration| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = configuration.native,
+            .profile_execution_tiers = configuration.native,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate(source)).asNum());
+        if (configuration.native and jit.optimizer_supported) {
+            const function = Interpreter.funcOf(ctx.global_object.getOwn("make").?) orelse
+                return error.TestUnexpectedResult;
+            const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+                return error.TestUnexpectedResult;
+            var saw_native_class = false;
+            for (artifact.native_operations.?.descriptors) |descriptor| {
+                if (@as(bc.Op, @fromBackingInt(@intCast(descriptor.bytecode_op))) == .eval_class) saw_native_class = true;
+            }
+            try std.testing.expect(saw_native_class);
+        }
+    }
+}
+
 test "vm: optimizer object and array construction resumes a spread throw once" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
