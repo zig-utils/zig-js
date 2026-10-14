@@ -3506,7 +3506,14 @@ pub const Parser = struct {
         // failure: retrying repeats the same descent (at every enclosing head,
         // so the work doubles per level) and a `for await` head would report it
         // as a SyntaxError (#936).
-        const for_target = if (classic_using_of_decl or classic_async_of_arrow or try self.classicForHeadAhead()) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
+        // ECMA-262 ForInOfStatement: a declared BindingIdentifier followed by
+        // unescaped `in`/`of` already determines the head. Do not scan its RHS
+        // under both slash goals: on minified input a hypothetical regexp can
+        // swallow the head's `)` and discover a semicolon in a later body.
+        const identifier_iteration = decl_kind != null and self.check(.identifier) and
+            !self.tokenAt(self.pos + 1).escaped_identifier and
+            (self.peekIsKeyword(1, "in") or self.peekIsKeyword(1, "of"));
+        const for_target = if (classic_using_of_decl or classic_async_of_arrow or (!identifier_iteration and try self.classicForHeadAhead())) null else self.tryForTarget(decl_kind) catch |err| switch (err) {
             error.StackExhausted, error.OutOfMemory => return err,
             else => null,
         };

@@ -1524,6 +1524,29 @@ pub fn build(b: *std.Build) void {
     parallel_test_step.dependOn(&parallel_driver_test.step);
     parallel_test_step.dependOn(&parallel_tests.step);
 
+    const iteration_parser = b.createModule(.{
+        .root_source_file = b.path("src/parser.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "regex", .module = regex_mod },
+            .{ .name = "gc", .module = gc_mod },
+        },
+    });
+    const iteration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/parser_iteration_heads.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "parser", .module = iteration_parser }},
+        }),
+    });
+    const run_iteration_tests = b.addRunArtifact(iteration_tests);
+    const iteration_step = b.step("test-parser-iteration-heads", "Parse compact iteration heads with later regexp bodies");
+    iteration_step.dependOn(&run_iteration_tests.step);
+    parallel_test_step.dependOn(&run_iteration_tests.step);
+
     // Small production JIT test root for tight development loops. It uses the
     // same runtime filter as the full root, so distinct filters reuse its linked
     // artifact too. The target, optimization, sanitizer, dependencies, and test

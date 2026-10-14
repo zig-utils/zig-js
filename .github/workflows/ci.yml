@@ -58,6 +58,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: compact parser iteration heads
+            cmd: zig build test-parser-iteration-heads
           - name: unit (shard 0/4)
             cmd: zig build test -Dunit-shard-index=0 -Dunit-shard-count=4
           - name: unit (shard 1/4)
