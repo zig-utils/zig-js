@@ -1,5 +1,20 @@
 # Objective-C JavaScriptCore Bridge
 
+Native Swift/AppKit embedders can import the owned `ZigJS` module. Its umbrella
+header, `include/ZigJS.h`, gives the bridge `ZigJSContext`, `ZigJSValue`,
+`ZigJSVirtualMachine`, and `ZigJSManagedValue` names. This prevents Objective-C
+class collisions when Apple frameworks load system JavaScriptCore transitively.
+Compile the bridge with `-include include/ZigJS.h`, or install with
+`zig build -Downed-objc=true`. Link the owned archive and Foundation without
+linking JavaScriptCore. The public C subset and legacy compatibility headers
+retain their pinned names.
+
+Call `ZJSContextRunMicrotasks(context)` after the outermost evaluation or host
+callback returns, on the context's owning thread. This explicit checkpoint
+delivers Promise and async continuations without reentering a host callback.
+`tests/swift_embedding.swift` covers the owned Swift import, Objective-C block
+callback, Promise checkpoint, and function-call conversion.
+
 zig-js targets the Objective-C JavaScriptCore headers shipped by macOS SDK
 27.0 build 26A5368g. The checked-in
 [`jsc-objc-api-macos-27.0.json`](jsc-objc-api-macos-27.0.json) inventory records

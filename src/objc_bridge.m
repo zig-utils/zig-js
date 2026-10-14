@@ -6,6 +6,16 @@
 
 #include "objc_abi_dispatch.h"
 
+#if defined(ZIG_JS_OWNED_OBJC)
+// The implementation uses the engine's existing checkpoint. Keep the private
+// ABI declaration here rather than exposing it to owned Swift/ObjC embedders.
+extern uint8_t JSC__JSGlobalObject__drainMicrotasks(JSContextRef context);
+void ZJSContextRunMicrotasks(JSContext *context)
+{
+    (void)JSC__JSGlobalObject__drainMicrotasks(context.JSGlobalContextRef);
+}
+#endif
+
 #if defined(ZJS_OBJC_BRIDGE_FAULT_INJECTION)
 static NSInteger ZJSBridgeFailureCountdown = -1;
 

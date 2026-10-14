@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const tsan = b.option(bool, "tsan", "Build tests with ThreadSanitizer") orelse false;
+    const owned_objc = b.option(bool, "owned-objc", "Use ZigJS Objective-C names for native embedders") orelse false;
     const home_tool = b.option([]const u8, "home-tool", "Path to Home's native JS/TS repository-tool runner") orelse
         b.graph.environ_map.get("HOME_TOOL") orelse blk: {
         const home_dir = b.graph.environ_map.get("HOME") orelse break :blk "home-tool";
@@ -364,10 +365,31 @@ pub fn build(b: *std.Build) void {
             "-fobjc-arc", "-fblocks", "-Wno-incomplete-implementation",
         });
         compile_objc_bridge.addPrefixedDirectoryArg("-I", b.path("include"));
+        if (owned_objc) {
+            compile_objc_bridge.addArg("-include");
+            compile_objc_bridge.addFileArg(b.path("include/ZigJS.h"));
+        }
         compile_objc_bridge.addArg("-c");
         compile_objc_bridge.addFileArg(b.path("src/objc_bridge.m"));
         compile_objc_bridge.addArg("-o");
         objc_bridge_object = compile_objc_bridge.addOutputFileArg("objc_bridge.o");
+
+        const swift_step = b.step("test-swift-embedding", "Exercise owned Swift context names, native blocks, and Promise checkpoints");
+        if (owned_objc) {
+            const swift_host = b.addSystemCommand(&.{ "xcrun", "swiftc", "-I" });
+            swift_host.addDirectoryArg(b.path("include"));
+            swift_host.addFileArg(b.path("tests/swift_embedding.swift"));
+            swift_host.addFileArg(objc_bridge_object.?);
+            swift_host.addArtifactArg(dispatch);
+            swift_host.addArtifactArg(lib);
+            swift_host.addArgs(&.{ "-framework", "Foundation", "-o" });
+            const host = swift_host.addOutputFileArg("swift-embedding");
+            const run_host = b.addSystemCommand(&.{"env"});
+            run_host.addFileArg(host);
+            swift_step.dependOn(&run_host.step);
+        } else {
+            swift_step.dependOn(&b.addFail("test-swift-embedding requires -Downed-objc=true").step);
+        }
 
         const merge_library = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/merge-static-library.ts" });
         installed_library = merge_library.addOutputFileArg("libzig-js.a");

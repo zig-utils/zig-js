@@ -31,7 +31,7 @@ differential and benchmark targets, never by the library itself.
 
 ## 2. Prerequisites (get this wrong and nothing builds)
 
-- **Zig `0.17.0-dev`**, at least `0.17.0-dev.956`. Zig 0.16 will not build this
+- **Zig `0.18.0-dev`**, matching `build.zig.zon`. Older Zig will not build this
   tree. On this machine zig is not on the default `PATH`; the pantry shim is at
   `$HOME/.local/share/pantry/global/bin`.
 - **Sibling checkouts** next to this repo — `../zig-regex` and `../zig-gc` (see

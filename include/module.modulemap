@@ -1,0 +1,5 @@
+// Swift hosts import the owned engine without autolinking Apple's framework.
+module ZigJS {
+  header "ZigJS.h"
+  export *
+}
