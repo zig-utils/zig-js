@@ -1,0 +1,49 @@
+name: Mobile I/O policy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [src/io_compat.zig, src/engine_io.zig, src/agent.zig, .github/probes/mobile-io.zig, .github/workflows/mobile-io.yml]
+  pull_request:
+    paths: [src/io_compat.zig, src/engine_io.zig, src/agent.zig, .github/probes/mobile-io.zig, .github/workflows/mobile-io.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        zig: ['0.17.0', '0.18.0-dev.146+35accc06e']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the published managed compiler
+        uses: pantry-pm/pantry/packages/action@edda9c23439a37a35e0f828315e2380889cc75e9 # v0.11.92
+        with:
+          version: '0.11.92'
+          install: 'false'
+          packages: ziglang.org@${{ matrix.zig }}
+      - name: Run the actual backend policy regression
+        run: |
+          set -e
+          zig version
+          zig test src/io_compat.zig -lc
+      - name: Compile the complete backend for Apple device and simulator targets
+        if: runner.os == 'macOS'
+        run: |
+          set -e
+          mkdir -p artifacts/mobile-io
+          for target in aarch64-ios x86_64-ios-simulator aarch64-ios-simulator; do
+            zig build-obj -target "$target" -lc --dep backend -Mroot=.github/probes/mobile-io.zig -target "$target" -Mbackend=src/io_compat.zig -femit-bin="artifacts/mobile-io/$target.o"
+          done
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: mobile-io-${{ matrix.zig }}
+          path: artifacts/mobile-io
+          if-no-files-found: error

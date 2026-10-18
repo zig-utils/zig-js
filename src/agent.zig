@@ -32,11 +32,11 @@ var io_state = std.atomic.Value(u8).init(0); // 0 uninit / 1 initializing / 2 re
 pub fn engineIo() std.Io {
     while (true) {
         switch (io_state.load(.acquire)) {
-            2 => return io_threaded.io(),
+            2 => return io_compat.threadedIo(&io_threaded),
             0 => if (io_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
                 io_threaded = std.Io.Threaded.init(alloc, .{});
                 io_state.store(2, .release);
-                return io_threaded.io();
+                return io_compat.threadedIo(&io_threaded);
             },
             else => std.atomic.spinLoopHint(),
         }
