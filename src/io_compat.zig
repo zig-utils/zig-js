@@ -28,41 +28,6 @@ const Io = std.Io;
 const Condition = std.Io.Condition;
 const Mutex = std.Io.Mutex;
 
-/// Sandboxed Apple hosts cannot replace their process. Construct the backend
-/// with that policy before instantiating desktop process operations; preserve
-/// the standard futex, clock, file and network operations used by the engine.
-pub fn threadedIo(threaded: *std.Io.Threaded) Io {
-    if (comptime switch (@import("builtin").os.tag) {
-        .ios, .tvos, .visionos, .watchos => true,
-        else => false,
-    }) return sandboxedThreadedIo(threaded);
-    return threaded.io();
-}
-
-fn sandboxedThreadedIo(threaded: *std.Io.Threaded) Io {
-    const vtable = comptime blk: {
-        var table = std.Io.Threaded.io(undefined).vtable.*;
-        table.processReplace = processReplaceUnsupported;
-        break :blk table;
-    };
-    return .{ .userdata = threaded, .vtable = &vtable };
-}
-
-fn processReplaceUnsupported(_: ?*anyopaque, _: std.process.ReplaceOptions) std.process.ReplaceError {
-    return error.OperationUnsupported;
-}
-
-test "sandboxed engine Io refuses process replacement and retains blocking primitives" {
-    var threaded: std.Io.Threaded = undefined;
-    const io = sandboxedThreadedIo(&threaded);
-    try std.testing.expectEqual(error.OperationUnsupported, std.process.replace(io, .{ .argv = &.{"/never-executed"} }));
-    try std.testing.expectEqual(@as(?*anyopaque, &threaded), io.userdata);
-    const standard = threaded.io();
-    inline for (.{ "futexWait", "futexWake", "now", "sleep" }) |name| {
-        try std.testing.expectEqual(@field(standard.vtable, name), @field(io.vtable, name));
-    }
-}
-
 /// Error set matching what a real `Condition.waitTimeout` returns and what every
 /// call site already switches on.
 pub const WaitTimeoutError = error{ Timeout, Canceled };
