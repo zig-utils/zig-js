@@ -71,8 +71,8 @@
       "id": "macos-sdk-foundation",
       "class": "standard_platform_interface",
       "status": "allowed",
-      "scope": "macOS Objective-C bridge and opt-in benchmark thermal-state sampling",
-      "locator": "xcrun clang and Foundation.framework",
+      "scope": "macOS Objective-C bridge, Swift embedding fixture and opt-in benchmark thermal-state sampling",
+      "locator": "xcrun clang, xcrun swiftc and Foundation.framework",
       "pin": "selected Xcode SDK",
       "license": "platform supplied",
       "affects_runtime_semantics": false,
@@ -216,10 +216,10 @@
       { "kind": "framework", "name": "JavaScriptCore", "count": 2, "edge": "system-javascriptcore" }
     ],
     "system_commands": [
-      { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },
+      { "name": "xcrun", "count": 5, "edge": "macos-sdk-foundation" },
       { "name": "/usr/bin/env", "count": 42, "edge": "home-tool-runtime" },
       { "name": "/usr/bin/lldb", "count": 1, "edge": "macos-lldb-debugger" },
-      { "name": "env", "count": 2, "edge": "macos-sdk-foundation" },
+      { "name": "env", "count": 3, "edge": "macos-sdk-foundation" },
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
