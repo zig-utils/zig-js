@@ -48,6 +48,65 @@ The convenience helper `js.evalNumber(source)` spins up a throwaway context; it
 is only safe for primitives, because the context — and therefore everything it
 allocated — is destroyed before it returns.
 
+## Retained typed hosting
+
+Single-owner hosts can keep callbacks and typed arrays without generating a
+script for each call:
+
+```zig
+const callback = try ctx.evaluateProtected("(function(bytes) { return ++bytes[0]; })");
+defer _ = ctx.unprotectValue(callback);
+const bytes = try ctx.createHostValue(.{ .typed_array = .{ .kind = .u8, .bytes = &.{0} } });
+defer _ = ctx.unprotectValue(bytes);
+const result = try ctx.callProtected(callback, null, &.{bytes});
+defer _ = ctx.unprotectValue(result);
+var snapshot: [1]u8 = undefined;
+try ctx.copyTypedArrayBytes(bytes, 0, &snapshot);
+```
+
+`createHostValue` accepts undefined, null, booleans, numbers, UTF-8 strings and
+typed-array bytes. It copies string and buffer inputs. Typed-array bytes use
+the host's native element representation; their length must be divisible by
+the element size. `copyTypedArrayBytes` and `writeTypedArrayBytes` check the
+current view and byte bounds, reject detached or shared buffers, and reject
+writes to immutable buffers. They expose no borrowed backing pointer.
+
+`evaluateProtected`, `createHostValue` and `callProtected` return Context-owned
+`ProtectedValue` handles. The handles remain roots through collection and
+compaction. Release them with `unprotectValue`, or let `destroy` release them
+all. A released handle is invalid and must never be used again, even if a later
+allocation reuses its address. Read a handle's `get()` result only until the
+next engine entry or compaction; keep the handle for later reads.
+
+`callProtected` checks that all handles belong to this Context. Its optional
+receiver supplies `this`; null supplies JavaScript undefined. It invokes the
+callable directly and returns a retained completion value. Before invocation,
+calls poll elapsed AbortSignal timeouts and timers, as evaluation does. After
+invocation they perform the maintained host microtask/finalization checkpoint,
+with the completion rooted throughout. Calls do not keep the realm alive just
+because a future timer remains referenced. A returned Promise remains an object;
+this boundary does not run a general event loop until that Promise settles.
+Installed module-host dynamic-import hooks are available to retained callbacks.
+Value creation and buffer copies do not execute this checkpoint.
+JavaScript throws return `error.Throw` and retain the thrown value in
+`ctx.exception`, as evaluation does. Failed calls release their provisional
+completion handle. Set `heap_limit_bytes` to bound the realm's live storage;
+hosts must separately bound their retained handle count and copied output.
+
+This boundary rejects a different native thread with `WrongThread` in every
+build mode and rejects thread-enabled realms with `UnsupportedHostMode`.
+The owner may retain a realm across calls, but it must not enter it concurrently
+or reentrantly. A watchdog may use the existing thread-safe
+`requestTermination`. Join the watchdog before destroying the Context. An
+interrupted call returns `Terminated`; the Context is terminal and must be
+destroyed rather than reused.
+
+`zig build test-hosted-values` exercises this public interface with retained
+callbacks, explicit collection and compaction, typed-array mutation and copy,
+receivers, repeated throws, foreign handles, invalid inputs, thread affinity and
+cooperative interruption. CI runs it in Debug and ReleaseSafe. These fixtures
+are engine evidence, not evidence of a native window or game renderer.
+
 ## Options
 
 ```zig

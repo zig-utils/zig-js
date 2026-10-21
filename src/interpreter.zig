@@ -10298,27 +10298,11 @@ pub const Interpreter = struct {
     /// only when the callee turns out not to be callable, so it costs dispatch
     /// nothing and every tier can name the callee identically.
     pub fn callValueWithThisAtSite(self: *Interpreter, callee_value: Value, args: []const Value, this_val: Value, site: CallSite) EvalError!Value {
-        var callee = callee_value;
+        const callee = callee_value;
         if (!callee.isObject()) return self.throwNotAFunction(callee, site);
-        var obj = callee.asObj();
-        // A Proxy without an `apply` trap calls its target (10.5.12 step 7).
-        // Forward a chain of such links in a loop: each step makes the same
-        // revocation check and trap lookup, in the same order, as recursing
-        // would, but a 100,000-link chain must not cost 100,000 native frames
-        // (#968).
-        while (obj.proxyHandler() != null or obj.proxy_revoked) {
-            const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
-            // A Proxy has a [[Call]] method only if its target is callable; if not,
-            // calling it is a TypeError BEFORE the apply trap runs (10.5.12).
-            if (!obj.behavior.proxy_callable) return self.throwNotAFunction(callee, site);
-            if (try self.proxyTrap(obj, "apply")) |trap| {
-                const arr = try self.newArray();
-                for (args) |a| try arr.asObj().appendElement(self.arena, a);
-                return self.callValueWithThis(trap, &.{ Value.obj(target), this_val, arr }, Value.obj(obj.proxyHandler().?));
-            }
-            obj = target;
-            callee = Value.obj(target);
-        }
+        const obj = callee.asObj();
+        if (obj.proxyHandler() != null or obj.proxy_revoked)
+            return self.callProxyWithThis(callee, args, this_val, site);
         if (obj.boundFunction()) |erased| {
             // Walk the chain instead of recursing per link: [[Call]] on a bound
             // function only prepends its arguments and swaps `this`, none of it
@@ -10356,6 +10340,52 @@ pub const Interpreter = struct {
             return self.callFunction(func, args, this_val);
         }
         return self.throwNotAFunction(callee, site);
+    }
+
+    fn callProxyWithThis(self: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: CallSite) EvalError!Value {
+        const roots = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(roots);
+        const callee_root = try self.pushTempRoot(callee);
+        const receiver_root = try self.pushTempRoot(this_val);
+        const arguments_root = try self.pushTempRootSlice(args);
+        const target_root = try self.pushTempRoot(Value.undef());
+        const handler_root = try self.pushTempRoot(Value.undef());
+        var current = callee;
+        // ECMA-262 10.5.12 captures target and handler before GetMethod. The
+        // apply getter can revoke the wrapper or compact the realm, so every
+        // input must be reloaded from roots after that observable operation.
+        // Keep absent-trap chains iterative, including 100,000-link chains.
+        while (true) {
+            current = self.tempRoot(callee_root, current);
+            const object = current.asObj();
+            if (object.proxyHandler() == null and !object.proxy_revoked) break;
+            const target = object.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
+            const handler = object.proxyHandler() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
+            if (!object.behavior.proxy_callable) return self.throwNotAFunction(current, site);
+            self.setTempRoot(target_root, Value.obj(target));
+            self.setTempRoot(handler_root, Value.obj(handler));
+            if (try self.proxyTrapFromHandler(self.tempRoot(handler_root, Value.obj(handler)), "apply")) |trap| {
+                const trap_root = try self.pushTempRoot(trap);
+                const array = try self.newArray();
+                const array_root = try self.pushTempRoot(array);
+                for (args, 0..) |argument, index| {
+                    try self.tempRoot(array_root, array).asObj().appendElement(self.arena, self.tempRoot(arguments_root + index, argument));
+                }
+                return self.callValueWithThis(
+                    self.tempRoot(trap_root, trap),
+                    &.{ self.tempRoot(target_root, Value.obj(target)), self.tempRoot(receiver_root, this_val), self.tempRoot(array_root, array) },
+                    self.tempRoot(handler_root, Value.obj(handler)),
+                );
+            }
+            current = self.tempRoot(target_root, Value.obj(target));
+            self.setTempRoot(callee_root, current);
+        }
+        // The caller's argument slice may live outside traced engine storage.
+        // Rebuild it from rewritten roots only after all apply getters finish.
+        const forwarded = try self.arena.alloc(Value, args.len);
+        for (args, forwarded, 0..) |argument, *output, index|
+            output.* = self.tempRoot(arguments_root + index, argument);
+        return self.callValueWithThisAtSite(self.tempRoot(callee_root, current), forwarded, self.tempRoot(receiver_root, this_val), site);
     }
 
     /// Invoke the already-selected Zig-native [[Call]] branch. Optimizer call

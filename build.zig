@@ -123,6 +123,19 @@ pub fn build(b: *std.Build) void {
     });
 
     const executable_memory_os = target.result.os.tag;
+    const hosted_values = b.addExecutable(.{
+        .name = "hosted-values-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/hosted_values.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    const run_hosted_values = b.addRunArtifact(hosted_values);
+    const hosted_values_step = b.step("test-hosted-values", "Exercise retained host calls, GC and typed-buffer ownership through the public Zig API");
+    hosted_values_step.dependOn(&run_hosted_values.step);
+
     const executable_memory_arch = target.result.cpu.arch;
     const executable_memory_target =
         (executable_memory_os == .macos and executable_memory_arch == .aarch64) or
@@ -1499,6 +1512,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run zig-js unit tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_hosted_values.step);
 
     // `zig build test` runs the whole suite in one single-threaded process,
     // which on this suite is hours on one core while every other core idles.
@@ -1523,6 +1537,7 @@ pub fn build(b: *std.Build) void {
     const parallel_test_step = b.step("test-parallel", "Run zig-js unit tests as parallel shards");
     parallel_test_step.dependOn(&parallel_driver_test.step);
     parallel_test_step.dependOn(&parallel_tests.step);
+    parallel_test_step.dependOn(&run_hosted_values.step);
 
     const iteration_parser = b.createModule(.{
         .root_source_file = b.path("src/parser.zig"),

@@ -58,6 +58,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: retained Zig hosting (Debug)
+            cmd: zig build test-hosted-values
+          - name: retained Zig hosting (ReleaseSafe)
+            cmd: zig build test-hosted-values -Doptimize=ReleaseSafe
           - name: compact parser iteration heads
             cmd: zig build test-parser-iteration-heads
           - name: unit (shard 0/4)

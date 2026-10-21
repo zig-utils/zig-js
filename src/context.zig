@@ -7900,20 +7900,219 @@ pub const Context = struct {
     /// handle becomes invalid after this returns true.
     pub fn unprotectValue(self: *Context, handle: *ProtectedValue) bool {
         self.assertOwnerThread();
-        const record: *ProtectedValueRecord = @ptrCast(@alignCast(handle));
         self.realmLock();
         var found = false;
+        var owned: ?*ProtectedValueRecord = null;
         for (self.protected_values.items, 0..) |candidate, index| {
-            if (candidate != record) continue;
+            if (@intFromPtr(candidate) != @intFromPtr(handle)) continue;
             _ = self.protected_values.swapRemove(index);
+            owned = candidate;
             found = true;
             break;
         }
         self.realmUnlock();
         if (!found) return false;
+        const record = owned.?;
         std.debug.assert(record.owner == self);
         self.gpa.destroy(record);
         return true;
+    }
+
+    /// Copy-in values for the single-owner persistent Zig hosting boundary.
+    /// Typed-array bytes use the host's native element representation. No
+    /// borrowed host memory is retained, even when JavaScript retains the view.
+    pub const HostValue = union(enum) {
+        undefined,
+        null,
+        boolean: bool,
+        number: f64,
+        string: []const u8,
+        typed_array: struct { kind: value.TAKind, bytes: []const u8 },
+    };
+
+    pub const HostError = RunError || error{
+        WrongThread,
+        UnsupportedHostMode,
+        InvalidHandle,
+        InvalidString,
+        InvalidBuffer,
+        OutOfBounds,
+        Terminated,
+    };
+
+    fn checkHostAccess(self: *Context) HostError!void {
+        // The initial embedding contract has one mutator and copied buffers.
+        // Refuse shared realms instead of pretending a thread-affine copy is
+        // synchronized with JavaScript running on another native thread.
+        if (!self.isOwnerThread()) return error.WrongThread;
+        if (self.gil != null or self.parallel_js) return error.UnsupportedHostMode;
+        if (self.terminationRequested()) return error.Terminated;
+    }
+
+    fn hostRecord(self: *Context, handle: *ProtectedValue) HostError!*ProtectedValueRecord {
+        for (self.protected_values.items) |record| {
+            if (@intFromPtr(record) == @intFromPtr(handle)) return record;
+        }
+        return error.InvalidHandle;
+    }
+
+    /// Load source once and retain the completion value, including a closure.
+    /// Handles belong to this Context and must be released with unprotectValue
+    /// or by destroying the Context. A released handle must never be reused.
+    pub fn evaluateProtected(self: *Context, source: []const u8) HostError!*ProtectedValue {
+        try self.checkHostAccess();
+        self.exception = null;
+        const result = self.protectValue(Value.undef()) catch |err| {
+            self.surfaceEscapedOutOfMemory(err);
+            return err;
+        };
+        errdefer _ = self.unprotectValue(result);
+        const completed = self.evaluate(source) catch |err| {
+            if (self.terminationRequested()) return error.Terminated;
+            return err;
+        };
+        (try self.hostRecord(result)).value = completed;
+        return result;
+    }
+
+    pub fn createHostValue(self: *Context, input: HostValue) HostError!*ProtectedValue {
+        return self.runHostOperation(.{ .create = input });
+    }
+
+    /// Invoke a retained callable without parsing or generating source. The
+    /// function, receiver, arguments and completion are all Context roots.
+    /// Calls are synchronous; a returned Promise remains a retained object.
+    pub fn callProtected(self: *Context, function: *ProtectedValue, receiver: ?*ProtectedValue, arguments: []const *ProtectedValue) HostError!*ProtectedValue {
+        try self.checkHostAccess();
+        _ = try self.hostRecord(function);
+        if (receiver) |handle| _ = try self.hostRecord(handle);
+        for (arguments) |handle| _ = try self.hostRecord(handle);
+        return self.runHostOperation(.{ .call = .{ .function = function, .receiver = receiver, .arguments = arguments } });
+    }
+
+    const HostCall = struct { function: *ProtectedValue, receiver: ?*ProtectedValue, arguments: []const *ProtectedValue };
+    const HostOperation = union(enum) {
+        create: HostValue,
+        call: HostCall,
+    };
+
+    fn runHostOperation(self: *Context, operation: HostOperation) HostError!*ProtectedValue {
+        try self.checkHostAccess();
+        self.exception = null;
+        const output = self.protectValue(Value.undef()) catch |err| {
+            self.surfaceEscapedOutOfMemory(err);
+            return err;
+        };
+        errdefer _ = self.unprotectValue(output);
+        const output_record = try self.hostRecord(output);
+        const gc_saved = gc_mod.setActiveContext(self);
+        defer gc_mod.restoreActiveContext(gc_saved);
+        const sa_saved = strcell.setActiveArena(self.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
+        defer self.finishConcurrentGCAtEvaluationBoundary();
+        self.collectQuiescentGarbage();
+        self.collectRequestedGarbage();
+        var machine = self.interpreter();
+        try self.pushActiveInterpreter(&machine);
+        defer self.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        // interpreter() owns the installed loader hooks. Keep the host script
+        // referrer while calls restore their own defining module as usual.
+        machine.cur_module = self.script_referrer;
+        const completed: HostError!Value = switch (operation) {
+            .create => |input| self.makeHostValue(&machine, input),
+            .call => |call| self.invokeHostValue(&machine, call),
+        };
+        const failed = if (completed) |result| failed: {
+            output_record.value = result;
+            break :failed false;
+        } else |err| failed: {
+            self.surfaceEscapedOutOfMemory(err);
+            if (self.terminationRequested()) return error.Terminated;
+            if (err != error.Throw) return err;
+            output_record.value = machine.exception;
+            self.exception = machine.exception;
+            break :failed true;
+        };
+        // Root the completion before the ordinary host checkpoint, which can
+        // execute jobs and compact the realm. Preserve a primary throw through
+        // secondary checkpoint work exactly as evaluateWithThis does.
+        if (operation == .call) machine.drainHostCheckpoint(false) catch |err| {
+            if (!failed) {
+                if (err == error.Throw) self.exception = machine.exception;
+                self.surfaceEscapedOutOfMemory(err);
+                if (self.terminationRequested()) return error.Terminated;
+                return err;
+            }
+        };
+        self.collectRequestedGarbage();
+        if (self.terminationRequested()) return error.Terminated;
+        if (failed) {
+            self.exception = output_record.value;
+            return error.Throw;
+        }
+        return output;
+    }
+
+    fn invokeHostValue(self: *Context, machine: *interp.Interpreter, call: HostCall) HostError!Value {
+        self.last_evaluation_diagnostic = null;
+        try machine.pollAbortSignalTimeouts();
+        try machine.pollTimers();
+        const arguments = try self.gpa.alloc(Value, call.arguments.len);
+        defer self.gpa.free(arguments);
+        for (call.arguments, arguments) |handle, *argument| argument.* = (try self.hostRecord(handle)).value;
+        const receiver = if (call.receiver) |handle| (try self.hostRecord(handle)).value else Value.undef();
+        return machine.callValueWithThis((try self.hostRecord(call.function)).value, arguments, receiver);
+    }
+
+    fn makeHostValue(self: *Context, machine: *interp.Interpreter, input: HostValue) HostError!Value {
+        return switch (input) {
+            .undefined => Value.undef(),
+            .null => Value.nul(),
+            .boolean => |boolean| Value.boolVal(boolean),
+            .number => |number| Value.num(number),
+            .string => |bytes| string: {
+                if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidString;
+                break :string try Value.strAlloc(self.arena(), bytes);
+            },
+            .typed_array => |input_array| array: {
+                const size = input_array.kind.byteSize();
+                if (input_array.bytes.len % size != 0) return error.InvalidBuffer;
+                const result = try machine.makeTypedArray(input_array.kind, &.{Value.num(@floatFromInt(input_array.bytes.len / size))});
+                const view = result.asObj().typedArray().?;
+                @memcpy(view.buffer.arrayBuffer().?.bytes()[0..input_array.bytes.len], input_array.bytes);
+                break :array result;
+            },
+        };
+    }
+
+    fn hostTypedArrayBytes(self: *Context, handle: *ProtectedValue, writing: bool) HostError![]u8 {
+        try self.checkHostAccess();
+        const payload = (try self.hostRecord(handle)).value;
+        if (!payload.isObject()) return error.InvalidBuffer;
+        const view = payload.asObj().typedArray() orelse return error.InvalidBuffer;
+        const backing = view.buffer.arrayBuffer() orelse return error.InvalidBuffer;
+        if (backing.is_shared or (writing and backing.immutable)) return error.InvalidBuffer;
+        const length = view.currentLength() orelse return error.InvalidBuffer;
+        const byte_length = std.math.mul(usize, length, view.kind.byteSize()) catch return error.InvalidBuffer;
+        const bytes = backing.bytes();
+        if (view.byte_offset > bytes.len or byte_length > bytes.len - view.byte_offset) return error.InvalidBuffer;
+        return bytes[view.byte_offset..][0..byte_length];
+    }
+
+    pub fn copyTypedArrayBytes(self: *Context, handle: *ProtectedValue, byte_offset: usize, destination: []u8) HostError!void {
+        const bytes = try self.hostTypedArrayBytes(handle, false);
+        if (byte_offset > bytes.len or destination.len > bytes.len - byte_offset) return error.OutOfBounds;
+        @memmove(destination, bytes[byte_offset..][0..destination.len]);
+    }
+
+    pub fn writeTypedArrayBytes(self: *Context, handle: *ProtectedValue, byte_offset: usize, source: []const u8) HostError!void {
+        const bytes = try self.hostTypedArrayBytes(handle, true);
+        if (byte_offset > bytes.len or source.len > bytes.len - byte_offset) return error.OutOfBounds;
+        @memmove(bytes[byte_offset..][0..source.len], source);
     }
 
     /// Whether the calling thread is the one that created this context.
