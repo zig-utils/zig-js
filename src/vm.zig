@@ -4750,7 +4750,7 @@ fn nativeNumericDataAccess(frame: *jit.NativeFrame, operation_id: u32) callconv(
 
 fn nativeOperationBytecodeOp(raw: u16) ?bc.Op {
     for (std.enums.values(bc.Op)) |op| {
-        if (raw == @as(u16, @intFromEnum(op))) return op;
+        if (raw == @as(u16, @backingInt(op))) return op;
     }
     return null;
 }
@@ -8647,7 +8647,14 @@ fn runChunk(
                 ip = inst.a;
                 if (is_backedge) {
                     const osr_result = try tryRunLoopOsrAtBackedge(
-                        vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                        vm,
+                        exec,
+                        chunk,
+                        frame,
+                        gen,
+                        inst.a,
+                        instruction,
+                        acc,
                     );
                     acc = exec.acc;
                     ip = exec.ip;
@@ -8671,7 +8678,14 @@ fn runChunk(
                     ip = inst.a;
                     if (is_backedge) {
                         const osr_result = try tryRunLoopOsrAtBackedge(
-                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                            vm,
+                            exec,
+                            chunk,
+                            frame,
+                            gen,
+                            inst.a,
+                            instruction,
+                            acc,
                         );
                         acc = exec.acc;
                         ip = exec.ip;
@@ -8692,7 +8706,14 @@ fn runChunk(
                     ip = inst.a;
                     if (is_backedge) {
                         const osr_result = try tryRunLoopOsrAtBackedge(
-                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                            vm,
+                            exec,
+                            chunk,
+                            frame,
+                            gen,
+                            inst.a,
+                            instruction,
+                            acc,
                         );
                         acc = exec.acc;
                         ip = exec.ip;
@@ -8713,7 +8734,14 @@ fn runChunk(
                     ip = inst.a;
                     if (is_backedge) {
                         const osr_result = try tryRunLoopOsrAtBackedge(
-                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                            vm,
+                            exec,
+                            chunk,
+                            frame,
+                            gen,
+                            inst.a,
+                            instruction,
+                            acc,
                         );
                         acc = exec.acc;
                         ip = exec.ip;
@@ -8735,7 +8763,14 @@ fn runChunk(
                     ip = inst.a;
                     if (is_backedge) {
                         const osr_result = try tryRunLoopOsrAtBackedge(
-                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                            vm,
+                            exec,
+                            chunk,
+                            frame,
+                            gen,
+                            inst.a,
+                            instruction,
+                            acc,
                         );
                         acc = exec.acc;
                         ip = exec.ip;
@@ -8757,7 +8792,14 @@ fn runChunk(
                     ip = inst.a;
                     if (is_backedge) {
                         const osr_result = try tryRunLoopOsrAtBackedge(
-                            vm, exec, chunk, frame, gen, inst.a, instruction, acc,
+                            vm,
+                            exec,
+                            chunk,
+                            frame,
+                            gen,
+                            inst.a,
+                            instruction,
+                            acc,
                         );
                         acc = exec.acc;
                         ip = exec.ip;
@@ -10929,7 +10971,7 @@ fn scheduleAsyncDisposeContinuation(vm: *Interpreter, state: *AsyncDisposeComple
 fn pushAsyncDisposeRoots(vm: *Interpreter, state: *const AsyncDisposeCompletion) EvalError!usize {
     if (vm.gc == null) return 0;
     const mark = vm.gc_temp_roots.items.len;
-    try vm.gc_temp_roots.ensureUnusedCapacity(vm.arena, state.disposables.len * 2);
+    try vm.gc_temp_roots.ensureUnusedCapacity(vm.gcRootAllocator(), state.disposables.len * 2);
     for (state.disposables) |disposable| {
         vm.gc_temp_roots.appendAssumeCapacity(disposable.value);
         vm.gc_temp_roots.appendAssumeCapacity(disposable.method);

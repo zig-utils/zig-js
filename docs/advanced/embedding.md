@@ -54,6 +54,11 @@ Single-owner hosts can keep callbacks and typed arrays without generating a
 script for each call:
 
 ```zig
+const ctx = try js.Context.createWith(allocator, .{
+    .enable_gc = true,
+    .heap_limit_bytes = 64 * 1024 * 1024,
+});
+defer ctx.destroy();
 const callback = try ctx.evaluateProtected("(function(bytes) { return ++bytes[0]; })");
 defer _ = ctx.unprotectValue(callback);
 const bytes = try ctx.createHostValue(.{ .typed_array = .{ .kind = .u8, .bytes = &.{0} } });
@@ -92,6 +97,11 @@ JavaScript throws return `error.Throw` and retain the thrown value in
 `ctx.exception`, as evaluation does. Failed calls release their provisional
 completion handle. Set `heap_limit_bytes` to bound the realm's live storage;
 hosts must separately bound their retained handle count and copied output.
+Host invocations own their temporary interpreter root vectors in the accounted,
+freeable backing allocator. Deregistration releases those vectors, while retained
+values stay under the realm's collector. Use a GC-enabled realm for repeated
+calls that allocate managed values. Standalone low-level interpreters keep their
+existing arena or borrowed-root lifetime unless they opt into owned root storage.
 
 This boundary rejects a different native thread with `WrongThread` in every
 build mode and rejects thread-enabled realms with `UnsupportedHostMode`.
@@ -104,7 +114,9 @@ destroyed rather than reused.
 `zig build test-hosted-values` exercises this public interface with retained
 callbacks, explicit collection and compaction, typed-array mutation and copy,
 receivers, repeated throws, foreign handles, invalid inputs, thread affinity and
-cooperative interruption. CI runs it in Debug and ReleaseSafe. These fixtures
+cooperative interruption. It also checks a retained-memory plateau across repeated
+public and JavaScript frame calls, and resumption of a suspended generator after
+actual relocation. CI runs it in Debug and ReleaseSafe. These fixtures
 are engine evidence, not evidence of a native window or game renderer.
 
 ## Options

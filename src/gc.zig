@@ -5310,7 +5310,7 @@ fn takeManagedStringCell(heap: *Heap, realm: *ContextMod.Context) std.mem.Alloca
             machine.gc_managed_string_warmup += 1;
             return heap.create(StringCell, .string);
         }
-        try machine.gc_string_reserve.ensureUnusedCapacity(machine.arena, reserve_batch);
+        try machine.gc_string_reserve.ensureUnusedCapacity(machine.gcRootAllocator(), reserve_batch);
         var fresh: [reserve_batch]*StringCell = undefined;
         const count = try heap.createBatch(StringCell, .string, &fresh);
         std.debug.assert(count != 0);

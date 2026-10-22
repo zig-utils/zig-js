@@ -4305,12 +4305,16 @@ pub const Interpreter = struct {
     /// contended under a parallel mid-script collection; uncontended (a single
     /// predicted `tryLock`) otherwise. See `gc.traceInterpreterRoots` callers.
     gc_root_lock: std.atomic.Mutex = .unlocked,
+    /// Optional ownership for invocation-local root vectors. Set before any
+    /// roots are allocated and call deinit when the invocation unregisters.
+    /// Standalone interpreters retain their arena/borrowed-storage lifetime.
+    gc_root_allocator: ?std.mem.Allocator = null,
     /// Active VM `Exec` frames on this interpreter, innermost last. The VM
     /// operand stack is arena-backed (not a GC cell), so its live `Value`s are
     /// invisible to both the precise tracer and a conservative native-stack
     /// scan; registering each running `Exec` lets `gc.zig` trace them precisely
     /// during a mid-script collection. Populated only when the GC is on; the
-    /// list itself is gpa-backed and freed on interpreter teardown.
+    /// vector uses gcRootAllocator and follows that storage's lifetime.
     gc_execs: std.ArrayListUnmanaged(*vm.Exec) = .empty,
     /// Scoped descriptor for the currently executing JIT invocation. Precise
     /// collectors consult it only at a published native safepoint; the map is
@@ -7647,7 +7651,7 @@ pub const Interpreter = struct {
             if (le.disposables.items.len == 0) {
                 loop_env = null;
             } else {
-                try self.gc_env_roots.append(self.arena, le);
+                try self.gc_env_roots.append(self.gcRootAllocator(), le);
                 loop_env_rooted = true;
             }
         }
@@ -7750,7 +7754,7 @@ pub const Interpreter = struct {
         if (allow_reuse and !state.disabled) {
             state.reuse = e;
             state.reuse_root = self.gc_env_roots.items.len;
-            try self.gc_env_roots.append(self.arena, e); // root across iterations (shrunk at loop exit)
+            try self.gc_env_roots.append(self.gcRootAllocator(), e); // root across iterations (shrunk at loop exit)
         }
         return e;
     }
@@ -8758,7 +8762,7 @@ pub const Interpreter = struct {
         // raw Function pointer across those allocations.
         const count = frame.lazy_args.len;
         const roots = self.gc_temp_roots.items.len;
-        try self.gc_temp_roots.ensureUnusedCapacity(self.arena, count + 1);
+        try self.gc_temp_roots.ensureUnusedCapacity(self.gcRootAllocator(), count + 1);
         defer self.gc_temp_roots.shrinkRetainingCapacity(roots);
         const func = frame.lazy_func.?;
         var simple = true;
@@ -11940,7 +11944,7 @@ pub const Interpreter = struct {
                 self.gc_unpublished_object_warmup += 1;
                 return gc_mod.allocObject(self.gc, self.arena);
             }
-            try self.gc_object_reserve.ensureUnusedCapacity(self.arena, reserve_batch);
+            try self.gc_object_reserve.ensureUnusedCapacity(self.gcRootAllocator(), reserve_batch);
             var fresh: [reserve_batch]*value.Object = undefined;
             const count = try gc_mod.allocObjectBatch(self.gc, self.arena, &fresh);
             std.debug.assert(count != 0);
@@ -12449,7 +12453,7 @@ pub const Interpreter = struct {
     /// state that is not already reachable through an existing root.
     pub fn reserveExecRoot(self: *Interpreter) EvalError!void {
         if (self.gc == null) return;
-        try self.gc_execs.ensureUnusedCapacity(self.arena, 1);
+        try self.gc_execs.ensureUnusedCapacity(self.gcRootAllocator(), 1);
     }
 
     /// Publish a prepared VM `Exec` without allocating. `reserveExecRoot` must
@@ -12479,9 +12483,13 @@ pub const Interpreter = struct {
         }
     }
 
+    pub fn gcRootAllocator(self: *const Interpreter) std.mem.Allocator {
+        return self.gc_root_allocator orelse self.arena;
+    }
+
     pub fn pushWasmRoots(self: *Interpreter, roots: *value.WasmExecutionRoots) error{OutOfMemory}!void {
         if (self.gc == null) return;
-        try self.gc_wasm_roots.append(self.arena, roots);
+        try self.gc_wasm_roots.append(self.gcRootAllocator(), roots);
     }
 
     pub fn popWasmRoots(self: *Interpreter, roots: *value.WasmExecutionRoots) void {
@@ -12499,14 +12507,14 @@ pub const Interpreter = struct {
     pub fn pushTempRoot(self: *Interpreter, v: Value) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_temp_roots.items.len;
-        try self.gc_temp_roots.append(self.arena, v);
+        try self.gc_temp_roots.append(self.gcRootAllocator(), v);
         return mark;
     }
 
     pub fn pushTempRootSlice(self: *Interpreter, values: []const Value) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_temp_roots.items.len;
-        try self.gc_temp_roots.appendSlice(self.arena, values);
+        try self.gc_temp_roots.appendSlice(self.gcRootAllocator(), values);
         return mark;
     }
 
@@ -12529,7 +12537,7 @@ pub const Interpreter = struct {
     pub fn pushTempEnvRoot(self: *Interpreter, environment: *Environment) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_env_roots.items.len;
-        try self.gc_env_roots.append(self.arena, environment);
+        try self.gc_env_roots.append(self.gcRootAllocator(), environment);
         return mark;
     }
 
@@ -12552,7 +12560,7 @@ pub const Interpreter = struct {
     pub fn pushTempBindingReferenceRoot(self: *Interpreter, reference: BindingReference) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_binding_reference_roots.items.len;
-        try self.gc_binding_reference_roots.append(self.arena, reference);
+        try self.gc_binding_reference_roots.append(self.gcRootAllocator(), reference);
         return mark;
     }
 
@@ -12602,7 +12610,7 @@ pub const Interpreter = struct {
     pub fn pushTempPromiseRoot(self: *Interpreter, p: *promise.Promise) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_temp_promise_roots.items.len;
-        try self.gc_temp_promise_roots.append(self.arena, p);
+        try self.gc_temp_promise_roots.append(self.gcRootAllocator(), p);
         return mark;
     }
 
@@ -13539,6 +13547,13 @@ pub const Interpreter = struct {
     }
 
     pub fn deinit(self: *Interpreter) void {
+        if (self.gc_root_allocator) |allocator| {
+            inline for (.{ "gc_execs", "gc_wasm_roots", "gc_temp_roots", "gc_binding_reference_roots", "gc_temp_promise_roots", "gc_object_reserve", "gc_string_reserve", "gc_env_roots" }) |field| {
+                const roots = &@field(self, field);
+                roots.deinit(allocator);
+                roots.* = .empty;
+            }
+        }
         if (self.array_join_active) |active| {
             active.deinit();
             self.array_join_active = null;
@@ -22296,7 +22311,7 @@ pub const Interpreter = struct {
         const reserved_catch_env_root_mark = self.gc_env_roots.items.len;
         defer self.gc_env_roots.shrinkRetainingCapacity(reserved_catch_env_root_mark);
         if (!self.out_of_memory_exception.isUndefined()) if (t.catch_param) |p| {
-            try self.gc_env_roots.ensureUnusedCapacity(self.arena, 1);
+            try self.gc_env_roots.ensureUnusedCapacity(self.gcRootAllocator(), 1);
             const catch_env = try gc_mod.allocEnv(self.arena);
             self.gc_env_roots.appendAssumeCapacity(catch_env);
             self.initEnvironment(catch_env, self.env, false);

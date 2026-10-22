@@ -8015,6 +8015,8 @@ pub const Context = struct {
         self.collectQuiescentGarbage();
         self.collectRequestedGarbage();
         var machine = self.interpreter();
+        // Each host invocation owns its temporary roots until deregistration.
+        machine.gc_root_allocator = self.gpa;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
         const ai_saved = gc_mod.setActiveInterpreter(&machine);

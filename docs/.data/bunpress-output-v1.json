@@ -20,8 +20,8 @@
     },
     {
       "path": "advanced/embedding/index.html",
-      "bytes": 229487,
-      "sha256": "4bce9652e970cfbbba59ac2229ab4922c2dd61e4eab6bb6c963f3296b4018522"
+      "bytes": 230318,
+      "sha256": "7861ef78c91229ac8c5105e19fccb23a3851acebf87bdf2af1ddbeea1b712418"
     },
     {
       "path": "advanced/execution-tiers/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "3f58eee3bd67858e5713a27b7c579db35f19a2cb9c44e35374fc8c7a83459ae7"
+  "tree_sha256": "77804b1c35c6d6ffe25c8efc0d345a4ebc79e950c8e66bd612eace35707fc3c0"
 }

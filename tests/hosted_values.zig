@@ -1,11 +1,69 @@
 const std = @import("std");
 const js = @import("js");
 
+fn checkRepeatedJavaScriptCalls(allocator: std.mem.Allocator) !void {
+    const context = try js.Context.createWith(allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+    });
+    defer context.destroy();
+    const callback = try context.evaluateProtected("(function(frame) { let next = frame + 1; return next; })");
+    defer _ = context.unprotectValue(callback);
+    const input = try context.createHostValue(.{ .number = 7 });
+    defer _ = context.unprotectValue(input);
+    var memory_before: usize = 0;
+    // Warm the collector's bounded cell reserves with the same workload, then
+    // require the next batch to stay at or below that retained-memory plateau.
+    for (0..2) |phase| {
+        for (0..1024) |_| {
+            const result = try context.callProtected(callback, null, &.{input});
+            try std.testing.expectEqual(@as(f64, 8), result.get().asNum());
+            try std.testing.expect(context.unprotectValue(result));
+        }
+        context.collectGarbage();
+        const memory_after = context.heapBudgetStats().?.used_bytes;
+        if (phase == 0) {
+            memory_before = memory_after;
+        } else {
+            std.debug.print("hosted values: repeated JavaScript frames retained {d} bytes before and {d} after\n", .{ memory_before, memory_after });
+            try std.testing.expect(memory_after <= memory_before);
+        }
+    }
+    _ = try context.evaluate("var generatorHoles = []; for (let i = 0; i < 512; i++) generatorHoles.push({ marker: i });");
+    const factory = try context.evaluateProtected("(function*(step) { let value = step; yield value; value += step; yield value; return value + step; })");
+    defer _ = context.unprotectValue(factory);
+    const iterator = try context.callProtected(factory, null, &.{input});
+    defer _ = context.unprotectValue(iterator);
+    const next = try context.evaluateProtected("Object.getPrototypeOf((function*(){})()).next");
+    defer _ = context.unprotectValue(next);
+    for ([_]f64{ 7, 14, 21 }, 0..) |expected, index| {
+        if (index == 1) {
+            // Release earlier cells while this generator is suspended. A dense
+            // heap can legitimately have no candidates; these holes provide a
+            // real relocation witness before resuming the retained frame.
+            _ = try context.evaluate("generatorHoles = null");
+            context.collectGarbage();
+            const address_before = @intFromPtr(iterator.get().asObj());
+            const compaction = context.compactGarbage();
+            try std.testing.expectEqual(js.Context.GcHeap.CompactionStatus.compacted, compaction.status);
+            try std.testing.expect(compaction.moved_cells > 0);
+            try std.testing.expect(address_before != @intFromPtr(iterator.get().asObj()));
+            std.debug.print("hosted values: the retained suspended generator moved before resumption\n", .{});
+        }
+        const result = try context.callProtected(next, iterator, &.{});
+        try std.testing.expectEqual(expected, result.get().asObj().getOwn("value").?.asNum());
+        try std.testing.expectEqual(index == 2, result.get().asObj().getOwn("done").?.asBool());
+        try std.testing.expect(context.unprotectValue(result));
+    }
+}
+
 pub fn main() !void {
     var heap: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(heap.deinit() == .ok);
     var threaded = std.Io.Threaded.init(heap.allocator(), .{});
     defer threaded.deinit();
+    try checkRepeatedJavaScriptCalls(heap.allocator());
     const context = try js.Context.createWith(heap.allocator(), .{
         .enable_gc = true,
         .enable_jit = true,
@@ -30,6 +88,24 @@ pub fn main() !void {
             try std.testing.expect(compaction.status != .unsupported);
         }
     }
+    // A retained native frame callback must release invocation bookkeeping,
+    // including its temporary roots, when the public call returns.
+    const steady_callback = try context.evaluateProtected("new Proxy(Math.max, {})");
+    defer _ = context.unprotectValue(steady_callback);
+    const steady_arguments: [64]@TypeOf(step) = @splat(step);
+    const warm_result = try context.callProtected(steady_callback, null, &steady_arguments);
+    try std.testing.expect(context.unprotectValue(warm_result));
+    context.collectGarbage();
+    const memory_before = context.heapBudgetStats().?.used_bytes;
+    for (0..1024) |_| {
+        const result = try context.callProtected(steady_callback, null, &steady_arguments);
+        try std.testing.expectEqual(@as(f64, 2), result.get().asNum());
+        try std.testing.expect(context.unprotectValue(result));
+    }
+    context.collectGarbage();
+    const memory_after = context.heapBudgetStats().?.used_bytes;
+    std.debug.print("hosted values: repeated public calls retained {d} bytes before and {d} after\n", .{ memory_before, memory_after });
+    try std.testing.expect(memory_after <= memory_before);
     var bytes: [3]u8 = undefined;
     try context.copyTypedArrayBytes(buffer, 0, &bytes);
     try std.testing.expectEqualSlices(u8, &.{ 201, 2, 3 }, &bytes);
