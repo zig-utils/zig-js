@@ -119,6 +119,14 @@ ArrayBuffer operation begins after peers have handed off their runnable slots.
 GIL-mode execution continues to yield through the GIL scheduler so it never
 retains the GIL while waiting to reacquire a runtime slot.
 
+A peer that reaches a realm-wide mutator stop also releases its runnable slot
+while waiting for the stop owner. It publishes its stopped generation before
+releasing the slot and reacquires capacity before resuming. A stopped peer
+therefore cannot prevent another interpreter from reaching the same boundary
+when the runnable budget is smaller than the thread group. The unshared Wasm
+memory regression exercises automatic sizing and one-, two- and three-slot
+budgets, with growth owned by either the host or a script thread.
+
 The coordinator reserves a slot, publishes the selected resource as runnable,
 and removes its waiter in one coherent mutation before signaling it. A thread
 woken from an engine condition never queues for that slot while holding its

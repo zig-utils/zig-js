@@ -8498,6 +8498,10 @@ pub const Context = struct {
         stack_scan.beginPark();
         defer stack_scan.endPark();
         machine.mutator_stop_published_gen.store(request, .release);
+        // A stopped peer must not occupy a runnable slot while another peer
+        // still needs one to reach the same operation boundary.
+        var blocking = runtime_threads.beginBlocking();
+        defer blocking.end();
         var spins: usize = 0;
         while (self.mutator_stop_request.load(.acquire) == request) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();

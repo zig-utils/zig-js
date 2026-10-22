@@ -4638,15 +4638,27 @@ test "wasm api shared Memory publishes grow buffers under no-GIL contention" {
 }
 
 test "wasm api unshared Memory relocation stops no-GIL readers at operation boundaries" {
+    // Keep every reader and growth operation under automatic policy and under
+    // budgets smaller than the reader group. Growth can belong to the host or
+    // to a script worker that itself owns one of the bounded runnable slots.
+    for ([_]?u64{ null, 1, 2, 3 }) |budget| {
+        try testUnsharedMemoryRelocation(budget, false);
+        try testUnsharedMemoryRelocation(budget, true);
+    }
+}
+
+fn testUnsharedMemoryRelocation(budget: ?u64, comptime grow_in_worker: bool) !void {
+    const previous = runtime_threads.setSchedulerLimits(.{ .max_runnable_threads = budget });
+    defer _ = runtime_threads.setSchedulerLimits(previous);
     const store = try context.Context.createWith(std.testing.allocator, .{
         .enable_threads = true,
     });
     defer store.destroy();
-    const result = try store.evaluate(
+    const setup =
         \\if ($vm.useThreadGIL() !== false) throw new Error('expected no-GIL execution');
         \\const memory = new WebAssembly.Memory({ initial: 1 });
         \\const sentinel = 0x5a5a5a5a;
-        \\const gate = { ready: 0, go: 0, done: 0 };
+        \\const gate = { ready: 0, go: 0, observed: 0, done: 0 };
         \\function stampedView() {
         \\  const view = new Int32Array(memory.buffer);
         \\  view.fill(sentinel);
@@ -4671,6 +4683,10 @@ test "wasm api unshared Memory relocation stops no-GIL readers at operation boun
         \\    // cannot detach the getter result before the constructor consumes it.
         \\    new Int32Array(memory.buffer);
         \\    observations++;
+        \\    if (observations === 1) {
+        \\      Atomics.add(gate, 'observed', 1);
+        \\      Atomics.notify(gate, 'observed');
+        \\    }
         \\  }
         \\  return observations;
         \\}));
@@ -4678,16 +4694,26 @@ test "wasm api unshared Memory relocation stops no-GIL readers at operation boun
         \\  Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 100);
         \\Atomics.store(gate, 'go', 1);
         \\Atomics.notify(gate, 'go', readers.length);
-        \\for (let page = 1; page <= 12; page++) {
-        \\  if (memory.grow(1) !== page) throw new Error('bad previous page count');
-        \\  current = stampedView();
+        \\while (Atomics.load(gate, 'observed') !== readers.length)
+        \\  Atomics.wait(gate, 'observed', Atomics.load(gate, 'observed'), 100);
+        \\function growMemory() {
+        \\  for (let page = 1; page <= 12; page++) {
+        \\    if (memory.grow(1) !== page) throw new Error('bad previous page count');
+        \\    current = stampedView();
+        \\  }
         \\}
+    ;
+    const grow = if (grow_in_worker)
+        setup ++ "\nconst grower = new Thread(growMemory); grower.join();\n"
+    else
+        setup ++ "\ngrowMemory();\n";
+    const result = try store.evaluate(grow ++
         \\Atomics.store(gate, 'done', 1);
         \\Atomics.notify(gate, 'done', readers.length);
         \\const joined = readers.map(reader => reader.join());
         \\if (memory.buffer.byteLength !== 13 * 65536) -9999;
         \\else joined.reduce((code, value, lane) =>
-        \\  code + (value < 0 ? (lane + 1) * 100 - value : 0), 0);
+        \\  code + (typeof value === 'number' && Number.isInteger(value) && value > 0 ? 0 : (lane + 1) * 100), 0);
     );
     try std.testing.expectEqual(@as(f64, 0), result.asNum());
 }
