@@ -1538,6 +1538,12 @@ test "runtime thread telemetry is coherent across concurrent starts and exits" {
 
 test "runtime blocking scopes account nested and concurrent transitions once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
+    // All workers must be runnable together while the fixture samples them.
+    // Automatic policy reserves a host slot, so a low-core runner can otherwise
+    // park a worker behind the finish gate that waits for every worker to resume.
+    const worker_count = 4;
+    const previous = setSchedulerLimits(.{ .max_runnable_threads = worker_count });
+    defer _ = setSchedulerLimits(previous);
     try std.testing.expectEqual(@as(u32, 9), snapshot().schema_version);
     const before = snapshot().resource(.script_worker);
     var blocked = std.atomic.Value(u64).init(0);
@@ -1556,7 +1562,7 @@ test "runtime blocking scopes account nested and concurrent transitions once" {
             while (!finish_gate.load(.acquire)) std.atomic.spinLoopHint();
         }
     };
-    var threads: [4]std.Thread = undefined;
+    var threads: [worker_count]std.Thread = undefined;
     for (&threads) |*thread| thread.* = try spawn(.script_worker, .{}, Worker.run, .{ &blocked, &release, &resumed, &finish });
     while (blocked.load(.acquire) != threads.len) std.atomic.spinLoopHint();
     const parked = snapshot().resource(.script_worker);
