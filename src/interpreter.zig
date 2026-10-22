@@ -10382,7 +10382,9 @@ pub const Interpreter = struct {
         }
         // The caller's argument slice may live outside traced engine storage.
         // Rebuild it from rewritten roots only after all apply getters finish.
-        const forwarded = try self.arena.alloc(Value, args.len);
+        const scratch = self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena);
+        const forwarded = try scratch.alloc(Value, args.len);
+        defer scratch.free(forwarded);
         for (args, forwarded, 0..) |argument, *output, index|
             output.* = self.tempRoot(arguments_root + index, argument);
         return self.callValueWithThisAtSite(self.tempRoot(callee_root, current), forwarded, self.tempRoot(receiver_root, this_val), site);
@@ -64305,6 +64307,30 @@ test "Function arguments are fresh detached snapshots across activation modes" {
         try std.testing.expect(before != ctx.global_object.getOwn("snapshotMarker").?.asObj());
         try std.testing.expect((try ctx.evaluate("savedSnapshots[0][0]===snapshotMarker && savedSnapshots[0][0].value===41 && savedSnapshots[1][0].value===42 && savedSnapshots[0].callee===snapshotMoving && Object.getOwnPropertyDescriptor(savedSnapshots[0],'callee').enumerable;")).asBool());
     }
+}
+
+test "Proxy forwarding releases invocation-local argument storage" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const callable = try ctx.evaluate("new Proxy(Math.max, {})");
+    const saved_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_context);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    const arguments: [64]Value = @splat(Value.num(17));
+    // Warm the root table and native-call path once. The forwarding copy is
+    // needed only until this invocation returns, including abrupt completion.
+    try std.testing.expectEqual(@as(f64, 17), (try machine.callValueWithThis(callable, &arguments, Value.undef())).asNum());
+    const capacity = ctx.arena_state.queryCapacity();
+    for (0..1024) |_| {
+        try std.testing.expectEqual(@as(f64, 17), (try machine.callValueWithThis(callable, &arguments, Value.undef())).asNum());
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+    }
+    try std.testing.expectEqual(capacity, ctx.arena_state.queryCapacity());
 }
 
 test "Function arguments snapshot allocation failures restore roots and realms" {
