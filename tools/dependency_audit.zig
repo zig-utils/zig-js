@@ -14,6 +14,7 @@ const DependencyClass = enum {
     zig_toolchain,
     standard_platform_interface,
     owner_maintained_local,
+    owner_maintained_pinned_source,
     owner_maintained_pinned_tooling,
     checksum_pinned_oracle,
     generated_data_acquisition_input,
@@ -40,6 +41,7 @@ const NamedCount = struct { name: []const u8, count: usize, edge: []const u8 };
 const ExtensionCount = struct { extension: []const u8, count: usize, edge: []const u8 };
 const PathEdge = struct { path: []const u8, edge: []const u8 };
 const OwnedSibling = struct { repository: []const u8, path: []const u8, revision: []const u8, occurrences: usize, edge: []const u8 };
+const OwnedZigPackage = struct { name: []const u8, repository: []const u8, revision: []const u8, hash: []const u8, edge: []const u8 };
 const ProductionImport = struct { name: []const u8, external: bool, edge: ?[]const u8 = null };
 const Submodule = struct { path: []const u8, url: []const u8, gitlink: []const u8, edge: []const u8 };
 const PackageDependency = struct {
@@ -58,7 +60,7 @@ const PinnedDownload = struct { url: []const u8, sha256: []const u8, occurrences
 const PinnedCorpus = struct { url: []const u8, revision: []const u8, edge: []const u8 };
 
 const Boundaries = struct {
-    production_zig_paths: []const []const u8,
+    production_zig_packages: []const OwnedZigPackage,
     owned_sibling_checkouts: []const OwnedSibling,
     production_imports: []const ProductionImport,
     build_links: []const BuildLink,
@@ -243,6 +245,7 @@ fn auditInventory(inventory: Inventory) !void {
     }
 
     for (inventory.boundaries.build_links) |item| try requireEdge(inventory, item.edge);
+    for (inventory.boundaries.production_zig_packages) |item| try requireEdge(inventory, item.edge);
     for (inventory.boundaries.owned_sibling_checkouts) |item| try requireEdge(inventory, item.edge);
     for (inventory.boundaries.production_imports) |item| {
         if (item.external and item.edge == null) return fail("external import '{s}' has no edge", .{item.name});
@@ -260,18 +263,38 @@ fn auditInventory(inventory: Inventory) !void {
     for (inventory.boundaries.pinned_ci_corpora) |item| try requireEdge(inventory, item.edge);
 }
 
+fn auditZonSource(gpa: std.mem.Allocator, source: []const u8, packages: []const OwnedZigPackage) !void {
+    // Dependencies must work after Zig extracts the public package into its own
+    // cache. A sibling path is outside that package, even when CI checks it out.
+    if (count(source, ".path =") != 0)
+        return fail("build.zig.zon cannot require a sibling checkout", .{});
+    if (count(source, ".url =") != packages.len or count(source, ".hash =") != packages.len)
+        return fail("build.zig.zon pinned package count drifted", .{});
+    for (packages, 0..) |package, index| {
+        if (package.revision.len != 40) return fail("package {s} requires an immutable revision", .{package.name});
+        for (package.revision) |byte| {
+            if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte))
+                return fail("package {s} requires a lowercase Git object id", .{package.name});
+        }
+        for (packages[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, package.name)) return fail("duplicate package {s}", .{package.name});
+        }
+        const fragment = try std.fmt.allocPrint(gpa,
+            \\.{s} = .{{
+            \\            .url = "https://codeload.github.com/{s}/tar.gz/{s}",
+            \\            .hash = "{s}",
+            \\        }},
+        , .{ package.name, package.repository, package.revision, package.hash });
+        defer gpa.free(fragment);
+        if (count(source, fragment) != 1)
+            return fail("package {s} does not match its exact owned source and native Zig hash", .{package.name});
+    }
+}
+
 fn auditZon(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {
     const source = try read(gpa, io, "build.zig.zon");
     defer gpa.free(source);
-    if (count(source, ".path = \"") != inventory.boundaries.production_zig_paths.len)
-        return fail("build.zig.zon local path count drifted", .{});
-    for (inventory.boundaries.production_zig_paths) |path| {
-        const fragment = try std.fmt.allocPrint(gpa, ".path = \"{s}\"", .{path});
-        defer gpa.free(fragment);
-        if (count(source, fragment) != 1) return fail("build.zig.zon must contain exactly one '{s}'", .{fragment});
-    }
-    if (count(source, ".url =") != 0 or count(source, ".hash =") != 0)
-        return fail("build.zig.zon may resolve only owned local-path dependencies", .{});
+    try auditZonSource(gpa, source, inventory.boundaries.production_zig_packages);
 }
 
 fn auditBuild(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {
@@ -855,4 +878,47 @@ pub fn main(init: std.process.Init) !void {
         count(inventory_source, "\"status\": \"migration_required\""),
         tool_inventory.tools.len,
     });
+}
+
+const portable_test_packages = [_]OwnedZigPackage{
+    .{ .name = "zig_regex", .repository = "zig-utils/zig-regex", .revision = "fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b", .hash = "zig_regex-0.2.1-omky0RWyGgAzNOkfsXmYm-kBSWG2aoELeC0IwiirA1cz", .edge = "zig-regex" },
+    .{ .name = "zig_gc", .repository = "zig-utils/zig-gc", .revision = "0285ef801dd221a4ae8e88b31a09ae31627657a3", .hash = "zig_gc-0.0.1-e4SVf1VWBACVfMi8WmQxxa8zgVU5Pis99RbHW7ChxIvD", .edge = "zig-gc" },
+};
+const portable_test_source =
+    \\.zig_regex = .{
+    \\            .url = "https://codeload.github.com/zig-utils/zig-regex/tar.gz/fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b",
+    \\            .hash = "zig_regex-0.2.1-omky0RWyGgAzNOkfsXmYm-kBSWG2aoELeC0IwiirA1cz",
+    \\        },
+    \\.zig_gc = .{
+    \\            .url = "https://codeload.github.com/zig-utils/zig-gc/tar.gz/0285ef801dd221a4ae8e88b31a09ae31627657a3",
+    \\            .hash = "zig_gc-0.0.1-e4SVf1VWBACVfMi8WmQxxa8zgVU5Pis99RbHW7ChxIvD",
+    \\        },
+;
+
+test "portable dependencies match owned immutable sources and compiler hashes" {
+    try auditZonSource(std.testing.allocator, portable_test_source, &portable_test_packages);
+}
+
+test "portable dependencies reject sibling paths, foreign URLs and changed hashes" {
+    const gpa = std.testing.allocator;
+    const substitutions = [_][2][]const u8{
+        .{ ".url =", ".path =" },
+        .{ "https://codeload.github.com/zig-utils/", "https://codeload.github.com/foreign/" },
+        .{ ".hash =", ".unreviewed_hash =" },
+        .{ "zig_regex-0.2.1-", "zig_regex-0.2.2-" },
+    };
+    for (substitutions) |substitution| {
+        const changed = try std.mem.replaceOwned(u8, gpa, portable_test_source, substitution[0], substitution[1]);
+        defer gpa.free(changed);
+        try std.testing.expectError(error.DependencyAuditFailed, auditZonSource(gpa, changed, &portable_test_packages));
+    }
+}
+
+test "portable dependency inventory rejects mutable revisions and duplicate names" {
+    var changed = portable_test_packages;
+    changed[0].revision = "main";
+    try std.testing.expectError(error.DependencyAuditFailed, auditZonSource(std.testing.allocator, portable_test_source, &changed));
+    changed[0] = portable_test_packages[0];
+    changed[1] = portable_test_packages[0];
+    try std.testing.expectError(error.DependencyAuditFailed, auditZonSource(std.testing.allocator, portable_test_source, &changed));
 }

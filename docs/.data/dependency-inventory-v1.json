@@ -6,6 +6,7 @@
     "zig_toolchain",
     "standard_platform_interface",
     "owner_maintained_local",
+    "owner_maintained_pinned_source",
     "owner_maintained_pinned_tooling",
     "checksum_pinned_oracle",
     "generated_data_acquisition_input",
@@ -25,22 +26,22 @@
     },
     {
       "id": "zig-regex",
-      "class": "owner_maintained_local",
+      "class": "owner_maintained_pinned_source",
       "status": "allowed",
       "scope": "production",
-      "locator": "../zig-regex",
-      "pin": "local sibling checkout provisioned from zig-utils/zig-regex",
+      "locator": "https://codeload.github.com/zig-utils/zig-regex/tar.gz/fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b",
+      "pin": "zig_regex-0.2.1-omky0RWyGgAzNOkfsXmYm-kBSWG2aoELeC0IwiirA1cz",
       "license": "MIT",
       "affects_runtime_semantics": true,
       "runtime_semantics": "Implements JavaScript RegExp semantics."
     },
     {
       "id": "zig-gc",
-      "class": "owner_maintained_local",
+      "class": "owner_maintained_pinned_source",
       "status": "allowed",
       "scope": "production",
-      "locator": "../zig-gc",
-      "pin": "local sibling checkout provisioned from zig-utils/zig-gc",
+      "locator": "https://codeload.github.com/zig-utils/zig-gc/tar.gz/0285ef801dd221a4ae8e88b31a09ae31627657a3",
+      "pin": "zig_gc-0.0.1-e4SVf1VWBACVfMi8WmQxxa8zgVU5Pis99RbHW7ChxIvD",
       "license": "MIT",
       "affects_runtime_semantics": true,
       "runtime_semantics": "Implements precise tracing allocation and collection."
@@ -190,9 +191,9 @@
     }
   ],
   "boundaries": {
-    "production_zig_paths": [
-      "../zig-regex",
-      "../zig-gc"
+    "production_zig_packages": [
+      {"name": "zig_regex", "repository": "zig-utils/zig-regex", "revision": "fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b", "hash": "zig_regex-0.2.1-omky0RWyGgAzNOkfsXmYm-kBSWG2aoELeC0IwiirA1cz", "edge": "zig-regex"},
+      {"name": "zig_gc", "repository": "zig-utils/zig-gc", "revision": "0285ef801dd221a4ae8e88b31a09ae31627657a3", "hash": "zig_gc-0.0.1-e4SVf1VWBACVfMi8WmQxxa8zgVU5Pis99RbHW7ChxIvD", "edge": "zig-gc"}
     ],
     "owned_sibling_checkouts": [
       { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b", "occurrences": 8, "edge": "zig-regex" },

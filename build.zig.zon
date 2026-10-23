@@ -5,16 +5,25 @@
     .minimum_zig_version = "0.18.0-dev",
     .dependencies = .{
         // Homegrown regex engine, reused to back JS RegExp (pantry: zig-regex).
-        .zig_regex = .{ .path = "../zig-regex" },
+        .zig_regex = .{
+            .url = "https://codeload.github.com/zig-utils/zig-regex/tar.gz/fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b",
+            .hash = "zig_regex-0.2.1-omky0RWyGgAzNOkfsXmYm-kBSWG2aoELeC0IwiirA1cz",
+        },
         // Precise tracing GC to unblock Phase 7 (issue #1); see
         // docs/threads/P7-gc-design.md. Opt-in contexts route heap cells
         // through this collector; the binding lives in src/gc.zig.
-        .zig_gc = .{ .path = "../zig-gc" },
+        .zig_gc = .{
+            .url = "https://codeload.github.com/zig-utils/zig-gc/tar.gz/0285ef801dd221a4ae8e88b31a09ae31627657a3",
+            .hash = "zig_gc-0.0.1-e4SVf1VWBACVfMi8WmQxxa8zgVU5Pis99RbHW7ChxIvD",
+        },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "include",
+        // Imported while compiling build.zig, including for module consumers.
+        "bench/wasm_threads_comparison.js",
         "README.md",
         "LICENSE",
     },

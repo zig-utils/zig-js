@@ -23,8 +23,8 @@ Plus a macOS Objective-C bridge (`src/objc_bridge.m`), a pure-Zig WebAssembly
 runtime (`src/wasm/`), and GIL-free shared-realm threading (`src/jsthread.zig`,
 `src/gil.zig`).
 
-Dependencies are two sibling Zig packages — `zig-regex` and `zig-gc` — resolved
-**by local path**. System JavaScriptCore is used only by explicitly-named
+Dependencies are the owner-maintained Zig packages `zig-regex` and `zig-gc`,
+resolved from immutable source URLs and compiler-generated package hashes. System JavaScriptCore is used only by explicitly-named
 differential and benchmark targets, never by the library itself.
 
 ---
@@ -34,10 +34,11 @@ differential and benchmark targets, never by the library itself.
 - **Zig `0.18.0-dev`**, matching `build.zig.zon`. Older Zig will not build this
   tree. On this machine zig is not on the default `PATH`; the pantry shim is at
   `$HOME/.local/share/pantry/global/bin`.
-- **Sibling checkouts** next to this repo — `../zig-regex` and `../zig-gc` (see
-  [`build.zig.zon`](build.zig.zon)). Without them dependency resolution fails
-  before compilation starts. In a `.claude/worktrees/<name>` worktree you must
-  create those two symlinks yourself.
+- **Pinned production dependencies** in [`build.zig.zon`](build.zig.zon). Zig
+  fetches the exact owned `zig-regex` and `zig-gc` sources and verifies their
+  native package hashes. Importing the public module requires no sibling
+  checkout or symlink. Explicit per-module developer probes below still use
+  sibling paths and require those optional checkouts.
 - **Owned documentation source** at `../../Tools/bunpress`. Documentation
   commands execute that checkout directly; fix renderer defects there instead
   of adding a local substitute to zig-js.

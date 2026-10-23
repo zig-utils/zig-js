@@ -1,0 +1,8 @@
+.{
+    .name = .public_package_consumer,
+    .version = "0.0.0",
+    .fingerprint = 0xe3fb2a147efc2414,
+    .minimum_zig_version = "0.18.0-dev",
+    .dependencies = .{ .zig_js = .{ .path = "package" } },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig", "package" },
+}

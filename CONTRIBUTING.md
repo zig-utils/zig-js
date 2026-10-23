@@ -22,20 +22,13 @@ have cost real time here.
 | **`bun`** | Builds the documentation site. |
 | macOS + Xcode CLT | Only for the Objective-C bridge, the JSC differential targets, and the JSC benchmark comparison. |
 
-### Sibling packages (the most common first-time failure)
+### Production dependencies
 
-`build.zig.zon` resolves two dependencies **by local path**. Check them out next
-to your `zig-js` directory:
-
-```
-parent/
-├── zig-js/
-├── zig-regex/     # github.com/zig-utils/zig-regex
-└── zig-gc/        # github.com/zig-utils/zig-gc
-```
-
-Without both, dependency resolution fails before anything compiles. If you work
-in a git worktree, create the two symlinks there yourself.
+`build.zig.zon` pins owner-maintained `zig-regex` and `zig-gc` to immutable Git
+revisions and compiler-generated package hashes. Zig fetches them through its
+normal package resolver. A public package consumer or isolated worktree needs
+no sibling checkout or symlink. CI's optional sibling checkouts support explicit
+developer probes; they do not supply the production dependency graph.
 
 The repository-wide ownership policy, including platform interfaces, pinned
 conformance oracles, and migration targets, is documented in

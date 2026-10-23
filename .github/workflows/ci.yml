@@ -58,6 +58,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: public package consumer (Debug)
+            portable_package: true
+            cmd: |
+              tar -czf "$RUNNER_TEMP/zig-js-public.tar.gz" build.zig build.zig.zon src include bench/wasm_threads_comparison.js README.md LICENSE
+              mkdir -p "$RUNNER_TEMP/public-consumer/package"
+              tar -xzf "$RUNNER_TEMP/zig-js-public.tar.gz" -C "$RUNNER_TEMP/public-consumer/package"
+              cp tests/package-consumer/build.zig.in "$RUNNER_TEMP/public-consumer/build.zig"
+              cp tests/package-consumer/build.zig.zon.in "$RUNNER_TEMP/public-consumer/build.zig.zon"
+              cp tests/package-consumer/main.zig "$RUNNER_TEMP/public-consumer/main.zig"
+              cd "$RUNNER_TEMP/public-consumer"
+              ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/public-consumer/cache" zig build check -Doptimize=Debug
+          - name: public package consumer (ReleaseSafe)
+            portable_package: true
+            cmd: |
+              tar -czf "$RUNNER_TEMP/zig-js-public.tar.gz" build.zig build.zig.zon src include bench/wasm_threads_comparison.js README.md LICENSE
+              mkdir -p "$RUNNER_TEMP/public-consumer/package"
+              tar -xzf "$RUNNER_TEMP/zig-js-public.tar.gz" -C "$RUNNER_TEMP/public-consumer/package"
+              cp tests/package-consumer/build.zig.in "$RUNNER_TEMP/public-consumer/build.zig"
+              cp tests/package-consumer/build.zig.zon.in "$RUNNER_TEMP/public-consumer/build.zig.zon"
+              cp tests/package-consumer/main.zig "$RUNNER_TEMP/public-consumer/main.zig"
+              cd "$RUNNER_TEMP/public-consumer"
+              ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/public-consumer/cache" zig build check -Doptimize=ReleaseSafe
           - name: retained Zig hosting (Debug)
             cmd: zig build test-hosted-values
           - name: retained Zig hosting (ReleaseSafe)
@@ -351,8 +373,8 @@ jobs:
           - name: threadfuzz-verify
             cmd: zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
     steps:
-      # build.zig.zon uses local-path deps (`../zig-regex`, `../zig-gc`), so the
-      # sibling repos are checked out next to this one.
+      # Optional sibling sources support explicit per-module developer probes.
+      # Public package consumers resolve their pinned graph without siblings.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
@@ -360,11 +382,13 @@ jobs:
           # non-parent HEAD~2 witness; retain precisely that ancestry in CI.
           fetch-depth: 3
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        if: matrix.portable_package != true
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        if: matrix.portable_package != true
         with:
           repository: zig-utils/zig-gc
           path: zig-gc

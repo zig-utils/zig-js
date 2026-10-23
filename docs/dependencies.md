@@ -20,7 +20,8 @@ Every external edge has exactly one class:
 | --- | --- |
 | `zig_toolchain` | The Zig compiler and standard library used to produce the engine. |
 | `standard_platform_interface` | Target C/C++ ABI and named SDK interfaces such as Foundation; never an imported JavaScript implementation. |
-| `owner_maintained_local` | An owner-maintained sibling checkout resolved by local path. The production allowlist is exactly `../zig-regex` and `../zig-gc`; owned tools such as BunPress are scoped separately. |
+| `owner_maintained_local` | An owner-maintained local repository tool, including Home and BunPress, scoped separately from the production library. |
+| `owner_maintained_pinned_source` | An owner-maintained production package fetched from an immutable source revision and checked with the native Zig package hash. |
 | `owner_maintained_pinned_tooling` | An owner-maintained build/bootstrap tool fixed to immutable source and executable versions; never part of engine semantics. |
 | `checksum_pinned_oracle` | A named test, differential, or benchmark input pinned by git object ID or release checksum. |
 | `generated_data_acquisition_input` | A one-shot source for checked-in generated tables; it is not contacted by ordinary build or test steps. |
@@ -31,10 +32,18 @@ it can affect runtime semantics. Ambiguous or missing fields fail the audit.
 
 ## Production boundary
 
-`build.zig.zon` contains only the two owned local dependencies. It has no URL or
-package-registry resolution, and the normal library graph contains no fetch
-command. CI checks out those siblings at the exact revisions recorded in the
-inventory, using the same adjacent paths as a local build.
+`build.zig.zon` contains exactly two owned source packages, `zig-regex` and
+`zig-gc`. Each canonical GitHub archive URL names an immutable revision, and Zig
+checks its compiler-generated package hash during normal resolution. No local
+path, registry alias, mutable branch, or unclassified package is accepted.
+`zig build dependency-audit` checks the exact manifest declarations against the
+inventory and exercises rejection of foreign URLs, changed hashes, sibling
+paths, mutable revisions, and duplicate package names. The audit stays offline;
+normal compiler dependency fetching may access the pinned source URLs.
+
+A public archive consumer does not need the source repositories placed next to
+its package cache. CI retains optional sibling checkouts for explicit per-module
+developer probes, pinned to the same revisions as the production packages.
 
 Documentation deliberately uses the owner-maintained BunPress source checkout
 at `../../Tools/bunpress`. Its exact source revision is recorded in the

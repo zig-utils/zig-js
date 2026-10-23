@@ -26,6 +26,15 @@ pub fn build(b: *std.Build) void {
     run_dependency_audit.setCwd(b.path("."));
     const dependency_audit_step = b.step("dependency-audit", "Reject unclassified dependency, link, fetch, and tooling edges");
     dependency_audit_step.dependOn(&run_dependency_audit.step);
+    const dependency_audit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/dependency_audit.zig"),
+            .target = target,
+            .optimize = std.builtin.OptimizeMode.debug,
+        }),
+    });
+    const run_dependency_audit_tests = b.addRunArtifact(dependency_audit_tests);
+    dependency_audit_step.dependOn(&run_dependency_audit_tests.step);
 
     // Production OS-thread ownership is a closed, machine-readable boundary
     // (#978). Any new resource class or direct spawn must update the reviewed

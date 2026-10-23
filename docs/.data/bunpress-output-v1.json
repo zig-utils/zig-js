@@ -80,8 +80,8 @@
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 220544,
-      "sha256": "3fe75887117817140442e15c28a939f0993b82a655ed654af0fb871edfdc96a9"
+      "bytes": 221305,
+      "sha256": "d64a800a2f697a34ba5b46fab3689515d15aeb5802016865c8ee0ee3ae68ce32"
     },
     {
       "path": "dev-cache/index.html",
@@ -181,7 +181,7 @@
     {
       "path": "search-index.json",
       "bytes": 275382,
-      "sha256": "446b63a5b451f012f92c297bc72713f2d15c666f8d609d69845e63098c96fafe"
+      "sha256": "93d0bbe16196b9bab7e836188d68cdbd19b7bf79db1aec4dbabddef1486dd441"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "7b40ff09e1cd8c69de593e493dde514884ef5c90d1a9a90b93f56a5133c2ac7c"
+  "tree_sha256": "1c4efc147cc682874901b8dd283f37d6888f14dbf393ad71a7eb544915aeb825"
 }
