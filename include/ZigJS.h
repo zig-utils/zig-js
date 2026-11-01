@@ -16,6 +16,9 @@
 #define JSPropertyDescriptorGetKey ZigJSPropertyDescriptorGetKey
 #define JSPropertyDescriptorSetKey ZigJSPropertyDescriptorSetKey
 #include <JavaScriptCore/JavaScriptCore.h>
+// zig-js's own C extensions (a precise-GC context, compaction, collection
+// epochs), so a Swift host can reach them through `import ZigJS`.
+#include <zig-js/Extensions.h>
 
 #if defined(__OBJC__) && JSC_OBJC_API_ENABLED
 // Call after the outermost host evaluation or callback returns, on the realm's

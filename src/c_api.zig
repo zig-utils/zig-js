@@ -441,9 +441,11 @@ comptime {
         @compileError("private WTFStringImpl prefix drifted from the pinned ABI");
 }
 
-/// Global allocator for C-API-created contexts and strings. `page_allocator`
-/// needs no libc and is always available; a tuned allocator can replace it.
-const gpa = std.heap.page_allocator;
+/// Global allocator for C-API-created contexts and strings: libc's, which the
+/// string bridge already links. It was `page_allocator`, which maps at least a
+/// page per allocation; a GC context makes thousands of small ones (outside the
+/// cell slabs), so one cost 186 MB before running a line, against 10 MB now.
+const gpa = std.heap.c_allocator;
 const private_string_allocator = std.heap.c_allocator;
 const PrivateJSCProcessOptions = struct {
     use_jit: bool = true,
