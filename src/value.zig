@@ -167,6 +167,10 @@ pub const HostClassHooks = struct {
     construct: ?*const fn (*anyopaque, *Object, []const Value) HostError!Value = null,
     has_instance: ?*const fn (*anyopaque, *Object, Value) HostError!bool = null,
     convert: ?*const fn (*anyopaque, *Object, HostClassConvertHint) HostError!Value = null,
+    /// A moving collection relocated the object. Native handles that name it
+    /// by address (its `object_ref`) are pointed at `Object` here; without it a
+    /// host callback received the vacated address.
+    relocated: ?*const fn (*CApiObjectOwner, *Object) void = null,
 };
 
 /// The element type of a typed array (no BigInt variants — those need a BigInt

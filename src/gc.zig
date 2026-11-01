@@ -362,6 +362,7 @@ pub fn relocateObjectProperties(o: *Object, v: anytype) void {
         var it = owner.custom_accessor_cells.valueIterator();
         while (it.next()) |cell|
             gc_relocation.rewriteRequiredSlot(v, Object, cell);
+        if (owner.hooks) |hooks| if (hooks.relocated) |moved| moved(owner, o);
     }
     if (!(o.is_weak and (o.is_map or o.is_set)))
         for (o.elementsItems()) |*element| gc_relocation.rewriteValueSlot(v, element);

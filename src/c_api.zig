@@ -2907,7 +2907,17 @@ fn cApiConstructorConstruct(
 const c_api_constructor_hooks: value.HostClassHooks = .{
     .is_constructor = cApiConstructorIsConstructor,
     .construct = cApiConstructorConstruct,
+    .relocated = relocateObjectHandle,
 };
+
+/// A moving collection relocated a class instance or constructor: its handle
+/// (`object_ref`, which callbacks receive as the object) follows it. A stale
+/// handle read the vacated cell, so an Objective-C block called after its
+/// wrapper moved found no block in its private data.
+fn relocateObjectHandle(owner: *value.CApiObjectOwner, object: *Object) void {
+    const boxed = boxedFrom(@ptrCast(owner.object_ref orelse return)) orelse return;
+    boxed.value = Value.obj(object);
+}
 
 const ClassCallbackTarget = struct {
     context: *Context,
@@ -3328,6 +3338,7 @@ fn classConvert(
 }
 
 const c_api_class_hooks: value.HostClassHooks = .{
+    .relocated = relocateObjectHandle,
     .get = classGet,
     .set = classSet,
     .has = classHas,
@@ -34186,6 +34197,70 @@ test "private counted JSValue protection discovers its VM and releases on balanc
     try std.testing.expect(context.gc.?.live_cells < protected_cells);
     Bun__JSValue__unprotect(encoded);
     try std.testing.expectEqual(@as(usize, 0), context.c_api_handles.items.len);
+}
+
+test "C-API: a class instance that compaction moved still reaches its callbacks with its own handle" {
+    const State = struct {
+        var marker: u8 = 0;
+        fn call(
+            ctx: JSContextRef,
+            function: JSObjectRef,
+            _: JSObjectRef,
+            _: usize,
+            _: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            // An Objective-C block's wrapper finds its block this way.
+            return JSValueMakeBoolean(ctx, JSObjectGetPrivate(function) == @as(*anyopaque, @ptrCast(&marker)));
+        }
+    };
+    const ctx = ZJSGlobalContextCreateGarbageCollected(false) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxFrom(ctx) orelse return error.JSCInitFailed;
+    const global = JSContextGetGlobalObject(ctx) orelse return error.GlobalObjectFailed;
+    var definition = kJSClassDefinitionEmpty;
+    definition.class_name = "MovingHostCallable";
+    definition.call_as_function = State.call;
+    const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
+    defer JSClassRelease(class);
+    // Garbage on both sides of the instance leaves its chunk sparse once collected, so compaction moves it.
+    const before_garbage = JSStringCreateWithUTF8CString(
+        \\globalThis.movingBefore = [];
+        \\for (let i = 0; i < 2048; i++) movingBefore.push({ dead: i });
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(before_garbage);
+    var exception_before: JSValueRef = null;
+    _ = JSEvaluateScript(ctx, before_garbage, null, null, 1, &exception_before) orelse return error.EvalFailed;
+    const callable = JSObjectMake(ctx, class, @ptrCast(&State.marker)) orelse return error.ObjectCreateFailed;
+    const name = JSStringCreateWithUTF8CString("hostCallable") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(ctx, global, name, callable, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const garbage = JSStringCreateWithUTF8CString(
+        \\globalThis.movingDiscard = [];
+        \\for (let i = 0; i < 4096; i++) movingDiscard.push({ dead: i, child: { value: i } });
+        \\movingDiscard = null;
+        \\movingBefore = null;
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(garbage);
+    _ = JSEvaluateScript(ctx, garbage, null, null, 1, &exception) orelse return error.EvalFailed;
+    JSGarbageCollect(ctx);
+    const held = JSObjectGetProperty(ctx, global, name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(ZJSValueProtect(ctx, held));
+    defer std.debug.assert(ZJSValueUnprotect(ctx, held));
+    const before = valueFromContext(context, held).?.asObj();
+    var moved_cells: usize = 0;
+    var moved_bytes: usize = 0;
+    try std.testing.expectEqual(ZJSGCCompactionStatus.compacted, ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes));
+    try std.testing.expect(valueFromContext(context, held).?.asObj() != before);
+
+    const call_it = JSStringCreateWithUTF8CString("hostCallable()") orelse return error.StringInitFailed;
+    defer JSStringRelease(call_it);
+    const result = JSEvaluateScript(ctx, call_it, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
 }
 
 test "C-API: JIT-enabled compaction fails closed in native callback then moves protected handle quiescently" {
