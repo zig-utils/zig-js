@@ -1571,6 +1571,20 @@ pub fn build(b: *std.Build) void {
     iteration_step.dependOn(&run_iteration_tests.step);
     parallel_test_step.dependOn(&run_iteration_tests.step);
 
+    const arrow_lookahead_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/parser_arrow_lookahead.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "parser", .module = iteration_parser }},
+        }),
+    });
+    const run_arrow_lookahead_tests = b.addRunArtifact(arrow_lookahead_tests);
+    const arrow_lookahead_step = b.step("test-parser-arrow-lookahead", "Tell arrows from groups without rescanning minified bundles");
+    arrow_lookahead_step.dependOn(&run_arrow_lookahead_tests.step);
+    parallel_test_step.dependOn(&run_arrow_lookahead_tests.step);
+
     // Small production JIT test root for tight development loops. It uses the
     // same runtime filter as the full root, so distinct filters reuse its linked
     // artifact too. The target, optimization, sanitizer, dependencies, and test

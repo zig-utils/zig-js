@@ -800,6 +800,9 @@ pub const Parser = struct {
     /// Unlike token indexes, these remain valid after speculative tokens are
     /// discarded and make every nested arrow query after the first O(1).
     arrow_lookahead: std.AutoHashMapUnmanaged(usize, bool) = .empty,
+    /// How many arrow lookaheads fell back to scanning source text, the slow
+    /// path taken only when a slash's goal had to be guessed.
+    arrow_source_scans: usize = 0,
     /// Var-scoped names declared inside the body of the outermost lexical `for`
     /// being parsed in the current var scope, each with the order of its latest
     /// declaration. A lexical head asks this whether its body var-declares one
@@ -4707,23 +4710,55 @@ pub const Parser = struct {
                 self.paren_close = saved_paren_close;
             }
 
+            // The parser lexes ahead as division and stops at the first slash,
+            // before it knows that slash's goal. Give it the reading the
+            // grammar fixes, so the tokens lexed after it are the real ones.
+            var relexed: ?Token = null;
+            defer if (relexed) |slash| {
+                self.tokens.items[saved_token_len - 1] = slash;
+            };
+            if (saved_token_len >= start + 2) {
+                const last = self.tokens.items[saved_token_len - 1];
+                const before = if (saved_token_len >= 3) self.tokens.items[saved_token_len - 3] else null;
+                if ((last.kind == .slash or last.kind == .slash_eq) and
+                    slashBeginsRegex(self.tokens.items[saved_token_len - 2], before, saved_lexer.last_rparen_control))
+                {
+                    if (self.lexer.reinterpretSlashAsRegex(last)) |literal| {
+                        relexed = last;
+                        self.tokens.items[saved_token_len - 1] = literal;
+                    } else |_| self.lex_error = error.UnexpectedCharacter;
+                }
+            }
+
             const close = try self.matchingParen(start);
             const guessed = if (close) |index| self.tokenAt(index + 1).kind == .arrow else false;
             const scan_end = if (close) |index| @min(index + 1, self.tokens.items.len) else self.tokens.items.len;
-            var saw_slash = false;
-            for (self.tokens.items[start..scan_end]) |token| {
-                if (isSlashToken(token.kind)) {
-                    saw_slash = true;
+            // Only a slash the lexer had to guess about makes the token scan
+            // untrustworthy. Treating every slash that way sent nearly every
+            // parenthesis in a minified bundle to the source scan below, which
+            // rescans each enclosing span: seconds for a 500 KB file.
+            var guessed_slash = false;
+            for (start..scan_end) |index| {
+                if (!self.tokenReadingCertain(index, saved_token_len)) {
+                    guessed_slash = true;
                     break;
                 }
             }
-            const ambiguous = self.lex_error != null or saw_slash;
+            const ambiguous = self.lex_error != null or guessed_slash;
             if (!ambiguous) {
                 if (self.paren_close) |table| {
+                    // The index answers for every parenthesis lexed so far, but
+                    // only this one's span was checked. Keep the answers whose
+                    // spans hold no slash the lexer guessed about.
+                    const uncertain_before = try lookahead_arena.allocator().alloc(u32, self.tokens.items.len + 1);
+                    uncertain_before[0] = 0;
+                    for (0..self.tokens.items.len) |index|
+                        uncertain_before[index + 1] = uncertain_before[index] + @intFromBool(!self.tokenReadingCertain(index, saved_token_len));
                     for (self.tokens.items, 0..) |token, index| {
                         if (token.kind != .lparen or index >= table.len) continue;
                         const close_index = table[index];
                         if (close_index == no_matching_paren) continue;
+                        if (uncertain_before[close_index] != uncertain_before[index]) continue;
                         try self.arrow_lookahead.put(
                             self.arena,
                             token.pos,
@@ -4739,7 +4774,9 @@ pub const Parser = struct {
         };
 
         if (!scan.ambiguous) return scan.guessed;
-        return self.sourceParenFollowedByArrow(open_offset);
+        const followed = try self.sourceParenFollowedByArrow(open_offset);
+        try self.arrow_lookahead.put(self.arena, open_offset, followed);
+        return followed;
     }
 
     const ParenScanState = struct { offset: usize, depth: usize };
@@ -4748,12 +4785,66 @@ pub const Parser = struct {
         return kind == .slash or kind == .slash_eq or kind == .regex;
     }
 
+    /// Whether this lookahead can take the token at `index` as lexed. Only a
+    /// slash can be misread; `buffered` is how many tokens the parser had
+    /// lexed before the lookahead began.
+    fn tokenReadingCertain(self: *Parser, index: usize, buffered: usize) bool {
+        const token = self.tokens.items[index];
+        if (!isSlashToken(token.kind)) return true;
+        if (index == 0) return false;
+        // From the last buffered token on, the lexer's state at the slash
+        // is known (and that slash was given its grammar reading).
+        return slashReadingCertain(token, self.tokens.items[index - 1], index + 1 >= buffered);
+    }
+
+    /// Whether the grammar reads a slash after `prev` as a RegExp, when that
+    /// is certain from the tokens: after a control head's `)`, an operand
+    /// keyword that is not a property name, or a punctuator that begins an
+    /// expression. False also when it cannot be known (`}`, `++`, `--`).
+    fn slashBeginsRegex(prev: Token, before: ?Token, rparen_closed_control: bool) bool {
+        return switch (prev.kind) {
+            .number, .string, .template_no_substitution, .template_tail, .regex, .private_name, .rbracket, .rbrace, .plus_plus, .minus_minus => false,
+            .rparen => rparen_closed_control,
+            .identifier => !prev.escaped_identifier and lex.isOperandKeyword(prev.text) and
+                !(if (before) |token| token.kind == .dot or token.kind == .question_dot else false),
+            else => true,
+        };
+    }
+
+    /// Whether a slash token's reading (RegExp or division) is the grammar's.
+    ///
+    /// A token comes from one of three places: the parser's own goal, which is
+    /// right; this lookahead's lexer, which decides from the previous token
+    /// and tracks a control head's `)` exactly; or a run the parser lexed
+    /// ahead as division before choosing a goal, which stops at the first
+    /// slash. So division is certain only after a literal, `]`, a plain name,
+    /// or a `)` this lookahead lexed itself, and a RegExp everywhere except
+    /// after `}` (block or object literal) and `++`/`--` (prefix or postfix).
+    fn slashReadingCertain(token: Token, prev: Token, lexed_here: bool) bool {
+        if (token.kind == .regex) return switch (prev.kind) {
+            .rbrace, .plus_plus, .minus_minus => false,
+            else => true,
+        };
+        return switch (prev.kind) {
+            .number, .string, .template_no_substitution, .template_tail, .regex, .private_name, .rbracket => true,
+            .rparen => lexed_here,
+            // Words that can stand before an expression would read a RegExp.
+            .identifier => !prev.escaped_identifier and !lex.isOperandKeyword(prev.text) and
+                !std.mem.eql(u8, prev.text, "yield") and
+                !std.mem.eql(u8, prev.text, "await") and
+                !std.mem.eql(u8, prev.text, "of") and
+                !std.mem.eql(u8, prev.text, "extends"),
+            else => false,
+        };
+    }
+
     /// Resolve a slash-ambiguous arrow lookahead without committing either
     /// lexical interpretation. Each slash contributes its division continuation
     /// and, when a complete literal exists, its RegExp continuation. Equal
     /// (offset, depth) states converge, so repeated ambiguity remains bounded by
     /// the source span rather than multiplying paths.
     fn sourceParenFollowedByArrow(self: *Parser, open_offset: usize) ParseError!bool {
+        self.arrow_source_scans += 1;
         var pending: std.ArrayListUnmanaged(ParenScanState) = .empty;
         defer pending.deinit(self.scratch_allocator);
         var visited = std.AutoHashMapUnmanaged(ParenScanState, void).empty;

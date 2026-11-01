@@ -1875,7 +1875,7 @@ fn controlHeadBeforeParen(
         (prev_identifier_context & identifier_for_await) != 0;
 }
 
-fn isOperandKeyword(text: []const u8) bool {
+pub fn isOperandKeyword(text: []const u8) bool {
     const words = [_][]const u8{
         "return", "typeof",  "instanceof", "in",   "new",
         "delete", "void",    "throw",      "case", "do",
