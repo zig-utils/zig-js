@@ -12844,6 +12844,23 @@ test "host timers are nonblocking tasks with stable handles and interval cancell
     try std.testing.expectEqual(@as(usize, 0), ctx.timers.items.len);
 }
 
+test "array literal spreads grow a GC context's array with that array's own allocator" {
+    // The testing allocator rejects freeing or growing memory it did not hand
+    // out, which is what spreading into an array literal did once literal
+    // elements followed the spread past the list's first growth.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\const head = ['x', 'y'];
+        \\const literals = Array.from({ length: 256 }, (_, i) => 'k' + i);
+        \\const built = Function('head', 'return [...head, ' + literals.map(text => JSON.stringify(text)).join(',') + ', ...head];')(head);
+        \\const tree = (() => [...head, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'aa', 'ab', 'ac', 'ad', 'ae', 'af', 'ag', 'ah', 'ai', 'aj', 'ak', 'al', 'am', 'an', 'ao', 'ap', 'aq', 'ar', 'as', 'at', 'au', 'av', 'aw', 'ax', 'ay', 'az', 'ba', 'bb', 'bc', 'bd', 'be', 'bf', 'bg', 'bh', 'bi', 'bj', 'bk', 'bl', 'bm', 'bn', 'bo', 'bp', 'bq', 'br', 'bs', 'bt', 'bu', 'bv', 'bw', 'bx', 'by', 'bz', 'ca', 'cb', 'cc', 'cd', 'ce', 'cf', 'cg', 'ch', 'ci', 'cj'])();
+        \\const wrong = [built, tree].flatMap(array => array.filter(item => typeof item !== 'string'));
+        \\built.length + ':' + tree.length + ':' + wrong.length + ':' + built[257] + ':' + tree.at(-1)
+    );
+    try std.testing.expectEqualStrings("260:90:0:k255:cj", result.asStr());
+}
+
 test "unrefed timers wait for a later host checkpoint and keep precise roots" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
@@ -28465,6 +28482,21 @@ test "enable_gc nursery: owner barriers preserve old object, environment, and pr
     try std.testing.expectEqual(@as(f64, 7), promise_value.asNum());
     const promise_text = try ctx.evaluate("globalThis.promiseText");
     try std.testing.expectEqualStrings("promise-7", promise_text.asStr());
+}
+
+test "split results grow with their own allocator in a GC context" {
+    // The testing allocator rejects growing memory it did not hand out, which
+    // pushing onto a split's result did once its list had been filled through
+    // the context arena.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\const plain = 'a,b,c'.split(',');
+        \\const pattern = 'a1b2c'.split(/\d/);
+        \\for (let i = 0; i < 300; i++) { plain.push('p' + i); pattern.push('r' + i); }
+        \\plain.length + ':' + pattern.length + ':' + plain[2] + pattern[2] + ':' + plain.at(-1) + pattern.at(-1)
+    );
+    try std.testing.expectEqualStrings("303:303:cc:p299r299", result.asStr());
 }
 
 test "enable_gc nursery: promoted functions retain immutable closure and home-object edges" {

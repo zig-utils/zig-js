@@ -9927,7 +9927,39 @@ pub const Interpreter = struct {
     /// is required even for packed arrays: `%ArrayIteratorPrototype%.next` is an
     /// observable mutable property, so a direct element-copy shortcut would skip
     /// both its lookup and calls.
+    /// Appends what `v` iterates to `list`, a list the caller owns (an argument list).
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
+        const ListSink = struct {
+            list: *std.ArrayListUnmanaged(Value),
+            allocator: std.mem.Allocator,
+            fn add(sink: @This(), _: *Interpreter, item: Value) EvalError!void {
+                try sink.list.append(sink.allocator, item);
+            }
+        };
+        try self.spreadEach(v, ListSink{ .list = list, .allocator = self.arena });
+    }
+
+    /// Appends what `v` iterates to the array literal `target`. Each value goes
+    /// through `appendElement`, so the array's own elements allocator grows the
+    /// list and the GC write barrier sees the value: appending to the raw list
+    /// with `self.arena` grew a GC context's array with an allocator that had
+    /// not allocated it (silently dropping elements past the first growth, or
+    /// aborting in libc's realloc). The array is read from its root after every
+    /// step, because the iterator's `next` runs arbitrary JavaScript.
+    pub fn spreadIntoArray(self: *Interpreter, target: Value, v: Value) EvalError!void {
+        const target_root = try self.pushTempRoot(target);
+        defer self.restoreTempRoots(target_root);
+        const ArraySink = struct {
+            root: usize,
+            target: Value,
+            fn add(sink: @This(), interpreter: *Interpreter, item: Value) EvalError!void {
+                try interpreter.tempRoot(sink.root, sink.target).asObj().appendElement(interpreter.arena, item);
+            }
+        };
+        try self.spreadEach(v, ArraySink{ .root = target_root, .target = target });
+    }
+
+    fn spreadEach(self: *Interpreter, v: Value, sink: anytype) EvalError!void {
         // Spread words both of its failures after the syntax; both tiers route
         // through here, so that wording is settled in one place.
         const record = try self.getIteratorRecordFor(v, .spread);
@@ -9946,7 +9978,10 @@ pub const Interpreter = struct {
             defer self.restoreTempRoots(result_root);
             if (!builtins.isRealObject(res)) return self.throwError("TypeError", "Iterator result interface is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
-            try list.append(self.arena, try self.getProperty(self.tempRoot(result_root, res), "value"));
+            const item = try self.getProperty(self.tempRoot(result_root, res), "value");
+            const item_root = try self.pushTempRoot(item);
+            defer self.restoreTempRoots(item_root);
+            try sink.add(self, self.tempRoot(item_root, item));
         }
     }
 
@@ -14858,16 +14893,42 @@ pub const Interpreter = struct {
         return try Value.strOwned(self.arena, try out.toOwnedSlice(self.arena));
     }
 
-    fn appendSplitSegment(self: *Interpreter, out: *std.ArrayListUnmanaged(Value), s: []const u8, cursor: *RxCursor, start: usize, end: usize) EvalError!void {
+    /// A new array filled in steps that each allocate (and may collect), so it
+    /// can move or age while it is built. It stays rooted, and every value goes
+    /// through `appendElement`: the array's own allocator grows the list and
+    /// the write barrier sees the value. Appending to the raw list with
+    /// `self.arena` grew a GC context's array with an allocator that had not
+    /// allocated it, and skipped the barrier once the array had aged.
+    const RootedArray = struct {
+        interpreter: *Interpreter,
+        root: usize,
+        array: Value,
+
+        fn append(self: RootedArray, item: Value) EvalError!void {
+            try self.value().asObj().appendElement(self.interpreter.arena, item);
+        }
+
+        fn len(self: RootedArray) usize {
+            return self.value().asObj().elementsItems().len;
+        }
+
+        fn value(self: RootedArray) Value {
+            return self.interpreter.tempRoot(self.root, self.array);
+        }
+    };
+
+    fn appendSplitSegment(self: *Interpreter, out: RootedArray, s: []const u8, cursor: *RxCursor, start: usize, end: usize) EvalError!void {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         try appendUtf16SliceFrom(&buf, self.arena, s, cursor, start, end);
-        try out.append(self.arena, try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena)));
+        try out.append(try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena)));
     }
 
     fn regexpSplit(self: *Interpreter, rx: Value, s: []const u8, limit_value: Value) EvalError!Value {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@split requires that |this| be an Object");
         const result = try self.newArray();
-        const out = try result.asObj().ensureElementsList(self.arena);
+        const result_root = try self.pushTempRoot(result);
+        defer self.restoreTempRoots(result_root);
+        const out = RootedArray{ .interpreter = self, .root = result_root, .array = result };
 
         const default_ctor = self.env.get("RegExp") orelse Value.undef();
         const ctor = try self.speciesConstructor(rx, default_ctor, Interpreter.bad_species_this);
@@ -14876,13 +14937,13 @@ pub const Interpreter = struct {
         const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
         const splitter = try self.construct(ctor, &.{ rx, try Value.strAlloc(self.arena, splitter_flags) });
         const lim: usize = if (limit_value.isUndefined()) std.math.maxInt(u32) else value.Value.uint32FromF64(try self.toNumberV(limit_value));
-        if (lim == 0) return result;
+        if (lim == 0) return out.value();
 
         const size = utf16LenOfString(s);
         if (size == 0) {
             const z = try self.regexpExecGeneric(splitter, s);
-            if (z.isNull()) try out.append(self.arena, try Value.strAlloc(self.arena, s));
-            return result;
+            if (z.isNull()) try out.append(try Value.strAlloc(self.arena, s));
+            return out.value();
         }
 
         // Fast path for a plain built-in splitter: precompute once, share cursors
@@ -14918,21 +14979,21 @@ pub const Interpreter = struct {
             }
 
             try self.appendSplitSegment(out, s, &seg_cursor, p, q);
-            if (out.items.len >= lim) return result;
+            if (out.len() >= lim) return out.value();
 
             const length = toLen(try self.toNumberV(try self.getProperty(z, "length")));
             var i: usize = 1;
             while (i < length) : (i += 1) {
                 const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                try out.append(self.arena, try self.getProperty(z, key));
-                if (out.items.len >= lim) return result;
+                try out.append(try self.getProperty(z, key));
+                if (out.len() >= lim) return out.value();
             }
 
             p = e;
             q = p;
         }
         try self.appendSplitSegment(out, s, &seg_cursor, p, size);
-        return result;
+        return out.value();
     }
 
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
@@ -16112,7 +16173,7 @@ pub const Interpreter = struct {
         for (elems) |en| {
             if (en.* == .spread) {
                 const iterable = try self.eval(en.spread);
-                try self.spreadInto(try self.tempRoot(array_root, v).asObj().ensureElementsList(self.arena), iterable);
+                try self.spreadIntoArray(self.tempRoot(array_root, v), iterable);
             } else if (en.* == .elision) {
                 // A hole: a slot that reads as absent (skipped by iteration).
                 try self.tempRoot(array_root, v).asObj().appendArrayHole(self.arena);
@@ -21516,13 +21577,15 @@ pub const Interpreter = struct {
         if (eq(name, "trim")) return if (s_ascii) try self.trimmedFixedWidthValue(s, s_cell, s_flat, true, true) else try Value.strAlloc(self.arena, jsTrim(s, true, true));
         if (eq(name, "split")) {
             const result = try self.newArray();
-            const out = try result.asObj().ensureElementsList(self.arena);
+            const result_root = try self.pushTempRoot(result);
+            defer self.restoreTempRoots(result_root);
+            const out = RootedArray{ .interpreter = self, .root = result_root, .array = result };
             // No separator → the whole string as the sole element.
             if (args.len == 0 or args[0].isUndefined()) {
                 const lim: usize = if (args.len > 1 and !args[1].isUndefined()) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
-                if (lim == 0) return result;
-                try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s)));
-                return result;
+                if (lim == 0) return out.value();
+                try out.append(try Value.strOwned(self.arena, try self.arena.dupe(u8, s)));
+                return out.value();
             }
             // `limit` (ToUint32; absent -> effectively unbounded) is converted
             // before the separator's ToString, but `limit === 0` is checked after.
@@ -21532,14 +21595,14 @@ pub const Interpreter = struct {
             if (args[0].isObject() and args[0].asObj().behavior.is_regex) {
                 var program = try self.compileRegex(args[0].asObj());
                 defer program.release();
-                if (lim == 0) return result;
+                if (lim == 0) return out.value();
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
                     if (program.find(s) catch null) |match| {
                         var owned_match = match;
                         defer owned_match.deinit();
-                    } else try out.append(self.arena, try Value.strAlloc(self.arena, s));
-                    return result;
+                    } else try out.append(try Value.strAlloc(self.arena, s));
+                    return out.value();
                 }
                 var p: usize = 0; // end of the previous piece
                 var q: usize = 0; // scan cursor
@@ -21554,20 +21617,20 @@ pub const Interpreter = struct {
                         q = m_start + 1;
                         continue;
                     }
-                    try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..m_start])));
-                    if (out.items.len >= lim) return result;
+                    try out.append(try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..m_start])));
+                    if (out.len() >= lim) return out.value();
                     for (0..m.captures.len) |ci| {
-                        try out.append(self.arena, try self.captureVal(m, ci));
-                        if (out.items.len >= lim) return result;
+                        try out.append(try self.captureVal(m, ci));
+                        if (out.len() >= lim) return out.value();
                     }
                     p = m_end;
                     q = if (m_end > m_start) m_end else m_end + 1;
                 }
-                try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..])));
-                return result;
+                try out.append(try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..])));
+                return out.value();
             }
             const sep = try self.toStringWtf8(args[0]);
-            if (lim == 0) return result;
+            if (lim == 0) return out.value();
             if (sep.len == 0) {
                 // Empty separator splits into individual UTF-16 code units (an
                 // astral character becomes its two surrogate halves), not
@@ -21578,10 +21641,10 @@ pub const Interpreter = struct {
                 else
                     StringCodeUnitIterator.initWtf8(s);
                 while (code_units.next()) |code_unit| {
-                    if (out.items.len >= lim) return result;
-                    try out.append(self.arena, try self.stringValueFromCodeUnit(code_unit.unit));
+                    if (out.len() >= lim) return out.value();
+                    try out.append(try self.stringValueFromCodeUnit(code_unit.unit));
                 }
-                return result;
+                return out.value();
             }
             if (stringBytesAreAscii(sep)) {
                 // An ASCII separator can only match at a code-unit boundary: every
@@ -21592,10 +21655,10 @@ pub const Interpreter = struct {
                 // of sequences. This is the allocation-free path.
                 var it = std.mem.splitSequence(u8, s, sep);
                 while (it.next()) |part| {
-                    if (out.items.len >= lim) return result;
-                    try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, part)));
+                    if (out.len() >= lim) return out.value();
+                    try out.append(try Value.strOwned(self.arena, try self.arena.dupe(u8, part)));
                 }
-                return result;
+                return out.value();
             }
             // ECMA-262 split steps 14–15 repeatedly apply StringIndexOf and
             // form substrings in UTF-16 code-unit space. A byte split cannot
@@ -21611,14 +21674,14 @@ pub const Interpreter = struct {
                 const position: usize = compact_position;
                 var part: std.ArrayListUnmanaged(u8) = .empty;
                 try appendUtf16SliceFrom(&part, self.arena, s, &slice_cursor, search_start, position);
-                try out.append(self.arena, try Value.strOwned(self.arena, try part.toOwnedSlice(self.arena)));
-                if (out.items.len >= lim) return result;
+                try out.append(try Value.strOwned(self.arena, try part.toOwnedSlice(self.arena)));
+                if (out.len() >= lim) return out.value();
                 search_start = position + sep_len;
             }
             var tail: std.ArrayListUnmanaged(u8) = .empty;
             try appendUtf16SliceFrom(&tail, self.arena, s, &slice_cursor, search_start, s_len);
-            try out.append(self.arena, try Value.strOwned(self.arena, try tail.toOwnedSlice(self.arena)));
-            return result;
+            try out.append(try Value.strOwned(self.arena, try tail.toOwnedSlice(self.arena)));
+            return out.value();
         }
         if (eq(name, "at")) {
             const n = try self.toNumberV(arg0(args));

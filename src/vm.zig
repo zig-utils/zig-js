@@ -4359,10 +4359,10 @@ fn nativeArrayAppendHole(vm: *Interpreter, target: Value) EvalError!Value {
 }
 
 fn nativeArraySpread(vm: *Interpreter, target: Value, iterable: Value) EvalError!Value {
-    const array = try literalArrayTarget(vm, target);
+    _ = try literalArrayTarget(vm, target);
     const target_root = try vm.pushTempRoot(target);
     defer vm.restoreTempRoots(target_root);
-    try vm.spreadInto(try array.ensureElementsList(vm.arena), iterable);
+    try vm.spreadIntoArray(vm.tempRoot(target_root, target), iterable);
     return vm.tempRoot(target_root, target);
 }
 
@@ -10048,7 +10048,7 @@ fn runChunk(
                 const iterable = stack.pop().?;
                 // The array stays on the stack (peeked); append the iterable's
                 // elements into it.
-                try vm.spreadInto(try stack.items[stack.items.len - 1].asObj().ensureElementsList(vm.arena), iterable);
+                try vm.spreadIntoArray(stack.items[stack.items.len - 1], iterable);
             },
             .throw_op => {
                 vm.exception = stack.pop().?;
