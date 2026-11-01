@@ -28484,6 +28484,39 @@ test "enable_gc nursery: owner barriers preserve old object, environment, and pr
     try std.testing.expectEqualStrings("promise-7", promise_text.asStr());
 }
 
+test "enable_gc nursery: a Set's delete tombstone survives behind an old set" {
+    // Long-lived sets that keep gaining and losing members across minor
+    // collections, as a UI's subscriber sets do. A delete stores a new
+    // tombstone in the set, now behind the write barrier. The lost tombstone
+    // itself reproduced only in an embedding host under mid-script
+    // collection (a later mark hit the freed cell); this covers the pattern.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+    _ = try ctx.evaluate(
+        \\globalThis.agedSets = Array.from({ length: 16 }, () => new Set());
+        \\globalThis.membersOf = agedSets.map(() => []);
+    );
+    for (0..runtime_gc_tenuring_age) |_| ctx.gc.?.collectYoung();
+    for (0..24) |_| {
+        _ = try ctx.evaluate(
+            \\agedSets.forEach((set, index) => {
+            \\  const members = membersOf[index];
+            \\  for (let i = 0; i < 6; i++) { const member = { member: true }; members.push(member); set.add(member); }
+            \\  for (const gone of members.splice(0, 3)) set.delete(gone);
+            \\});
+        );
+        ctx.gc.?.collectYoung();
+        _ = try ctx.evaluate("for (let i = 0; i < 2048; i++) ({ filler: i });");
+    }
+    ctx.collectGarbage();
+    const result = try ctx.evaluate(
+        \\agedSets.every(set => [...set].every(member => member.member === true)) + ':' +
+        \\agedSets.every((set, index) => set.size === membersOf[index].length)
+    );
+    try std.testing.expectEqualStrings("true:true", result.asStr());
+}
+
 test "split results grow with their own allocator in a GC context" {
     // The testing allocator rejects growing memory it did not hand out, which
     // pushing onto a split's result did once its list had been filled through

@@ -15870,6 +15870,9 @@ pub const Interpreter = struct {
             const elements_locked_9 = o.lockElements();
             defer o.unlockElements(elements_locked_9);
             if (setFindPos(o, key, self.arena)) |pos| {
+                // A new tombstone behind a live set: without the barrier an old
+                // set hid it from the next minor collection, which freed it.
+                gc_mod.barrierCellFrom(o, @ptrCast(tomb));
                 o.elementsItems()[pos] = Value.obj(tomb);
                 o.collRecordDelete();
                 if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
