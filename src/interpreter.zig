@@ -4509,10 +4509,10 @@ pub const Interpreter = struct {
     /// `leftContext`/`$\``/`rightContext`/`$'`/`$1`..`$9`.
     re_legacy: RegExpLegacy = .{},
     /// Compiled programs and matcher scratch are interpreter-local, freeable,
-    /// and bounded together. Leases pin entries across reentrant callbacks;
-    /// immutable Thompson programs may be reused by value while mutable
-    /// backtracking programs remain isolated by stable RegExp identity.
-    /// Allocated lazily rather than adding the bounded table to every frame.
+    /// and bounded together, shared by source and flags. Leases pin entries
+    /// across reentrant callbacks, so a nested use of the same pattern gets
+    /// its own program. Allocated lazily rather than adding the bounded table
+    /// to every frame.
     regex_programs: ?*RegExpProgramCache = null,
     signal: Signal = .none,
     ret_value: Value = Value.undef(),
@@ -13622,7 +13622,6 @@ pub const Interpreter = struct {
     fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!RegExpProgramCache.Lease {
         const raw_src = o.regexSource();
         const flags = o.regexFlags();
-        const identity = gc_mod.stableCellIdentity(@ptrCast(o)) orelse @as(u64, @intCast(@intFromPtr(o)));
         const programs = self.regex_programs orelse blk: {
             const allocator = self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena);
             const cache = try allocator.create(RegExpProgramCache);
@@ -13630,7 +13629,7 @@ pub const Interpreter = struct {
             self.regex_programs = cache;
             break :blk cache;
         };
-        if (programs.acquire(raw_src, flags, identity)) |cached| return cached;
+        if (programs.acquire(raw_src, flags)) |cached| return cached;
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const owned = try programs.ownerForMiss();
         errdefer owned.deinit();
@@ -13661,7 +13660,7 @@ pub const Interpreter = struct {
             return self.throwError("SyntaxError", "invalid regular expression");
         };
         owned.publish(compiled);
-        return programs.adopt(raw_src, flags, identity, owned);
+        return programs.adopt(raw_src, flags, owned);
     }
 
     /// Whether `o` is the `%RegExp.prototype%` intrinsic (which the source/flags
@@ -62129,6 +62128,37 @@ test "bounded RegExp cache shares one immutable program across fresh objects" {
     }
     try std.testing.expectEqual(@as(usize, 1), machine.regex_programs.?.len);
     try std.testing.expectEqual(@as(usize, 1), machine.regex_programs.?.matcherCount());
+}
+
+test "bounded RegExp cache shares a backtracking literal across evaluations and reentrant calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // `(a+)b\1` needs the backtracking engine. The literal is a fresh object
+    // on every evaluation; the nested replace uses the same pattern while the
+    // outer replace still holds its program.
+    var parser = try Parser.init(a,
+        \\let total = 0;
+        \\for (let i = 0; i < 64; i++) {
+        \\  const run = "a".repeat(i % 3 + 1);
+        \\  total += /(a+)b\1/.exec("x" + run + "b" + run + "b")[1].length;
+        \\}
+        \\const nested = "aabaa-abab".replace(/(a+)b\1/g, (whole) => whole.replace(/(a+)b\1/g, (_, run) => `[${run}]`));
+        \\`${total}|${nested}|${/(a+)b\1/.test("aab")}`
+    );
+    const prog = try parser.parseProgram();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var interp = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape, .scratch_allocator = std.testing.allocator };
+    defer interp.deinit();
+    const tdz = try a.create(value.Object);
+    tdz.* = .{};
+    interp.tdz_marker = tdz;
+
+    try std.testing.expectEqualStrings("127|[aa]-[a]b|false", (try interp.eval(prog)).asStr());
+    // One program for the literal, one more for the reentrant use.
+    try std.testing.expect(interp.regex_programs.?.len <= 2);
 }
 
 test "Intl.DateTimeFormat German numeric date pattern" {

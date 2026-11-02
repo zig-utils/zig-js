@@ -6,8 +6,18 @@ const Regex = regex.Regex;
 /// matcher scratch. A lease pins its entry across reentrant JavaScript calls;
 /// when all entries are pinned, the new program stays transient rather than
 /// weakening the bound or invalidating an outer operation.
+///
+/// Programs are shared by source and flags. A regexp literal is a fresh
+/// RegExp object every time it is evaluated, so keying by object would
+/// recompile a hot literal on every call. Sharing is safe for backtracking
+/// programs too: their search state is reset at the start of every match,
+/// and the pin keeps a reentrant use off a program an outer one is using.
 pub const Cache = struct {
-    pub const capacity = 64;
+    /// Real code cycles through more distinct patterns than a small table
+    /// holds: a utility-class compiler runs ~80 literals per class list, and
+    /// round-robin eviction of a cyclic working set larger than the table
+    /// misses on every lookup. A compiled program is a few KB.
+    pub const capacity = 256;
 
     /// Compilation performs many small allocations whose lifetimes are exactly
     /// the program lifetime. Keep those in a per-program arena so eviction is
@@ -77,9 +87,10 @@ pub const Cache = struct {
     };
 
     const Entry = struct {
+        /// `keyHash(source, flags)`, compared before the bytes on every lookup.
+        hash: u64,
         source: []const u8,
         flags: []const u8,
-        identity: u64,
         owned: *OwnedProgram,
         matcher: ?Regex.Matcher = null,
         pins: usize = 0,
@@ -212,17 +223,23 @@ pub const Cache = struct {
         entry.owned.deinit();
     }
 
-    fn matches(entry: *const Entry, source: []const u8, flags: []const u8, identity: u64) bool {
-        if (!std.mem.eql(u8, entry.flags, flags) or !std.mem.eql(u8, entry.source, source)) return false;
-        // Thompson programs are immutable and reusable by value. Backtracking
-        // programs embed mutable search state and stay isolated per RegExp.
-        return entry.owned.regex.?.engine_type == .thompson_nfa or entry.identity == identity;
+    fn keyHash(source: []const u8, flags: []const u8) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(flags);
+        hasher.update(&.{0});
+        hasher.update(source);
+        return hasher.final();
     }
 
-    pub fn acquire(self: *Cache, source: []const u8, flags: []const u8, identity: u64) ?Lease {
+    fn matches(entry: *const Entry, hash: u64, source: []const u8, flags: []const u8) bool {
+        return entry.hash == hash and std.mem.eql(u8, entry.flags, flags) and std.mem.eql(u8, entry.source, source);
+    }
+
+    pub fn acquire(self: *Cache, source: []const u8, flags: []const u8) ?Lease {
+        const hash = keyHash(source, flags);
         for (&self.entries, self.occupied, 0..) |*entry, occupied, index| {
             if (!occupied) continue;
-            if (!matches(entry, source, flags, identity)) continue;
+            if (!matches(entry, hash, source, flags)) continue;
             // A callback may recursively use the same RegExp while its outer
             // operation still owns matcher state. Skip pinned matches so the
             // recursive operation gets an independent cached or transient
@@ -257,7 +274,7 @@ pub const Cache = struct {
 
     /// Adopt one successfully compiled program. Ownership always transfers:
     /// either an unpinned slot owns it, or the returned transient lease does.
-    pub fn adopt(self: *Cache, source: []const u8, flags: []const u8, identity: u64, owned: *OwnedProgram) Lease {
+    pub fn adopt(self: *Cache, source: []const u8, flags: []const u8, owned: *OwnedProgram) Lease {
         var index: ?usize = null;
         if (self.len < capacity) {
             for (0..capacity) |offset| {
@@ -281,9 +298,9 @@ pub const Cache = struct {
             .owned = owned,
         } } };
         self.entries[target] = .{
+            .hash = keyHash(source, flags),
             .source = source,
             .flags = flags,
-            .identity = identity,
             .owned = owned,
             .pins = 1,
         };
@@ -324,14 +341,14 @@ test "RegExp program cache compares complete immutable keys by value" {
     var cache = Cache.init(std.testing.allocator);
     defer cache.deinit();
     const program = try compileOwned(std.testing.allocator, "a");
-    var lease = cache.adopt("a\x00b", "gi", 1, program);
+    var lease = cache.adopt("a\x00b", "gi", program);
     lease.release();
-    var hit = cache.acquire("a\x00b", "gi", 2).?;
+    var hit = cache.acquire("a\x00b", "gi").?;
     defer hit.release();
-    try std.testing.expect(cache.acquire("a\x00b", "gi", 2) == null);
-    try std.testing.expect(cache.acquire("a", "gi", 2) == null);
-    try std.testing.expect(cache.acquire("a\x00c", "gi", 2) == null);
-    try std.testing.expect(cache.acquire("a\x00b", "g", 2) == null);
+    try std.testing.expect(cache.acquire("a\x00b", "gi") == null);
+    try std.testing.expect(cache.acquire("a", "gi") == null);
+    try std.testing.expect(cache.acquire("a\x00c", "gi") == null);
+    try std.testing.expect(cache.acquire("a\x00b", "g") == null);
 }
 
 test "RegExp program cache reclaims an unpinned eviction" {
@@ -341,26 +358,41 @@ test "RegExp program cache reclaims an unpinned eviction" {
     for (&keys, 0..) |*key, i| {
         std.mem.writeInt(u32, key, @intCast(i), .little);
         const program = try compileOwned(std.testing.allocator, "a");
-        var lease = cache.adopt(key, "", @intCast(i), program);
+        var lease = cache.adopt(key, "", program);
         lease.release();
     }
     try std.testing.expectEqual(Cache.capacity, cache.len);
-    try std.testing.expect(cache.acquire(&keys[0], "", 0) == null);
-    var newest = cache.acquire(&keys[Cache.capacity], "", Cache.capacity).?;
+    try std.testing.expect(cache.acquire(&keys[0], "") == null);
+    var newest = cache.acquire(&keys[Cache.capacity], "").?;
     newest.release();
 }
 
-test "RegExp program cache isolates mutable backtracking programs by identity" {
+test "RegExp program cache shares a backtracking program by value, never while it is pinned" {
     var cache = Cache.init(std.testing.allocator);
     defer cache.deinit();
-    const program = try compileOwned(std.testing.allocator, "(a)\\1");
+    const program = try compileOwned(std.testing.allocator, "(a+)b\\1");
     try std.testing.expectEqual(.backtracking, program.regex.?.engine_type);
-    var lease = cache.adopt("(a)\\1", "", 41, program);
+    var lease = cache.adopt("(a+)b\\1", "", program);
+    const shared = lease.program();
+    {
+        var found = (try lease.find("xaabaa")).?;
+        defer found.deinit();
+        try std.testing.expectEqualStrings("aa", found.value.captures[0]);
+    }
+    // An outer match still holds it: a reentrant use must compile its own.
+    try std.testing.expect(cache.acquire("(a+)b\\1", "") == null);
     lease.release();
 
-    try std.testing.expect(cache.acquire("(a)\\1", "", 42) == null);
-    var same_object = cache.acquire("(a)\\1", "", 41).?;
-    same_object.release();
+    // Released, a later RegExp with the same source gets the same program, and
+    // the earlier search's captures do not leak into the new one.
+    var later = cache.acquire("(a+)b\\1", "").?;
+    defer later.release();
+    try std.testing.expectEqual(shared, later.program());
+    var found = (try later.find("abab")).?;
+    defer found.deinit();
+    try std.testing.expectEqualStrings("aba", found.value.slice);
+    try std.testing.expectEqualStrings("a", found.value.captures[0]);
+    try std.testing.expect((try later.find("aab")) == null);
 }
 
 test "RegExp program cache recycles an unpinned arena without moving pinned leases" {
@@ -369,10 +401,10 @@ test "RegExp program cache recycles an unpinned arena without moving pinned leas
     var keys: [Cache.capacity][4]u8 = undefined;
     for (&keys, 0..) |*key, i| {
         std.mem.writeInt(u32, key, @intCast(i), .little);
-        var lease = cache.adopt(key, "", @intCast(i), try compileOwned(std.testing.allocator, "a"));
+        var lease = cache.adopt(key, "", try compileOwned(std.testing.allocator, "a"));
         lease.release();
     }
-    var pinned = cache.acquire(&keys[0], "", 0).?;
+    var pinned = cache.acquire(&keys[0], "").?;
     const pinned_program = pinned.program();
     const recycled = try cache.ownerForMiss();
     try std.testing.expect(recycled.regex == null);
@@ -385,7 +417,7 @@ test "RegExp program cache recycles an unpinned arena without moving pinned leas
 test "RegExp program cache reuses matcher and result arenas across hot matches" {
     var cache = Cache.init(std.testing.allocator);
     defer cache.deinit();
-    var lease = cache.adopt("(a+?)(b)", "", 1, try compileOwned(std.testing.allocator, "(a+?)(b)"));
+    var lease = cache.adopt("(a+?)(b)", "", try compileOwned(std.testing.allocator, "(a+?)(b)"));
     defer lease.release();
     for (0..128) |_| {
         var found = (try lease.find("aaab")).?;
@@ -399,7 +431,7 @@ test "RegExp program cache reuses matcher and result arenas across hot matches" 
 test "RegExp program cache keeps lazy DFA scratch across result resets" {
     var cache = Cache.init(std.testing.allocator);
     defer cache.deinit();
-    var lease = cache.adopt("(ab+)", "", 1, try compileOwned(std.testing.allocator, "(ab+)"));
+    var lease = cache.adopt("(ab+)", "", try compileOwned(std.testing.allocator, "(ab+)"));
     defer lease.release();
 
     // A shared global RegExp can first be observed with nonzero lastIndex in
@@ -423,11 +455,11 @@ test "RegExp program cache uses a transient lease when every slot is pinned" {
     for (&leases, 0..) |*lease, i| {
         std.mem.writeInt(u32, &keys[i], @intCast(i), .little);
         const program = try compileOwned(std.testing.allocator, "a");
-        lease.* = cache.adopt(&keys[i], "", @intCast(i), program);
+        lease.* = cache.adopt(&keys[i], "", program);
     }
     std.mem.writeInt(u32, &keys[Cache.capacity], Cache.capacity, .little);
     const extra = try compileOwned(std.testing.allocator, "b");
-    var transient = cache.adopt(&keys[Cache.capacity], "", Cache.capacity, extra);
+    var transient = cache.adopt(&keys[Cache.capacity], "", extra);
     switch (transient.owner) {
         .transient => {},
         else => return error.TestUnexpectedResult,
