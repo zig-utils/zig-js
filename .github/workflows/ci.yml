@@ -392,7 +392,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         if: matrix.home_tool == true
         with:
@@ -567,7 +567,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@${{ env.ZIG_VERSION }}
@@ -632,7 +632,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: home-lang/home
@@ -688,7 +688,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: home-lang/home
@@ -741,7 +741,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@${{ env.ZIG_VERSION }}
@@ -795,7 +795,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@${{ env.ZIG_VERSION }}
@@ -832,7 +832,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@${{ env.ZIG_VERSION }}
@@ -879,7 +879,7 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: Libraries/zig-gc
-          ref: 0285ef801dd221a4ae8e88b31a09ae31627657a3
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: stacksjs/bunpress
