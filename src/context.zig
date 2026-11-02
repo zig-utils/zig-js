@@ -28132,6 +28132,41 @@ test "enable_gc nursery: quiescent minor collection reclaims young garbage" {
     try std.testing.expectEqual(full_before, heap.full_collections);
 }
 
+test "enable_gc nursery: closures sharing a captured frame keep its young slot values" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.sharedFrameClosures = (function () {
+        \\  let slot = null;
+        \\  const closures = [];
+        \\  for (let i = 0; i < 16; i++) closures.push({ set(v) { slot = v; }, get() { return slot; } });
+        \\  return closures;
+        \\})();
+    );
+    // Tenure every closure and the activation frame they all capture. Each
+    // minor cycle then rescans those old Functions, visiting the shared frame
+    // once per cycle; an unbarriered upvalue store must still be found.
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    var source_buf: [160]u8 = undefined;
+    for (0..runtime_gc_tenuring_age + 2) |round| {
+        const store = try std.fmt.bufPrint(&source_buf, "sharedFrameClosures[{d}].set({{ round: {d}, text: 'young-' + {d} }})", .{ round % 16, round, round });
+        _ = try ctx.evaluate(store);
+        try std.testing.expect(heap.young_cells > 0);
+        const minor_before = heap.minor_collections;
+        for (0..runtime_gc_tenuring_age) |_| heap.collectYoung();
+        try std.testing.expect(heap.minor_collections > minor_before);
+        const read = try std.fmt.bufPrint(&source_buf, "(() => {{ const v = sharedFrameClosures[{d}].get(); return v.round === {d} && v.text === 'young-{d}'; }})()", .{ 15 - round % 16, round, round });
+        try std.testing.expect((try ctx.evaluate(read)).asBool());
+    }
+}
+
 test "enable_gc: quiescent promotion debt reclaims a transient tenured burst" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
     defer ctx.destroy();

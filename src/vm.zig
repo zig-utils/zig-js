@@ -126,6 +126,10 @@ pub const Frame = struct {
     // the parallel flag, so the GIL/single-threaded engine pays nothing.
     escaped: std.atomic.Value(bool) = .init(false),
     slot_lock: std.atomic.Mutex = .unlocked,
+    /// Minor-GC trace stamp (see `gc.claimMinorTrace`). Every closure created
+    /// in an activation, and in each nested one, walks this frame; one visit
+    /// per minor cycle marks its slots.
+    gc_minor_trace_epoch: u64 = 0,
 
     // `pub` so the GC's parallel root trace can take the same lock when it reads
     // an escaped frame's slots via a cross-thread captured-frame walk; see

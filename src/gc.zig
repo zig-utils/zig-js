@@ -1754,11 +1754,39 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     return released;
 }
 
+/// The visitor's stamp for the current stop-the-world minor trace, or zero
+/// whenever containers must be traced on every visit.
+inline fn minorTraceEpoch(v: anytype) u64 {
+    if (comptime !@hasDecl(@TypeOf(v.*), "minorTraceEpoch")) return 0;
+    return v.minorTraceEpoch();
+}
+
+/// Old Function cells are rescanned on every minor cycle (`traceOldOnMinor`)
+/// because, among other edges, captured frame slots change without an owner
+/// barrier.
+/// Those containers are shared: every closure of an activation walks the same
+/// frame chain (a bundle's top-level frame holds thousands of slots), and every
+/// closure of a template traces the same constant pools. Visiting each once per
+/// minor trace attempt keeps that rescan proportional to the distinct
+/// containers rather than to closures times container size. The graph cannot
+/// change during a stop-the-world minor and marking is idempotent, so a later
+/// visit within the attempt finds nothing new. Returns true when the container
+/// was already visited; otherwise claims it for this attempt.
+inline fn claimMinorTrace(stamp: *u64, epoch: u64) bool {
+    if (epoch == 0) return false;
+    // Atomic only because a chunk can be shared by heaps collecting on other
+    // threads; each heap's stamps are unique, so a foreign stamp never skips.
+    if (@atomicLoad(u64, stamp, .monotonic) == epoch) return true;
+    @atomicStore(u64, stamp, epoch, .monotonic);
+    return false;
+}
+
 /// Bytecode storage is arena-owned, but constants emitted through `Value.strAlloc`
 /// and object-valued constants still belong to the managed heap. Nested function
 /// templates are not cells yet, so their chunks must be reached through the
 /// owning chunk as well.
 fn traceChunk(chunk: *const bytecode.Chunk, v: anytype) void {
+    if (claimMinorTrace(@constCast(&chunk.gc_minor_trace_epoch), minorTraceEpoch(v))) return;
     for (chunk.consts.items) |constant| markValue(v, constant);
     for (chunk.fns.items) |template|
         if (template.chunk) |nested| traceChunk(nested, v);
@@ -1779,7 +1807,11 @@ fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
 fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
     const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
+    const epoch = minorTraceEpoch(v);
     while (frame) |current| : (frame = current.parent) {
+        // A claimed frame's whole parent chain was walked by the visit that
+        // claimed it, so the rest of this chain is already traced too.
+        if (claimMinorTrace(&current.gc_minor_trace_epoch, epoch)) break;
         if (current.closure_environment) |environment| markManaged(v, environment);
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
         if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
@@ -4467,6 +4499,9 @@ pub const Binding = struct {
     }
 
     pub fn afterWeak(self: *Binding, cell: *anyopaque, kind: Kind) void {
+        // Only objects carry weak entries; a minor cycle visits every carded
+        // Function here, so skip the realm lookup for every other kind.
+        if (kind != .object) return;
         const ctx = self.realmForCell(cell) orelse return;
         switch (kind) {
             .object => {

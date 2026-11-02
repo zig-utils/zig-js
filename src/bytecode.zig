@@ -946,6 +946,9 @@ pub const Chunk = struct {
     /// every resulting assumption and preserve baseline/interpreter fallback.
     optimizer_profile: jit.OptimizerProfile = .{},
     optimizer_tier: jit.OptimizerTier = .{},
+    /// Minor-GC trace stamp (see `gc.claimMinorTrace`). Every closure of a
+    /// template shares this chunk; one visit per minor cycle marks its pool.
+    gc_minor_trace_epoch: u64 = 0,
 
     pub fn init(arena: std.mem.Allocator) Chunk {
         return .{ .arena = arena };
