@@ -14727,6 +14727,44 @@ export fn Bun__setSamplingInterval(interval_microseconds: c_int) callconv(.c) vo
     private_cpu_sampling_interval_us.store(validated, .release);
 }
 
+/// Start sampling the JavaScript a context's group runs, every `interval_us`
+/// microseconds (0: the 1 ms default), for an embedder's own profiling switch.
+/// Restarting discards samples not yet read.
+export fn ZJSContextStartCPUProfile(ctx: JSContextRef, interval_us: u32) callconv(.c) bool {
+    const global = ctx orelse return false;
+    if (privateGroupFromVM(JSC__JSGlobalObject__vm(global)) == null) return false;
+    if (interval_us != 0) Bun__setSamplingInterval(@intCast(@min(interval_us, 60 * 1_000_000)));
+    Bun__startCPUProfiler(JSC__JSGlobalObject__vm(global));
+    return true;
+}
+
+/// Stop sampling and return what was sampled as Chrome DevTools `.cpuprofile`
+/// JSON (DevTools, speedscope and the like read it), or null when no profile
+/// was running. Release the string with JSStringRelease.
+export fn ZJSContextStopCPUProfile(ctx: JSContextRef) callconv(.c) JSStringRef {
+    const global = ctx orelse return null;
+    const group = privateGroupFromVM(JSC__JSGlobalObject__vm(global)) orelse return null;
+    group.primary.assertOwnerThread();
+    const profiler = &group.cpu_profiler;
+    if (!profiler.running.swap(false, .acq_rel)) return null;
+    privateCPUProfilerSetHooks(group, false);
+
+    profiler.acquire();
+    var samples = profiler.samples;
+    profiler.samples = .empty;
+    const start_wall_us = profiler.start_wall_us;
+    profiler.dropped_samples = 0;
+    profiler.release();
+    defer {
+        for (samples.items) |sample| gpa.free(sample.frames);
+        samples.deinit(gpa);
+    }
+    const json = privateGenerateCPUProfileJSON(samples.items, start_wall_us, gpa) catch return null;
+    defer gpa.free(json);
+    const string = JsString.create(gpa, json) catch return null;
+    return @ptrCast(string);
+}
+
 /// Start (or restart) a clean per-VM session. Restarting intentionally discards
 /// unconsumed samples; it never appends a second timeline onto the first.
 export fn Bun__startCPUProfiler(vm_ref: ?*anyopaque) callconv(.c) void {
@@ -24534,6 +24572,32 @@ test "private heap snapshot IDs preserve arena and precise identities" {
     try std.testing.expectEqual(precise_id, try privateHeapSnapshotCellId(precise_group, precise_cell));
     try std.testing.expectEqual(@as(usize, 0), precise_group.heap_snapshot_ids.count());
     try std.testing.expect(precise_group.heap_snapshot_ids.context == null);
+}
+
+test "C-API: a context's CPU profile names the functions that ran" {
+    const ctx = ZJSGlobalContextCreateGarbageCollected(false) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    try std.testing.expect(ZJSContextStopCPUProfile(ctx) == null);
+    try std.testing.expect(ZJSContextStartCPUProfile(ctx, 50));
+
+    const script = JSStringCreateWithUTF8CString(
+        \\function busyProfiledWork() { let total = 0; for (let i = 0; i < 400000; i++) total += i % 7; return total }
+        \\busyProfiledWork() + busyProfiledWork()
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    var exception: JSValueRef = null;
+    _ = JSEvaluateScript(ctx, script, null, null, 1, &exception);
+    try std.testing.expect(exception == null);
+
+    const profile = ZJSContextStopCPUProfile(ctx) orelse return error.NoProfile;
+    defer JSStringRelease(profile);
+    var buffer: [1 << 16]u8 = undefined;
+    const written = JSStringGetUTF8CString(profile, &buffer, buffer.len);
+    const json = buffer[0 .. written - 1];
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"nodes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "busyProfiledWork") != null);
+    // Stopped: a second stop has nothing to give.
+    try std.testing.expect(ZJSContextStopCPUProfile(ctx) == null);
 }
 
 test "C-API: create + release context, round-trip a number" {

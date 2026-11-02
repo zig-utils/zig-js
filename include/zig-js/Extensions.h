@@ -25,6 +25,13 @@ typedef enum ZJSGCCompactionStatus {
 JS_EXPORT ZJSGCCompactionStatus ZJSContextCompactGarbage(
     JSContextRef ctx, size_t* movedCells, size_t* movedBytes);
 
+/* Sample the JavaScript a context's group runs (0: every 1 ms) and stop with
+ * the samples as Chrome DevTools .cpuprofile JSON, null if none was running.
+ * Release the string with JSStringRelease. Statement-boundary sampling: time in
+ * one long native call is counted at the statement after it. */
+JS_EXPORT bool ZJSContextStartCPUProfile(JSContextRef ctx, uint32_t intervalMicroseconds);
+JS_EXPORT JSStringRef ZJSContextStopCPUProfile(JSContextRef ctx);
+
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);
