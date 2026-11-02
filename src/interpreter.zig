@@ -1558,6 +1558,17 @@ fn BindingStringMapUnmanaged(comptime MapValue: type) type {
     };
 }
 
+/// Invalidates every cached identifier resolution (`vm.zig` QuickGlobalBinding)
+/// at once. It advances when a sloppy direct eval (or a sloppy PutValue
+/// re-creating a deleted eval binding) adds a binding to an Environment that
+/// already existed, and at every garbage-collection phase boundary, because a
+/// collection may free or move the Environments and objects a cache entry
+/// names by address. Every other declaration is instantiated before code in
+/// that scope can run, so an entry stays exact while this value is unchanged.
+/// Process-wide because bytecode chunks, and their caches, outlive any one
+/// interpreter or heap; a spurious advance only costs one canonical lookup.
+pub var binding_cache_epoch: std.atomic.Value(u64) = .init(0);
+
 pub const Environment = struct {
     vars: BindingStringMapUnmanaged(Value) = .{},
     binding_hash_state: BindingHashState = .secure_entropy,
@@ -2045,6 +2056,9 @@ pub const Environment = struct {
     pub fn markDeletable(self: *Environment, name: []const u8) EvalError!void {
         if (self.direct_eval_forward_target) |target| return target.markDeletable(name);
         try self.markOwnedName(&self.deletable, name);
+        // Every caller has just added `name` to a record that already existed,
+        // so a resolution cached through this record may now be shadowed.
+        _ = binding_cache_epoch.fetchAdd(1, .release);
     }
 
     /// Remove a binding from *this* scope entirely (DeleteBinding for a deletable

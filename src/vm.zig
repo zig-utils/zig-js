@@ -1094,18 +1094,27 @@ const QuickLeafPlan = union(enum) {
     numeric: QuickNumericLeaf,
 };
 
-const QuickGlobalBinding = union(enum) {
-    object: struct {
-        env: *Environment,
-        object: *value.Object,
-        shape: *Shape,
-        slot: u32,
-    },
-    environment: struct {
-        start: *Environment,
-        binding: *Environment,
-        name: []const u8,
-    },
+const QuickGlobalBinding = struct {
+    /// `interp.binding_cache_epoch` observed before the resolving walk. A later
+    /// sloppy-eval declaration can shadow `target` from any record the walk
+    /// passed, and a collection can free or move every record and object named
+    /// below and reuse their addresses; no pointer or shape guard sees either.
+    epoch: u64 = 0,
+    target: Target,
+
+    const Target = union(enum) {
+        object: struct {
+            env: *Environment,
+            object: *value.Object,
+            shape: *Shape,
+            slot: u32,
+        },
+        environment: struct {
+            start: *Environment,
+            binding: *Environment,
+            name: []const u8,
+        },
+    };
 };
 
 // Test-only observations enforce that the optimized path remains reachable.
@@ -1448,7 +1457,8 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
     if (instruction >= chunk.quick_global_bindings.len) return null;
     const raw = chunk.quick_global_bindings[instruction] orelse return null;
     const cache: *QuickGlobalBinding = @ptrCast(@alignCast(raw));
-    return switch (cache.*) {
+    if (cache.epoch != interp.binding_cache_epoch.load(.acquire)) return null;
+    return switch (cache.target) {
         .object => |object_cache| value_: {
             if (vm.env != object_cache.env or vm.global_object != object_cache.object or
                 object_cache.object.shape != object_cache.shape)
@@ -1468,7 +1478,7 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
     };
 }
 
-fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8, allow_unbound_global_object: bool) ?QuickGlobalBinding {
+fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8, allow_unbound_global_object: bool) ?QuickGlobalBinding.Target {
     const start = vm.env;
     // Evaluated scripts may put a transparent declarative environment between
     // a function closure and the realm root. Cache the exact environment record
@@ -1537,9 +1547,13 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
         chunk.quick_global_bindings = caches;
     }
     if (instruction >= chunk.quick_global_bindings.len) return;
-    const resolved = resolveQuickGlobalBinding(vm, name, false) orelse {
-        chunk.quick_global_bindings[instruction] = null;
-        return;
+    const epoch = interp.binding_cache_epoch.load(.acquire);
+    const resolved: QuickGlobalBinding = .{
+        .epoch = epoch,
+        .target = resolveQuickGlobalBinding(vm, name, false) orelse {
+            chunk.quick_global_bindings[instruction] = null;
+            return;
+        },
     };
     if (chunk.quick_global_bindings[instruction]) |raw| {
         const cache: *QuickGlobalBinding = @ptrCast(@alignCast(raw));

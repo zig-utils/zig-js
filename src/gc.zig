@@ -4051,6 +4051,9 @@ pub const Binding = struct {
     pub const Kind = CellKind;
 
     pub fn collectionPhaseBoundary(self: *Binding, boundary: gc.CollectionPhaseBoundary) void {
+        // Sweep and relocation recycle cell addresses, which bytecode binding
+        // caches hold without tracing. Retire them before any can be reused.
+        _ = interp.binding_cache_epoch.fetchAdd(1, .release);
         self.context.recordGcCollectionPhase(boundary);
     }
 

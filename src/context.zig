@@ -15283,6 +15283,63 @@ test "cached identifier reads honor slot-backed activation bindings" {
     );
 }
 
+test "garbage collection retires cached identifier resolutions" {
+    // Cache entries name Environments by address without tracing them. A
+    // collection may free or move those records and hand the address to a new
+    // activation, so every collection must retire the entries.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var current = 'global';
+        \\var handlers = [];
+        \\function setup() {
+        \\  const current = 'inner';
+        \\  const mount = async () => { handlers.push(() => [current, {}]); };
+        \\  mount();
+        \\}
+        \\setup();
+        \\function readAll() {
+        \\  var seen = [];
+        \\  for (var i = 0; i < 64; i++) seen.push(handlers[0]()[0]);
+        \\  return seen.every(function (v) { return v === 'inner'; });
+        \\}
+    );
+    try std.testing.expect((try ctx.evaluate("readAll()")).asBool());
+    const before = interp.binding_cache_epoch.load(.acquire);
+    ctx.collectGarbage();
+    try std.testing.expect(interp.binding_cache_epoch.load(.acquire) != before);
+    _ = ctx.compactGarbage();
+    try std.testing.expect((try ctx.evaluate("readAll()")).asBool());
+}
+
+test "cached identifier reads see bindings a sloppy eval adds later" {
+    try expectEvalStr("outer,inner;outer,inner",
+        \\var log = [];
+        \\(function () {
+        \\  var current = 'outer';
+        \\  async function f() {
+        \\    const read = () => current;
+        \\    const a = read();
+        \\    eval('var current = "inner"');
+        \\    log.push(a + ',' + read());
+        \\  }
+        \\  f();
+        \\})();
+        \\var other = 'outer';
+        \\async function g() {
+        \\  const read = () => other;
+        \\  const a = read();
+        \\  eval('var other = "inner"');
+        \\  log.push(a + ',' + read());
+        \\}
+        \\g();
+        \\log.join(';')
+    );
+}
+
 test "$262.AbstractModuleSource host intrinsic surface" {
     try std.testing.expect((try evalIn(
         \\var C = $262.AbstractModuleSource;
