@@ -1457,10 +1457,14 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
             if (slot >= object_cache.object.slotsItems().len) break :value_ null;
             break :value_ object_cache.object.slotsItems()[slot];
         },
-        .environment => |environment_cache| if (vm.env == environment_cache.start)
-            environment_cache.binding.getLocal(environment_cache.name)
-        else
-            null,
+        .environment => |environment_cache| value_: {
+            if (vm.env != environment_cache.start) break :value_ null;
+            const live = environment_cache.binding.getLocal(environment_cache.name) orelse break :value_ null;
+            // A slot-backed lexical re-enters its TDZ when its block runs
+            // again; the canonical path owns the ReferenceError.
+            if (vm.isTdz(live)) break :value_ null;
+            break :value_ live;
+        },
     };
 }
 
@@ -1478,6 +1482,12 @@ fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8, allow_unbound_g
     while (cursor) |env| : (cursor = env.parent) {
         if (env.direct_eval_forward_target != null) return null;
         if (env.with_object != null) return null;
+        // A suspendable closure or direct eval in a compiled function sees that
+        // activation's frame slots through this view, never through `vars`.
+        // `lookupIdentValue` consults it first, and so must this walk: skipping
+        // it would cache an outer same-named binding the view shadows.
+        if (env.activation) |*view| if (view.binding(name) != null)
+            return .{ .environment = .{ .start = start, .binding = env, .name = name } };
         const locked = env.lockBindingsForRead();
         const context = env.bindingHashContext();
         const alias = env.aliases.contains(context, name);

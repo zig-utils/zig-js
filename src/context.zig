@@ -15252,6 +15252,37 @@ fn expectEvalStr(expected: []const u8, src: []const u8) !void {
     try std.testing.expectEqualStrings(expected, v.asStr());
 }
 
+test "cached identifier reads honor slot-backed activation bindings" {
+    // A compiled function's suspendable closure reaches the function's frame
+    // slots through activation-backed Environments. The `load_var` cache once
+    // skipped them, so every read after the first returned the outer `current`
+    // (stx native screens declaring `const current` inside `onMount`).
+    try expectEvalStr("inner,inner,inner,inner2,inner2,inner2",
+        \\var current = 'global';
+        \\var log = [];
+        \\(function () {
+        \\  var current = 'outer';
+        \\  var handlers = [];
+        \\  function setup() {
+        \\    const current = 'inner';
+        \\    const mount = async () => { handlers.push(() => current); };
+        \\    mount();
+        \\  }
+        \\  setup();
+        \\  for (var i = 0; i < 3; i++) log.push(handlers[0]());
+        \\})();
+        \\var hs = [];
+        \\function setup2() {
+        \\  const current = 'inner2';
+        \\  const mount = async () => { hs.push(() => current); };
+        \\  mount();
+        \\}
+        \\setup2();
+        \\for (var j = 0; j < 3; j++) log.push(hs[0]());
+        \\log.join()
+    );
+}
+
 test "$262.AbstractModuleSource host intrinsic surface" {
     try std.testing.expect((try evalIn(
         \\var C = $262.AbstractModuleSource;
