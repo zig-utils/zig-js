@@ -1275,6 +1275,11 @@ pub const StackTraceCallFrame = struct {
     code_type: value.ErrorStackFrameCode = .function,
     is_async: bool = false,
     location: ?DebugStatementLocation = null,
+    /// Bytecode records only the statement node it reached; the registry
+    /// lookup runs when a stack trace, profiler or debugger reads the frame
+    /// (`Interpreter.resolveStackTraceLocations`). Non-null means `location`
+    /// is stale until resolved.
+    location_node: ?*const Node = null,
     definition_location: ?DebugStatementLocation = null,
     caller: ?*StackTraceCallFrame = null,
 };
@@ -4078,6 +4083,9 @@ pub const Interpreter = struct {
     debug_exception_ctx: ?*anyopaque = null,
     debug_exception_hook: ?DebugExceptionHook = null,
     debug_current_location: ?DebugStatementLocation = null,
+    /// Latest bytecode statement whose location has not been looked up yet.
+    /// Read `debug_current_location` through `currentDebugLocation`.
+    debug_current_location_node: ?*const Node = null,
     debug_call_frame: ?*DebugCallFrame = null,
     stack_trace_call_frame: ?*StackTraceCallFrame = null,
     debug_top_level_location: ?DebugStatementLocation = null,
@@ -6136,6 +6144,7 @@ pub const Interpreter = struct {
     }
 
     fn captureErrorStack(self: *Interpreter, obj: *value.Object) EvalError!void {
+        self.resolveStackTraceLocations();
         var frames: std.ArrayListUnmanaged(value.ErrorStackFrame) = .empty;
         var current = self.stack_trace_call_frame;
         while (current) |frame| : (current = frame.caller) {
@@ -6250,7 +6259,7 @@ pub const Interpreter = struct {
     pub fn notifyDebuggerException(self: *Interpreter, uncaught: bool) EvalError!void {
         if (self.debug_exception_hook) |hook| {
             if (!uncaught) self.debug_exception_origin_notified = true;
-            try hook(self.debug_exception_ctx.?, self, self.exception, self.debug_current_location, uncaught);
+            try hook(self.debug_exception_ctx.?, self, self.exception, self.currentDebugLocation(), uncaught);
         }
     }
 
@@ -7038,6 +7047,31 @@ pub const Interpreter = struct {
         if (self.debug_registry_lock) |registry| registry.unlock();
     }
 
+    /// The current statement location, resolving the statement bytecode
+    /// recorded without a registry lookup. An unregistered node leaves the
+    /// previous location in place, as an eager lookup would have.
+    pub fn currentDebugLocation(self: *Interpreter) ?DebugStatementLocation {
+        if (self.debug_current_location_node) |node| {
+            self.debug_current_location_node = null;
+            if (self.debugStatementLocation(node)) |location| self.debug_current_location = location;
+        }
+        return self.debug_current_location;
+    }
+
+    pub fn resolveStackTraceFrameLocation(self: *Interpreter, frame: *StackTraceCallFrame) void {
+        const node = frame.location_node orelse return;
+        frame.location_node = null;
+        if (self.debugStatementLocation(node)) |location| frame.location = location;
+    }
+
+    /// Resolve every pending statement location on this interpreter's stack
+    /// trace chain. Call before reading `location` from any frame of the chain.
+    pub fn resolveStackTraceLocations(self: *Interpreter) void {
+        _ = self.currentDebugLocation();
+        var current = self.stack_trace_call_frame;
+        while (current) |frame| : (current = frame.caller) self.resolveStackTraceFrameLocation(frame);
+    }
+
     pub fn debugStatementLocation(self: *Interpreter, node: *const Node) ?DebugStatementLocation {
         const set_index = debugLocationCacheSetIndex(node);
         const set = &self.debug_location_cache[set_index];
@@ -7077,7 +7111,11 @@ pub const Interpreter = struct {
         if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
         if (location) |statement_location| {
             self.debug_current_location = statement_location;
-            if (self.stack_trace_call_frame) |frame| frame.location = statement_location;
+            self.debug_current_location_node = null;
+            if (self.stack_trace_call_frame) |frame| {
+                frame.location = statement_location;
+                frame.location_node = null;
+            }
             if (self.debug_statement_hook) |hook| {
                 if (self.debug_call_frame) |frame| {
                     if (!frame.environment_is_vm_activation) frame.environment = self.env;
@@ -8526,7 +8564,7 @@ pub const Interpreter = struct {
             .closure = closure,
             .realm_global = functionRealmGlobal(closure, self.global_object),
             .name = fnode.name,
-            .definition_location = self.debug_current_location,
+            .definition_location = self.currentDebugLocation(),
             .source = fnode.source,
             .bytecode_execution_mode = self.bytecode_execution_mode,
             .is_generator = fnode.is_generator,

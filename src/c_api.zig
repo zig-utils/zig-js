@@ -3877,10 +3877,11 @@ fn privateJSHostFunctionNative(
 
     const frame: *PrivateCallFrame = @ptrCast(@alignCast(registers.ptr));
     const caller_frame = machine.stack_trace_call_frame;
+    if (caller_frame) |caller| machine.resolveStackTraceFrameLocation(caller);
     const active = PrivateActiveCallFrame{
         .frame = frame,
         .context = record.context,
-        .caller_location = machine.debug_current_location orelse if (caller_frame) |caller| caller.location else null,
+        .caller_location = machine.currentDebugLocation() orelse if (caller_frame) |caller| caller.location else null,
         .caller_function_name = if (caller_frame) |caller| caller.function_name else "",
     };
     const previous_active = private_active_call_frame;
@@ -14114,6 +14115,7 @@ fn privateCPUProfilerStatementBoundary(
     if (now_mono < profiler.next_sample_mono_ns) return;
     profiler.next_sample_mono_ns = now_mono + @as(i128, profiler.interval_us) * std.time.ns_per_us;
 
+    machine.resolveStackTraceLocations();
     var frame_count: usize = 0;
     var current = machine.stack_trace_call_frame;
     while (current) |frame| : (current = frame.caller) {
@@ -18725,6 +18727,7 @@ fn captureInspectorAsyncFrames(context: *Context, state: *const CInspectorState)
         null;
     const limit = if (machine) |active| active.selectedStackTraceLimit() else std.math.maxInt(u8);
     if (machine) |active| {
+        active.resolveStackTraceLocations();
         var current = active.stack_trace_call_frame;
         while (current) |frame| : (current = frame.caller) {
             const retained = interp.Interpreter.errorStackFrameFromCallFrame(frame, frames.items.len);
@@ -18739,7 +18742,7 @@ fn captureInspectorAsyncFrames(context: *Context, state: *const CInspectorState)
             if (frames.items.len >= limit) break;
         }
         if (frames.items.len == 0 and limit > 0) {
-            const location = active.debug_current_location;
+            const location = active.currentDebugLocation();
             try appendInspectorAsyncFrame(
                 &frames,
                 "(global)",
@@ -19475,7 +19478,7 @@ fn inspectorExceptionBoundary(
     state.step_mode = .none;
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
     defer pause_arena.deinit();
-    const frame_location = maybe_location orelse machine.debug_current_location orelse interp.DebugStatementLocation{
+    const frame_location = maybe_location orelse machine.currentDebugLocation() orelse interp.DebugStatementLocation{
         .script_id = 0,
         .location = .{ .line = 1, .column = 1, .byte_offset = 0 },
     };

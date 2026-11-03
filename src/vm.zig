@@ -2470,7 +2470,11 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
                         .source_url = source.source_url,
                     };
                     vm.debug_current_location = location;
-                    if (vm.stack_trace_call_frame) |call_frame| call_frame.location = location;
+                    vm.debug_current_location_node = null;
+                    if (vm.stack_trace_call_frame) |call_frame| {
+                        call_frame.location = location;
+                        call_frame.location_node = null;
+                    }
                     hook(vm.profile_statement_ctx.?, vm, location);
                 }
             }
@@ -7701,6 +7705,7 @@ fn resolveNativeBytecodeSource(
 fn nativeCodeOrigin(vm: *Interpreter, owner: *const jit.Owner, chunk: ?*const Chunk) jit.NativeCodeOrigin {
     if (!owner.nativeObservabilityEnabled()) return .{};
     const frame = vm.stack_trace_call_frame orelse return .{};
+    if (frame.definition_location == null) vm.resolveStackTraceFrameLocation(frame);
     const location = frame.definition_location orelse frame.location;
     if (location) |source| return .{
         .function_name = frame.function_name,
@@ -8115,12 +8120,16 @@ fn serviceVmDebugStatement(vm: *Interpreter, node: *const ast.Node, chunk: *Chun
     }
 }
 
-fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
-    const location = vm.debugStatementLocation(node) orelse return;
-    vm.debug_current_location = location;
-    if (vm.stack_trace_call_frame) |frame| frame.location = location;
-    if (vm.profile_statement_hook) |hook|
-        hook(vm.profile_statement_ctx.?, vm, location);
+/// Record the statement an activation reached. Only the node is stored; the
+/// registry lookup is deferred until a stack trace, error, debugger or profiler
+/// reads the location (`Interpreter.resolveStackTraceLocations`).
+inline fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
+    vm.debug_current_location_node = node;
+    if (vm.stack_trace_call_frame) |frame| frame.location_node = node;
+    if (vm.profile_statement_hook) |hook| {
+        vm.resolveStackTraceLocations();
+        if (vm.debug_current_location) |location| hook(vm.profile_statement_ctx.?, vm, location);
+    }
 }
 
 /// The instruction loop proper. Operates on `exec.stack` directly so the
@@ -8568,37 +8577,50 @@ fn runChunk(
                     try stack.append(stack_alloc, cf.readSlot(inst.a, parallel_sync));
                     continue;
                 }
-                const start = ip - 1;
+                if (parallel_sync) {
+                    try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst, Value.undef(), parallel_sync));
+                    continue;
+                }
+                const local = cf.slots[inst.a];
                 // A quick property assignment must start with an object-valued
                 // base and then a numeric RHS load. Keep the recognizer call off
                 // ordinary numeric locals (including the arithmetic JIT side
                 // exits), and off the inner `load_local; get_prop` read pair.
-                const may_start_quick_property = !debug_execution and ip < code.len and quickPropertySiteMayApply(chunk, start, parallel_sync) and
-                    switch (code[ip].op) {
-                        .load_const, .load_local => true,
-                        else => false,
-                    };
-                if (may_start_quick_property) property: {
-                    const held = cf.lockSlots(parallel_sync);
-                    const quick_property_base = cf.slots[inst.a].isObject();
-                    cf.unlockSlots(held);
-                    if (!quick_property_base) break :property;
+                if (local.isObject() and !debug_execution and ip < code.len and
+                    (code[ip].op == .load_const or code[ip].op == .load_local) and
+                    quickPropertySiteMayApply(chunk, ip - 1, parallel_sync))
+                {
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                     const steps_until_budget = vm.step_budget - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                    if (!parallel_sync) {
-                        if (tryNumericPropertyUpdate(chunk, cf, start, max_extra_steps)) |quick| {
-                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
-                            vm.steps += quick.extra_steps;
-                            ip = quick.next_ip;
-                            continue;
-                        }
+                    if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |quick| {
+                        if (execution_inventory != null) vm_quick_kernel_hits += 1;
+                        vm.steps += quick.extra_steps;
+                        ip = quick.next_ip;
+                        continue;
                     }
                 }
-                try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst, Value.undef(), parallel_sync));
+                try stack.append(stack_alloc, local);
             },
-            .load_local_lexical => try stack.append(stack_alloc, try executeLocalBinding(vm, frame.?, chunk, inst, Value.undef(), parallel_sync)),
-            .store_local, .store_local_mapped, .store_local_lexical => {
+            .load_local_lexical => {
+                const cf = frame.?;
+                if (parallel_sync) {
+                    try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst, Value.undef(), parallel_sync));
+                    continue;
+                }
+                const local = cf.slots[inst.a];
+                if (vm.isTdz(local)) return throwTdzSlot(vm, chunk, inst.a);
+                try stack.append(stack_alloc, local);
+            },
+            .store_local => {
+                const cf = frame.?;
+                if (parallel_sync or cf.mapped_arguments != null) {
+                    _ = try executeLocalBinding(vm, cf, chunk, inst, stack.items[stack.items.len - 1], parallel_sync);
+                    continue;
+                }
+                cf.slots[inst.a] = stack.items[stack.items.len - 1];
+            },
+            .store_local_mapped, .store_local_lexical => {
                 _ = try executeLocalBinding(vm, frame.?, chunk, inst, stack.items[stack.items.len - 1], parallel_sync);
             },
             .load_upval, .load_upval_mapped, .load_upval_lexical => {
@@ -9914,6 +9936,7 @@ fn runChunk(
                     g.suspend_kind = if (inst.op == .await_op) .await else .yield;
                     if (inst.op == .await_op) {
                         if (vm.stack_trace_call_frame) |trace_frame| {
+                            vm.resolveStackTraceFrameLocation(trace_frame);
                             var snapshot = Interpreter.errorStackFrameFromCallFrame(trace_frame, 0);
                             snapshot.is_async = true;
                             g.async_suspension_frame = snapshot;
@@ -12703,7 +12726,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .closure = closure_env,
         .realm_global = interp.functionRealmGlobal(closure_env, vm.global_object),
         .name = tmpl.name,
-        .definition_location = vm.debugStatementLocation(tmpl.definition_node) orelse vm.debug_current_location,
+        .definition_location = vm.debugStatementLocation(tmpl.definition_node) orelse vm.currentDebugLocation(),
         .source = tmpl.source,
         .bytecode_admission_reason = admission_reason,
         .bytecode_execution_mode = vm.bytecode_execution_mode,
@@ -13006,6 +13029,11 @@ const Activation = struct {
     legacy_argument_storage: []Value = &.{},
     legacy_call_frame: interp.LegacyCallFrame = undefined,
     legacy_call_frame_active: bool = false,
+    /// The legacy argument buffers hold values that release must clear.
+    legacy_arguments_used: bool = false,
+    /// The frame escaped into a closure when this activation was released;
+    /// the next acquire allocates a fresh frame instead of reusing it.
+    frame_detached: bool = false,
     next_free: ?*Activation = null,
     // The operand-stack index in the *caller* where this call's result lands
     // (callee + args were popped off before the call ran). Unused for the
@@ -13047,37 +13075,37 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     }
     if (act.exec.parameter_rest_arguments) |arguments| @memset(arguments, Value.undef());
     act.exec.parameter_rest_arguments = null;
-    @memset(&act.legacy_inline_arguments, Value.undef());
-    @memset(act.legacy_argument_storage, Value.undef());
+    if (act.legacy_arguments_used) {
+        @memset(&act.legacy_inline_arguments, Value.undef());
+        @memset(act.legacy_argument_storage, Value.undef());
+        act.legacy_arguments_used = false;
+    }
     act.legacy_call_frame_active = false;
-    if (act.frame.escaped.load(.monotonic)) return;
     act.exec.stack.clearRetainingCapacity();
     act.exec.handlers.clearRetainingCapacity();
     act.exec.acc = Value.undef();
     act.exec.ip = 0;
     act.exec.frame = null;
-    act.exec.saved_this = Value.undef();
-    act.exec.saved_env = null;
-    act.exec.saved_global = null;
-    act.exec.saved_nt = Value.undef();
-    act.exec.saved_ims = null;
-    act.exec.saved_imo = null;
-    act.exec.saved_this_cell = null;
-    act.exec.saved_active_function = null;
-    act.exec.saved_home_object = null;
-    act.exec.saved_super_ctor = null;
+    // The saved caller fields need no reset: the pool is not a GC root, and
+    // `buildActivation` rewrites every one before it publishes the Exec.
     act.exec.debug_environment = null;
     act.exec.environment_depth = 0;
     act.exec.abrupt_environment_depth = 0;
     act.exec.class_strict_depth = 0;
     act.exec.class_strict_base = false;
     act.exec.strict_initialized = false;
-    @memset(act.exec.binding_references, .empty);
-    act.frame.mapped_arguments = null;
-    act.frame.mapped_parameter_indices = &.{};
-    act.frame.closure_environment = null;
-    act.frame.direct_eval_environment.store(null, .release);
-    act.frame.direct_eval_parameter_environment.store(null, .release);
+    if (act.exec.binding_references.len != 0) @memset(act.exec.binding_references, .empty);
+    if (act.frame.escaped.load(.monotonic)) {
+        // A closure owns the frame and its slots now. Recycle the rest of the
+        // activation; the next acquire gives it a fresh frame.
+        act.frame_detached = true;
+    } else {
+        act.frame.mapped_arguments = null;
+        act.frame.mapped_parameter_indices = &.{};
+        act.frame.closure_environment = null;
+        act.frame.direct_eval_environment.store(null, .release);
+        act.frame.direct_eval_parameter_environment.store(null, .release);
+    }
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
     vm.vm_activation_free = act;
 }
@@ -13085,20 +13113,25 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
 fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation {
     if (vm.vm_activation_free) |raw| {
         const act: *Activation = @ptrCast(@alignCast(raw));
-        if (act.slot_storage.len >= local_count) {
-            vm.vm_activation_free = act.next_free;
-            act.next_free = null;
-            act.frame.slots = act.slot_storage[0..local_count];
-            act.frame.parent = null;
-            act.frame.mapped_arguments = null;
-            act.frame.mapped_parameter_indices = &.{};
-            act.frame.closure_environment = null;
-            act.frame.direct_eval_environment.store(null, .release);
-            act.frame.direct_eval_parameter_environment.store(null, .release);
-            act.frame.escaped.store(false, .monotonic);
-            @memset(act.frame.slots, Value.undef());
-            return act;
+        if (act.frame_detached) {
+            // The previous frame escaped into a closure: keep the activation
+            // and its buffers, but never the captured frame or its slots.
+            const slots = try vm.arena.alloc(Value, @max(local_count, act.slot_storage.len));
+            const frame = try vm.arena.create(Frame);
+            frame.* = .{ .slots = slots[0..local_count], .parent = null };
+            act.frame = frame;
+            act.slot_storage = slots;
+            act.frame_detached = false;
+        } else if (act.slot_storage.len < local_count) {
+            act.slot_storage = try vm.arena.alloc(Value, local_count);
         }
+        vm.vm_activation_free = act.next_free;
+        act.next_free = null;
+        // `releaseActivation` already cleared the frame's per-call edges and
+        // `buildActivation` reinitializes the whole frame before publishing it.
+        act.frame.slots = act.slot_storage[0..local_count];
+        @memset(act.frame.slots, Value.undef());
+        return act;
     }
 
     const slots = try vm.arena.alloc(Value, local_count);
@@ -13150,134 +13183,129 @@ fn discardActivation(vm: *Interpreter, act: *Activation) void {
 /// VM state into it, publish it as a precise root, and install the callee's VM
 /// state. Does not run anything. Every returned activation owns exactly one
 /// root registration; every preparation failure restores the caller first.
-fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
-    // ECMA-262 10.2.1 [[Call]], step 4 rejects a class before parameter,
-    // field or body evaluation, creating its TypeError in the callee realm.
-    // Direct VM entries must enforce the same contract as callFunctionNT.
-    if (new_target.isUndefined() and func.is_class_constructor)
-        return interp.throwClassConstructorCallError(vm, func);
-    // This may allocate and trigger recovery, so do it while all input values
-    // still belong to the caller's established roots. Publication below is then
-    // infallible for the lifetime of this provisional activation.
-    try vm.reserveExecRoot();
-    const act = try acquireActivation(vm, func.local_count);
-    var exec = act.exec;
-    ensureBindingReferenceStorage(vm, &exec, fchunk) catch |err| {
-        releaseActivation(vm, act);
-        return err;
-    };
-    const frame = act.frame;
-    const slot_storage = act.slot_storage;
-    const rest_argument_storage = act.rest_argument_storage;
-    const legacy_argument_storage = act.legacy_argument_storage;
-    const slots = frame.slots;
+/// Check a function's parameter metadata against its chunk before any
+/// activation state exists, so a malformed layout needs no unwinding.
+fn validateParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *const Chunk) EvalError!void {
+    const slot_count = func.local_count;
     const pattern_indices = fchunk.destructuring_parameter_indices;
     const default_indices = fchunk.default_parameter_indices;
     var pattern_cursor: usize = 0;
     var default_cursor: usize = 0;
     for (func.params, 0..) |parameter, index| {
         if (parameter.pattern != null) {
-            if (pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index) {
-                releaseActivation(vm, act);
+            if (pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index)
                 return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
-            }
             pattern_cursor += 1;
         }
         if (parameter.default != null) {
-            if (parameter.is_rest or default_cursor >= default_indices.len or default_indices[default_cursor] != index) {
-                releaseActivation(vm, act);
+            if (parameter.is_rest or default_cursor >= default_indices.len or default_indices[default_cursor] != index)
                 return vm.throwError("InternalError", "invalid bytecode default parameter layout");
-            }
             default_cursor += 1;
         }
     }
-    if (pattern_cursor != pattern_indices.len or default_cursor != default_indices.len) {
-        releaseActivation(vm, act);
+    if (pattern_cursor != pattern_indices.len or default_cursor != default_indices.len)
         return vm.throwError("InternalError", "invalid bytecode parameter entry metadata");
-    }
-    const RestParameterLayout = struct { index: usize, slot: u32 };
-    const rest_layout: ?RestParameterLayout = if (fchunk.rest_parameter_index) |rest_index_u32| layout: {
+    var positional_count = fchunk.parameter_slots.len;
+    if (fchunk.rest_parameter_index) |rest_index_u32| {
         const rest_index: usize = rest_index_u32;
         if (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len or
             rest_index + 1 != func.params.len or
             !func.params[rest_index].is_rest or func.params[rest_index].default != null)
         {
-            releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid bytecode rest parameter layout");
         }
-        const rest_slot = fchunk.parameter_slots[rest_index];
-        if (rest_slot >= slots.len) {
-            releaseActivation(vm, act);
+        if (fchunk.parameter_slots[rest_index] >= slot_count)
             return vm.throwError("InternalError", "invalid bytecode rest parameter slot");
-        }
-        break :layout .{ .index = rest_index, .slot = rest_slot };
-    } else null;
-    const has_non_simple_layout = rest_layout != null or pattern_indices.len != 0 or default_indices.len != 0;
+        positional_count = rest_index;
+    }
+    const has_non_simple_layout = fchunk.rest_parameter_index != null or pattern_indices.len != 0 or default_indices.len != 0;
     if (fchunk.has_non_simple_parameters != has_non_simple_layout or
         (has_non_simple_layout and
             (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len)) or
         (fchunk.has_non_simple_parameters and fchunk.mapped_parameter_indices.len != 0))
     {
-        releaseActivation(vm, act);
         return vm.throwError("InternalError", "invalid bytecode parameter simplicity metadata");
     }
     if (fchunk.parameter_slots.len == func.params.len) {
+        for (fchunk.parameter_slots[0..positional_count]) |slot| {
+            if (slot >= slot_count) return vm.throwError("InternalError", "invalid bytecode parameter slot");
+        }
+    } else if (fchunk.parameter_slots.len != 0) {
+        return vm.throwError("InternalError", "invalid bytecode parameter layout");
+    }
+}
+
+/// Allocate a callee activation (frame + slots from `args`), capture the caller
+/// VM state into it, publish it as a precise root, and install the callee's VM
+/// state. Does not run anything. Every returned activation owns exactly one
+/// root registration; every preparation failure restores the caller first.
+fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
+    // ECMA-262 10.2.1 [[Call]], step 4 rejects a class before parameter,
+    // field or body evaluation, creating its TypeError in the callee realm.
+    // Direct VM entries must enforce the same contract as callFunctionNT.
+    if (new_target.isUndefined() and func.is_class_constructor)
+        return interp.throwClassConstructorCallError(vm, func);
+    try validateParameterLayout(vm, func, fchunk);
+    // This may allocate and trigger recovery, so do it while all input values
+    // still belong to the caller's established roots. Publication below is then
+    // infallible for the lifetime of this provisional activation.
+    try vm.reserveExecRoot();
+    const act = try acquireActivation(vm, func.local_count);
+    ensureBindingReferenceStorage(vm, &act.exec, fchunk) catch |err| {
+        releaseActivation(vm, act);
+        return err;
+    };
+    const frame = act.frame;
+    const slots = frame.slots;
+    const pattern_indices = fchunk.destructuring_parameter_indices;
+    const default_indices = fchunk.default_parameter_indices;
+    const RestParameterLayout = struct { index: usize, slot: u32 };
+    const rest_layout: ?RestParameterLayout = if (fchunk.rest_parameter_index) |rest_index_u32|
+        .{ .index = rest_index_u32, .slot = fchunk.parameter_slots[rest_index_u32] }
+    else
+        null;
+    if (fchunk.parameter_slots.len == func.params.len) {
         const positional_slots = if (rest_layout) |layout| fchunk.parameter_slots[0..layout.index] else fchunk.parameter_slots;
         for (positional_slots, 0..) |slot, argument_index| {
-            if (slot >= slots.len) {
-                releaseActivation(vm, act);
-                return vm.throwError("InternalError", "invalid bytecode parameter slot");
-            }
             // Assign every syntactic occurrence from left to right. Duplicate
             // sloppy formals therefore leave the rightmost argument (or
             // undefined when it is missing) in their one shared binding.
             slots[slot] = if (argument_index < args.len) args[argument_index] else Value.undef();
         }
-    } else if (fchunk.parameter_slots.len == 0) {
+    } else {
         // Hand-authored unit-test chunks predate the explicit layout. Their
         // parameters are unique and retain the historical positional contract.
         const positional = @min(func.params.len, @min(args.len, slots.len));
         @memcpy(slots[0..positional], args[0..positional]);
-    } else {
-        releaseActivation(vm, act);
-        return vm.throwError("InternalError", "invalid bytecode parameter layout");
     }
     // FunctionDeclarationInstantiation creates every lexical binding in its TDZ
     // before the first statement/debugger checkpoint. Scope-entry bytecodes
     // repeat this reset for blocks that can execute more than once.
     for (fchunk.lexical_slots) |slot| slots[slot] = Value.obj(vm.tdz_marker.?);
-    act.* = .{
-        .exec = exec,
-        .chunk = fchunk,
-        .frame = frame,
-        .slot_storage = slot_storage,
-        .rest_argument_storage = rest_argument_storage,
-        .legacy_inline_arguments = @splat(Value.undef()),
-        .legacy_argument_storage = legacy_argument_storage,
-        .legacy_call_frame = undefined,
-        .legacy_call_frame_active = false,
-        .next_free = null,
-        .optimizer_delta = .{},
-        .optimizer_profile_active = false,
-        .saved_strict = vm.strict,
-        .saved_cur_module = vm.cur_module,
-        .saved_eval_nt = vm.direct_eval_new_target_allowed,
-        .saved_bytecode_execution_mode = vm.bytecode_execution_mode,
-        .saved_pm = vm.current_private_map,
-        .saved_active_call_frame = vm.active_call_frame,
-        .saved_debug_call_frame = vm.debug_call_frame,
-        .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
-        .saved_field_initializer = vm.in_field_initializer,
-        .saved_this_initialized = vm.this_initialized,
-        .saved_in_derived_ctor = vm.in_derived_ctor,
-        .saved_in_default_ctor = vm.in_default_ctor,
-        .saved_pending_field_inits = vm.pending_field_inits,
-        .saved_pending_brand_names = vm.pending_brand_names,
-        .saved_in_param_expr = vm.in_param_expr,
-        .saved_in_param_default = vm.in_param_default,
-        .saved_cur_func_params = vm.cur_func_params,
-        .saved_cur_func_args_needed = vm.cur_func_args_needed,
-    };
+    // Only the per-call fields are written; the pool keeps every buffer and
+    // `releaseActivation` already cleared the rest.
+    act.chunk = fchunk;
+    act.optimizer_delta = .{};
+    act.optimizer_profile_active = false;
+    act.result_base = 0;
+    act.saved_strict = vm.strict;
+    act.saved_cur_module = vm.cur_module;
+    act.saved_eval_nt = vm.direct_eval_new_target_allowed;
+    act.saved_bytecode_execution_mode = vm.bytecode_execution_mode;
+    act.saved_pm = vm.current_private_map;
+    act.saved_active_call_frame = vm.active_call_frame;
+    act.saved_debug_call_frame = vm.debug_call_frame;
+    act.saved_stack_trace_call_frame = vm.stack_trace_call_frame;
+    act.saved_field_initializer = vm.in_field_initializer;
+    act.saved_this_initialized = vm.this_initialized;
+    act.saved_in_derived_ctor = vm.in_derived_ctor;
+    act.saved_in_default_ctor = vm.in_default_ctor;
+    act.saved_pending_field_inits = vm.pending_field_inits;
+    act.saved_pending_brand_names = vm.pending_brand_names;
+    act.saved_in_param_expr = vm.in_param_expr;
+    act.saved_in_param_default = vm.in_param_default;
+    act.saved_cur_func_params = vm.cur_func_params;
+    act.saved_cur_func_args_needed = vm.cur_func_args_needed;
     act.exec.saved_this = vm.this_value;
     act.exec.saved_env = vm.env;
     act.exec.saved_global = vm.global_object;
@@ -13312,6 +13340,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
                 break :retained act.legacy_argument_storage[0..args.len];
             };
             @memcpy(retained, args);
+            act.legacy_arguments_used = true;
             act.legacy_call_frame.lazy_func = func;
             act.legacy_call_frame.lazy_args = retained;
             act.legacy_call_frame.lazy_env = func.closure;
@@ -13613,7 +13642,44 @@ inline fn jsChunkFn(callee: Value) ?*Function {
 /// matching handler (restoring caller VM state and logical depth), and resume
 /// the first that does at its catch/finally. Returns true when a handler was
 /// found (the top activation is now positioned there), false when uncaught.
-fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) EvalError!bool {
+/// A driver's activation stack. Most drivers never nest deeper than a few
+/// calls, so the first entries live in the driver's own native frame and an
+/// arena array is taken only past that depth. Must not move once `items`
+/// points into `inline_buffer`.
+const ActivationStack = struct {
+    items: []*Activation = &.{},
+    capacity: usize = inline_capacity,
+    inline_buffer: [inline_capacity]*Activation = undefined,
+
+    const inline_capacity = 16;
+
+    fn append(self: *ActivationStack, allocator: std.mem.Allocator, act: *Activation) std.mem.Allocator.Error!void {
+        if (self.items.len == self.capacity) {
+            const grown = try allocator.alloc(*Activation, self.capacity * 2);
+            @memcpy(grown[0..self.items.len], self.items);
+            if (self.items.ptr != &self.inline_buffer) allocator.free(self.items.ptr[0..self.capacity]);
+            self.items = grown[0..self.items.len];
+            self.capacity = grown.len;
+        }
+        self.items.len += 1;
+        self.items[self.items.len - 1] = act;
+    }
+
+    fn pop(self: *ActivationStack) ?*Activation {
+        if (self.items.len == 0) return null;
+        const act = self.items[self.items.len - 1];
+        self.items.len -= 1;
+        return act;
+    }
+
+    fn deinit(self: *ActivationStack, allocator: std.mem.Allocator) void {
+        if (self.items.ptr != &self.inline_buffer) allocator.free(self.items.ptr[0..self.capacity]);
+        self.items = self.inline_buffer[0..0];
+        self.capacity = inline_capacity;
+    }
+};
+
+fn unwindThrow(vm: *Interpreter, acts: *ActivationStack) EvalError!bool {
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
         if (cur.exec.handlers.items.len > 0) {
@@ -13638,14 +13704,14 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
     return false;
 }
 
-fn activationStackHasHandler(acts: *const std.ArrayListUnmanaged(*Activation)) bool {
+fn activationStackHasHandler(acts: *const ActivationStack) bool {
     for (acts.items) |act| {
         if (act.exec.handlers.items.len > 0) return true;
     }
     return false;
 }
 
-fn discardActivationStack(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) void {
+fn discardActivationStack(vm: *Interpreter, acts: *ActivationStack) void {
     while (acts.items.len > 0) {
         const act = acts.pop().?;
         discardActivation(vm, act);
@@ -13685,7 +13751,8 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
         vm.driver_active = saved_active;
     }
 
-    var acts: std.ArrayListUnmanaged(*Activation) = .empty;
+    var acts: ActivationStack = .{};
+    acts.items = acts.inline_buffer[0..0];
     defer acts.deinit(vm.arena);
     acts.append(vm.arena, initial) catch |err| {
         // buildActivation already installed callee state. The driver's own
@@ -13910,12 +13977,15 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
             var next = machine.vm_activation_free;
             while (next) |raw| {
                 const activation: *Activation = @ptrCast(@alignCast(raw));
-                try std.testing.expect(!activation.frame.escaped.load(.acquire));
+                // The activation is pooled, but a captured frame is only ever
+                // referenced as detached: the next acquire replaces it.
+                try std.testing.expect(activation.frame_detached or !activation.frame.escaped.load(.acquire));
                 free_count += 1;
                 next = activation.next_free;
             }
             // This function captures one defining frame. That frame is Context-
-            // arena owned and must stay out of the reusable activation pool.
+            // arena owned and must stay out of the reusable frame pool; its
+            // activation is still recycled.
             try std.testing.expect(free_count <= machine.vm_activation_allocations);
             try std.testing.expect(machine.vm_activation_allocations - free_count <= 1);
             if (failing.has_induced_failure) {
@@ -13932,7 +14002,13 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
             const captured = Interpreter.funcOf(closure).?;
             const frame: *Frame = @ptrCast(@alignCast(captured.frame.?));
             try std.testing.expect(frame.escaped.load(.acquire));
-            try std.testing.expectEqual(@as(usize, 1), machine.vm_activation_allocations - free_count);
+            try std.testing.expectEqual(machine.vm_activation_allocations, free_count);
+            var pooled = machine.vm_activation_free;
+            while (pooled) |raw| {
+                const activation: *Activation = @ptrCast(@alignCast(raw));
+                if (activation.frame == frame) try std.testing.expect(activation.frame_detached);
+                pooled = activation.next_free;
+            }
             try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "retainedActivation", closure);
             try std.testing.expectEqual(@as(f64, 20), (try ctx.evaluate("retainedActivation(7)")).asNum());
             try std.testing.expectEqual(@as(f64, 14), (try ctx.evaluate("retainedActivation(1)")).asNum());

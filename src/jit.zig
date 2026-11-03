@@ -213,6 +213,9 @@ pub const OptimizerTier = struct {
     };
 
     pub fn beginProfiling(self: *OptimizerTier) void {
+        // Every VM call enters here; only the first may change the state, so
+        // keep the read-modify-write off the steady-state path.
+        if (self.state.load(.monotonic) != .cold) return;
         _ = self.state.cmpxchgStrong(.cold, .profiling, .acq_rel, .acquire);
     }
 
