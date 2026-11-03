@@ -74,7 +74,7 @@ fn recordRuntimeOperation(vm: *Interpreter, encoded_op: u16) void {
         inventory.recordRuntimeOperation(@fromBackingInt(@intCast(raw)));
 }
 
-fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
+inline fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
     if (func.is_strict) return this_val;
     if (this_val.isNull() or this_val.isUndefined()) {
@@ -12975,6 +12975,18 @@ test "deferred class capture allocation failure restores its runtime environment
 /// closure's upvalue source. Templates with a compiled `chunk` take the VM path;
 /// env-mode templates may leave it null and use the tree-walker body fallback.
 /// `chunk` is the defining chunk, which holds `tmpl` and its name constant.
+/// Where a closure was defined: its own registered node when it has one (a
+/// declaration), else the statement creating it. Templates remember a miss so
+/// expression closures stop probing the registry on every creation.
+fn closureDefinitionLocation(vm: *Interpreter, tmpl: *bc.FnTemplate) ?interp.DebugStatementLocation {
+    if (!tmpl.vm_definition_unregistered) {
+        if (vm.debugStatementLocation(tmpl.definition_node)) |location| return location;
+        // An interpreter without a registry has nothing to remember.
+        if (vm.debug_statement_locations != null) tmpl.vm_definition_unregistered = true;
+    }
+    return vm.currentDebugLocation();
+}
+
 fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const saved_environment = vm.env;
     const saved_environment_root = if (tmpl.capture_environment != null)
@@ -13017,7 +13029,7 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         .closure = closure_env,
         .realm_global = interp.functionRealmGlobal(closure_env, vm.global_object),
         .name = tmpl.name,
-        .definition_location = vm.debugStatementLocation(tmpl.definition_node) orelse vm.currentDebugLocation(),
+        .definition_location = closureDefinitionLocation(vm, tmpl),
         .source = tmpl.source,
         .bytecode_admission_reason = admission_reason,
         .bytecode_execution_mode = vm.bytecode_execution_mode,

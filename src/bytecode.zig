@@ -808,6 +808,10 @@ pub const FnTemplate = struct {
     /// source coordinates even when declaration instantiation is hoisted ahead
     /// of the first statement checkpoint.
     definition_node: *const ast.Node,
+    /// Set once the statement-location registry is known to have no entry for
+    /// `definition_node` (function expressions are not statements), so closure
+    /// creation stops probing it. Registrations never change for a node.
+    vm_definition_unregistered: bool = false,
     /// A *named function expression's* own name, which binds as an immutable
     /// binding in a fresh scope enclosing the body (so the body can recurse via
     /// its own name and can't rebind it). Empty for declarations and anonymous
