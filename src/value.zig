@@ -6211,6 +6211,27 @@ pub const Object = struct {
             ko.deinit(alloc);
             alloc.destroy(ko);
         }
+        // A chain without delete operations names each key exactly once, so
+        // its additions, oldest first, are already the insertion order. Only a
+        // chain that deleted (and possibly re-added) a key needs the
+        // newest-wins dedup below; seeding every accessor-bearing object
+        // through a hash set made the first accessor cost a hash insertion per
+        // existing property. A tombstone or re-add counts toward `depth` but
+        // not `live_count`, so equality proves the chain never deleted.
+        if (self.shape) |head| if (head.depth == head.live_count) {
+            try ko.ensureTotalCapacityPrecise(alloc, head.live_count);
+            ko.items.len = head.live_count;
+            var index: usize = head.live_count;
+            var cursor: ?*Shape = head;
+            while (cursor) |sh| : (cursor = sh.parent) {
+                const n = sh.name orelse continue;
+                index -= 1;
+                ko.items[index] = .{ .key = n, .deleted = false, .owned = false };
+            }
+            std.debug.assert(index == 0);
+            cold.key_order.store(ko, .monotonic);
+            return;
+        };
         var seed: std.ArrayListUnmanaged([]const u8) = .empty;
         defer seed.deinit(arena);
         var seen: ObjectNameMapUnmanaged(void) = .{};
@@ -7045,7 +7066,9 @@ fn keyOrderNeedsAdd(list: *const std.ArrayListUnmanaged(KeyOrderEntry), name: []
     while (index > 0) {
         index -= 1;
         const entry = list.items[index];
-        if (std.mem.eql(u8, entry.key, name)) return entry.deleted;
+        // Length and first byte inline; the full comparison is out of line.
+        if (entry.key.len == name.len and (name.len == 0 or entry.key[0] == name[0]) and
+            std.mem.eql(u8, entry.key, name)) return entry.deleted;
     }
     return true;
 }
