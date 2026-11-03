@@ -760,6 +760,11 @@ pub const FnTemplate = struct {
     /// upvalue opcodes. Retain the exact defining activation/lexical projection.
     capture_environment: ?*const DirectEvalPlan = null,
     name: []const u8,
+    /// Index in the defining chunk's `consts` of `name` as a String, which
+    /// every closure of this template shares as its `name` property value
+    /// (strings are immutable, so the sharing is unobservable). Null for an
+    /// empty name.
+    name_const: ?u32 = null,
     /// Function declaration/expression node used to recover its exact registered
     /// source coordinates even when declaration instantiation is hoisted ahead
     /// of the first statement checkpoint.

@@ -6669,6 +6669,7 @@ pub const Compiler = struct {
         tmpl.* = .{
             .capture_environment = capture_environment,
             .name = fnode.name,
+            .name_const = if (fnode.name.len == 0) null else try self.chunk.addConst(try Value.strAlloc(self.arena, fnode.name)),
             .definition_node = definition_node,
             // A *named function expression* (not a declaration, not an inferred
             // name, not a method, not an arrow) self-binds its own name in an

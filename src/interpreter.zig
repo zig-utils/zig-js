@@ -40646,6 +40646,19 @@ pub fn installFunctionProps(
     params: []const ast.Param,
     name: []const u8,
 ) EvalError!void {
+    const name_value = if (name.len == 0) Value.str("") else try Value.strAlloc(arena, name);
+    try installFunctionPropsNamed(arena, root_shape, obj, params, name_value);
+}
+
+/// `installFunctionProps` with the `name` value already made, so closures of
+/// one function template can share their template's name string.
+pub fn installFunctionPropsNamed(
+    arena: std.mem.Allocator,
+    root_shape: *Shape,
+    obj: *value.Object,
+    params: []const ast.Param,
+    name: Value,
+) EvalError!void {
     var len: usize = 0;
     for (params) |p| {
         if (p.is_rest or p.default != null) break;
@@ -40653,7 +40666,7 @@ pub fn installFunctionProps(
     }
     const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
     try obj.setOwnWithAttr(arena, root_shape, "length", Value.num(@floatFromInt(len)), ro_attr);
-    try obj.setOwnWithAttr(arena, root_shape, "name", try Value.strAlloc(arena, name), ro_attr);
+    try obj.setOwnWithAttr(arena, root_shape, "name", name, ro_attr);
 }
 
 /// Install the `name` and `length` own properties on a *native* (built-in)

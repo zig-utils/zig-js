@@ -4998,7 +4998,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             return @backingInt(jit.NativeOperationStatus.host_trap);
         if (op == .make_closure) {
             if (inst.a >= chunk.fns.items.len) return @backingInt(jit.NativeOperationStatus.host_trap);
-            return finishNativeOperation(frame, vm, operation_id, makeClosure(vm, chunk.fns.items[inst.a], active.frame));
+            return finishNativeOperation(frame, vm, operation_id, makeClosure(vm, chunk, chunk.fns.items[inst.a], active.frame));
         }
         const current = active.frame orelse return @backingInt(jit.NativeOperationStatus.host_trap);
         if (inst.a >= current.slots.len) return @backingInt(jit.NativeOperationStatus.host_trap);
@@ -9502,7 +9502,7 @@ fn runChunk(
             },
 
             .make_closure => {
-                const closure = try makeClosure(vm, chunk.fns.items[inst.a], frame);
+                const closure = try makeClosure(vm, chunk, chunk.fns.items[inst.a], frame);
                 try stack.append(stack_alloc, closure);
             },
             .call => {
@@ -12694,7 +12694,8 @@ test "deferred class capture allocation failure restores its runtime environment
 /// Build a Function value from a template, capturing the current `frame` as the
 /// closure's upvalue source. Templates with a compiled `chunk` take the VM path;
 /// env-mode templates may leave it null and use the tree-walker body fallback.
-fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
+/// `chunk` is the defining chunk, which holds `tmpl` and its name constant.
+fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const saved_environment = vm.env;
     const saved_environment_root = if (tmpl.capture_environment != null)
         try vm.pushTempEnvRoot(saved_environment)
@@ -12793,7 +12794,10 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     func.obj = obj;
     // Allocating `obj` may have run a full collection that tenured `func`.
     gc_mod.barrierFunctionEdge(func, obj);
-    try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
+    if (tmpl.name_const) |name|
+        try interp.installFunctionPropsNamed(vm.arena, vm.root_shape, obj, tmpl.params, chunk.consts.items[name])
+    else
+        try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, Value.obj(obj));
     return Value.obj(obj);
 }
@@ -12825,7 +12829,7 @@ test "nested suspendable closure allocation failure restores the defining enviro
         var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         machine.arena = failing.allocator();
-        const attempt = makeClosure(&machine, template, &frame);
+        const attempt = makeClosure(&machine, compiled.chunk, template, &frame);
         try std.testing.expectEqual(&root, machine.env);
         try std.testing.expectEqual(@as(f64, 7), slots[value_slot.?].asNum());
         if (attempt) |closure| {
@@ -12852,7 +12856,7 @@ test "nested suspendable closure allocation failure restores the defining enviro
     var frame = Frame{ .slots = slots, .parent = null, .closure_environment = machine.env };
     var unavailable = std.testing.FailingAllocator.init(machine.arena, .{ .fail_index = 0, .resize_fail_index = 0 });
     machine.arena = unavailable.allocator();
-    try std.testing.expectError(error.OutOfMemory, makeClosure(&machine, template, &frame));
+    try std.testing.expectError(error.OutOfMemory, makeClosure(&machine, compiled.chunk, template, &frame));
     try std.testing.expectEqual(&context.env, machine.env);
     try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
     try std.testing.expect(frame.direct_eval_environment.load(.acquire) == null);
