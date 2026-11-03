@@ -8470,8 +8470,9 @@ fn runChunk(
     // before executing any chunk and retain the synchronized paths below.
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
 
+    const debug_nodes = chunk.debug_nodes.ptr;
     while (ip < code.len) {
-        if (location_execution) if (chunk.debug_nodes[ip]) |node| {
+        if (location_execution) if (debug_nodes[ip]) |node| {
             vm.serviceMutatorStopSafepoint();
             if (debug_execution)
                 try serviceVmDebugStatement(vm, node, chunk, frame)
@@ -8479,8 +8480,12 @@ fn runChunk(
                 serviceVmStackStatement(vm, node);
         };
         vm.steps += 1;
-        if (vm.steps > vm.step_budget) return vm.throwError("RangeError", "evaluation step budget exceeded");
+        if (vm.steps > vm.step_budget) {
+            @branchHint(.cold);
+            return vm.throwError("RangeError", "evaluation step budget exceeded");
+        }
         if ((vm.steps & 1023) == 0) {
+            @branchHint(.unlikely);
             if (vm.stop_flag) |sf| if (sf.load(.monotonic))
                 return vm.throwError("Error", "worker terminated");
             try vm.serviceVmTraps();
@@ -8496,7 +8501,12 @@ fn runChunk(
                 vm.serviceGcSafepoint();
             } else vm.handoffRuntimeSlotIfContended();
         }
-        if (execution_inventory != null) vm_dispatches += 1;
+        // Profiling only: a branch, rather than a counter kept live (and
+        // stored) on every dispatch of the unprofiled loop.
+        if (execution_inventory != null) {
+            @branchHint(.unlikely);
+            vm_dispatches += 1;
+        }
         const inst = code[ip];
         ip += 1;
         switch (inst.op) {
@@ -8508,7 +8518,7 @@ fn runChunk(
             .load_true => try stack.append(stack_alloc, Value.boolVal(true)),
             .load_false => try stack.append(stack_alloc, Value.boolVal(false)),
             .load_import_meta => try stack.append(stack_alloc, try vm.importMetaValue()),
-            .pop => _ = stack.pop(),
+            .pop => stack.shrinkRetainingCapacity(stack.items.len - 1),
             .dup => try stack.append(stack_alloc, stack.items[stack.items.len - 1]),
             .swap => {
                 const top = stack.items.len - 1;
