@@ -2102,6 +2102,17 @@ pub const Compiler = struct {
         }, true, floor);
     }
 
+    /// A statement list's function declarations are instantiated before any
+    /// of its statements run, so their bodies can be called (and read the
+    /// list's lexical bindings) before those bindings are initialized:
+    /// `{ let y = f(); function f() { return y; } }` throws a ReferenceError.
+    fn tdzHoistedFunctionsRefsPending(stmts: []const *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void), floor: usize) error{StackExhausted}!bool {
+        for (stmts) |stmt| if (annex_b.functionDeclaration(stmt)) |declaration| {
+            if (try tdzRefsPending(declaration.func_decl.body, m, declared, floor)) return true;
+        };
+        return false;
+    }
+
     fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *SecureStringMapUnmanaged(void), floor: usize) CompileError!bool {
         if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
         switch (node.*) {
@@ -2141,14 +2152,25 @@ pub const Compiler = struct {
                 if (stmt.decl_kind) |kind| if (kind != .@"var") try tdzDeclarePattern(arena, declared, stmt.target, floor);
                 return try tdzScanStmt(arena, stmt.body, m, declared, floor);
             },
-            .block => |stmts| for (stmts) |stmt| {
-                if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
+            .block => |stmts| {
+                if (try tdzHoistedFunctionsRefsPending(stmts, m, declared, floor)) return true;
+                for (stmts) |stmt| {
+                    if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
+                }
             },
             .decl_group => |stmts| for (stmts) |stmt| {
                 if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
             },
             .switch_stmt => |stmt| {
                 if (try tdzRefsPending(stmt.disc, m, declared, floor)) return true;
+                // One scope spans every clause, and a jump to a later clause
+                // skips the declarations of the earlier ones: source order
+                // proves nothing, so a clause-level lexical declaration is a
+                // hazard outright.
+                for (stmt.cases) |case| {
+                    if (try tdzHoistedFunctionsRefsPending(case.body, m, declared, floor)) return true;
+                    for (case.body) |body_stmt| if (try nodeDeclaresLexical(body_stmt, floor) or body_stmt.* == .class_expr) return true;
+                }
                 for (stmt.cases) |case| {
                     if (case.@"test") |test_node| if (try tdzRefsPending(test_node, m, declared, floor)) return true;
                     for (case.body) |body_stmt| if (try tdzScanStmt(arena, body_stmt, m, declared, floor)) return true;
