@@ -4582,6 +4582,9 @@ pub const Context = struct {
     /// its address is stable). No-GIL mode still uses its task/waiter records;
     /// `.gil = true` additionally uses the VM lock. Null means no Thread API.
     gil: ?*gil_mod.Gil = null,
+    /// Free list of recycled VM activations shared by every Interpreter this
+    /// Context hands out (see `Interpreter.vm_activation_pool`). Arena-owned.
+    vm_activation_pool: ?*anyopaque = null,
     /// Phase 7: the precise tracing GC heap (null = arena engine, today's
     /// default). When set, heap cells allocate through it and are reclaimed by
     /// collection / freed at `destroy`. See docs/threads/P7-gc-design.md.
@@ -6065,6 +6068,13 @@ pub const Context = struct {
             .termination_request_flag = self.termination_request_flag,
             .main_can_block = self.main_can_block,
             .use_thread_gil = self.gil != null and !self.parallel_js,
+            // Only a context whose JS never runs on another thread may share
+            // one free list: thread-capable, parallel-GC and concurrent
+            // contexts keep each interpreter's pool private.
+            .vm_activation_pool = if (self.locked_arena != null or self.parallel_js or self.promise_state_locking)
+                null
+            else
+                &self.vm_activation_pool,
             .gil = self.gil,
             .gc = self.gc,
             .gc_realm_context = self,

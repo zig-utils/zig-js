@@ -13416,12 +13416,20 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
         if (act.frame.direct_eval_parameter_environment.load(.monotonic) != null)
             act.frame.direct_eval_parameter_environment.store(null, .release);
     }
-    act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
-    vm.vm_activation_free = act;
+    const pool = activationPool(vm);
+    act.next_free = if (pool.*) |raw| @ptrCast(@alignCast(raw)) else null;
+    pool.* = act;
+}
+
+/// The free list this interpreter recycles activations through: its Context's
+/// shared pool, or its own list when it has none.
+inline fn activationPool(vm: *Interpreter) *?*anyopaque {
+    return vm.vm_activation_pool orelse &vm.vm_activation_free;
 }
 
 fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation {
-    if (vm.vm_activation_free) |raw| {
+    const pool = activationPool(vm);
+    if (pool.*) |raw| {
         const act: *Activation = @ptrCast(@alignCast(raw));
         if (act.frame_detached) {
             // The previous frame escaped into a closure: keep the activation
@@ -13435,7 +13443,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         } else if (act.slot_storage.len < local_count) {
             act.slot_storage = try vm.arena.alloc(Value, local_count);
         }
-        vm.vm_activation_free = act.next_free;
+        pool.* = act.next_free;
         act.next_free = null;
         // `releaseActivation` already cleared the frame's per-call edges and
         // `buildActivation` reinitializes the whole frame before publishing it.
@@ -14272,6 +14280,32 @@ test "vm: precise exec root admission fails before bytecode execution" {
     try std.testing.expectEqual(@as(f64, 37), ctx.global_object.getOwn("activationRootEffect").?.asNum());
 }
 
+test "vm: host calls through fresh interpreters reuse the context activation pool" {
+    // Context.interpreter() builds a new Interpreter for every host call. Each
+    // must recycle the Context's activations instead of allocating its own:
+    // a private pool would strand one arena activation per call.
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate("function hostFrame(frame) { var next = frame + 1; return next; }");
+    const callee = ctx.global_object.getOwn("hostFrame").?;
+    try std.testing.expect(Interpreter.funcOf(callee).?.chunk != null);
+    const saved_active_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_active_context);
+    var allocations: usize = 0;
+    for (0..64) |_| {
+        var machine = ctx.interpreter();
+        const result = try machine.callValueWithThis(callee, &.{Value.num(7)}, Value.undef());
+        try std.testing.expectEqual(@as(f64, 8), result.asNum());
+        allocations += machine.vm_activation_allocations;
+    }
+    try std.testing.expect(allocations <= 1);
+    try std.testing.expect(ctx.vm_activation_pool != null);
+}
+
 test "vm: escaped closure allocation failures preserve frame ownership" {
     for ([_]bool{ false, true }) |native| {
         const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
@@ -14289,6 +14323,8 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
         var induced_failures: usize = 0;
         for (0..512) |fail_index| {
             var machine = ctx.interpreter();
+            // These assertions audit one interpreter's own activation pool.
+            machine.vm_activation_pool = null;
             machine.vm_inline_calls_disabled = true;
             const saved_this = Value.num(91);
             const saved_new_target = Value.num(92);
@@ -14412,6 +14448,8 @@ test "vm: activation driver allocation failures restore exact ownership" {
         var induced_failures: usize = 0;
         for (0..512) |fail_index| {
             var machine = ctx.interpreter();
+            // These assertions audit one interpreter's own activation pool.
+            machine.vm_activation_pool = null;
             machine.vm_inline_calls_disabled = true;
             const saved_this = Value.num(91);
             const saved_new_target = Value.num(92);

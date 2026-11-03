@@ -1,7 +1,41 @@
 const std = @import("std");
 const js = @import("js");
 
+/// Host calls into one JavaScript function must reach a retained-memory
+/// plateau. `source` selects the callee's tier: a `let` body runs through the
+/// tree-walker; a `var` body compiles with the program, so each call enters the
+/// VM through a program-chunk template closure.
+fn checkRepeatedJavaScriptFrames(allocator: std.mem.Allocator, source: []const u8, label: []const u8) !void {
+    const context = try js.Context.createWith(allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+    });
+    defer context.destroy();
+    const callback = try context.evaluateProtected(source);
+    defer _ = context.unprotectValue(callback);
+    const input = try context.createHostValue(.{ .number = 7 });
+    defer _ = context.unprotectValue(input);
+    var memory_before: usize = 0;
+    for (0..2) |phase| {
+        for (0..1024) |_| {
+            const result = try context.callProtected(callback, null, &.{input});
+            try std.testing.expectEqual(@as(f64, 8), result.get().asNum());
+            try std.testing.expect(context.unprotectValue(result));
+        }
+        context.collectGarbage();
+        const memory_after = context.heapBudgetStats().?.used_bytes;
+        if (phase == 0) {
+            memory_before = memory_after;
+        } else {
+            std.debug.print("hosted values: repeated {s} frames retained {d} bytes before and {d} after\n", .{ label, memory_before, memory_after });
+            try std.testing.expect(memory_after <= memory_before);
+        }
+    }
+}
+
 fn checkRepeatedJavaScriptCalls(allocator: std.mem.Allocator) !void {
+    try checkRepeatedJavaScriptFrames(allocator, "(function(frame) { var next = frame + 1; return next; })", "bytecode template");
     const context = try js.Context.createWith(allocator, .{
         .enable_gc = true,
         .enable_jit = false,
