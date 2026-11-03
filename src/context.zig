@@ -18054,6 +18054,27 @@ test "Intl.Segmenter input sharing stays bounded under adversarial segmentation"
     try std.testing.expect(stats.used_bytes < stats.limit_bytes);
 }
 
+test "native iterator results keep a freshly made value alive across collection" {
+    // Segment data objects and Map entry arrays are made just before their
+    // IteratorResult, and nothing else holds them yet. A collection at every
+    // safepoint must not reclaim or move them out from under that result.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.nursery_threshold_bytes = 1;
+    const result = try ctx.evaluate(
+        \\var freshSegments = new Intl.Segmenter("en", { granularity: "word" }).segment("alpha beta gamma");
+        \\var freshSegmentIterator = freshSegments[Symbol.iterator](), freshOut = [];
+        \\for (;;) { var freshStep = freshSegmentIterator.next(); if (freshStep.done) break; freshOut.push(freshStep.value.segment + freshStep.value.index); }
+        \\var freshEntries = new Map([[1, { a: 1 }], [2, { b: 2 }]]).entries();
+        \\for (;;) { var freshEntry = freshEntries.next(); if (freshEntry.done) break; freshOut.push(freshEntry.value[0] + ":" + Object.keys(freshEntry.value[1])[0]); }
+        \\freshOut.join(",");
+    );
+    try std.testing.expectEqualStrings("alpha0, 5,beta6, 10,gamma11,1:a,2:b", result.asStr());
+}
+
 test "moving nursery preserves shared Intl.Segmenter input and iterator progress" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

@@ -19425,10 +19425,18 @@ pub const Interpreter = struct {
 
     /// A fresh `{ value, done }` IteratorResult object.
     pub fn iterResultObj(self: *Interpreter, val: Value, done: bool) EvalError!Value {
-        const o = (try self.newObject()).asObj();
-        try self.setProp(o, "value", val);
-        try self.setProp(o, "done", Value.boolVal(done));
-        return Value.obj(o);
+        // `val` is often a cell its producer has just allocated and not yet
+        // published anywhere (a Segment data object, a Map entry array), and
+        // allocating the result, or its slots, can collect and move cells.
+        // Root both across those allocations.
+        const value_root = try self.pushTempRoot(val);
+        defer self.restoreTempRoots(value_root);
+        const result = try self.newObject();
+        const result_root = try self.pushTempRoot(result);
+        defer self.restoreTempRoots(result_root);
+        try self.setProp(self.tempRoot(result_root, result).asObj(), "value", self.tempRoot(value_root, val));
+        try self.setProp(self.tempRoot(result_root, result).asObj(), "done", Value.boolVal(done));
+        return self.tempRoot(result_root, result);
     }
 
     /// The `{ read, written }` record returned by Uint8Array.prototype.setFrom*.
@@ -37427,12 +37435,21 @@ fn segNext(input: SegmenterInput, pos: usize, gran: SegmenterGranularity) struct
 /// Build a segment-data object `{ segment, index, input[, isWordLike] }` (own
 /// properties in that order; isWordLike only for the "word" granularity).
 fn segDataObj(self: *Interpreter, input: SegmenterInput, start: usize, end: usize, gran: SegmenterGranularity, word_like: bool) EvalError!Value {
-    const o = (try self.newObject()).asObj();
-    try self.setProp(o, "segment", try input.segmentValue(self.arena, start, end));
-    try self.setProp(o, "index", Value.num(@floatFromInt(input.utf16Index(start))));
-    try self.setProp(o, "input", input.value);
-    if (gran == .word) try self.setProp(o, "isWordLike", Value.boolVal(word_like));
-    return Value.obj(o);
+    // Each allocation below can collect under heap pressure: read the input
+    // before the first one, and keep the new object and its fresh segment
+    // string rooted.
+    const index = Value.num(@floatFromInt(input.utf16Index(start)));
+    const segment = try input.segmentValue(self.arena, start, end);
+    const segment_root = try self.pushTempRoot(segment);
+    defer self.restoreTempRoots(segment_root);
+    const data = try self.newObject();
+    const data_root = try self.pushTempRoot(data);
+    defer self.restoreTempRoots(data_root);
+    try self.setProp(self.tempRoot(data_root, data).asObj(), "segment", self.tempRoot(segment_root, segment));
+    try self.setProp(self.tempRoot(data_root, data).asObj(), "index", index);
+    try self.setProp(self.tempRoot(data_root, data).asObj(), "input", input.value);
+    if (gran == .word) try self.setProp(self.tempRoot(data_root, data).asObj(), "isWordLike", Value.boolVal(word_like));
+    return self.tempRoot(data_root, data);
 }
 
 fn segmenterGranularity(seg_obj: *value.Object) SegmenterGranularity {
