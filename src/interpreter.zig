@@ -11870,6 +11870,7 @@ pub const Interpreter = struct {
             return Value.strAlloc(self.arena, try prim.toString(self.arena));
         }
         if (v.isString()) return v;
+        if (v.isNumber()) if (smallIntegerString(v.asNum())) |cell| return Value.strCell(cell);
         return Value.strAlloc(self.arena, try v.toString(self.arena));
     }
 
@@ -14821,7 +14822,7 @@ pub const Interpreter = struct {
         if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype.@@matchAll requires |this| to be an Object");
         const default_ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
         const c = try self.speciesConstructor(this, default_ctor, Interpreter.bad_species_this);
-        const flags = try self.toStringWtf8(try self.getProperty(this, "flags"));
+        const flags = try regexpFlagsOf(self, this);
         const matcher = try self.construct(c, &.{ this, try Value.strAlloc(self.arena, flags) });
         const last_index = toLen(try self.toNumberV(try self.getProperty(this, "lastIndex")));
         try self.setRegExpLikeLastIndex(matcher, @floatFromInt(last_index));
@@ -14846,7 +14847,7 @@ pub const Interpreter = struct {
 
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@match requires that |this| be an Object");
-        const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
+        const flags = try regexpFlagsOf(self, rx);
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         if (!global) return try self.regexpExecGeneric(rx, s);
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
@@ -14901,7 +14902,7 @@ pub const Interpreter = struct {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype.@@replace requires that |this| be an Object");
         const functional_replace = replace_value.isCallable();
         const replace_string = if (functional_replace) "" else try self.toStringWtf8(replace_value);
-        const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
+        const flags = try regexpFlagsOf(self, rx);
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         const full_unicode = global and (std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null);
 
@@ -15032,7 +15033,7 @@ pub const Interpreter = struct {
 
         const default_ctor = self.env.get("RegExp") orelse Value.undef();
         const ctor = try self.speciesConstructor(rx, default_ctor, Interpreter.bad_species_this);
-        const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
+        const flags = try regexpFlagsOf(self, rx);
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
         const splitter = try self.construct(ctor, &.{ rx, try Value.strAlloc(self.arena, splitter_flags) });
@@ -15100,7 +15101,7 @@ pub const Interpreter = struct {
         if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype.toString called on a non-object");
         if (self.isRegExpProto(this.asObj())) return Value.str("/(?:)/");
         const src = try self.toStringWtf8(try self.getProperty(this, "source"));
-        const flags = try self.toStringWtf8(try self.getProperty(this, "flags"));
+        const flags = try regexpFlagsOf(self, this);
         return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }));
     }
 
@@ -22613,7 +22614,7 @@ pub const Interpreter = struct {
             .typeof => v.typeOfValue(),
             .bit_not => Value.num(@floatFromInt(~Value.num(try self.toNumberV(nv)).toInt32())),
             .void_op => Value.undef(),
-            .to_string => try Value.strAlloc(self.arena, try self.toStringWtf8(v)), // template-substitution ToString
+            .to_string => try self.toStringValue(v), // template-substitution ToString; a String is returned as is
         };
     }
 
@@ -41242,26 +41243,112 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return try Value.strAlloc(self.arena, try escapeRegexSource(self.arena, o.regexSource()));
 }
 
+/// ToString of the integers 0 to 1023 as static cells. Template
+/// substitutions and string building convert small integers (indices, ids,
+/// pixel sizes) constantly; an immutable String needs no fresh cell each time.
+const small_integer_strings: [1024]*const strcell.StringCell = blk: {
+    @setEvalBranchQuota(10_000_000);
+    var cells: [1024]*const strcell.StringCell = undefined;
+    for (&cells, 0..) |*cell, n| cell.* = strcell.staticCell(std.fmt.comptimePrint("{d}", .{n}));
+    break :blk cells;
+};
+
+/// The static cell for ToString(`n`) when `n` is an integer in 0..1023
+/// (including -0, which converts to "0").
+fn smallIntegerString(n: f64) ?*const strcell.StringCell {
+    if (!(n >= 0 and n < small_integer_strings.len)) return null;
+    const index: usize = @intFromFloat(n);
+    if (@as(f64, @floatFromInt(index)) != n) return null;
+    return small_integer_strings[index];
+}
+
+/// RegExp flag characters in the order `RegExp.prototype.flags` lists them,
+/// with the accessor that reports each one.
+const regexp_flag_specs = [_]struct { c: u8, name: []const u8 }{
+    .{ .c = 'd', .name = "hasIndices" },
+    .{ .c = 'g', .name = "global" },
+    .{ .c = 'i', .name = "ignoreCase" },
+    .{ .c = 'm', .name = "multiline" },
+    .{ .c = 's', .name = "dotAll" },
+    .{ .c = 'u', .name = "unicode" },
+    .{ .c = 'v', .name = "unicodeSets" },
+    .{ .c = 'y', .name = "sticky" },
+};
+
+/// Every string the built-in `flags` getter can produce, indexed by a mask
+/// whose bit i is `regexp_flag_specs[i]`, as text and as a static cell.
+const regexp_flags_texts: [1 << regexp_flag_specs.len][]const u8 = blk: {
+    @setEvalBranchQuota(100_000);
+    var texts: [1 << regexp_flag_specs.len][]const u8 = undefined;
+    for (&texts, 0..) |*text, mask| {
+        var t: []const u8 = "";
+        for (regexp_flag_specs, 0..) |spec, bit| {
+            if (mask & (1 << bit) != 0) t = t ++ &[_]u8{spec.c};
+        }
+        text.* = t;
+    }
+    break :blk texts;
+};
+const regexp_flags_cells: [regexp_flags_texts.len]*const strcell.StringCell = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var cells: [regexp_flags_texts.len]*const strcell.StringCell = undefined;
+    for (&cells, regexp_flags_texts) |*cell, text| cell.* = strcell.staticCell(text);
+    break :blk cells;
+};
+
+/// True when `name` on `o` is an accessor whose getter is the built-in `getter`.
+fn hasBuiltinGetter(o: *value.Object, name: []const u8, getter: value.NativeFn) bool {
+    const accessor = o.getAccessor(name) orelse return false;
+    const g = accessor.get orelse return false;
+    if (!g.isObject()) return false;
+    const native = g.asObj().native orelse return false;
+    return native == getter;
+}
+
+/// The flags mask `Get(rx, "flags")` would report for RegExp object `o`, when
+/// that read can only reach built-ins: `o` has no own property besides
+/// `lastIndex`, and its [[Prototype]] holds the built-in `flags` getter and
+/// all eight built-in flag getters. That getter chain observes nothing, so
+/// the answer is `o`'s own flags. Null means take the ordinary [[Get]].
+fn pristineRegExpFlagsMask(o: *value.Object) ?usize {
+    if (!o.behavior.is_regex or o.proxyHandler() != null or o.proxy_revoked) return null;
+    if (o.restrictionOwner() != 0 or o.accessorsMap() != null or o.hostClassHooks() != null) return null;
+    if (o.shapeSnapshot()) |shape| {
+        if (shape.live_count > 1) return null;
+        if (shape.live_count == 1 and o.getOwn("lastIndex") == null) return null;
+    }
+    const proto = o.protoAtomic() orelse return null;
+    if (proto.proxyHandler() != null or proto.proxy_revoked) return null;
+    if (proto.restrictionOwner() != 0 or proto.hostClassHooks() != null) return null;
+    if (!hasBuiltinGetter(proto, "flags", regexFlagsGetter)) return null;
+    const flags = o.regexFlags();
+    var mask: usize = 0;
+    inline for (regexp_flag_specs, 0..) |spec, bit| {
+        if (!hasBuiltinGetter(proto, spec.name, regexFlagGetter(spec.c))) return null;
+        if (std.mem.indexOfScalar(u8, flags, spec.c) != null) mask |= 1 << bit;
+    }
+    return mask;
+}
+
+/// ToString(Get(rx, "flags")), as the RegExp built-ins read it, without the
+/// nine getter calls and the string they build while that read can only
+/// reach the built-in accessors.
+fn regexpFlagsOf(self: *Interpreter, rx: Value) EvalError![]const u8 {
+    if (rx.isObject()) if (pristineRegExpFlagsMask(rx.asObj())) |mask| return regexp_flags_texts[mask];
+    return self.toStringWtf8(try self.getProperty(rx, "flags"));
+}
+
 fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!builtins.isRealObject(this)) return self.throwError("TypeError", "The RegExp.prototype.flags getter can only be called on an object");
     const o = this.asObj();
     if (self.isRegExpProto(o)) return Value.str("");
+    if (pristineRegExpFlagsMask(o)) |mask| return Value.strCell(regexp_flags_cells[mask]);
 
     var buf: [8]u8 = undefined;
     var n: usize = 0;
-    const specs = [_]struct { c: u8, name: []const u8 }{
-        .{ .c = 'd', .name = "hasIndices" },
-        .{ .c = 'g', .name = "global" },
-        .{ .c = 'i', .name = "ignoreCase" },
-        .{ .c = 'm', .name = "multiline" },
-        .{ .c = 's', .name = "dotAll" },
-        .{ .c = 'u', .name = "unicode" },
-        .{ .c = 'v', .name = "unicodeSets" },
-        .{ .c = 'y', .name = "sticky" },
-    };
-    for (specs) |spec| {
+    for (regexp_flag_specs) |spec| {
         if ((try self.getProperty(this, spec.name)).toBoolean()) {
             buf[n] = spec.c;
             n += 1;
