@@ -13,8 +13,8 @@
         // docs/threads/P7-gc-design.md. Opt-in contexts route heap cells
         // through this collector; the binding lives in src/gc.zig.
         .zig_gc = .{
-            .url = "https://codeload.github.com/zig-utils/zig-gc/tar.gz/73c802e05768a729614e9c4296abb118aa06faf9",
-            .hash = "zig_gc-0.0.1-e4SVfzOmBAAQX82u9LaOnkh6Biqat0pws-6h0pPX2hM6",
+            .url = "https://codeload.github.com/zig-utils/zig-gc/tar.gz/9bdb139cb4c6cdaa37b6fa2abebcf549cfe43762",
+            .hash = "zig_gc-0.0.1-e4SVf1WzBAA0WpyH09Vg97LmvYYKPjZ9n8LBvrwGxh-V",
         },
     },
     .paths = .{

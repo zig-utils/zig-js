@@ -171,6 +171,12 @@ const finalization_cleanup_queue_reserve_granularity = 16;
 const module_queue_reserve_granularity = 16;
 const module_namespace_waiter_reserve_granularity = 16;
 const runtime_gc_tenuring_age: u8 = 3;
+/// Nursery floor for runtime contexts. UI mounts allocate many cells per
+/// component and keep a large share; at zig-gc's 4 MiB default each minor
+/// spent its fixed root/remembered-owner cost on too few dead cells. 8 MiB cut
+/// an 80-row stx mount by 2-3% of instructions and ~7% of wall time for
+/// about 4 MiB more resident memory; larger floors stopped paying.
+const runtime_gc_nursery_minimum_bytes: usize = 8 * 1024 * 1024;
 const precise_gc_nursery_threshold_bytes: usize = 2 * 1024 * 1024;
 const gc_auto_compaction_min_reclaimable_bytes: usize = 512 * 1024;
 
@@ -5833,6 +5839,7 @@ pub const Context = struct {
             else
                 collector_auxiliary);
             h.setNurseryTenuringAge(runtime_gc_tenuring_age);
+            h.setNurseryMinimumBytes(runtime_gc_nursery_minimum_bytes);
             h.setNurseryEnabled(true);
             h.setMovingNurseryEnabled(true);
             self.gc = h;
@@ -40296,14 +40303,15 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
 
     const result = try ctx.evaluate(
         \\let acc = 0;
-        \\for (let i = 0; i < 50000; i++) {
+        \\for (let i = 0; i < 150000; i++) {
         \\  const o = { a: i, b: { c: i }, arr: [i, i, i] };
         \\  acc += o.b.c + o.arr[1];
         \\}
         \\acc;
     );
-    // sum_{i=0..49999}(i + i) = 2 * (49999*50000/2) = 2499950000.
-    try std.testing.expectEqual(@as(f64, 2499950000), result.asNum());
+    // Sized to allocate several runtime nurseries (8 MiB floor).
+    // sum_{i=0..149999}(i + i) = 149999*150000 = 22499850000.
+    try std.testing.expectEqual(@as(f64, 22499850000), result.asNum());
     // Collection ran repeatedly mid-loop — far more than the single quiescent
     // collect at the top of `evaluate`.
     try std.testing.expect(ctx.gc.?.collections > 2);
