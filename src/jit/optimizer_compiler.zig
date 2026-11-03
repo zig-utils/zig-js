@@ -752,7 +752,8 @@ fn stageNativeOperationDescriptors(
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
                 inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
                 inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
-                inst.op == .make_closure or inst.op == .load_local or inst.op == .load_local_mapped or inst.op == .load_local_lexical or inst.op == .store_local or inst.op == .store_local_mapped or inst.op == .store_local_lexical or inst.op == .init_local_lexical or inst.op == .array_spread or inst.op == .array_append_hole or inst.op == .iter_of or inst.op == .assert_iter_result or inst.op == .iter_close or inst.op == .iter_close_completion)
+                inst.op == .make_closure or inst.op == .load_local or inst.op == .load_local_mapped or inst.op == .load_local_lexical or inst.op == .store_local or inst.op == .store_local_mapped or inst.op == .store_local_lexical or inst.op == .init_local_lexical or inst.op == .array_spread or inst.op == .array_append_hole or inst.op == .iter_of or inst.op == .assert_iter_result or inst.op == .iter_close or inst.op == .iter_close_completion or
+                inst.op == .iter_of_record or inst.op == .iter_step or inst.op == .iter_materialize)
                 break :runtime operation.lhs;
             return error.UnsupportedChunk;
         } else staged: {
@@ -847,6 +848,8 @@ fn stageNativeOperationDescriptors(
                 .enum_next => 4,
                 .enum_end_completion => 0,
                 .prepare_class_heritage => 2,
+                .iter_of_record => 2,
+                .iter_step => 3,
                 .enter_block, .exit_block, .prepare_class_private_environment => 0,
                 else => 1,
             },
@@ -965,7 +968,8 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
         node.kind == .instance_of or node.kind == .private_in or node.kind == .enter_block or
         node.kind == .exit_block or node.kind == .prepare_class_heritage or
         node.kind == .prepare_class_private_environment or node.kind == .eval_class or
-        node.kind == .class_result or node.kind == .call or
+        node.kind == .class_result or node.kind == .iter_result or node.kind == .iter_of_record or
+        node.kind == .iter_step or node.kind == .iter_materialize or node.kind == .call or
         node.kind == .call_eval or node.kind == .call_method or node.kind == .call_spread or
         node.kind == .call_eval_spread or node.kind == .call_with_this_spread or
         node.kind == .call_with_this or node.kind == .construct or node.kind == .construct_spread or
@@ -1207,7 +1211,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .load_managed_constant, .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .enter_block, .exit_block, .prepare_class_heritage, .prepare_class_private_environment, .eval_class, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .load_managed_constant, .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .iter_of_record, .iter_step, .iter_materialize, .enum_keys, .enum_next, .enum_end_completion, .enter_block, .exit_block, .prepare_class_heritage, .prepare_class_private_environment, .eval_class, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture, .store_capture, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -1246,7 +1250,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .origin = node.origin,
             });
         },
-        .enum_result, .class_result => {
+        .enum_result, .class_result, .iter_result => {
             if (node.immediate >= 4) return error.UnsupportedChunk;
             types[node.id] = .other;
             try operations.append(allocator, .{
@@ -3252,7 +3256,7 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
                 try operations.append(allocator, .{ .kind = .runtime_base, .destination = @intCast(node.id), .block = block, .lhs = @intCast(node.lhs), .origin = node.origin });
             },
-            .load_managed_constant, .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .enum_keys, .enum_next, .enum_end_completion, .enter_block, .exit_block, .prepare_class_heritage, .prepare_class_private_environment, .eval_class, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
+            .load_managed_constant, .make_closure, .load_frame, .store_frame, .init_frame, .iter_of, .assert_iter_result, .iter_close, .iter_close_completion, .iter_of_record, .iter_step, .iter_materialize, .enum_keys, .enum_next, .enum_end_completion, .enter_block, .exit_block, .prepare_class_heritage, .prepare_class_private_environment, .eval_class, .load_var_or_undef, .store_var, .def_var, .def_lex, .init_declarations, .copy_annex_b, .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref, .load_var, .load_this, .load_new_target, .load_capture => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 const first_input = try runtime.stageFrameInputs(
                     graph,
@@ -3491,7 +3495,7 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
-            .enum_result, .class_result => {
+            .enum_result, .class_result, .iter_result => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 if (node.immediate >= 4 or node.origin >= runtime.chunk.code.items.len)
                     return error.UnsupportedChunk;
@@ -3508,6 +3512,12 @@ fn appendBlockOperations(
                         else => return error.UnsupportedChunk,
                     },
                     .prepare_class_heritage => .other,
+                    .iter_of_record => .other,
+                    .iter_step => switch (node.immediate) {
+                        0, 2 => .other,
+                        1 => .boolean,
+                        else => return error.UnsupportedChunk,
+                    },
                     else => return error.UnsupportedChunk,
                 };
                 try operations.append(allocator, .{

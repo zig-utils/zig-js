@@ -483,6 +483,9 @@ pub const Op = enum(u8) {
     enum_end_completion, // remove enumeration state below a pending [completion value, kind]
     iter_close, // pop iterator; normal-completion IteratorClose (call return() if present, validate result is Object)
     iter_close_completion, // pop iterator; IteratorClose while [completion-value, kind] is beneath it, preserving throw completions
+    iter_of_record, // pop iterable -> push the iteration record [iterator, next]: GetIterator, then `next` read once. An Array iteration nothing can observe yields the virtual record [index 0, array]
+    iter_step, // pop record [next, iterator] -> push [value, done, iterator'] (IteratorStepValue; a finished step's value is undefined). Built-in cursor and virtual Array records step without an IteratorResult; iterator' (a virtual record's advanced index) is stored back
+    iter_materialize, // pop record [next, iterator] -> push the iterator object IteratorClose needs, creating the Array Iterator a virtual record stands for
     async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present
     async_iter_close_completion, // async_iter_close while [completion-value, kind] is beneath it, preserving throw completions during GetMethod/Call
     prepare_class_heritage, // pop raw extends value; validate once, push normalized constructor + prototype roots

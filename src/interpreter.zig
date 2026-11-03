@@ -18587,6 +18587,15 @@ pub const Interpreter = struct {
             .generic => notAnObjectMessage(v),
             .spread => "Spread syntax requires ...iterable not be null or undefined",
         });
+        const input_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(input_root);
+        const method = try self.iteratorMethodFor(v, use);
+        return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, v)));
+    }
+
+    /// GetMethod(v, @@iterator) for GetIterator, with its not-iterable
+    /// TypeErrors. `v` is not nullish.
+    fn iteratorMethodFor(self: *Interpreter, v: Value, use: IteratorUse) EvalError!Value {
         const key = self.symbolIteratorKey() orelse
             return self.throwError("TypeError", "value is not iterable");
         const input_root = try self.pushTempRoot(v);
@@ -18608,7 +18617,80 @@ pub const Interpreter = struct {
                 .{notIterableSubject(self.tempRoot(input_root, v))},
             ));
         }
-        return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, v)));
+        return method;
+    }
+
+    /// The iteration record compiled `for-of` and array destructuring drive:
+    /// GetIterator(v), then the iterator's `next` read once.
+    ///
+    /// When `v` is an ordinary Array whose @@iterator is the built-in
+    /// `values` and %ArrayIteratorPrototype% holds the built-in `next` as a
+    /// data property, the Array Iterator that call would create is invisible
+    /// until IteratorClose hands it to a `return` method: making it and
+    /// reading `next` from it observe nothing. The record is then virtual,
+    /// [index 0, v]. A Number never names a real iterator (GetIterator
+    /// requires an Object), so `iter_step` recognizes it, steps the
+    /// Array exactly as the built-in `next` would, and the compiled code
+    /// stores the advanced index back; `iter_materialize` creates the real
+    /// iterator, at its current index, only for IteratorClose.
+    pub fn iterationRecordFor(self: *Interpreter, v: Value) EvalError!IteratorRecord {
+        if (v.isUndefined() or v.isNull()) return self.throwError("TypeError", notAnObjectMessage(v));
+        const input_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(input_root);
+        const method = try self.iteratorMethodFor(v, .generic);
+        const input = self.tempRoot(input_root, v);
+        if (self.arrayIterationIsVirtual(input, method))
+            return .{ .iterator = Value.num(0), .next_method = input };
+        const iterator = try self.requireIteratorObject(try self.callValueWithThis(method, &.{}, input));
+        const iterator_root = try self.pushTempRoot(iterator);
+        defer self.restoreTempRoots(iterator_root);
+        const next_method = try self.getProperty(iterator, "next");
+        return .{
+            .iterator = self.tempRoot(iterator_root, iterator),
+            .next_method = next_method,
+        };
+    }
+
+    /// Whether calling `method` on `v` creates an Array Iterator whose
+    /// creation and `next` read are unobservable (see `iterationRecordFor`).
+    fn arrayIterationIsVirtual(self: *Interpreter, v: Value, method: Value) bool {
+        if (!v.isObject() or !method.isObject()) return false;
+        const values_fn = method.asObj().native orelse return false;
+        if (values_fn != &arrayValuesIterFn) return false;
+        const o = v.asObj();
+        if (!o.is_array or o.is_arguments or o.proxyHandler() != null or o.proxy_revoked) return false;
+        const proto_value = self.env.get("\x00ArrIterProto") orelse return false;
+        if (!proto_value.isObject()) return false;
+        const proto = proto_value.asObj();
+        if (proto.proxyHandler() != null or proto.proxy_revoked) return false;
+        if (proto.restrictionOwner() != 0 or proto.hostClassHooks() != null) return false;
+        if (proto.getAccessor("next") != null) return false;
+        const next = proto.getOwn("next") orelse return false;
+        if (!next.isObject()) return false;
+        const next_fn = next.asObj().native orelse return false;
+        return next_fn == &cursorIterNext;
+    }
+
+    /// One built-in `next` step of the virtual Array iteration record
+    /// [index, array]: the value, or null once done.
+    pub fn virtualArrayIterStep(self: *Interpreter, array: Value, index: Value) EvalError!?Value {
+        const o = array.asObj();
+        const i = toLen(index.asNum());
+        if (i >= o.arrayLength()) return null;
+        return try self.arrIndexGet(o, i);
+    }
+
+    /// The iterator object of record [iterator, next] for IteratorClose: a
+    /// real iterator as is, or for a virtual record the Array Iterator over
+    /// `next` at the record's index, exactly as the built-in iteration would
+    /// have left it.
+    pub fn materializeIterationRecord(self: *Interpreter, next: Value, iterator: Value) EvalError!Value {
+        if (!iterator.isNumber()) return iterator;
+        const created = try self.makeCursorIterator(next);
+        const created_root = try self.pushTempRoot(created);
+        defer self.restoreTempRoots(created_root);
+        try self.setProp(created.asObj(), "__i", iterator);
+        return self.tempRoot(created_root, created);
     }
 
     /// GetIterator(obj, sync): acquire the iterator object and capture its

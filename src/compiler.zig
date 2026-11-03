@@ -4037,15 +4037,21 @@ pub const Compiler = struct {
         }
         // for-await uses the async-iterator protocol (Symbol.asyncIterator, else
         // a wrapped sync iterator) and awaits each `next()` result.
-        _ = try self.chunk.emit(if (await_each) .async_iter_of else .iter_of, 0);
-        try self.emitDefineActivationTemp(iterator_temp);
         // GetIterator reads the iterator's `next` method exactly ONCE (it becomes
         // the Iterator Record's [[NextMethod]]); cache it so a `next` accessor is
         // not re-read each iteration.
         const next_temp = try self.freshProtocolTemp();
-        try self.emitLoadActivationTemp(iterator_temp);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
-        try self.emitDefineActivationTemp(next_temp);
+        if (await_each) {
+            _ = try self.chunk.emit(.async_iter_of, 0);
+            try self.emitDefineActivationTemp(iterator_temp);
+            try self.emitLoadActivationTemp(iterator_temp);
+            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
+            try self.emitDefineActivationTemp(next_temp);
+        } else {
+            _ = try self.chunk.emit(.iter_of_record, 0); // [iterator, next]
+            try self.emitDefineActivationTemp(next_temp);
+            try self.emitDefineActivationTemp(iterator_temp);
+        }
 
         const done_temp = try self.freshProtocolTemp();
         // This flag tracks whether an abrupt completion must close the iterator.
@@ -4068,22 +4074,32 @@ pub const Compiler = struct {
         const top = self.chunk.here();
         // r = it.next()  (for-await: r = await it.next()) — the cached `next`,
         // invoked with this=it via call_with_this (no second property lookup).
-        try self.emitLoadActivationTemp(next_temp);
-        try self.emitLoadActivationTemp(iterator_temp);
-        _ = try self.chunk.emitAB(.call_with_this, 0, 0);
-        if (await_each) _ = try self.chunk.emit(.await_op, 0); // await the next() result
-        _ = try self.chunk.emit(.assert_iter_result, 0); // IteratorNext: result must be an Object
-        try self.emitDefineActivationTemp(result_temp);
-        // if (r.done) break  — `not` then jump_if_false exits exactly when done.
-        try self.emitLoadActivationTemp(result_temp);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
-        _ = try self.chunk.emit(.not, 0);
-        const to_end = try self.chunk.emit(.jump_if_false, 0);
+        var to_end: usize = undefined;
+        if (await_each) {
+            try self.emitLoadActivationTemp(next_temp);
+            try self.emitLoadActivationTemp(iterator_temp);
+            _ = try self.chunk.emitAB(.call_with_this, 0, 0);
+            _ = try self.chunk.emit(.await_op, 0); // await the next() result
+            _ = try self.chunk.emit(.assert_iter_result, 0); // IteratorNext: result must be an Object
+            try self.emitDefineActivationTemp(result_temp);
+            // if (r.done) break  — `not` then jump_if_false exits exactly when done.
+            try self.emitLoadActivationTemp(result_temp);
+            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
+            _ = try self.chunk.emit(.not, 0);
+            to_end = try self.chunk.emit(.jump_if_false, 0);
+            try self.emitLoadActivationTemp(result_temp);
+            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+        } else {
+            // [value, done]; when done, drop the undefined value and exit.
+            try self.emitIteratorStepValue(next_temp, iterator_temp);
+            const to_body = try self.chunk.emit(.jump_if_false, 0);
+            _ = try self.chunk.emit(.pop, 0);
+            to_end = try self.chunk.emit(.jump, 0);
+            self.chunk.patchToHere(to_body);
+        }
         // IteratorValue itself is outside IteratorClose. Leave its value on the
         // operand stack, then arm the close handler for environment creation,
         // target binding, and body evaluation.
-        try self.emitLoadActivationTemp(result_temp);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitStoreActivationTempDiscard(done_temp);
         if (environment_binding) {
@@ -4152,8 +4168,13 @@ pub const Compiler = struct {
             // not call the same iterator's `return` a second time.
             _ = try self.chunk.emit(.load_true, 0);
             try self.emitStoreActivationTempDiscard(done_temp);
-            try self.emitLoadActivationTemp(iterator_temp);
-            if (await_each) try self.emitAsyncIteratorClose(false) else _ = try self.chunk.emit(.iter_close, 0);
+            if (await_each) {
+                try self.emitLoadActivationTemp(iterator_temp);
+                try self.emitAsyncIteratorClose(false);
+            } else {
+                try self.emitLoadIteratorForClose(next_temp, iterator_temp);
+                _ = try self.chunk.emit(.iter_close, 0);
+            }
             self.chunk.patchToHere(skip_close);
         }
         self.popLoop();
@@ -4165,8 +4186,13 @@ pub const Compiler = struct {
         try self.emitLoadActivationTemp(done_temp);
         _ = try self.chunk.emit(.not, 0);
         const skip_close = try self.chunk.emit(.jump_if_false, 0);
-        try self.emitLoadActivationTemp(iterator_temp);
-        if (await_each) try self.emitAsyncIteratorClose(true) else _ = try self.chunk.emit(.iter_close_completion, 0);
+        if (await_each) {
+            try self.emitLoadActivationTemp(iterator_temp);
+            try self.emitAsyncIteratorClose(true);
+        } else {
+            try self.emitLoadIteratorForClose(next_temp, iterator_temp);
+            _ = try self.chunk.emit(.iter_close_completion, 0);
+        }
         self.chunk.patchToHere(skip_close);
         _ = try self.chunk.emit(.end_finally, 0);
         self.chunk.patchToHere(after_finally);
@@ -4423,16 +4449,14 @@ pub const Compiler = struct {
     fn compileArrayPattern(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, src: ActivationTemp, mode: PatternMode) CompileError!void {
         const none = std.math.maxInt(u32);
         try self.emitLoadActivationTemp(src);
-        _ = try self.chunk.emit(.iter_of, 0);
-        const it = try self.freshActivationTemp();
-        try self.emitDefineActivationTemp(it);
         // GetIterator caches [[NextMethod]] once. Reading `iterator.next` on
         // every element would repeat an observable getter and could call a
         // different method after user code mutates the iterator.
+        _ = try self.chunk.emit(.iter_of_record, 0); // [iterator, next]
+        const it = try self.freshActivationTemp();
         const next_method = try self.freshActivationTemp();
-        try self.emitLoadActivationTemp(it);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
         try self.emitDefineActivationTemp(next_method);
+        try self.emitDefineActivationTemp(it);
         const done = try self.freshActivationTemp();
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitDefineActivationTemp(done);
@@ -4451,7 +4475,7 @@ pub const Compiler = struct {
         try self.emitLoadActivationTemp(done);
         _ = try self.chunk.emit(.not, 0);
         const skip = try self.chunk.emit(.jump_if_false, 0);
-        try self.emitLoadActivationTemp(it);
+        try self.emitLoadIteratorForClose(next_method, it);
         // The pending [value, kind] completion remains below the iterator.
         // IteratorClose preserves an existing throw even when `return` itself
         // throws, while a close failure replaces a normal completion.
@@ -4460,12 +4484,31 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.end_finally, 0);
     }
 
+    /// IteratorStepValue on the record in `next`/`iterator` (from
+    /// `iter_of_record`), leaving [value, done]; a finished step's value is
+    /// undefined. `iter_step` stores nothing itself: the record's iterator
+    /// word, which a virtual Array record advances, is stored back here.
+    fn emitIteratorStepValue(self: *Compiler, next: ActivationTemp, iterator: ActivationTemp) CompileError!void {
+        try self.emitLoadActivationTemp(next);
+        try self.emitLoadActivationTemp(iterator);
+        _ = try self.chunk.emit(.iter_step, 0);
+        try self.emitStoreActivationTempDiscard(iterator);
+    }
+
+    /// Push the iterator object IteratorClose needs for the record in
+    /// `next`/`iterator`, creating it when the record is virtual.
+    fn emitLoadIteratorForClose(self: *Compiler, next: ActivationTemp, iterator: ActivationTemp) CompileError!void {
+        try self.emitLoadActivationTemp(next);
+        try self.emitLoadActivationTemp(iterator);
+        _ = try self.chunk.emit(.iter_materialize, 0);
+    }
+
     fn compileArrayPatternBody(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, it: ActivationTemp, next_method: ActivationTemp, done: ActivationTemp, mode: PatternMode) CompileError!void {
         for (elems) |elem| {
             // Spec order: evaluate the target reference first, then step the
             // iterator. Member/super targets carry an observable reference eval.
             const ref = try self.preEvalPatternAssignmentRef(elem.target, mode);
-            // ev = undefined; if (!done) { r = it.next(); if (r.done) done = true else ev = r.value }
+            // ev = undefined; if (!done) [ev, done] = IteratorStepValue(it)
             const ev = try self.freshActivationTemp();
             _ = try self.chunk.emit(.load_undefined, 0);
             try self.emitDefineActivationTemp(ev);
@@ -4473,7 +4516,6 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.not, 0);
             const skip_step = try self.chunk.emit(.jump_if_false, 0); // skip when done
             {
-                const r = try self.freshActivationTemp();
                 // IteratorStepValue marks the iterator record done before
                 // propagating an abrupt IteratorNext / IteratorComplete /
                 // IteratorValue completion. Set the flag before those calls,
@@ -4482,26 +4524,11 @@ pub const Compiler = struct {
                 // operation itself throws.
                 _ = try self.chunk.emit(.load_true, 0);
                 try self.emitStoreActivationTempDiscard(done);
-                try self.emitLoadActivationTemp(next_method);
-                try self.emitLoadActivationTemp(it);
-                _ = try self.chunk.emit(.call_with_this, 0);
-                try self.emitDefineActivationTemp(r);
-                try self.emitLoadActivationTemp(r);
-                _ = try self.chunk.emit(.assert_iter_result, 0);
-                _ = try self.chunk.emit(.pop, 0);
-                try self.emitLoadActivationTemp(r);
-                _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
-                const not_done = try self.chunk.emit(.jump_if_false, 0);
-                _ = try self.chunk.emit(.load_true, 0);
+                // [value, done]: a finished step yields undefined, which is
+                // already ev's value.
+                try self.emitIteratorStepValue(next_method, it);
                 try self.emitStoreActivationTempDiscard(done);
-                const after = try self.chunk.emit(.jump, 0);
-                self.chunk.patchToHere(not_done);
-                try self.emitLoadActivationTemp(r);
-                _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
                 try self.emitStoreActivationTempDiscard(ev);
-                _ = try self.chunk.emit(.load_false, 0);
-                try self.emitStoreActivationTempDiscard(done);
-                self.chunk.patchToHere(after);
             }
             self.chunk.patchToHere(skip_step);
             // default: if (ev === undefined) ev = <default>   (may yield)
@@ -4539,26 +4566,14 @@ pub const Compiler = struct {
             try self.emitLoadActivationTemp(done);
             _ = try self.chunk.emit(.not, 0);
             const to_end = try self.chunk.emit(.jump_if_false, 0); // exit when done
-            const r = try self.freshActivationTemp();
             _ = try self.chunk.emit(.load_true, 0);
             try self.emitStoreActivationTempDiscard(done);
-            try self.emitLoadActivationTemp(next_method);
-            try self.emitLoadActivationTemp(it);
-            _ = try self.chunk.emit(.call_with_this, 0);
-            try self.emitDefineActivationTemp(r);
-            try self.emitLoadActivationTemp(r);
-            _ = try self.chunk.emit(.assert_iter_result, 0);
-            _ = try self.chunk.emit(.pop, 0);
-            try self.emitLoadActivationTemp(r);
-            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
+            try self.emitIteratorStepValue(next_method, it);
             const not_done = try self.chunk.emit(.jump_if_false, 0);
-            _ = try self.chunk.emit(.load_true, 0);
-            try self.emitStoreActivationTempDiscard(done);
+            _ = try self.chunk.emit(.pop, 0); // the finished step's undefined
             const to_end2 = try self.chunk.emit(.jump, 0);
             self.chunk.patchToHere(not_done);
             const rest_value = try self.freshActivationTemp();
-            try self.emitLoadActivationTemp(r);
-            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
             try self.emitDefineActivationTemp(rest_value);
             _ = try self.chunk.emit(.load_false, 0);
             try self.emitStoreActivationTempDiscard(done);
@@ -8180,7 +8195,7 @@ test "compiler reports stable plain-function admission reasons" {
             var saw_frame_store = false;
             for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
                 .bind_pattern => return error.TestUnexpectedResult,
-                .iter_of => saw_iterator = true,
+                .iter_of_record => saw_iterator = true,
                 .object_rest => saw_object_rest = true,
                 .store_local => saw_frame_store = true,
                 else => {},
@@ -8427,7 +8442,7 @@ test "compiler emits mixed destructuring rest at its ordered parameter entry" {
             try std.testing.expectEqual(compiled.chunk.parameter_slots[1], instruction.a);
             collect_index = index;
         },
-        .iter_of => if (iterator_index == null) {
+        .iter_of_record => if (iterator_index == null) {
             iterator_index = index;
         },
         else => {},
@@ -9696,7 +9711,7 @@ test "compiler lowers plain-function destructuring assignments without bind_patt
     var saw_frame_store = false;
     for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
         .bind_pattern => return error.TestUnexpectedResult,
-        .iter_of => saw_iterator = true,
+        .iter_of_record => saw_iterator = true,
         .object_rest => saw_object_rest = true,
         .store_local, .store_local_lexical => saw_frame_store = true,
         else => {},
@@ -9768,7 +9783,7 @@ test "compiler lowers plain-function destructuring declarations without bind_pat
     var saw_lexical_init = false;
     for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
         .bind_pattern => return error.TestUnexpectedResult,
-        .iter_of => saw_iterator = true,
+        .iter_of_record => saw_iterator = true,
         .object_rest => saw_object_rest = true,
         .store_local, .store_local_lexical, .store_local_mapped => saw_frame_store = true,
         .init_local_lexical => saw_lexical_init = true,
@@ -9831,7 +9846,7 @@ test "compiler keeps for-of protocol state in activation-owned slots" {
     var local_loads: usize = 0;
     var local_stores: usize = 0;
     for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
-        .iter_of => saw_iterator = true,
+        .iter_of_record => saw_iterator = true,
         .load_local, .load_local_lexical => local_loads += 1,
         .store_local, .store_local_lexical => local_stores += 1,
         .load_var, .store_var, .def_var, .def_lex => {

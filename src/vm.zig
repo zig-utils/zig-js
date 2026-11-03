@@ -4587,6 +4587,7 @@ fn nativeOperationCanElideLegacyFrame(
     const values: []const Value = @ptrCast(inputs);
     switch (op) {
         .enum_keys, .enum_next, .enum_end_completion => return false,
+        .iter_of_record, .iter_step, .iter_materialize => return false,
         .not, .typeof_op => return values.len == 1,
         .to_numeric,
         .neg,
@@ -5012,6 +5013,29 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         const inst = chunk.code.items[descriptor.origin];
         if (inst.op != .load_const or inst.a != descriptor.operand_a) return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, chunk.consts.items[inst.a]);
+    }
+    if (op == .iter_of_record) {
+        if (inputs.len != 1 or descriptor.result_count != 2) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const record = vm.iterationRecordFor(Value.fromRawBits(inputs[0])) catch |err|
+            return finishNativeOperationError(frame, vm, operation_id, err);
+        frame.operation_result_bits[0] = record.iterator.rawBits();
+        frame.operation_result_bits[1] = record.next_method.rawBits();
+        frame.operation_detail = operation_id;
+        return @backingInt(jit.NativeOperationStatus.value);
+    }
+    if (op == .iter_step) {
+        if (inputs.len != 2 or descriptor.result_count != 3) return @backingInt(jit.NativeOperationStatus.host_trap);
+        const step = iteratorStep(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1]), .none) catch |err|
+            return finishNativeOperationError(frame, vm, operation_id, err);
+        frame.operation_result_bits[0] = step.value.rawBits();
+        frame.operation_result_bits[1] = Value.boolVal(step.done).rawBits();
+        frame.operation_result_bits[2] = step.iterator.rawBits();
+        frame.operation_detail = operation_id;
+        return @backingInt(jit.NativeOperationStatus.value);
+    }
+    if (op == .iter_materialize) {
+        if (inputs.len != 2) return @backingInt(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(frame, vm, operation_id, vm.materializeIterationRecord(Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])));
     }
     if (op == .iter_of or op == .assert_iter_result or op == .iter_close or op == .iter_close_completion) {
         const expected: usize = if (op == .iter_close_completion) 3 else 1;
@@ -8219,6 +8243,40 @@ fn executeEnumerationNext(vm: *Interpreter, target: Value, keys_value: Value, in
     };
 }
 
+const IteratorStep = struct { value: Value, done: bool, iterator: Value };
+
+/// IteratorStepValue on the compiled iteration record [next, iterator]: the
+/// value (undefined once done), whether the step finished, and the record's
+/// iterator word to store back. A virtual Array record steps the Array the
+/// way the built-in `next` would and advances its index; a built-in cursor
+/// iterator holding the built-in `next` steps directly. Neither allocates the
+/// IteratorResult only this step would see. Any other record calls `next`,
+/// requires an Object, reads `done`, then `value` only when not done.
+fn iteratorStep(vm: *Interpreter, next: Value, iterator: Value, site: interp.CallSite) EvalError!IteratorStep {
+    const roots = try vm.pushTempRootSlice(&.{ next, iterator });
+    defer vm.restoreTempRoots(roots);
+    if (iterator.isNumber()) {
+        const step = try vm.virtualArrayIterStep(next, iterator);
+        return .{
+            .value = step orelse Value.undef(),
+            .done = step == null,
+            .iterator = if (step == null) iterator else Value.num(iterator.asNum() + 1),
+        };
+    }
+    if (interp.builtinCursorIterator(iterator, next)) |cursor| {
+        const step = try interp.builtinCursorIterStep(vm, cursor);
+        return .{ .value = step orelse Value.undef(), .done = step == null, .iterator = vm.tempRoot(roots + 1, iterator) };
+    }
+    const result = try callValue(vm, next, &.{}, iterator, site);
+    _ = try executeIteratorEffect(vm, .assert_iter_result, result, Value.undef(), Value.undef());
+    const result_root = try vm.pushTempRoot(result);
+    defer vm.restoreTempRoots(result_root);
+    if ((try vm.getProperty(result, "done")).toBoolean())
+        return .{ .value = Value.undef(), .done = true, .iterator = vm.tempRoot(roots + 1, iterator) };
+    const item = try vm.getProperty(vm.tempRoot(result_root, result), "value");
+    return .{ .value = item, .done = false, .iterator = vm.tempRoot(roots + 1, iterator) };
+}
+
 /// ECMA-262 GetIterator, IteratorComplete's Object assertion, and
 /// IteratorClose. A pending throw wins over a close-time JavaScript throw;
 /// termination and allocation failure still propagate through the host status.
@@ -9996,6 +10054,27 @@ fn runChunk(
             },
             .assert_iter_result => {
                 _ = try executeIteratorEffect(vm, inst.op, stack.items[stack.items.len - 1], Value.undef(), Value.undef());
+            },
+            .iter_of_record => {
+                const record = try vm.iterationRecordFor(stack.items[stack.items.len - 1]);
+                stack.items[stack.items.len - 1] = record.iterator;
+                try stack.append(stack_alloc, record.next_method);
+            },
+            .iter_step => {
+                // The record stays on the operand stack until the step is
+                // complete, so an unwind leaves the frame as the unfused
+                // protocol did.
+                const len = stack.items.len;
+                const step = try iteratorStep(vm, stack.items[len - 2], stack.items[len - 1], vmCallSite(chunk, ip));
+                stack.items[len - 2] = step.value;
+                stack.items[len - 1] = Value.boolVal(step.done);
+                try stack.append(stack_alloc, step.iterator);
+            },
+            .iter_materialize => {
+                const len = stack.items.len;
+                const iterator = try vm.materializeIterationRecord(stack.items[len - 2], stack.items[len - 1]);
+                stack.shrinkRetainingCapacity(len - 1);
+                stack.items[len - 2] = iterator;
             },
             .iter_of => {
                 const v = stack.pop().?;
@@ -14353,7 +14432,7 @@ test "vm: destructuring parameter allocation failure restores the caller activat
     const allocator = arena.allocator();
     var parser = try Parser.init(
         allocator,
-        "function collect([value]) { return value; } collect",
+        "function collect([...values]) { return values[0]; } collect",
     );
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
@@ -14378,7 +14457,8 @@ test "vm: destructuring parameter allocation failure restores the caller activat
 
     // Warm frame, operand-stack, and iterator bookkeeping. The trampoline's
     // activation list performs allocation zero; allocation one belongs to
-    // GetIterator in the parameter BindingInitialization prologue.
+    // the rest element's Array in the parameter BindingInitialization
+    // prologue (iterating an ordinary Array itself allocates nothing).
     try std.testing.expectEqual(
         @as(f64, 13),
         (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
@@ -20519,7 +20599,7 @@ test "vm: optimizer native iterator region preserves protocol exceptions" {
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var effect_index: ?usize = null;
-    for (operations.descriptors) |descriptor| if (descriptor.bytecode_op == @backingInt(bc.Op.iter_of)) {
+    for (operations.descriptors) |descriptor| if (descriptor.bytecode_op == @backingInt(bc.Op.iter_of_record)) {
         effect_index = descriptor.deopt_index;
     };
     const index = effect_index orelse return error.TestUnexpectedResult;

@@ -129,11 +129,15 @@ pub const ValueKind = enum {
     enum_end_completion,
     enum_result,
     class_result,
+    iter_result,
     enter_block,
     exit_block,
     prepare_class_heritage,
     prepare_class_private_environment,
     eval_class,
+    iter_of_record,
+    iter_step,
+    iter_materialize,
     load_managed_constant,
     binding_base,
     branch_predicate,
@@ -657,6 +661,9 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .enum_next => .{ .required = 3, .removed = 0, .added = 3 },
         .enum_end_completion => .{ .required = 5, .removed = 3, .added = 0 },
         .prepare_class_heritage => .{ .required = 1, .removed = 1, .added = 2 },
+        .iter_of_record => .{ .required = 1, .removed = 1, .added = 2 },
+        .iter_step => .{ .required = 2, .removed = 2, .added = 3 },
+        .iter_materialize => .{ .required = 2, .removed = 2, .added = 1 },
         .scratch_store => .{ .required = 1, .removed = 1, .added = 0 },
         .scratch_load => .{ .required = 0, .removed = 0, .added = 1 },
         .get_index, .set_prop, .instance_of, .import_call => .{ .required = 2, .removed = 2, .added = 1 },
@@ -780,6 +787,9 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .enum_end_completion,
         .prepare_class_heritage,
         .eval_class,
+        .iter_of_record,
+        .iter_step,
+        .iter_materialize,
         => return depthEffect(inst).required,
         else => {},
     }
@@ -1701,6 +1711,48 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     depth += 1;
                 }
             },
+            .iter_of_record, .iter_step, .iter_materialize => {
+                // The compiled iteration record: [iterable] -> [iterator, next],
+                // [next, iterator] -> [value, done, iterator'], and
+                // [next, iterator] -> [iterator object].
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const first = depth - effect.required;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = switch (inst.op) {
+                        .iter_of_record => .iter_of_record,
+                        .iter_step => .iter_step,
+                        .iter_materialize => .iter_materialize,
+                        else => unreachable,
+                    },
+                    .lhs = stack[first],
+                    .rhs = if (effect.required == 2) stack[first + 1] else ValueNode.none,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                depth -= effect.removed;
+                if (inst.op == .iter_materialize) {
+                    stack[depth] = result;
+                    depth += 1;
+                } else for (0..effect.added) |result_index| {
+                    const value = try builder.appendNode(.{
+                        .id = undefined,
+                        .block = @intCast(block_id),
+                        .origin = @intCast(origin),
+                        .kind = .iter_result,
+                        .immediate = result_index,
+                        .may_have_effect = true,
+                    });
+                    try builder.roots.append(allocator, value);
+                    stack[depth] = value;
+                    depth += 1;
+                }
+            },
             .eval_class => {
                 if (inst.a >= chunk.classes.items.len or depth < inst.b) return error.InvalidControlFlow;
                 try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
@@ -2263,6 +2315,9 @@ fn supports(op: bc.Op) bool {
         .prepare_class_heritage,
         .prepare_class_private_environment,
         .eval_class,
+        .iter_of_record,
+        .iter_step,
+        .iter_materialize,
         => true,
         else => false,
     };

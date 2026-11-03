@@ -137,6 +137,8 @@ pub fn verify(program: *const compiler.Program) Error!void {
             .enum_next => 4,
             .enum_end_completion => 0,
             .prepare_class_heritage => 2,
+            .iter_of_record => 2,
+            .iter_step => 3,
             .enter_block, .exit_block, .prepare_class_private_environment => 0,
             else => 1,
         };
