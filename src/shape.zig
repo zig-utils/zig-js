@@ -393,6 +393,12 @@ pub const Shape = struct {
     /// serializes insertion and same-name convergence.
     transition_head: std.atomic.Value(?*TransitionList.Head) = .init(null),
     transition_count: std.atomic.Value(usize) = .init(0),
+    /// The two most recently taken transition edges, newest first. Probed by
+    /// name before the keyed skip list: shapes that fan out widely (the root,
+    /// prototype-less dictionaries) still see the same few additions in a row
+    /// from one construction site. Advisory: every entry is an immutable
+    /// published child, so a stale or racing entry only costs the list probe.
+    recent_transitions: [2]std.atomic.Value(?*Shape) = .{ .init(null), .init(null) },
     transition_lock: std.atomic.Mutex = .unlocked,
     owner: *ShapeOwner,
 
@@ -676,7 +682,17 @@ pub const Shape = struct {
     }
 
     fn findTransitionCached(self: *Shape, name: []const u8) ?*Shape {
-        return TransitionList.get(self.transition_head.load(.acquire), name);
+        const newest = self.recent_transitions[0].load(.acquire);
+        if (newest) |child| if (std.mem.eql(u8, child.name.?, name)) return child;
+        if (self.recent_transitions[1].load(.acquire)) |child| if (std.mem.eql(u8, child.name.?, name)) {
+            self.recent_transitions[1].store(newest, .release);
+            self.recent_transitions[0].store(child, .release);
+            return child;
+        };
+        const child = TransitionList.get(self.transition_head.load(.acquire), name) orelse return null;
+        self.recent_transitions[1].store(newest, .release);
+        self.recent_transitions[0].store(child, .release);
+        return child;
     }
 
     fn publishTransition(self: *Shape, child: *Shape) std.mem.Allocator.Error!void {
