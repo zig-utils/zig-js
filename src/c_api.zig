@@ -1130,6 +1130,19 @@ const ReachabilityVisitor = struct {
                     self.markInternal("[[RealmGlobal]]", function.realm_global);
                     gc_mod.traceFunction(function, self);
                 },
+                .object => {
+                    // A JS function lives in its object's cell, so object
+                    // tracing covers it, but the GC marks only heap-managed
+                    // environments. Reachability names the closure edge
+                    // whatever owns the environment, as for a Function cell.
+                    const object: *Object = @ptrCast(@alignCast(cell.pointer));
+                    if (object.jsFunction()) |erased| {
+                        const function: *interp.Function = @ptrCast(@alignCast(erased));
+                        self.markInternal("[[Environment]]", function.closure);
+                        self.markInternal("[[RealmGlobal]]", function.realm_global);
+                    }
+                    gc_mod.Binding.trace(cell.pointer, cell.kind, self);
+                },
                 .environment => {
                     const environment: *interp.Environment = @ptrCast(@alignCast(cell.pointer));
                     self.markInternal("[[OuterEnv]]", environment.parent);

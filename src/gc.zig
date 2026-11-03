@@ -285,7 +285,9 @@ pub fn traceObject(o: *Object, v: anytype) void {
     }
 
     // Type-erased side-cells.
-    if (cold.js_function) |p| v.mark(@as(*interp.Function, @ptrCast(@alignCast(p))));
+    // A JS function lives in its function object's own cell (`allocClosure`),
+    // so tracing the object traces the function's edges.
+    if (cold.js_function) |p| traceFunction(@as(*interp.Function, @ptrCast(@alignCast(p))), v);
     if (cold.bound_function) |p| v.mark(@as(*interp.Interpreter.BoundFn, @ptrCast(@alignCast(p))));
     if (cold.promise_data) |p| v.mark(@as(*promise.Promise, @ptrCast(@alignCast(p))));
     if (cold.generator) |p| v.mark(@as(*vm.Generator, @ptrCast(@alignCast(p))));
@@ -417,7 +419,12 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
             gc_relocation.rewriteValueSlot(v, &data.locale),
         .promise => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.promise.ptr),
         .constructor => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.constructor.ptr),
-        .js_function => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.js_function.ptr),
+        .js_function => if (cold.rare.js_function.ptr != null) {
+            // The function moved with its object's cell; `o` is the copy.
+            const function = closureFunction(o);
+            cold.rare.js_function.ptr = @ptrCast(function);
+            relocateFunction(function, v);
+        },
         .none,
         .primitive,
         .error_state,
@@ -597,7 +604,6 @@ test "Object rare strong relocation mutates every active managed payload" {
     try rare_objects[6].setDataView(allocator, &data_view);
     try rare_objects[7].setPromiseData(allocator, @ptrCast(&old_promise));
     try rare_objects[8].setCtorRef(allocator, &old_objects[5]);
-    try rare_objects[9].setJsFunction(allocator, @ptrCast(&old_function));
     rare_objects[10].setGetterSetterCellData(.ordinary(
         Value.obj(&old_objects[6]),
         Value.obj(&old_objects[7]),
@@ -680,7 +686,6 @@ test "Object rare strong relocation mutates every active managed payload" {
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_promise)), rare_objects[7].promiseData().?);
     try std.testing.expect(rare_objects[7].storageState() == null);
     try std.testing.expectEqual(&new_objects[5], rare_objects[8].ctorRef().?);
-    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_function)), rare_objects[9].jsFunction().?);
     const getter_setter = rare_objects[10].getterSetterCellData().?;
     try std.testing.expectEqual(&new_objects[6], getter_setter.getterValue().?.asObj());
     try std.testing.expectEqual(&new_objects[7], getter_setter.setterValue().?.asObj());
@@ -690,6 +695,51 @@ test "Object rare strong relocation mutates every active managed payload" {
     try std.testing.expectEqual(&new_objects[0], async_context_frame.callback.asObj());
     try std.testing.expectEqual(&new_objects[7], async_context_frame.context.asObj());
     try std.testing.expectEqual(&new_objects[2], rare_objects[13].collectionIteratorState().?.source.asObj());
+}
+
+test "a Function relocates and traces with its function object's cell" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var body: ast.Node = .undefined_lit;
+    const closure = try allocClosure(allocator);
+    closure.function.* = .{ .params = &.{}, .body = &body, .is_expr_body = true, .closure = &old_environment, .obj = closure.object };
+    try closure.object.setJsFunction(allocator, @ptrCast(closure.function));
+    try std.testing.expectEqual(closure.object, functionCell(closure.function));
+    try std.testing.expectEqual(closure.function, closureFunction(closure.object));
+
+    // A moving collection copies the whole cell and rewrites the copy.
+    var moved: ClosureCell = @as(*ClosureCell, @ptrCast(closure.object)).*;
+    const moved_object: *Object = @ptrCast(&moved);
+    const Plan = struct {
+        old_object: *Object,
+        new_object: *Object,
+        old_environment: *Environment,
+        new_environment: *Environment,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            if (old == @as(*anyopaque, @ptrCast(self.old_object))) return @ptrCast(self.new_object);
+            if (old == @as(*anyopaque, @ptrCast(self.old_environment))) return @ptrCast(self.new_environment);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_object = closure.object,
+        .new_object = moved_object,
+        .old_environment = &old_environment,
+        .new_environment = &new_environment,
+    };
+    relocateObjectRareStrong(moved_object, &plan);
+    const moved_function = closureFunction(moved_object);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(moved_function)), moved_object.jsFunction().?);
+    try std.testing.expectEqual(&new_environment, moved_function.closure);
+    try std.testing.expectEqual(moved_object, moved_function.obj.?);
+
+    var function_slot = closure.function;
+    rewriteFunctionSlot(&plan, &function_slot);
+    try std.testing.expectEqual(moved_function, function_slot);
 }
 
 test "Wasm relocation: Object rare state rewrites every JavaScript-bearing slot" {
@@ -1927,13 +1977,13 @@ pub fn barrierReleasedFrame(frame: *vm.Frame) void {
 
 /// Owner barrier for a Function field written after creation.
 pub inline fn barrierFunctionEdge(function: *interp.Function, cell: ?*value.Object) void {
-    barrierCellFrom(@ptrCast(function), if (cell) |object| @ptrCast(object) else null);
+    barrierCellFrom(@ptrCast(functionCell(function)), if (cell) |object| @ptrCast(object) else null);
 }
 
 /// Have the next minor cycle trace `function` if it is already old, for
 /// edges added through containers it owns (a freshly compiled chunk).
 pub inline fn rememberFunction(function: *interp.Function) void {
-    barrierWeak(@ptrCast(function));
+    barrierWeak(@ptrCast(functionCell(function)));
 }
 
 /// Relocation runs after every realm mutator has parked, so the same captured
@@ -3105,7 +3155,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         v.mark(@as(*vm.Generator, @ptrCast(@alignCast(root.generator))));
     var tree_call = machine.gc_tree_call_roots;
     while (tree_call) |call| : (tree_call = call.previous) {
-        v.mark(call.function);
+        v.mark(functionCell(call.function));
         traceFunction(call.function, v);
         for ([_]?*Environment{ call.environment, call.caller_environment }) |maybe_env| if (maybe_env) |env| {
             markManaged(v, env);
@@ -3221,7 +3271,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     while (call_frame) |fr| : (call_frame = fr.caller) {
         v.mark(fr.func_obj);
         if (fr.arguments) |args| markValue(v, args);
-        if (fr.lazy_func) |function| v.mark(function);
+        if (fr.lazy_func) |function| v.mark(functionCell(function));
         if (fr.lazy_env) |env| markManaged(v, env);
         // Tree-walker frames read their snapshot from `gc_temp_roots`; VM
         // frames own a stable activation-local copy that must be traced here.
@@ -3261,7 +3311,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         relocateGenerator(@ptrCast(@alignCast(root.generator)), v);
     var tree_call = machine.gc_tree_call_roots;
     while (tree_call) |call| : (tree_call = call.previous) {
-        gc_relocation.rewriteRequiredSlot(v, interp.Function, &call.function);
+        rewriteFunctionSlot(v, &call.function);
         relocateFunction(call.function, v);
         gc_relocation.rewriteOptionalSlot(v, Environment, &call.environment);
         gc_relocation.rewriteRequiredSlot(v, Environment, &call.caller_environment);
@@ -3361,7 +3411,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     while (call_frame) |frame| : (call_frame = frame.caller) {
         gc_relocation.rewriteRequiredSlot(v, Object, &frame.func_obj);
         gc_relocation.rewriteOptionalValueSlot(v, &frame.arguments);
-        gc_relocation.rewriteOptionalSlot(v, interp.Function, &frame.lazy_func);
+        if (frame.lazy_func) |*function| rewriteFunctionSlot(v, function);
         gc_relocation.rewriteOptionalSlot(v, Environment, &frame.lazy_env);
         if (frame.lazy_args_root == null)
             for (@constCast(frame.lazy_args)) |*argument|
@@ -3387,13 +3437,18 @@ test "tree call roots trace and rewrite suspended caller state" {
     var old_objects: [10]Object = @splat(.{});
     var new_objects = old_objects;
     var body: ast.Node = .undefined_lit;
-    var old_function = interp.Function{ .params = &.{}, .body = &body, .is_expr_body = true, .closure = &old_envs[0] };
-    var new_function = old_function;
+    // A Function lives in its function object's cell; the cell is what moves.
+    var old_closure_cell: ClosureCell = undefined;
+    var new_closure_cell: ClosureCell = undefined;
+    const old_function = closureFunction(@ptrCast(&old_closure_cell));
+    old_function.* = interp.Function{ .params = &.{}, .body = &body, .is_expr_body = true, .closure = &old_envs[0] };
+    new_closure_cell = old_closure_cell;
+    const new_function = closureFunction(@ptrCast(&new_closure_cell));
     var caller_cell = interp.ThisCell.init(Value.obj(&old_objects[8]), true);
     var active_cell = interp.ThisCell.init(Value.obj(&old_objects[9]), true);
     var roots = interp.TreeCallRoots{
         .previous = null,
-        .function = &old_function,
+        .function = old_function,
         .environment = &old_envs[0],
         .caller_environment = &old_envs[1],
         .caller_return = Value.obj(&old_objects[0]),
@@ -3412,8 +3467,8 @@ test "tree call roots trace and rewrite suspended caller state" {
         new_envs: *[2]Environment,
         old_objects: *[10]Object,
         new_objects: *[10]Object,
-        old_function: *interp.Function,
-        new_function: *interp.Function,
+        old_function_cell: *anyopaque,
+        new_function_cell: *anyopaque,
         seen: std.AutoHashMap(usize, void),
 
         pub fn concurrent(_: *@This()) bool {
@@ -3432,19 +3487,19 @@ test "tree call roots trace and rewrite suspended caller state" {
         pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
             for (self.old_envs, 0..) |*env, i| if (old == @as(*anyopaque, @ptrCast(env))) return &self.new_envs[i];
             for (self.old_objects, 0..) |*object, i| if (old == @as(*anyopaque, @ptrCast(object))) return &self.new_objects[i];
-            if (old == @as(*anyopaque, @ptrCast(self.old_function))) return self.new_function;
+            if (old == self.old_function_cell) return self.new_function_cell;
             return old;
         }
     };
-    var visitor = Visitor{ .old_envs = &old_envs, .new_envs = &new_envs, .old_objects = &old_objects, .new_objects = &new_objects, .old_function = &old_function, .new_function = &new_function, .seen = .init(std.testing.allocator) };
+    var visitor = Visitor{ .old_envs = &old_envs, .new_envs = &new_envs, .old_objects = &old_objects, .new_objects = &new_objects, .old_function_cell = @ptrCast(&old_closure_cell), .new_function_cell = @ptrCast(&new_closure_cell), .seen = .init(std.testing.allocator) };
     defer visitor.seen.deinit();
     traceInterpreterRoots(&machine, &visitor);
     try std.testing.expectEqual(@as(usize, 13), visitor.seen.count());
     for (&old_objects) |*object| try std.testing.expect(visitor.seen.contains(@intFromPtr(object)));
     for (&old_envs) |*env| try std.testing.expect(visitor.seen.contains(@intFromPtr(env)));
-    try std.testing.expect(visitor.seen.contains(@intFromPtr(&old_function)));
+    try std.testing.expect(visitor.seen.contains(@intFromPtr(&old_closure_cell)));
     relocateInterpreterRoots(&machine, &visitor);
-    try std.testing.expectEqual(&new_function, roots.function);
+    try std.testing.expectEqual(new_function, roots.function);
     try std.testing.expectEqual(&new_envs[0], roots.function.closure);
     try std.testing.expectEqual(&new_envs[0], roots.environment.?);
     try std.testing.expectEqual(&new_envs[1], roots.caller_environment);
@@ -5735,8 +5790,48 @@ fn allocCell(comptime T: type, kind: CellKind, arena: std.mem.Allocator) std.mem
 pub fn allocEnv(arena: std.mem.Allocator) std.mem.Allocator.Error!*Environment {
     return allocCell(Environment, .environment, arena);
 }
-pub fn allocFunction(arena: std.mem.Allocator) std.mem.Allocator.Error!*interp.Function {
-    return allocCell(interp.Function, .function, arena);
+/// A JS function and its function object share one `.object` cell: the
+/// Object at the cell start, so object Values and object marks address the
+/// cell, and the Function at `closure_function_offset` after it. Object
+/// tracing, relocation and finalization therefore cover the function, and a
+/// `*Function` is an interior pointer: mark, barrier and relocate it through
+/// `functionCell`. Every engine Function is allocated this way.
+pub const closure_function_offset = std.mem.alignForward(usize, @sizeOf(Object), @alignOf(interp.Function));
+const ClosureCell = struct {
+    bytes: [closure_function_offset + @sizeOf(interp.Function)]u8 align(@max(@alignOf(Object), @alignOf(interp.Function))),
+};
+
+pub const Closure = struct { object: *Object, function: *interp.Function };
+
+/// Allocate a function object and its Function in one cell. The Object is
+/// default-initialized; the caller initializes the Function before its next
+/// safepoint and before linking it with `setJsFunction`.
+pub fn allocClosure(arena: std.mem.Allocator) std.mem.Allocator.Error!Closure {
+    const cell = if (active_heap) |h| blk: {
+        const heap: *Heap = @ptrCast(@alignCast(h));
+        break :blk try heap.create(ClosureCell, .object);
+    } else try arena.create(ClosureCell);
+    const object: *Object = @ptrCast(cell);
+    object.* = .{};
+    object.initInlineSlots();
+    return .{ .object = object, .function = closureFunction(object) };
+}
+
+/// The Function stored in function object `object`'s cell.
+pub inline fn closureFunction(object: *Object) *interp.Function {
+    return @ptrFromInt(@intFromPtr(object) + closure_function_offset);
+}
+
+/// The function object whose cell holds `function`.
+pub inline fn functionCell(function: *interp.Function) *Object {
+    return @ptrFromInt(@intFromPtr(function) - closure_function_offset);
+}
+
+/// Rewrite a `*Function` root after relocation: the function moved with its
+/// object's cell, which is what the relocation plan records.
+fn rewriteFunctionSlot(v: anytype, slot: **interp.Function) void {
+    const cell: *Object = @ptrCast(@alignCast(v.resolve(@ptrCast(functionCell(slot.*)))));
+    slot.* = closureFunction(cell);
 }
 pub fn allocPromise(arena: std.mem.Allocator) std.mem.Allocator.Error!*promise.Promise {
     return allocCell(promise.Promise, .promise, arena);

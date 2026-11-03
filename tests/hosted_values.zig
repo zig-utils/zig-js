@@ -249,8 +249,11 @@ pub fn main() !void {
     if (js.jit.supported) {
         try std.testing.expect(context.tierAttributionSnapshot().baseline_publications > 0);
         try std.testing.expect(!context.gc_compaction_requested.load(.acquire));
-        try std.testing.expect(callback_address_before != @intFromPtr(native_callback.get().asObj()));
-        std.debug.print("hosted values: native checkpoint moved the retained callback during invocation\n", .{});
+        // The callback's function object shares its cell with the Function
+        // its own native frame is running, so that frame pins it at the
+        // checkpoint: the compaction runs there, but this cell stays put.
+        try std.testing.expectEqual(callback_address_before, @intFromPtr(native_callback.get().asObj()));
+        std.debug.print("hosted values: native checkpoint compacted while the running callback stayed pinned\n", .{});
     } else {
         try std.testing.expect(context.gc_compaction_requested.load(.acquire));
         const after_call = context.compactGarbage();

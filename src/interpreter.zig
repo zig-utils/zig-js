@@ -8596,8 +8596,14 @@ pub const Interpreter = struct {
         // an enclosing `for (let …)` loop must give each iteration its own binding
         // env rather than reusing one. Record that here (see `Environment.captured`).
         closure.markCaptured();
-        const func = try gc_mod.allocFunction(self.arena);
+        // The function object and its Function share one cell. Link them
+        // before compiling the body (which can collect), so tracing the object
+        // traces the Function and its compiled chunks.
+        const cell = try gc_mod.allocClosure(self.arena);
+        const func = cell.function;
+        const obj = cell.object;
         func.* = .{
+            .obj = obj,
             .params = fnode.params,
             .body = fnode.body,
             .is_expr_body = fnode.is_expr_body,
@@ -8622,6 +8628,7 @@ pub const Interpreter = struct {
             .module_referrer = self.cur_module,
             .private_map = self.current_private_map,
         };
+        try obj.setJsFunction(self.arena, @ptrCast(func));
         // A `with` block's object Environment Record is part of the lexical chain
         // (`Environment.with_object`), so a function defined inside a `with`
         // captures it automatically through its `closure` — no separate capture.
@@ -8693,15 +8700,12 @@ pub const Interpreter = struct {
             if (tag) |t| if (self.env.get(t)) |v| if (v.isObject()) break :blk v.asObj();
             break :blk self.functionProto();
         };
-        const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .proto = fproto };
-        try obj.setJsFunction(self.arena, @ptrCast(func));
-        func.obj = obj;
-        // Compiling the body and allocating `obj` can collect. A full cycle
-        // tenures `func`, after which its chunk constants and `obj` are young
-        // edges no owner barrier saw; have the next minor cycle trace it.
+        obj.proto = fproto;
+        // Compiling the body can collect. A full cycle tenures the function
+        // object's cell, after which its chunk constants are young edges no
+        // owner barrier saw; have the next minor cycle trace it.
         gc_mod.rememberFunction(func);
-        gc_mod.barrierFunctionEdge(func, obj);
+        gc_mod.barrierFunctionEdge(func, fproto);
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return Value.obj(obj);
     }

@@ -13109,7 +13109,6 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         const materialized = try materializeDirectEvalEnvironment(vm, defining_frame, plan);
         materialized.environment.markCaptured();
     }
-    const func = try gc_mod.allocFunction(vm.arena);
     const admission_reason: interp.BytecodeAdmissionReason = switch (tmpl.admission) {
         .plain_compiled => .template_plain_compiled,
         .plain_parameter_prologue => .template_plain_rejected_parameter_prologue,
@@ -13126,7 +13125,13 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         vm.initEnvironment(fenv, vm.env, false);
         break :blk fenv;
     } else vm.env;
+    // The function object and its Function share one cell; the Function is
+    // initialized here, before the next allocation can collect.
+    const closure = try gc_mod.allocClosure(vm.arena);
+    const func = closure.function;
+    const obj = closure.object;
     func.* = .{
+        .obj = obj,
         .params = tmpl.params,
         .body = tmpl.body,
         .is_expr_body = tmpl.is_expr_body,
@@ -13172,7 +13177,6 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
     // so their slots may now be touched concurrently — mark the chain escaped so
     // load/store_{local,upval} serialize on those frames (no-GIL only).
     if (frame) |fr| fr.markEscapedChain();
-    const obj = try gc_mod.allocObj(vm.arena);
     const fproto: ?*value.Object = blk: {
         const tag: ?[]const u8 = if (tmpl.is_generator and tmpl.is_async)
             "\x00AsyncGenFuncProto"
@@ -13185,11 +13189,8 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         if (tag) |t| if (vm.env.get(t)) |v| if (v.isObject()) break :blk v.asObj();
         break :blk vm.functionProto();
     };
-    obj.* = .{ .proto = fproto };
+    obj.proto = fproto;
     try obj.setJsFunction(vm.arena, @ptrCast(func));
-    func.obj = obj;
-    // Allocating `obj` may have run a full collection that tenured `func`.
-    gc_mod.barrierFunctionEdge(func, obj);
     if (tmpl.name_const) |name|
         try interp.installFunctionPropsNamed(vm.arena, vm.root_shape, obj, tmpl.params, chunk.consts.items[name])
     else
@@ -22410,9 +22411,12 @@ test "vm: call and closure execution survives moving GC" {
     });
     defer ctx.destroy();
     ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+    // A closure shares one cell with its function object, in a larger size
+    // class than plain objects: dead closures ahead of the live one give
+    // compaction somewhere to move it.
     const function = try ctx.evaluate(
         \\globalThis.callMoveDiscard = [];
-        \\for (let i = 0; i < 4096; i++) callMoveDiscard.push({dead:i,child:{value:i}});
+        \\for (let i = 0; i < 4096; i++) callMoveDiscard.push({dead:i,child:{value:i},fn:function() { return i; }});
         \\function capture(seed) { return function(delta) { return seed + delta; }; }
         \\globalThis.callMoveClosure = capture(13);
         \\globalThis.callMoveReceiver = {bias:3, step(a,b) { return this.bias + a + b; }};
