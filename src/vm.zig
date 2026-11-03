@@ -1406,6 +1406,132 @@ fn quickStringNamedGet(vm: *Interpreter, ic: *bc.InlineCache, name: []const u8) 
     return quickResolvePrototypeChain(vm, ic, null, true, prototype, name, siteNameBloom(ic, name));
 }
 
+/// The complete `get_prop` operation for the instruction at `instruction`
+/// (name operand `name_index`) on `obj`: RequireObjectCoercible, the site's
+/// inline caches (own data, prototype chains, accessor-bearing objects,
+/// primitive Strings, Array fast paths) with their fill on a miss, the full
+/// [[Get]] otherwise, evaluation-site diagnostics and optimizer profiling.
+/// `.get_prop` and fused dispatches that contain one share this exact body.
+pub inline fn getPropAtSite(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    optimizer_delta: *jit.OptimizerProfile.Delta,
+    parallel_sync: bool,
+    instruction: usize,
+    name_index: u32,
+    obj: Value,
+) EvalError!Value {
+    if (obj.isNull() or obj.isUndefined())
+        return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, instruction + 1));
+    if (obj.isObject()) try vm.checkRestricted(obj.asObj());
+    const name = chunk.names.items[name_index];
+    if (value.isPrivateKey(name)) {
+        const result = try vm.getPropertyAtSite(obj, name, vmEvaluationSite(chunk, instruction + 1));
+        optimizer_delta.observeValue(optimizerProfileKind(result));
+        return result;
+    }
+    var result: Value = undefined;
+    fast: {
+        // Inline cache: ordinary non-array own data properties.
+        // Accessors need full [[Get]], but descriptor attributes do
+        // not affect the value read from a present own data slot.
+        if (obj.isObject()) {
+            const o = obj.asObj();
+            // Shape profiling is advisory, but the pointer itself is
+            // published by property transitions under
+            // `property_lock`; snapshot it under that lock in a
+            // shared realm so profiling never races the writer.
+            // Ordinary named reads keep this same acquisition for
+            // the IC/slot lookup below instead of paying a second
+            // hot-path lock. Arrays release it after the snapshot
+            // because their length/prototype paths own separate
+            // synchronization and only rarely fall through to named
+            // own-property lookup.
+            if (parallel_sync) o.lockProperties();
+            const observed_shape = o.shape;
+            if (parallel_sync and o.is_array) o.unlockProperties();
+            defer if (parallel_sync and !o.is_array) o.unlockProperties();
+            if (observed_shape) |shape| optimizer_delta.observeShape(@intFromPtr(shape));
+            if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
+                std.mem.eql(u8, name, "length"))
+            {
+                const length = if (parallel_sync) o.arrayLength() else @max(o.elementsItems().len, o.arrayLengthFloor());
+                result = Value.num(@floatFromInt(length));
+                if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
+                break :fast;
+            }
+            // Ordinary arrays normally have no named own properties;
+            // their methods are direct data properties on
+            // Array.prototype. Cache that prototype shape/slot while
+            // retaining the observable own-property and accessor
+            // checks. A replaced method value is read from the live
+            // slot, and any shape transition invalidates the cache.
+            if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked) {
+                if (quickArrayPrototypeData(chunk, instruction, o, name, parallel_sync)) |data| {
+                    result = data;
+                    if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
+                    break :fast;
+                }
+            }
+            if (parallel_sync and o.is_array) o.lockProperties();
+            defer if (parallel_sync and o.is_array) o.unlockProperties();
+            if (!o.is_array and !parallel_sync) {
+                // Isolated realms: an own-data hit stays valid on an
+                // object with accessors once the bloom-guarded
+                // probe rules out an own accessor `name`; misses
+                // try the prototype-chain entry, then a plain
+                // resolve that records one.
+                const ic = &chunk.ics[instruction];
+                if (ic.lookupSlotMode(o.shape, false)) |sl| {
+                    if (o.accessorsMap() == null or !o.hasOwnAccessorNamedUnlocked(name, siteNameBloom(ic, name))) {
+                        result = o.slotsItems()[sl];
+                        break :fast;
+                    }
+                } else if (quickInheritedNamedGet(vm, ic, o, name)) |inherited| {
+                    result = inherited;
+                    if (builtin.is_test) _ = quick_named_inherited_hits.fetchAdd(1, .monotonic);
+                    break :fast;
+                } else if (quickResolveNamedGet(vm, ic, o, name)) |resolved| {
+                    result = resolved;
+                    if (builtin.is_test) _ = quick_named_resolve_hits.fetchAdd(1, .monotonic);
+                    break :fast;
+                }
+            } else if (!o.is_array and o.accessorsMap() == null) {
+                const ic = &chunk.ics[instruction];
+                if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
+                    result = o.slotsItems()[sl];
+                    break :fast;
+                }
+                if (o.shape) |sh| {
+                    if (sh.lookup(name)) |slot| {
+                        ic.recordMode(sh, slot, parallel_sync);
+                        result = o.slotsItems()[slot];
+                        break :fast;
+                    }
+                }
+            }
+            // An own miss needs the full [[Get]] prototype walk.
+        } else if (!parallel_sync and obj.isString()) {
+            if (quickStringNamedGet(vm, &chunk.ics[instruction], name)) |inherited| {
+                result = inherited;
+                if (builtin.is_test) _ = quick_named_inherited_hits.fetchAdd(1, .monotonic);
+                break :fast;
+            }
+        }
+        var inherited_observation: ?interp.InheritedPropertyObservation = null;
+        result = try vm.getPropertyObserved(obj, name, &inherited_observation); // arrays, strings, proto chain, null/undefined
+        if (inherited_observation) |observation|
+            chunk.ics[instruction].recordInheritedMode(
+                observation.receiver_shape,
+                observation.holder_shape,
+                observation.slot,
+                parallel_sync,
+            );
+    }
+    optimizer_delta.observeValue(optimizerProfileKind(result));
+    return result;
+}
+
 /// Resolve a direct data property on an Array prototype without walking the
 /// full generic [[Get]] machinery. In shared mode both the receiver's own-data
 /// exclusion and the prototype slot read are short property-lock snapshots;
@@ -9239,116 +9365,7 @@ fn runChunk(
             },
             .get_prop => {
                 const obj = stack.pop().?;
-                if (obj.isNull() or obj.isUndefined())
-                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
-                if (obj.isObject()) try vm.checkRestricted(obj.asObj());
-                const name = chunk.names.items[inst.a];
-                if (value.isPrivateKey(name)) {
-                    const result = try vm.getPropertyAtSite(obj, name, vmEvaluationSite(chunk, ip));
-                    optimizer_delta.observeValue(optimizerProfileKind(result));
-                    try stack.append(stack_alloc, result);
-                    continue;
-                }
-                var result: Value = undefined;
-                fast: {
-                    // Inline cache: ordinary non-array own data properties.
-                    // Accessors need full [[Get]], but descriptor attributes do
-                    // not affect the value read from a present own data slot.
-                    if (obj.isObject()) {
-                        const o = obj.asObj();
-                        // Shape profiling is advisory, but the pointer itself is
-                        // published by property transitions under
-                        // `property_lock`; snapshot it under that lock in a
-                        // shared realm so profiling never races the writer.
-                        // Ordinary named reads keep this same acquisition for
-                        // the IC/slot lookup below instead of paying a second
-                        // hot-path lock. Arrays release it after the snapshot
-                        // because their length/prototype paths own separate
-                        // synchronization and only rarely fall through to named
-                        // own-property lookup.
-                        if (parallel_sync) o.lockProperties();
-                        const observed_shape = o.shape;
-                        if (parallel_sync and o.is_array) o.unlockProperties();
-                        defer if (parallel_sync and !o.is_array) o.unlockProperties();
-                        if (observed_shape) |shape| optimizer_delta.observeShape(@intFromPtr(shape));
-                        if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
-                            std.mem.eql(u8, name, "length"))
-                        {
-                            const length = if (parallel_sync) o.arrayLength() else @max(o.elementsItems().len, o.arrayLengthFloor());
-                            result = Value.num(@floatFromInt(length));
-                            if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
-                            break :fast;
-                        }
-                        // Ordinary arrays normally have no named own properties;
-                        // their methods are direct data properties on
-                        // Array.prototype. Cache that prototype shape/slot while
-                        // retaining the observable own-property and accessor
-                        // checks. A replaced method value is read from the live
-                        // slot, and any shape transition invalidates the cache.
-                        if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked) {
-                            if (quickArrayPrototypeData(chunk, ip - 1, o, name, parallel_sync)) |data| {
-                                result = data;
-                                if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
-                                break :fast;
-                            }
-                        }
-                        if (parallel_sync and o.is_array) o.lockProperties();
-                        defer if (parallel_sync and o.is_array) o.unlockProperties();
-                        if (!o.is_array and !parallel_sync) {
-                            // Isolated realms: an own-data hit stays valid on an
-                            // object with accessors once the bloom-guarded
-                            // probe rules out an own accessor `name`; misses
-                            // try the prototype-chain entry, then a plain
-                            // resolve that records one.
-                            const ic = &chunk.ics[ip - 1];
-                            if (ic.lookupSlotMode(o.shape, false)) |sl| {
-                                if (o.accessorsMap() == null or !o.hasOwnAccessorNamedUnlocked(name, siteNameBloom(ic, name))) {
-                                    result = o.slotsItems()[sl];
-                                    break :fast;
-                                }
-                            } else if (quickInheritedNamedGet(vm, ic, o, name)) |inherited| {
-                                result = inherited;
-                                if (builtin.is_test) _ = quick_named_inherited_hits.fetchAdd(1, .monotonic);
-                                break :fast;
-                            } else if (quickResolveNamedGet(vm, ic, o, name)) |resolved| {
-                                result = resolved;
-                                if (builtin.is_test) _ = quick_named_resolve_hits.fetchAdd(1, .monotonic);
-                                break :fast;
-                            }
-                        } else if (!o.is_array and o.accessorsMap() == null) {
-                            const ic = &chunk.ics[ip - 1];
-                            if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
-                                result = o.slotsItems()[sl];
-                                break :fast;
-                            }
-                            if (o.shape) |sh| {
-                                if (sh.lookup(name)) |slot| {
-                                    ic.recordMode(sh, slot, parallel_sync);
-                                    result = o.slotsItems()[slot];
-                                    break :fast;
-                                }
-                            }
-                        }
-                        // An own miss needs the full [[Get]] prototype walk.
-                    } else if (!parallel_sync and obj.isString()) {
-                        if (quickStringNamedGet(vm, &chunk.ics[ip - 1], name)) |inherited| {
-                            result = inherited;
-                            if (builtin.is_test) _ = quick_named_inherited_hits.fetchAdd(1, .monotonic);
-                            break :fast;
-                        }
-                    }
-                    var inherited_observation: ?interp.InheritedPropertyObservation = null;
-                    result = try vm.getPropertyObserved(obj, name, &inherited_observation); // arrays, strings, proto chain, null/undefined
-                    if (inherited_observation) |observation|
-                        chunk.ics[ip - 1].recordInheritedMode(
-                            observation.receiver_shape,
-                            observation.holder_shape,
-                            observation.slot,
-                            parallel_sync,
-                        );
-                }
-                optimizer_delta.observeValue(optimizerProfileKind(result));
-                try stack.append(stack_alloc, result);
+                try stack.append(stack_alloc, try getPropAtSite(vm, chunk, optimizer_delta, parallel_sync, ip - 1, inst.a, obj));
             },
             .get_index => {
                 const key = stack.pop().?;
