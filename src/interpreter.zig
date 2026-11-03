@@ -17258,6 +17258,7 @@ pub const Interpreter = struct {
                 // value, etc. resolve).
                 var cur: ?*value.Object = o;
                 var prototype_depth: usize = 0;
+                var name_bits: u64 = 0;
                 while (cur) |c| {
                     if (c != o) try self.checkRestricted(c);
                     if (c.proxyHandler() != null or c.proxy_revoked)
@@ -17286,7 +17287,7 @@ pub const Interpreter = struct {
                     // accessor replacement runs its getter and deletion inherits.
                     if (c.is_array and !c.is_arguments and std.mem.eql(u8, key, "length"))
                         return Value.num(@floatFromInt(c.arrayLength())); // locked length read (grow-vs-read)
-                    const named_own = c.namedOwnPropertySnapshot(key);
+                    const named_own = c.namedOwnGetSnapshot(key, &name_bits);
                     if (named_own == .accessor) {
                         const acc = named_own.accessor;
                         // An explicit `get: undefined` is stored as the undefined

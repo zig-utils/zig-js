@@ -6501,6 +6501,39 @@ pub const Object = struct {
         } };
     }
 
+    pub const NamedOwnGetSnapshot = union(enum) {
+        absent,
+        data: struct {
+            value: Value,
+            shape: *Shape,
+            slot: u32,
+        },
+        accessor: Accessor,
+    };
+
+    /// The own-property step of ordinary [[Get]]. An isolated realm reads the
+    /// accessor map and Shape directly (its only writer is the running
+    /// mutator), skips the attribute map [[Get]] never consults, and probes
+    /// accessors only when the map's bloom admits `name`. `name_bits` caches
+    /// `nameBloomBits(name)` across one prototype walk (0 = not yet computed).
+    /// Shared realms keep the gated `namedOwnPropertySnapshot`.
+    pub fn namedOwnGetSnapshot(self: *const Object, name: []const u8, name_bits: *u64) NamedOwnGetSnapshot {
+        if (property_snapshot_locks_enabled.load(.monotonic)) return switch (self.namedOwnPropertySnapshot(name)) {
+            .absent => .absent,
+            .accessor => |accessor| .{ .accessor = accessor },
+            .data => |own| .{ .data = .{ .value = own.value, .shape = own.shape, .slot = own.slot } },
+        };
+        if (self.accessorsMap()) |accessors| {
+            if (name_bits.* == 0) name_bits.* = nameBloomBits(name);
+            if (accessors.mayContain(name_bits.*)) {
+                if (accessors.get(self.installedNameHashContext(), name)) |accessor| return .{ .accessor = accessor };
+            }
+        }
+        const shape = self.shape orelse return .absent;
+        const slot = shape.lookup(name) orelse return .absent;
+        return .{ .data = .{ .value = self.slotsItems()[slot], .shape = shape, .slot = slot } };
+    }
+
     /// Snapshot a compile-time-classified set of ordinary named data properties
     /// as one logical read. `false` means either a requested name is an accessor
     /// or the Shape is too deep for the bounded scan, so a caller that must
