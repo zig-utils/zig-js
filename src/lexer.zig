@@ -204,6 +204,10 @@ pub const Lexer = struct {
     /// the previous significant token — true at the start of input. A line-
     /// leading `-->` is an HTML close comment only in this state.
     at_line_start: bool = true,
+    /// Whether any PrivateIdentifier (`#name`) token has been scanned. Source
+    /// without one cannot reference a private name, so the parser skips its
+    /// whole-tree private-name check.
+    saw_private_name: bool = false,
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
         // Nesting guards probe this thread's stack bounds. The lexer is the
@@ -289,6 +293,38 @@ pub const Lexer = struct {
         errdefer result.outer_control_paren_depths.deinit(allocator);
         try result.template_brace_depths.appendSlice(allocator, self.template_brace_depths.items);
         return result;
+    }
+
+    /// Whether the next token might begin with `/`, judged from the source
+    /// without moving the cursor. False only when the next significant byte is
+    /// certainly something else: trivia this cannot classify cheaply (non-ASCII
+    /// bytes, HTML-like comments, an unterminated block comment) answers true.
+    /// A parser lookahead uses it to snapshot the scanner only before a slash.
+    pub fn nextTokenMayBeSlash(self: *const Lexer) bool {
+        var j = self.i;
+        const src = self.src;
+        while (j < src.len) {
+            switch (src[j]) {
+                ' ', '\t', '\n', '\r', 0x0B, 0x0C => j += 1,
+                '/' => {
+                    if (j + 1 >= src.len) return true;
+                    if (src[j + 1] == '/') {
+                        j += 2;
+                        while (j < src.len and src[j] != '\n' and src[j] != '\r') : (j += 1) {
+                            if (src[j] >= 0x80) return true;
+                        }
+                    } else if (src[j + 1] == '*') {
+                        j = (std.mem.indexOfPos(u8, src, j + 2, "*/") orelse return true) + 2;
+                    } else return true;
+                },
+                // Possible HTML-like comments and a hashbang are trivia too.
+                '<' => return std.mem.startsWith(u8, src[j + 1 ..], "!--"),
+                '-' => return std.mem.startsWith(u8, src[j + 1 ..], "->"),
+                '#' => return j == 0,
+                else => |c| return c >= 0x80,
+            }
+        }
+        return false;
     }
 
     fn peek(self: *Lexer) u8 {
@@ -813,6 +849,7 @@ pub const Lexer = struct {
             const start_len = self.identStartLen() orelse
                 return self.failAt(LexError.UnexpectedCharacter, .invalid_character, start, start);
             const name = try self.lexIdentNameWithOwnedPrefix("#", start_len);
+            self.saw_private_name = true;
             // The token's complete unescaped spelling is already stable source.
             // Escapes seed their one owned decoded buffer with `#` directly.
             const text = if (self.last_identifier_escaped) name else self.src[start..self.i];

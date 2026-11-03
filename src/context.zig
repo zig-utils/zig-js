@@ -10320,10 +10320,11 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         self.last_evaluation_diagnostic = null;
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithScratchDiagnostic(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
+        var parser = Parser.initForScript(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
             try self.recordEvaluationDiagnostic(null, lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
             return err;
         };
+        defer parser.deinit();
         parser.useRealmHashKeys(self.root_shape);
         const program = parser.parseProgram() catch |err| {
             try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
@@ -10366,10 +10367,11 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         self.last_evaluation_diagnostic = null;
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithScratchDiagnostic(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
+        var parser = Parser.initForScript(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
             try self.recordEvaluationDiagnostic(null, lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
             return err;
         };
+        defer parser.deinit();
         parser.useRealmHashKeys(self.root_shape);
         const prog = parser.parseProgram() catch |err| {
             try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
@@ -10395,6 +10397,9 @@ pub const Context = struct {
             try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
             return err;
         };
+        // The tokens are dead once the tree is checked; drop them before the
+        // script runs rather than holding them for its whole execution.
+        parser.deinit();
         var machine = self.interpreter();
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
