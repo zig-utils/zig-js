@@ -18684,8 +18684,23 @@ pub const Interpreter = struct {
     /// real iterator as is, or for a virtual record the Array Iterator over
     /// `next` at the record's index, exactly as the built-in iteration would
     /// have left it.
+    ///
+    /// That Array Iterator has no own `return`, so IteratorClose's
+    /// GetMethod(iterator, "return") is decided by %ArrayIteratorPrototype%'s
+    /// chain. While that chain holds no `return` at all, through ordinary
+    /// objects only, the lookup observes nothing and finds nothing: closing
+    /// the prototype itself performs the same no-op, and no iterator is made.
     pub fn materializeIterationRecord(self: *Interpreter, next: Value, iterator: Value) EvalError!Value {
         if (!iterator.isNumber()) return iterator;
+        if (self.env.get("\x00ArrIterProto")) |proto_value| if (proto_value.isObject()) {
+            var cur: ?*value.Object = proto_value.asObj();
+            while (cur) |c| {
+                if (c.proxyHandler() != null or c.proxy_revoked or c.hostClassHooks() != null or
+                    c.restrictionOwner() != 0 or moduleNsOf(c) != null) break;
+                if (c.getAccessor("return") != null or c.getOwn("return") != null) break;
+                cur = self.effectiveProto(c);
+            } else return proto_value;
+        };
         const created = try self.makeCursorIterator(next);
         const created_root = try self.pushTempRoot(created);
         defer self.restoreTempRoots(created_root);
