@@ -1380,6 +1380,13 @@ fn compileNumeric(
     allocator: std.mem.Allocator,
 ) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
+    // The opcode/size filter rejects exactly what the analysis would reject on
+    // those grounds, without allocating one abstract state per instruction.
+    // Object- and call-heavy chunks reach this tier through the ordinary hot
+    // threshold; zero-filling a multi-kilobyte state for each of their
+    // instructions only to fail on the first property access made every such
+    // tier-up cost far more than the call it was meant to accelerate.
+    if (!isCandidate(chunk)) return error.UnsupportedChunk;
 
     var analysis = try analyzeNumeric(chunk, true, allocator);
     defer analysis.deinit();

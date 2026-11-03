@@ -7436,6 +7436,12 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null, false);
 }
 
+/// Backing for tier-up scratch. Compilers make many small, short-lived
+/// allocations (worklists, graph nodes, maps); the page allocator turned each
+/// into an mmap/munmap pair. The process allocator recycles them, while the
+/// scratch wrapper still accounts every byte against the compilation budget.
+const native_compilation_backing: std.mem.Allocator = if (builtin.link_libc) std.heap.c_allocator else std.heap.page_allocator;
+
 fn loadOrCompileOptimizer(
     vm: *Interpreter,
     owner: *jit.Owner,
@@ -7469,7 +7475,7 @@ fn loadOrCompileOptimizer(
         var claim = claim_value;
         var work = runtime_threads.beginInternalWork(.native_compilation);
         defer work.end();
-        var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, std.heap.page_allocator);
+        var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, native_compilation_backing);
         defer scratch.deinit();
         const scratch_allocator = scratch.allocator();
         const tier_up_started_ns = tierTimingStarted(vm);
@@ -7625,7 +7631,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         var claim = claim_value;
         var work = runtime_threads.beginInternalWork(.native_compilation);
         defer work.end();
-        var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, std.heap.page_allocator);
+        var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, native_compilation_backing);
         defer scratch.deinit();
         const scratch_allocator = scratch.allocator();
         const tier_up_started_ns = tierTimingStarted(vm);
