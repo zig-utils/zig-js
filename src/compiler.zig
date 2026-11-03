@@ -76,6 +76,31 @@ const CompileHashState = struct {
     }
 };
 
+/// A name hashed once with the compilation secret. Name resolution probes the
+/// same name in several maps per enclosing function (lexical counts, body
+/// bindings, parameters); hashing it once per lookup instead of once per probe
+/// keeps resolution cost proportional to the probes, not to the key length
+/// times the probes.
+const HashedName = struct {
+    name: []const u8,
+    hash: u64,
+
+    fn of(state: *const CompileHashState, name: []const u8) ?HashedName {
+        const context = state.context orelse return null;
+        return .{ .name = name, .hash = context.hash(name) };
+    }
+};
+
+const HashedNameAdapter = struct {
+    pub fn hash(_: @This(), key: HashedName) u64 {
+        return key.hash;
+    }
+
+    pub fn eql(_: @This(), key: HashedName, stored: []const u8) bool {
+        return std.mem.eql(u8, key.name, stored);
+    }
+};
+
 fn SecureStringMapUnmanaged(comptime MapValue: type) type {
     const Index = std.HashMapUnmanaged(
         []const u8,
@@ -115,6 +140,11 @@ fn SecureStringMapUnmanaged(comptime MapValue: type) type {
         fn getPtr(self: *Self, key: []const u8) ?*MapValue {
             const context = self.state.context orelse return null;
             return self.index.getPtrContext(key, context);
+        }
+
+        /// `key` was hashed with this map's compilation state.
+        fn getHashed(self: *const Self, key: HashedName) ?MapValue {
+            return self.index.getAdapted(key, HashedNameAdapter{});
         }
 
         fn contains(self: *const Self, key: []const u8) bool {
@@ -446,6 +476,32 @@ const FnScope = struct {
         if (self.names.get(name)) |binding| return binding;
         if (self.parameter_names) |parameters| return parameters.get(name);
         return null;
+    }
+
+    fn getHashed(self: *const FnScope, key: HashedName) ?SlotBinding {
+        if (self.bindsLexicallyHashed(key)) {
+            var index = self.lexical_scopes.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (self.lexical_scopes.items[index].getHashed(key)) |binding| return binding;
+            }
+        } else if (std.debug.runtime_safety) {
+            for (self.lexical_scopes.items) |scope| std.debug.assert(!scope.contains(key.name));
+        }
+        if (self.names.getHashed(key)) |binding| return binding;
+        if (self.parameter_names) |parameters| return parameters.getHashed(key);
+        return null;
+    }
+
+    fn getParameterHashed(self: *const FnScope, key: HashedName) ?SlotBinding {
+        if (self.parameter_names) |parameters| return parameters.getHashed(key);
+        return self.names.getHashed(key);
+    }
+
+    fn bindsLexicallyHashed(self: *const FnScope, key: HashedName) bool {
+        const counts = self.lexical_name_counts orelse return false;
+        const count = counts.getHashed(key) orelse return false;
+        return count != 0;
     }
 
     fn bindsLexically(self: *const FnScope, name: []const u8) bool {
@@ -2359,29 +2415,52 @@ pub const Compiler = struct {
     }
 
     fn resolve(self: *Compiler, name: []const u8) Resolved {
+        return self.resolveWithDepth(name).resolved;
+    }
+
+    const Resolution = struct {
+        resolved: Resolved,
+        /// The `with` records that can intervene before the resolved binding.
+        with_depth: u32,
+    };
+
+    /// One walk of the function-scope chain, hashing `name` once, yielding
+    /// both the static resolution and the `with` depth in front of it.
+    fn resolveWithDepth(self: *Compiler, name: []const u8) Resolution {
         var depth: u32 = 0;
         var environment_depth: u32 = 0;
+        var with_depth = self.with_depth;
         var scope = self.scope;
         var phase = self.function_binding_phase;
+        const key = HashedName.of(self.hash_state, name) orelse
+            return .{ .resolved = .global, .with_depth = self.withDepthOfChain() };
         while (scope) |sc| {
             const binding = if (phase == .parameters)
-                sc.getParameter(name)
+                sc.getParameterHashed(key)
             else
-                sc.get(name);
+                sc.getHashed(key);
             if (binding) |resolved_binding| {
-                if (resolved_binding.environment) return .{ .environment = resolved_binding };
-                return if (depth == 0) .{ .local = resolved_binding } else .{ .upval = .{
+                if (resolved_binding.environment) return .{ .resolved = .{ .environment = resolved_binding }, .with_depth = with_depth };
+                return .{ .resolved = if (depth == 0) .{ .local = resolved_binding } else .{ .upval = .{
                     .depth = depth,
                     .environment_depth = environment_depth - resolved_binding.lexical_environment_depth,
                     .binding = resolved_binding,
-                } };
+                } }, .with_depth = with_depth };
             }
             environment_depth += sc.parent_environment_depth;
+            with_depth += sc.parent_with_depth;
             depth += 1;
             phase = sc.parent_binding_phase;
             scope = sc.parent;
         }
-        return .global;
+        return .{ .resolved = .global, .with_depth = with_depth };
+    }
+
+    fn withDepthOfChain(self: *const Compiler) u32 {
+        var depth = self.with_depth;
+        var scope = self.scope;
+        while (scope) |sc| : (scope = sc.parent) depth += sc.parent_with_depth;
+        return depth;
     }
 
     /// Count only the `with` records that can intervene before the statically
@@ -2389,29 +2468,17 @@ pub const Compiler = struct {
     /// already represented by `resolve`; treating them as dynamic would add
     /// Reference slots to ordinary no-`with` code and block native fast paths.
     fn withDepthToResolution(self: *Compiler, name: []const u8) u32 {
-        var depth = self.with_depth;
-        var scope = self.scope;
-        var phase = self.function_binding_phase;
-        while (scope) |sc| {
-            const binding = if (phase == .parameters)
-                sc.getParameter(name)
-            else
-                sc.get(name);
-            if (binding != null) return depth;
-            depth += sc.parent_with_depth;
-            phase = sc.parent_binding_phase;
-            scope = sc.parent;
-        }
-        return depth;
+        return self.resolveWithDepth(name).with_depth;
     }
 
     /// Emit a load of `name` to the appropriate location (local / upvalue / global).
     fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
-        if (try self.dynamicBindingReferencePlan(name)) |reference| {
+        const resolution = self.resolveWithDepth(name);
+        if (try self.dynamicBindingReferencePlanResolved(name, resolution)) |reference| {
             try self.emitLoadBindingReference(reference, false, false, false);
             return;
         }
-        switch (self.resolve(name)) {
+        switch (resolution.resolved) {
             .local => |binding| _ = try self.chunk.emit(if (binding.mapped_parameter) .load_local_mapped else if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
             .upval => |u| _ = try self.chunk.emitAB(if (u.binding.mapped_parameter) .load_upval_mapped else if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
             .environment, .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
@@ -2558,13 +2625,17 @@ pub const Compiler = struct {
     }
 
     fn dynamicBindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
-        const resolved = self.resolve(name);
+        return self.dynamicBindingReferencePlanResolved(name, self.resolveWithDepth(name));
+    }
+
+    fn dynamicBindingReferencePlanResolved(self: *Compiler, name: []const u8, resolution: Resolution) CompileError!?u32 {
+        const resolved = resolution.resolved;
         const has_direct_eval_boundary = switch (resolved) {
             .local => |binding| binding.parameter_with_eval_boundary,
             .upval => |upvalue| upvalue.binding.parameter_with_eval_boundary,
             .environment, .global => false,
         };
-        if (self.withDepthToResolution(name) == 0 and
+        if (resolution.with_depth == 0 and
             !has_direct_eval_boundary and
             !self.readMayObserveOwnDirectEvalVar(resolved)) return null;
         return try self.bindingReferencePlan(name);
@@ -2576,8 +2647,9 @@ pub const Compiler = struct {
     /// without `with` so strict unresolvable and deletion/creation ordering is
     /// not delayed until PutValue.
     fn assignmentBindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
-        if (self.withDepthToResolution(name) != 0) return try self.bindingReferencePlan(name);
-        return switch (self.resolve(name)) {
+        const resolution = self.resolveWithDepth(name);
+        if (resolution.with_depth != 0) return try self.bindingReferencePlan(name);
+        return switch (resolution.resolved) {
             .local => |binding| if (binding.parameter_with_eval_boundary) try self.bindingReferencePlan(name) else null,
             .upval => |upvalue| if (upvalue.binding.parameter_with_eval_boundary) try self.bindingReferencePlan(name) else null,
             .environment, .global => try self.bindingReferencePlan(name),
