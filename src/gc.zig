@@ -1761,24 +1761,40 @@ inline fn minorTraceEpoch(v: anytype) u64 {
     return v.minorTraceEpoch();
 }
 
-/// Old Function cells are rescanned on every minor cycle (`traceOldOnMinor`)
-/// because, among other edges, captured frame slots change without an owner
-/// barrier.
-/// Those containers are shared: every closure of an activation walks the same
-/// frame chain (a bundle's top-level frame holds thousands of slots), and every
-/// closure of a template traces the same constant pools. Visiting each once per
-/// minor trace attempt keeps that rescan proportional to the distinct
-/// containers rather than to closures times container size. The graph cannot
-/// change during a stop-the-world minor and marking is idempotent, so a later
-/// visit within the attempt finds nothing new. Returns true when the container
-/// was already visited; otherwise claims it for this attempt.
-inline fn claimMinorTrace(stamp: *u64, epoch: u64) bool {
-    if (epoch == 0) return false;
+/// Frames and constant pools reached through Functions are shared: every
+/// closure of an activation walks the same frame chain (a bundle's top-level
+/// frame holds thousands of slots), and every closure of a template traces the
+/// same constant pools. Visiting each once per minor trace attempt keeps a
+/// minor proportional to the distinct containers rather than to closures times
+/// container size. The graph cannot change during a stop-the-world minor and
+/// marking is idempotent, so a later visit within the attempt marks nothing new.
+///
+/// A skipped visit must still report what the first one found, though: a
+/// Function is an owner-barriered kind, and zig-gc keeps an old one carded only
+/// while its trace observes an edge to a cell that stays young
+/// (`Visitor.young_edge`). The stamp therefore packs the attempt's epoch with
+/// that observation in its low bit. Epochs come from one process-wide counter,
+/// so a stamp left by another heap's attempt never matches.
+inline fn minorTraceStamp(stamp: *const u64, epoch: u64) ?bool {
     // Atomic only because a chunk can be shared by heaps collecting on other
-    // threads; each heap's stamps are unique, so a foreign stamp never skips.
-    if (@atomicLoad(u64, stamp, .monotonic) == epoch) return true;
-    @atomicStore(u64, stamp, epoch, .monotonic);
-    return false;
+    // threads.
+    const current = @atomicLoad(u64, stamp, .monotonic);
+    if (current >> 1 != epoch) return null;
+    return current & 1 != 0;
+}
+
+inline fn storeMinorTraceStamp(stamp: *u64, epoch: u64, young: bool) void {
+    @atomicStore(u64, stamp, (epoch << 1) | @intFromBool(young), .monotonic);
+}
+
+inline fn visitorYoungEdge(v: anytype) bool {
+    if (comptime !@hasField(@TypeOf(v.*), "young_edge")) return false;
+    return v.young_edge;
+}
+
+inline fn setVisitorYoungEdge(v: anytype, young: bool) void {
+    if (comptime !@hasField(@TypeOf(v.*), "young_edge")) return;
+    v.young_edge = young;
 }
 
 /// Bytecode storage is arena-owned, but constants emitted through `Value.strAlloc`
@@ -1786,10 +1802,28 @@ inline fn claimMinorTrace(stamp: *u64, epoch: u64) bool {
 /// templates are not cells yet, so their chunks must be reached through the
 /// owning chunk as well.
 fn traceChunk(chunk: *const bytecode.Chunk, v: anytype) void {
-    if (claimMinorTrace(@constCast(&chunk.gc_minor_trace_epoch), minorTraceEpoch(v))) return;
+    const stamp: *u64 = @constCast(&chunk.gc_minor_trace_epoch);
+    const epoch = minorTraceEpoch(v);
+    if (epoch == 0) {
+        for (chunk.consts.items) |constant| markValue(v, constant);
+        for (chunk.fns.items) |template|
+            if (template.chunk) |nested| traceChunk(nested, v);
+        return;
+    }
+    if (minorTraceStamp(stamp, epoch)) |young| {
+        if (young) setVisitorYoungEdge(v, true);
+        return;
+    }
+    const outer_young = visitorYoungEdge(v);
+    // Claim pessimistically; the observation replaces it once traced.
+    storeMinorTraceStamp(stamp, epoch, true);
+    setVisitorYoungEdge(v, false);
     for (chunk.consts.items) |constant| markValue(v, constant);
     for (chunk.fns.items) |template|
         if (template.chunk) |nested| traceChunk(nested, v);
+    const young = visitorYoungEdge(v);
+    storeMinorTraceStamp(stamp, epoch, young);
+    setVisitorYoungEdge(v, outer_young or young);
 }
 
 fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
@@ -1805,21 +1839,101 @@ fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
 /// are a precise Function edge and concurrent tracing must serialize with
 /// `load_upval` / `store_upval` through the frame slot lock.
 fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
-    var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
+    const first: *vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else return;
     const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
     const epoch = minorTraceEpoch(v);
-    while (frame) |current| : (frame = current.parent) {
-        // A claimed frame's whole parent chain was walked by the visit that
-        // claimed it, so the rest of this chain is already traced too.
-        if (claimMinorTrace(&current.gc_minor_trace_epoch, epoch)) break;
-        if (current.closure_environment) |environment| markManaged(v, environment);
-        if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
-        if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
-        traceFrameMappedParameters(current, v);
-        const held = current.lockSlots(lock_slots);
-        for (current.slots) |slot| markValueInternal(v, "captured VM frame slot", slot);
-        current.unlockSlots(held);
+    if (epoch == 0) {
+        var frame: ?*vm.Frame = first;
+        while (frame) |current| : (frame = current.parent) {
+            current.gc_function_traced.store(true, .monotonic);
+            traceCapturedFrameContents(current, v, lock_slots);
+        }
+        return;
     }
+    // First pass: trace each unclaimed frame, leaving its own young-edge
+    // observation in its stamp. A claimed frame's whole parent chain was walked
+    // by the visit that claimed it, and its stamp already holds the answer for
+    // that chain, so the walk stops there.
+    const outer_young = visitorYoungEdge(v);
+    var stop: ?*vm.Frame = null;
+    var tail_young = false;
+    var young_frames: usize = 0;
+    var frame: ?*vm.Frame = first;
+    while (frame) |current| : (frame = current.parent) {
+        if (minorTraceStamp(&current.gc_minor_trace_epoch, epoch)) |young| {
+            stop = current;
+            tail_young = young;
+            break;
+        }
+        current.gc_function_traced.store(true, .monotonic);
+        setVisitorYoungEdge(v, false);
+        traceCapturedFrameContents(current, v, lock_slots);
+        const own_young = visitorYoungEdge(v);
+        if (own_young) young_frames += 1;
+        storeMinorTraceStamp(&current.gc_minor_trace_epoch, epoch, own_young);
+    }
+    // Second pass: replace each frame's own observation with its chain's, so
+    // a closure that later reaches any of them inherits the full answer.
+    var remaining = young_frames;
+    frame = first;
+    while (frame) |current| : (frame = current.parent) {
+        if (current == stop) break;
+        const own_young = minorTraceStamp(&current.gc_minor_trace_epoch, epoch).?;
+        storeMinorTraceStamp(&current.gc_minor_trace_epoch, epoch, remaining > 0 or tail_young);
+        if (own_young) remaining -= 1;
+    }
+    setVisitorYoungEdge(v, outer_young or young_frames > 0 or tail_young);
+}
+
+fn traceCapturedFrameContents(current: *vm.Frame, v: anytype, lock_slots: bool) void {
+    if (current.closure_environment) |environment| markManaged(v, environment);
+    if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
+    if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
+    traceFrameMappedParameters(current, v);
+    const held = current.lockSlots(lock_slots);
+    for (current.slots) |slot| markValueInternal(v, "captured VM frame slot", slot);
+    current.unlockSlots(held);
+}
+
+/// Barrier a store into a captured VM frame that its own activation's root
+/// does not cover (an upvalue store, or a direct-eval view write). Frames are
+/// arena storage rather than cells, and old Functions are not rescanned by
+/// minor cycles, so a frame flagged as reachable from a traced Function
+/// retains a young stored cell as a remembered target until it tenures. An
+/// unflagged frame has no tenured Function capturer: when one is promoted, its
+/// promotion trace sees the frame's then-current contents and cards it.
+pub inline fn barrierFrameStore(frame: *vm.Frame, stored: Value) void {
+    if (!frame.gc_function_traced.load(.monotonic)) return;
+    barrierValue(stored);
+}
+
+/// An escaped frame stops being a precise root when its activation ends. The
+/// activation's own stores into it were unbarriered while it was a root, so a
+/// flagged frame retains each young cell it still holds the same way.
+pub fn barrierReleasedFrame(frame: *vm.Frame) void {
+    if (!frame.escaped.load(.monotonic) or !frame.gc_function_traced.load(.monotonic)) return;
+    if (frame.closure_environment) |environment| if (environment.gc_managed) barrierCell(@ptrCast(environment));
+    if (frame.direct_eval_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCell(@ptrCast(environment));
+    if (frame.direct_eval_parameter_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCell(@ptrCast(environment));
+    if (frame.mapped_arguments) |arguments| barrierCell(@ptrCast(arguments));
+    const parallel = bytecode.ic_seqlock_enabled.load(.monotonic);
+    for (0..frame.slots.len) |slot| {
+        const held = frame.lockSlots(parallel);
+        const stored = frame.slots[slot];
+        frame.unlockSlots(held);
+        barrierValue(stored);
+    }
+}
+
+/// Owner barrier for a Function field written after creation.
+pub inline fn barrierFunctionEdge(function: *interp.Function, cell: ?*value.Object) void {
+    barrierCellFrom(@ptrCast(function), if (cell) |object| @ptrCast(object) else null);
+}
+
+/// Have the next minor cycle trace `function` if it is already old, for
+/// edges added through containers it owns (a freshly compiled chunk).
+pub inline fn rememberFunction(function: *interp.Function) void {
+    barrierWeak(@ptrCast(function));
 }
 
 /// Relocation runs after every realm mutator has parked, so the same captured
@@ -2021,7 +2135,12 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expectEqual(&new_objects[13], parent_frame_slots[0].asObj());
     try std.testing.expectEqual(&new_objects[14], captured_frame_slots[0].asObj());
     try std.testing.expectEqual(&new_environment, captured_frame.closure_environment.?);
-    try std.testing.expect(Binding.traceOldOnMinor(.function));
+    // Old Functions are owner-barriered: minor cycles do not rescan them, and
+    // tracing one flags every frame of its captured chain for the frame
+    // barriers that replace that rescan.
+    try std.testing.expect(!Binding.traceOldOnMinor(.function));
+    try std.testing.expect(captured_frame.gc_function_traced.load(.monotonic));
+    try std.testing.expect(parent_frame.gc_function_traced.load(.monotonic));
 }
 
 pub fn traceBoundFn(b: *interp.Interpreter.BoundFn, v: anytype) void {
@@ -4480,14 +4599,22 @@ pub const Binding = struct {
         }
     }
 
-    /// Object and Environment mutations are funneled through owner-aware
-    /// barriers. Mutable type-erased side cells have a wider set of lifecycle
-    /// writes, so quiescent minor GC conservatively rescans those old kinds.
-    /// Function cells are rescanned too: most edges are immutable after
-    /// publication, but a captured derived-constructor `this_cell.value_bits` is
-    /// initialized by `super()` and can therefore acquire a young object.
+    /// Object, Environment and Function mutations are funneled through
+    /// owner-aware barriers. Mutable type-erased side cells have a wider set of
+    /// lifecycle writes, so quiescent minor GC conservatively rescans those old
+    /// kinds.
+    ///
+    /// A Function's own edges are fixed at creation except the few written
+    /// later (home object, class constructor links, a deferred chunk), which
+    /// take `barrierFunctionEdge`/`rememberFunction`. The containers it reaches
+    /// are not cells and are barriered at their stores instead: a captured
+    /// frame's (`barrierFrameStore`, `barrierReleasedFrame`), a derived
+    /// constructor's shared `this` cell and an import.meta slot (unowned
+    /// barriers at their one-time publication). Rescanning every old Function
+    /// on every minor made each nursery collection proportional to all the
+    /// closures a page had ever created.
     pub fn traceOldOnMinor(kind: Kind) bool {
-        return kind != .object and kind != .string and kind != .environment;
+        return kind != .object and kind != .string and kind != .environment and kind != .function;
     }
 
     pub fn traceEphemeron(self: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {

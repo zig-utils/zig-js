@@ -1319,6 +1319,8 @@ pub const ActivationFrameView = struct {
     mapped_parameter_indices: []const u32,
     escaped: *std.atomic.Value(bool),
     slot_lock: *std.atomic.Mutex,
+    /// The viewed frame's `gc_function_traced` flag (null for synthetic views).
+    gc_function_traced: ?*const std.atomic.Value(bool) = null,
 
     fn lockSlots(self: *const ActivationFrameView) bool {
         if (!bc.ic_seqlock_enabled.load(.monotonic) or !self.escaped.load(.monotonic)) return false;
@@ -1362,6 +1364,7 @@ pub const ActivationFrameView = struct {
         const held = self.lockSlots();
         self.slots[slot] = stored;
         self.unlockSlots(held);
+        if (self.gc_function_traced) |traced| if (traced.load(.monotonic)) gc_mod.barrierValue(stored);
     }
 
     pub fn markEscaped(self: *const ActivationFrameView) void {
@@ -2932,6 +2935,10 @@ pub const ThisCell = struct {
         if (self.state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) return false;
         self.value_bits.store(bound_value.rawBits(), .release);
         self.state.store(2, .release);
+        // Not a GC cell: an arrow Function may have been tenured before
+        // `super()` returned, so retain the young `this` like any edge stored
+        // into an unowned container.
+        gc_mod.barrierValue(bound_value);
         return true;
     }
 };
@@ -2981,6 +2988,8 @@ pub const ImportMetaSlot = struct {
 
     pub fn publish(self: *ImportMetaSlot, object: *value.Object) void {
         self.obj.store(object, .release);
+        // Shared by the module's Functions, which minor cycles do not rescan.
+        gc_mod.barrierCell(@ptrCast(object));
     }
 
     fn lockInitialization(self: *ImportMetaSlot) void {
@@ -8607,6 +8616,11 @@ pub const Interpreter = struct {
         obj.* = .{ .proto = fproto };
         try obj.setJsFunction(self.arena, @ptrCast(func));
         func.obj = obj;
+        // Compiling the body and allocating `obj` can collect. A full cycle
+        // tenures `func`, after which its chunk constants and `obj` are young
+        // edges no owner barrier saw; have the next minor cycle trace it.
+        gc_mod.rememberFunction(func);
+        gc_mod.barrierFunctionEdge(func, obj);
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return Value.obj(obj);
     }
@@ -9657,6 +9671,9 @@ pub const Interpreter = struct {
             cf.is_derived_constructor = derived;
             cf.is_default_ctor = derived and ctor_node == null;
             cf.derived_constructor = if (derived) class_obj else null;
+            gc_mod.barrierFunctionEdge(cf, proto);
+            gc_mod.barrierFunctionEdge(cf, super_obj);
+            gc_mod.barrierFunctionEdge(cf, cf.derived_constructor);
             cf.field_inits = field_inits.items;
             // Private brands. Methods/accessors are added all at once before field
             // initializers run, so they brand the instance up front; *fields* are
@@ -9777,6 +9794,8 @@ pub const Interpreter = struct {
                 mf.home_object = home;
                 const current_superclass = self.tempRoot(superclass_root, superclass);
                 mf.super_ctor = if (current_superclass.isNull()) null else current_superclass.asObj();
+                gc_mod.barrierFunctionEdge(mf, home);
+                gc_mod.barrierFunctionEdge(mf, mf.super_ctor);
                 mf.private_map = private_map; // a direct eval in this method resolves the class's private names
             }
             switch (m.accessor) {
@@ -9817,6 +9836,9 @@ pub const Interpreter = struct {
         class_val = self.tempRoot(class_root, class_val);
         if (fnode.defer_plain_bytecode_compilation) if (funcOf(class_val)) |cf| {
             const reason = try self.installPlainFunctionBytecode(cf, fnode);
+            // Computed names ran first and may have tenured the constructor;
+            // its new chunk's constants arrive after any promotion trace.
+            gc_mod.rememberFunction(cf);
             cf.bytecode_admission_reason = reason;
             self.recordBytecodeAdmission(reason);
         };
@@ -12522,6 +12544,9 @@ pub const Interpreter = struct {
 
     pub fn popExecRoot(self: *Interpreter, exec: *vm.Exec) void {
         if (self.gc == null) return;
+        // The frame stops being a root here. A closure that captured it may
+        // already be old, and its own stores were never barriered.
+        if (exec.frame) |frame| gc_mod.barrierReleasedFrame(frame);
         var i = self.gc_execs.items.len;
         while (i > 0) {
             i -= 1;
@@ -13444,7 +13469,10 @@ pub const Interpreter = struct {
     pub fn vmInitAccessor(self: *Interpreter, obj: Value, key: Value, fn_val: Value, is_get: bool) EvalError!void {
         const k = try self.keyOf(key);
         const name = try self.keyDisplayName(key);
-        if (funcOf(fn_val)) |f| f.home_object = obj.asObj();
+        if (funcOf(fn_val)) |f| {
+            f.home_object = obj.asObj();
+            gc_mod.barrierFunctionEdge(f, obj.asObj());
+        }
         try self.nameAccessor(fn_val, if (is_get) "get" else "set", name);
         if (is_get)
             try self.defineAccessor(obj.asObj(), k, fn_val, null)
@@ -13497,17 +13525,24 @@ pub const Interpreter = struct {
                     if (p.value.* == .function and p.value.function.is_method)
                         if (funcOf(pv)) |f| {
                             f.home_object = object;
+                            gc_mod.barrierFunctionEdge(f, object);
                         };
                     try self.maybeNameAnon(pv, p.value, name_str);
                     try self.defineLiteralDataProp(object, key, pv);
                 },
                 .get => {
-                    if (funcOf(pv)) |f| f.home_object = object;
+                    if (funcOf(pv)) |f| {
+                        f.home_object = object;
+                        gc_mod.barrierFunctionEdge(f, object);
+                    }
                     try self.nameAccessor(pv, "get", name_str);
                     try self.defineAccessor(object, key, pv, null);
                 },
                 .set => {
-                    if (funcOf(pv)) |f| f.home_object = object;
+                    if (funcOf(pv)) |f| {
+                        f.home_object = object;
+                        gc_mod.barrierFunctionEdge(f, object);
+                    }
                     try self.nameAccessor(pv, "set", name_str);
                     try self.defineAccessor(object, key, null, pv);
                 },

@@ -126,10 +126,17 @@ pub const Frame = struct {
     // the parallel flag, so the GIL/single-threaded engine pays nothing.
     escaped: std.atomic.Value(bool) = .init(false),
     slot_lock: std.atomic.Mutex = .unlocked,
-    /// Minor-GC trace stamp (see `gc.claimMinorTrace`). Every closure created
+    /// Minor-GC trace stamp (see `gc.minorTraceStamp`). Every closure created
     /// in an activation, and in each nested one, walks this frame; one visit
-    /// per minor cycle marks its slots.
+    /// per minor cycle marks its slots and records whether this frame's chain
+    /// still reaches a cell that stays young, for the closures that skip it.
     gc_minor_trace_epoch: u64 = 0,
+    /// Set once a collector has traced a Function whose captured chain
+    /// includes this frame. Old Function cells are not rescanned by minor
+    /// collections, so only a flagged frame can be reachable from one; its
+    /// stores that the owning activation's root does not cover take the GC
+    /// write barrier (`gc.barrierFrameStore`, `gc.barrierReleasedFrame`).
+    gc_function_traced: std.atomic.Value(bool) = .init(false),
 
     // `pub` so the GC's parallel root trace can take the same lock when it reads
     // an escaped frame's slots via a cross-thread captured-frame walk; see
@@ -187,6 +194,7 @@ pub const Frame = struct {
             .mapped_parameter_indices = self.mapped_parameter_indices,
             .escaped = &self.escaped,
             .slot_lock = &self.slot_lock,
+            .gc_function_traced = &self.gc_function_traced,
         };
     }
 
@@ -4338,6 +4346,7 @@ fn nativeInitProperty(vm: *Interpreter, target: Value, name: []const u8, stored:
     const object = try literalObjectTarget(vm, target);
     if (make_method) if (Interpreter.funcOf(stored)) |function| {
         function.home_object = object;
+        gc_mod.barrierFunctionEdge(function, object);
     };
     try vm.defineLiteralDataProp(object, name, stored);
     return target;
@@ -4356,6 +4365,7 @@ fn nativeInitComputedProperty(vm: *Interpreter, target: Value, key: Value, store
     const object = try literalObjectTarget(vm, target);
     if (make_method) if (Interpreter.funcOf(stored)) |function| {
         function.home_object = object;
+        gc_mod.barrierFunctionEdge(function, object);
     };
     if (name_anonymous) try vm.nameAnonValueForKey(stored, key);
     try vm.defineLiteralDataProp(object, try propKey(vm, key), stored);
@@ -8160,6 +8170,9 @@ fn storeCapturedBinding(vm: *Interpreter, frame: ?*Frame, inst: bc.Inst, stored:
         if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
         if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
     } else target.writeSlot(slot, stored, parallel);
+    // An upvalue store reaches a frame outside the running activation, which
+    // no root covers; an old closure may be its only owner.
+    gc_mod.barrierFrameStore(target, stored);
     return stored;
 }
 
@@ -8360,6 +8373,7 @@ fn storeStaticBindingFallback(
             while (depth > 0) : (depth -= 1) target = target.parent.?;
             if (fallback.op == .store_upval_mapped) {
                 target.writeSlot(fallback.b, stored, parallel);
+                gc_mod.barrierFrameStore(target, stored);
                 return;
             }
             const immutable_mask: u32 = @as(u32, 1) << 31;
@@ -8369,6 +8383,7 @@ fn storeStaticBindingFallback(
             const in_tdz = fallback.op == .store_upval_lexical and vm.isTdz(target.slots[slot]);
             if (!in_tdz and !immutable) target.slots[slot] = stored;
             target.unlockSlots(held);
+            gc_mod.barrierFrameStore(target, stored);
             if (in_tdz) return vm.throwUninitializedBinding(name);
             if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
         },
@@ -8903,6 +8918,7 @@ fn runChunk(
                 // shorthand/method/computed key does not trip the prototype setter).
                 if (inst.b & bc.literal_function_method != 0) if (Interpreter.funcOf(v)) |f| {
                     f.home_object = obj.asObj();
+                    gc_mod.barrierFunctionEdge(f, obj.asObj());
                 };
                 const object = obj.asObj();
                 const key = chunk.names.items[inst.a];
@@ -12742,6 +12758,8 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     obj.* = .{ .proto = fproto };
     try obj.setJsFunction(vm.arena, @ptrCast(func));
     func.obj = obj;
+    // Allocating `obj` may have run a full collection that tenured `func`.
+    gc_mod.barrierFunctionEdge(func, obj);
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, Value.obj(obj));
     return Value.obj(obj);

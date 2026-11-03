@@ -26337,6 +26337,88 @@ test "deferred class captures retain exact identities through moving nursery" {
     }
 }
 
+test "enable_gc nursery: tenured closures keep frame edges stored after promotion" {
+    // Old Function cells are not rescanned by minor cycles. Each case tenures
+    // a closure while its captured state is still being written, then stores
+    // young cells into that state through a path no owner barrier sees: the
+    // activation's own locals before it returns, an upvalue store, a derived
+    // constructor's shared `this`, and a constructor compiled after its
+    // computed names ran. A minor cycle at every safepoint then must keep each
+    // young cell alive through the captured frame or cell alone.
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const ctx: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            ctx.gc.?.nursery_threshold_bytes = 1;
+            return Value.undef();
+        }
+    };
+    const prelude =
+        \\function churn(n){let keep=null;for(let i=0;i<n;i++){keep={i:i,s:'c'+i};}return keep;}
+    ;
+    const cases = [_]struct { name: []const u8, setup: []const u8, run: []const u8, expected: []const u8 }{
+        .{
+            .name = "released_frame",
+            .setup = "function longActivation(tag){let early=null;let late=null;const read=()=>early.text+'|'+late.text;churn(60000);early={text:'early-'+tag};late={text:'late-'+tag};return read;}",
+            .run = "globalThis.readers=[];for(let i=0;i<3;i++)readers.push(longActivation(i));churn(60000);readers.map(r=>r()).join(',')",
+            .expected = "early-0|late-0,early-1|late-1,early-2|late-2",
+        },
+        .{
+            .name = "nested_released_frame",
+            .setup = "function outerActivation(tag){let outer=null;function inner(){let own=null;const read=()=>outer.text+'/'+own.text;churn(60000);own={text:'own-'+tag};return read;}const read=inner();churn(60000);outer={text:'outer-'+tag};return read;}",
+            .run = "globalThis.nested=outerActivation(7);churn(60000);nested()",
+            .expected = "outer-7/own-7",
+        },
+        .{
+            .name = "upvalue_store",
+            .setup = "function makeHolder(){let held=null;return {set(v){held=v;},get(){return held;}};}globalThis.holders=[];for(let i=0;i<8;i++)holders.push(makeHolder());churn(60000);",
+            .run = "for(let round=0;round<4;round++){holders.forEach((h,i)=>h.set({text:'r'+round+':'+i}));churn(60000);}holders.map(h=>h.get().text).join(',')",
+            .expected = "r3:0,r3:1,r3:2,r3:3,r3:4,r3:5,r3:6,r3:7",
+        },
+        .{
+            .name = "derived_this",
+            .setup = "class TenureBase{constructor(){churn(60000);return {text:'base-'+3};}}class TenureDerived extends TenureBase{constructor(){const early=()=>this;super();globalThis.derivedEarly=early;}}",
+            .run = "new TenureDerived();churn(60000);derivedEarly().text",
+            .expected = "base-3",
+        },
+        .{
+            .name = "deferred_constructor",
+            .setup = "function makeDeferred(tag){return class{[(churn(60000),'read')](){return this.field;}field='field-'+tag;};}",
+            .run = "globalThis.Deferred=makeDeferred(5);churn(60000);new Deferred().read()",
+            .expected = "field-5",
+        },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (cases) |case| {
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+            defer ctx.destroy();
+            {
+                const saved = gc_mod.setActiveContext(ctx);
+                defer gc_mod.restoreActiveContext(saved);
+                const arm = try gc_mod.allocObj(ctx.arena());
+                arm.* = .{ .native = Host.arm };
+                try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "tenureArm", Value.obj(arm));
+                try ctx.env.put("tenureArm", Value.obj(arm));
+            }
+            ctx.setBytecodeExecutionModeForTesting(mode);
+            _ = try ctx.evaluate(prelude);
+            _ = try ctx.evaluate("tenureArm();");
+            const minors_before = ctx.gc.?.accounting().minor_collections;
+            errdefer std.debug.print("tenured closure case {s} ({s})\n", .{ case.name, @tagName(mode) });
+            _ = try ctx.evaluate(case.setup);
+            const result = try ctx.evaluate(case.run);
+            try std.testing.expectEqualStrings(case.expected, result.asStr());
+            const minors = ctx.gc.?.accounting().minor_collections - minors_before;
+            // Bytecode functions keep their bindings in frames, the subject
+            // here; the tree-walker's safepoints are sparser.
+            if (mode == .required and minors <= runtime_gc_tenuring_age) {
+                std.debug.print("only {d} minor collections\n", .{minors});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
 test "reentrant property references preserve coercion and target order" {
     const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
         .{ .name = "plain_order", .source = "var log='', box={set x(v){log+='set'+v;}}, key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 4;}var n=(box[key]=rhs());var result=n+':'+log;", .expected = "4:rhskeyset4" },
