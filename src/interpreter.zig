@@ -10009,6 +10009,13 @@ pub const Interpreter = struct {
         const next_root = try self.pushTempRoot(next_method);
         defer self.restoreTempRoots(next_root);
         while (true) {
+            if (builtinCursorIterator(self.tempRoot(iter_root, iter_obj), self.tempRoot(next_root, next_method))) |cursor| {
+                const item = try cursorIterStep(self, cursor) orelse break;
+                const item_root = try self.pushTempRoot(item);
+                defer self.restoreTempRoots(item_root);
+                try sink.add(self, self.tempRoot(item_root, item));
+                continue;
+            }
             const res = try self.callValueWithThis(self.tempRoot(next_root, next_method), &.{}, self.tempRoot(iter_root, iter_obj));
             const result_root = try self.pushTempRoot(res);
             defer self.restoreTempRoots(result_root);
@@ -19228,6 +19235,10 @@ pub const Interpreter = struct {
     /// `next_method` exactly as recorded: if it is non-callable, Call throws
     /// without re-reading `it.next` or observing a later replacement.
     fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
+        if (builtinCursorIterator(it, next_method)) |o| {
+            const step = try cursorIterStep(self, o);
+            return .{ .done = step == null, .value = step orelse Value.undef() };
+        }
         const r = try self.callValueWithThis(next_method, &.{}, it);
         if (!builtins.isRealObject(r)) return self.throwError("TypeError", "Iterator result interface is not an object");
         const result_root = try self.pushTempRoot(r);
@@ -40411,6 +40422,30 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         if (o.collectionIteratorState() != null) return collectionCursorIterNext(self, o);
         o.unlockProperties();
     }
+    const step = try cursorIterStep(self, o);
+    return self.iterResultObj(step orelse Value.undef(), step == null);
+}
+
+/// The iterator object when an iterator record pairs a non-collection cursor
+/// iterator with the built-in cursor `next` itself. Calling that `next` has no
+/// effect beyond `cursorIterStep` plus allocating the IteratorResult, and an
+/// internal consumer reads that result's own `done`/`value` data properties
+/// without exposing it, so it can take the step directly.
+fn builtinCursorIterator(it: Value, next_method: Value) ?*value.Object {
+    if (!next_method.isObject() or !it.isObject()) return null;
+    const native = next_method.asObj().native orelse return null;
+    if (native != &cursorIterNext) return null;
+    const o = it.asObj();
+    if (o.hasCollectionIterator() or o.proxyHandler() != null or o.proxy_revoked) return null;
+    return o;
+}
+
+/// One step of the shared cursor `next` for a non-collection iterator: the
+/// produced value, or null once done. `cursorIterNext` wraps it in a fresh
+/// IteratorResult; internal consumers that hold the built-in `next` as their
+/// iterator record's method use it directly (`builtinIteratorStep`), because
+/// that result object would never reach user code.
+fn cursorIterStep(self: *Interpreter, o: *value.Object) EvalError!?Value {
     // Brand check: a genuine Array/Map/Set/String iterator carries its `__src`
     // cursor slot as an OWN property. A bare object, a boxed primitive, the
     // iterator *prototype* itself, or `Object.create(anIterator)` (which only
@@ -40418,7 +40453,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const src = o.getOwn("__src") orelse
         return self.throwError("TypeError", "next called on an incompatible receiver");
     if (o.getOwn("__done")) |d| {
-        if (d.toBoolean()) return self.iterResultObj(Value.undef(), true);
+        if (d.toBoolean()) return null;
     }
     const i = toLen((o.getOwn("__i") orelse Value.num(0)).asNum());
     const kind = if (o.getOwn("__kind")) |k| if (k.isNumber()) toLen(k.asNum()) else 0 else 0;
@@ -40535,10 +40570,10 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     }
     if (done) {
         try self.setProp(o, "__done", Value.boolVal(true));
-    } else {
-        try self.setProp(o, "__i", Value.num(@floatFromInt(i + advance)));
+        return null;
     }
-    return self.iterResultObj(val, done);
+    try self.setProp(o, "__i", Value.num(@floatFromInt(i + advance)));
+    return val;
 }
 
 /// Install the `length` and `name` own properties on a function object, per the
