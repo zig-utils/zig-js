@@ -5390,10 +5390,17 @@ pub const Interpreter = struct {
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{};
         try o.setBoxedPrimitive(self.arena, v);
-        if (self.env.get(ctor_name)) |ctor| {
-            if (ctor.isObject()) o.setProtoAtomic(try self.protoObject(ctor.asObj()));
-        }
+        if (try self.primitiveWrapperProto(ctor_name)) |proto| o.setProtoAtomic(proto);
         return o;
+    }
+
+    /// The [[Prototype]] `toObject` gives the wrapper of a primitive whose
+    /// constructor is named `ctor_name`; null when that constructor is not
+    /// reachable as an object.
+    fn primitiveWrapperProto(self: *Interpreter, ctor_name: []const u8) EvalError!?*value.Object {
+        const ctor = self.env.get(ctor_name) orelse return null;
+        if (!ctor.isObject()) return null;
+        return try self.protoObject(ctor.asObj());
     }
 
     /// ToObject for property references whose base is a primitive.
@@ -17294,14 +17301,26 @@ pub const Interpreter = struct {
                 if (try self.stringIndexValueOf(recv, i)) |v| return v;
             }
         }
-        const receiver_root = try self.pushTempRoot(recv);
-        defer self.restoreTempRoots(receiver_root);
-        const boxed = Value.obj(try self.boxPrimitiveBase(self.tempRoot(receiver_root, recv)));
-        const target_root = try self.pushTempRoot(boxed);
         // GetValue on a primitive reference performs ToObject for the lookup,
         // while retaining the primitive Receiver for getters and Proxy traps.
+        // That fresh wrapper's only own properties are a String's `length` and
+        // indices, answered above, so the lookup starts at the [[Prototype]]
+        // `toObject` would give it and the wrapper itself is never allocated.
+        const ctor_name: []const u8 = switch (recv.kind()) {
+            .string => "String",
+            .number => "Number",
+            .boolean => "Boolean",
+            .object => if (recv.asObj().is_symbol) "Symbol" else "BigInt",
+            .undefined, .null => unreachable,
+        };
+        const receiver_root = try self.pushTempRoot(recv);
+        defer self.restoreTempRoots(receiver_root);
+        const proto = try self.primitiveWrapperProto(ctor_name) orelse {
+            if (found) |slot| slot.* = false;
+            return Value.undef();
+        };
         return self.getPropertyWithReceiverFound(
-            self.tempRoot(target_root, boxed),
+            Value.obj(proto),
             key,
             self.tempRoot(receiver_root, recv),
             found,
