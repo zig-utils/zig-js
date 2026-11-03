@@ -826,6 +826,35 @@ pub const EnvironmentDeclarations = struct {
 pub const CallSiteSpan = diagnostic_site.CallSiteSpan;
 pub const EvaluationSiteSpan = diagnostic_site.EvaluationSiteSpan;
 
+/// See `Chunk.vm_parameter_layout_checked`.
+pub const ParameterLayoutKey = struct {
+    params: [*]const ast.Param,
+    params_len: usize,
+    local_count: u32,
+    param_count: u32,
+    rest_parameter_index: u32,
+    has_non_simple_parameters: bool,
+    parameter_slots: []const u32,
+    destructuring_parameter_indices: []const u32,
+    default_parameter_indices: []const u32,
+    mapped_parameter_indices_len: usize,
+
+    pub fn eql(a: ParameterLayoutKey, b: ParameterLayoutKey) bool {
+        return a.params == b.params and a.params_len == b.params_len and
+            a.local_count == b.local_count and a.param_count == b.param_count and
+            a.rest_parameter_index == b.rest_parameter_index and
+            a.has_non_simple_parameters == b.has_non_simple_parameters and
+            sameSlice(a.parameter_slots, b.parameter_slots) and
+            sameSlice(a.destructuring_parameter_indices, b.destructuring_parameter_indices) and
+            sameSlice(a.default_parameter_indices, b.default_parameter_indices) and
+            a.mapped_parameter_indices_len == b.mapped_parameter_indices_len;
+    }
+
+    fn sameSlice(a: []const u32, b: []const u32) bool {
+        return a.ptr == b.ptr and a.len == b.len;
+    }
+};
+
 pub const Chunk = struct {
     const DebugSite = struct { instruction: usize, node: *const ast.Node };
 
@@ -863,6 +892,10 @@ pub const Chunk = struct {
     /// exotic for a non-simple formal list. Frozen here so calls never rescan
     /// parameter AST merely to select the arguments-object representation.
     has_non_simple_parameters: bool = false,
+    /// Every input `vm.buildActivation` last checked the parameter layout
+    /// against. A call whose inputs all still match skips re-walking the
+    /// formal AST (cold memory); any changed slice or count revalidates.
+    vm_parameter_layout_checked: ?ParameterLayoutKey = null,
     /// Frame slot initialized with this ordinary function's arguments exotic
     /// object. Strict functions use it directly; sloppy simple-parameter
     /// functions additionally route the exact mapped parameter slots below.

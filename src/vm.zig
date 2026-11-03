@@ -8565,7 +8565,9 @@ fn runChunk(
             @branchHint(.unlikely);
             vm_dispatches += 1;
         }
-        const inst = code[ip];
+        // Fields are read where a body needs them; bytecode is immutable while
+        // it runs, so the loop keeps no decoded copy live across each body.
+        const inst: *const bc.Inst = &code[ip];
         ip += 1;
         switch (inst.op) {
             .nop => {},
@@ -8602,16 +8604,16 @@ fn runChunk(
                 if (!parallel_sync) recordQuickGlobalBinding(chunk, ip - 1, vm, name);
                 try stack.append(stack_alloc, v);
             },
-            .load_local_mapped => try stack.append(stack_alloc, try executeLocalBinding(vm, frame.?, chunk, inst, Value.undef(), parallel_sync)),
-            .load_var_or_undef => try stack.append(stack_alloc, (try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef())).value),
+            .load_local_mapped => try stack.append(stack_alloc, try executeLocalBinding(vm, frame.?, chunk, inst.*, Value.undef(), parallel_sync)),
+            .load_var_or_undef => try stack.append(stack_alloc, (try executeEnvironmentBinding(vm, exec, chunk, inst.*, Value.undef())).value),
             .store_var => {
-                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.items[stack.items.len - 1]);
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst.*, stack.items[stack.items.len - 1]);
             },
             .init_declarations, .copy_annex_b => {
-                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef());
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst.*, Value.undef());
             },
             .def_var, .def_lex => {
-                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.pop().?);
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst.*, stack.pop().?);
             },
             .bind_pattern => {
                 // Reuse the tree-walker's destructuring over the live env (a=pattern
@@ -8621,19 +8623,19 @@ fn runChunk(
                 try vm.bindPatternVM(pat, v, inst.b);
             },
             .resolve_binding_ref, .clear_binding_ref => {
-                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef());
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst.*, Value.undef());
             },
             .load_binding_ref => {
-                const loaded = try executeEnvironmentBinding(vm, exec, chunk, inst, Value.undef());
+                const loaded = try executeEnvironmentBinding(vm, exec, chunk, inst.*, Value.undef());
                 if (inst.b & bc.binding_ref_load_with_base != 0) try stack.append(stack_alloc, loaded.with_base);
                 try stack.append(stack_alloc, loaded.value);
             },
             .store_binding_ref => {
-                _ = try executeEnvironmentBinding(vm, exec, chunk, inst, stack.pop().?);
+                _ = try executeEnvironmentBinding(vm, exec, chunk, inst.*, stack.pop().?);
             },
 
             .init_local_lexical => {
-                _ = try executeLocalBinding(vm, frame.?, chunk, inst, Value.undef(), parallel_sync);
+                _ = try executeLocalBinding(vm, frame.?, chunk, inst.*, Value.undef(), parallel_sync);
             },
             .load_local => {
                 const cf = frame.?;
@@ -8646,7 +8648,7 @@ fn runChunk(
                     continue;
                 }
                 if (parallel_sync) {
-                    try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst, Value.undef(), parallel_sync));
+                    try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst.*, Value.undef(), parallel_sync));
                     continue;
                 }
                 const local = cf.slots[inst.a];
@@ -8673,7 +8675,7 @@ fn runChunk(
             .load_local_lexical => {
                 const cf = frame.?;
                 if (parallel_sync) {
-                    try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst, Value.undef(), parallel_sync));
+                    try stack.append(stack_alloc, try executeLocalBinding(vm, cf, chunk, inst.*, Value.undef(), parallel_sync));
                     continue;
                 }
                 const local = cf.slots[inst.a];
@@ -8683,19 +8685,19 @@ fn runChunk(
             .store_local => {
                 const cf = frame.?;
                 if (parallel_sync or cf.mapped_arguments != null) {
-                    _ = try executeLocalBinding(vm, cf, chunk, inst, stack.items[stack.items.len - 1], parallel_sync);
+                    _ = try executeLocalBinding(vm, cf, chunk, inst.*, stack.items[stack.items.len - 1], parallel_sync);
                     continue;
                 }
                 cf.slots[inst.a] = stack.items[stack.items.len - 1];
             },
             .store_local_mapped, .store_local_lexical => {
-                _ = try executeLocalBinding(vm, frame.?, chunk, inst, stack.items[stack.items.len - 1], parallel_sync);
+                _ = try executeLocalBinding(vm, frame.?, chunk, inst.*, stack.items[stack.items.len - 1], parallel_sync);
             },
             .load_upval, .load_upval_mapped, .load_upval_lexical => {
-                try stack.append(stack_alloc, try loadCapturedBinding(vm, frame, inst, parallel_sync));
+                try stack.append(stack_alloc, try loadCapturedBinding(vm, frame, inst.*, parallel_sync));
             },
             .store_upval, .store_upval_mapped, .store_upval_lexical => {
-                _ = try storeCapturedBinding(vm, frame, inst, stack.items[stack.items.len - 1], parallel_sync);
+                _ = try storeCapturedBinding(vm, frame, inst.*, stack.items[stack.items.len - 1], parallel_sync);
             },
 
             .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {
@@ -13196,8 +13198,12 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
         act.frame.mapped_arguments = null;
         act.frame.mapped_parameter_indices = &.{};
         act.frame.closure_environment = null;
-        act.frame.direct_eval_environment.store(null, .release);
-        act.frame.direct_eval_parameter_environment.store(null, .release);
+        // Release stores order every earlier store; only pay for one when a
+        // direct eval actually published an environment on this frame.
+        if (act.frame.direct_eval_environment.load(.monotonic) != null)
+            act.frame.direct_eval_environment.store(null, .release);
+        if (act.frame.direct_eval_parameter_environment.load(.monotonic) != null)
+            act.frame.direct_eval_parameter_environment.store(null, .release);
     }
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
     vm.vm_activation_free = act;
@@ -13278,7 +13284,27 @@ fn discardActivation(vm: *Interpreter, act: *Activation) void {
 /// root registration; every preparation failure restores the caller first.
 /// Check a function's parameter metadata against its chunk before any
 /// activation state exists, so a malformed layout needs no unwinding.
-fn validateParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *const Chunk) EvalError!void {
+fn validateParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *Chunk) EvalError!void {
+    const key: bc.ParameterLayoutKey = .{
+        .params = func.params.ptr,
+        .params_len = func.params.len,
+        .local_count = func.local_count,
+        .param_count = fchunk.param_count,
+        .rest_parameter_index = fchunk.rest_parameter_index orelse std.math.maxInt(u32),
+        .has_non_simple_parameters = fchunk.has_non_simple_parameters,
+        .parameter_slots = fchunk.parameter_slots,
+        .destructuring_parameter_indices = fchunk.destructuring_parameter_indices,
+        .default_parameter_indices = fchunk.default_parameter_indices,
+        .mapped_parameter_indices_len = fchunk.mapped_parameter_indices.len,
+    };
+    // Shared parallel realms may race on the cached key; they keep checking.
+    const cacheable = !bc.ic_seqlock_enabled.load(.monotonic);
+    if (cacheable) if (fchunk.vm_parameter_layout_checked) |checked| if (checked.eql(key)) return;
+    try checkParameterLayout(vm, func, fchunk);
+    if (cacheable) fchunk.vm_parameter_layout_checked = key;
+}
+
+fn checkParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *const Chunk) EvalError!void {
     const slot_count = func.local_count;
     const pattern_indices = fchunk.destructuring_parameter_indices;
     const default_indices = fchunk.default_parameter_indices;

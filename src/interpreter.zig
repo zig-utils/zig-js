@@ -10428,6 +10428,18 @@ pub const Interpreter = struct {
         const callee = callee_value;
         if (!callee.isObject()) return self.throwNotAFunction(callee, site);
         const obj = callee.asObj();
+        // The common native→JS call (an Array callback, a getter, a host
+        // callback's JS target): an ordinary bytecode function. Its object holds
+        // only the js_function rare state, so it is no proxy, bound function or
+        // error constructor; enter the VM directly. `callFunctionNT`'s callee
+        // root is needed only under parallel_js, and the VM entry already saves
+        // and restores the bytecode execution mode.
+        if (!self.lock_microtasks and !obj.proxy_revoked and obj.native == null) if (obj.coldState()) |cold| if (cold.hasRare(.js_function)) {
+            const func: *Function = @ptrCast(@alignCast(cold.rare.js_function.ptr));
+            if (!func.is_generator and !func.is_async and !func.is_class_constructor and obj.hostClassHooks() == null) {
+                if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, Value.undef());
+            }
+        };
         if (obj.proxyHandler() != null or obj.proxy_revoked)
             return self.callProxyWithThis(callee, args, this_val, site);
         if (obj.boundFunction()) |erased| {
@@ -12575,8 +12587,9 @@ pub const Interpreter = struct {
     /// Reserve precise-root storage before preparing an activation. Allocation
     /// recovery may collect, so callers must do this before publishing callee
     /// state that is not already reachable through an existing root.
-    pub fn reserveExecRoot(self: *Interpreter) EvalError!void {
+    pub inline fn reserveExecRoot(self: *Interpreter) EvalError!void {
         if (self.gc == null) return;
+        if (self.gc_execs.items.len < self.gc_execs.capacity) return;
         try self.gc_execs.ensureUnusedCapacity(self.gcRootAllocator(), 1);
     }
 
@@ -12600,7 +12613,13 @@ pub const Interpreter = struct {
         // The frame stops being a root here. A closure that captured it may
         // already be old, and its own stores were never barriered.
         if (exec.frame) |frame| gc_mod.barrierReleasedFrame(frame);
-        var i = self.gc_execs.items.len;
+        // Activations unwind in LIFO order, so the newest root is the usual hit.
+        const len = self.gc_execs.items.len;
+        if (len != 0 and self.gc_execs.items[len - 1] == exec) {
+            self.gc_execs.items.len = len - 1;
+            return;
+        }
+        var i = len;
         while (i > 0) {
             i -= 1;
             if (self.gc_execs.items[i] == exec) {
