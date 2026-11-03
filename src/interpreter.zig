@@ -10055,7 +10055,7 @@ pub const Interpreter = struct {
         defer self.restoreTempRoots(next_root);
         while (true) {
             if (builtinCursorIterator(self.tempRoot(iter_root, iter_obj), self.tempRoot(next_root, next_method))) |cursor| {
-                const item = try cursorIterStep(self, cursor) orelse break;
+                const item = try builtinCursorIterStep(self, cursor) orelse break;
                 const item_root = try self.pushTempRoot(item);
                 defer self.restoreTempRoots(item_root);
                 try sink.add(self, self.tempRoot(item_root, item));
@@ -15679,16 +15679,20 @@ pub const Interpreter = struct {
             // below is the first step wrapped. A `next()` that returns a
             // non-object is part of the same protocol and likewise does not
             // close (`Object.fromEntries` documents the same rule).
-            const r = try self.callValueWithThis(
-                self.tempRoot(next_root, next_method),
-                &.{},
-                self.tempRoot(iter_root, iter),
-            );
-            if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
-            const result_root = try self.pushTempRoot(r);
-            defer self.restoreTempRoots(result_root);
-            if ((try self.getProperty(r, "done")).toBoolean()) break;
-            const item = try self.getProperty(self.tempRoot(result_root, r), "value");
+            const item = if (builtinCursorIterator(self.tempRoot(iter_root, iter), self.tempRoot(next_root, next_method))) |cursor|
+                try builtinCursorIterStep(self, cursor) orelse break
+            else step: {
+                const r = try self.callValueWithThis(
+                    self.tempRoot(next_root, next_method),
+                    &.{},
+                    self.tempRoot(iter_root, iter),
+                );
+                if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
+                const result_root = try self.pushTempRoot(r);
+                defer self.restoreTempRoots(result_root);
+                if ((try self.getProperty(r, "done")).toBoolean()) break;
+                break :step try self.getProperty(self.tempRoot(result_root, r), "value");
+            };
             // From here the abrupt completion is ours: a non-object entry, a
             // throwing "0"/"1" getter, a throwing key coercion, or a throwing
             // adder all close the iterator while keeping the original throw.
@@ -15780,6 +15784,16 @@ pub const Interpreter = struct {
         }
         if (eq(name, "set")) {
             const val = arg(args, 1);
+            // Updating a present key needs no entry pair; look before
+            // allocating one, then look again after the allocation.
+            {
+                const elements_locked = o.lockElements();
+                defer o.unlockElements(elements_locked);
+                if (mapFindPos(o, key, self.arena)) |pos| {
+                    _ = liveMapEntry(o.elementsItems()[pos]).?.setElementAt(1, val);
+                    return self_v;
+                }
+            }
             const pair = (try self.newArray()).asObj();
             try pair.appendElement(self.arena, key);
             try pair.appendElement(self.arena, val);
@@ -18528,7 +18542,7 @@ pub const Interpreter = struct {
         return self.callResolvedMethod(recv, name, method, args, .none);
     }
 
-    fn callResolvedMethod(self: *Interpreter, recv: Value, name: []const u8, method: Value, args: []const Value, site: CallSite) EvalError!Value {
+    pub fn callResolvedMethod(self: *Interpreter, recv: Value, name: []const u8, method: Value, args: []const Value, site: CallSite) EvalError!Value {
         if (method.isObject() and method.asObj().isCallableObject())
             return self.callValueWithThis(method, args, recv);
         if (try self.builtinMethod(recv, name, args)) |result| return result;
@@ -19294,7 +19308,7 @@ pub const Interpreter = struct {
     /// without re-reading `it.next` or observing a later replacement.
     fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
         if (builtinCursorIterator(it, next_method)) |o| {
-            const step = try cursorIterStep(self, o);
+            const step = try builtinCursorIterStep(self, o);
             return .{ .done = step == null, .value = step orelse Value.undef() };
         }
         const r = try self.callValueWithThis(next_method, &.{}, it);
@@ -40384,7 +40398,10 @@ fn arrayIteratorValue(self: *Interpreter, kind: usize, index: usize, elem: Value
 /// iterator object's `property_lock` (per-activation writers, peer iterators
 /// unaffected); GC trace reads `source` through the backing lock and relocation
 /// rewrites it only at a world-stopped commit.
-fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.HostError!Value {
+///
+/// Returns the produced value, or null once done; `cursorIterNext` wraps it in
+/// the IteratorResult.
+fn collectionCursorIterStep(self: *Interpreter, iterator: *value.Object) EvalError!?Value {
     var done = false;
     var kind: u8 = 0;
     var entry_key: Value = Value.undef();
@@ -40397,7 +40414,7 @@ fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.H
     };
     if (cursor.done) {
         iterator.unlockProperties();
-        return self.iterResultObj(Value.undef(), true);
+        return null;
     }
     kind = cursor.kind;
     const src = cursor.source;
@@ -40443,8 +40460,8 @@ fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.H
     collection.unlockElements(source_elements_locked);
     iterator.unlockProperties();
 
-    if (done) return self.iterResultObj(Value.undef(), true);
-    const result = if (is_map)
+    if (done) return null;
+    return if (is_map)
         switch (kind) {
             1 => entry_key,
             2 => pair: {
@@ -40461,14 +40478,20 @@ fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.H
         try entry.appendElement(self.arena, entry_value);
         break :pair Value.obj(entry);
     } else entry_value;
-    return self.iterResultObj(result, false);
 }
 
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "next called on non-object");
-    const o = this.asObj();
+    const step = try builtinCursorIterStep(self, this.asObj());
+    return self.iterResultObj(step orelse Value.undef(), step == null);
+}
+
+/// One step of the shared cursor `next` on iterator `o`: the produced value,
+/// or null once done. Exactly what `cursorIterNext` does short of allocating
+/// the IteratorResult that carries it.
+pub fn builtinCursorIterStep(self: *Interpreter, o: *value.Object) EvalError!?Value {
     // Inspecting and advancing a shared collection cursor is one atomic logical
     // transaction (#643): the rare-state probe runs inside the same property
     // lock critical section that guards every cursor-field store, so no
@@ -40477,32 +40500,28 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     // case) off the lock entirely; the tag is immutable once published.
     if (o.hasCollectionIterator()) {
         o.lockProperties();
-        if (o.collectionIteratorState() != null) return collectionCursorIterNext(self, o);
+        if (o.collectionIteratorState() != null) return collectionCursorIterStep(self, o);
         o.unlockProperties();
     }
-    const step = try cursorIterStep(self, o);
-    return self.iterResultObj(step orelse Value.undef(), step == null);
+    return cursorIterStep(self, o);
 }
 
-/// The iterator object when an iterator record pairs a non-collection cursor
-/// iterator with the built-in cursor `next` itself. Calling that `next` has no
-/// effect beyond `cursorIterStep` plus allocating the IteratorResult, and an
-/// internal consumer reads that result's own `done`/`value` data properties
-/// without exposing it, so it can take the step directly.
-fn builtinCursorIterator(it: Value, next_method: Value) ?*value.Object {
+/// The iterator object when an iterator record pairs a cursor iterator with
+/// the built-in cursor `next` itself. Calling that `next` has no effect beyond
+/// `builtinCursorIterStep` plus allocating the IteratorResult, and an internal
+/// consumer reads that result's own `done`/`value` data properties without
+/// exposing it, so it can take the step directly.
+pub fn builtinCursorIterator(it: Value, next_method: Value) ?*value.Object {
     if (!next_method.isObject() or !it.isObject()) return null;
     const native = next_method.asObj().native orelse return null;
     if (native != &cursorIterNext) return null;
     const o = it.asObj();
-    if (o.hasCollectionIterator() or o.proxyHandler() != null or o.proxy_revoked) return null;
+    if (o.proxyHandler() != null or o.proxy_revoked) return null;
     return o;
 }
 
 /// One step of the shared cursor `next` for a non-collection iterator: the
-/// produced value, or null once done. `cursorIterNext` wraps it in a fresh
-/// IteratorResult; internal consumers that hold the built-in `next` as their
-/// iterator record's method use it directly (`builtinIteratorStep`), because
-/// that result object would never reach user code.
+/// produced value, or null once done (see `builtinCursorIterStep`).
 fn cursorIterStep(self: *Interpreter, o: *value.Object) EvalError!?Value {
     // Brand check: a genuine Array/Map/Set/String iterator carries its `__src`
     // cursor slot as an OWN property. A bare object, a boxed primitive, the

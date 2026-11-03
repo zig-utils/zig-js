@@ -1186,16 +1186,26 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         const iterator_root = try self.pushTempRoot(it);
         var k: usize = 0;
         while (true) {
-            const res = try self.callMethod(self.tempRoot(iterator_root, it), "next", &.{});
-            if (!isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
-            const step_root = try self.pushTempRoot(res);
-            defer self.restoreTempRoots(step_root);
-            if ((try self.getProperty(res, "done")).toBoolean()) break;
-            const v = try self.getProperty(self.tempRoot(step_root, res), "value");
-            const mapped: Value = if (mapping) self.callValueWithThis(self.tempRoot(map_root, map_fn), &.{ v, Value.num(@floatFromInt(k)) }, self.tempRoot(this_root, this_arg)) catch |e| {
+            // `next` is read on every step, as it always has been here. When
+            // that read finds the built-in cursor `next` on a built-in cursor
+            // iterator, step it without the IteratorResult nobody else sees.
+            const next_method = try self.getProperty(self.tempRoot(iterator_root, it), "next");
+            const v = if (interpreter.builtinCursorIterator(self.tempRoot(iterator_root, it), next_method)) |cursor|
+                try interpreter.builtinCursorIterStep(self, cursor) orelse break
+            else step: {
+                const res = try self.callResolvedMethod(self.tempRoot(iterator_root, it), "next", next_method, &.{}, .none);
+                if (!isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
+                const step_root = try self.pushTempRoot(res);
+                defer self.restoreTempRoots(step_root);
+                if ((try self.getProperty(res, "done")).toBoolean()) break;
+                break :step try self.getProperty(self.tempRoot(step_root, res), "value");
+            };
+            const v_root = try self.pushTempRoot(v);
+            defer self.restoreTempRoots(v_root);
+            const mapped: Value = if (mapping) self.callValueWithThis(self.tempRoot(map_root, map_fn), &.{ self.tempRoot(v_root, v), Value.num(@floatFromInt(k)) }, self.tempRoot(this_root, this_arg)) catch |e| {
                 self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, it));
                 return e;
-            } else v;
+            } else self.tempRoot(v_root, v);
             createDataIndexOrThrow(self, self.tempRoot(result_root, result), k, mapped) catch |e| {
                 self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, it));
                 return e;
