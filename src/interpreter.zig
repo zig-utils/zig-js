@@ -40863,9 +40863,21 @@ pub fn installFunctionPropsNamed(
         if (p.is_rest or p.default != null) break;
         len += 1;
     }
-    const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-    try obj.setOwnWithAttr(arena, root_shape, "length", Value.num(@floatFromInt(len)), ro_attr);
-    try obj.setOwnWithAttr(arena, root_shape, "name", name, ro_attr);
+    try installLengthAndName(arena, root_shape, obj, Value.num(@floatFromInt(len)), name);
+}
+
+/// Publish a function object's `length` and `name`. A fresh function shares
+/// the process-wide attribute preset for them instead of allocating its own
+/// attribute table, keys and hash seed.
+fn installLengthAndName(arena: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, length: Value, name: Value) EvalError!void {
+    if (try obj.adoptSharedFunctionAttrs(arena)) {
+        errdefer obj.dropSharedFunctionAttrs();
+        try obj.setOwn(arena, root_shape, "length", length);
+        try obj.setOwn(arena, root_shape, "name", name);
+        return;
+    }
+    try obj.setOwnWithAttr(arena, root_shape, "length", length, value.function_prop_attr);
+    try obj.setOwnWithAttr(arena, root_shape, "name", name, value.function_prop_attr);
 }
 
 /// Install the `name` and `length` own properties on a *native* (built-in)
@@ -40875,9 +40887,7 @@ pub fn installFunctionPropsNamed(
 /// `installFunctionProps` for user functions — test262's propertyHelper checks
 /// `name.js` / `length.js` for essentially every built-in method.
 pub fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, name: []const u8, len: usize) EvalError!void {
-    const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-    try obj.setOwnWithAttr(a, rs, "length", Value.num(@floatFromInt(len)), ro_attr);
-    try obj.setOwnWithAttr(a, rs, "name", try Value.strAlloc(a, name), ro_attr);
+    try installLengthAndName(a, rs, obj, Value.num(@floatFromInt(len)), try Value.strAlloc(a, name));
 }
 
 fn defineGlobalFn(env: *Environment, rs: *Shape, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {

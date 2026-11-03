@@ -1624,13 +1624,14 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.attrs) {
-        if (o.attrsMap()) |attrs| {
+        // A shared preset (`adoptSharedFunctionAttrs`) is process-owned.
+        if (o.attrsMap()) |attrs| if (!attrs.isShared()) {
             var it = attrs.keyIterator();
             while (it.next()) |key| a.free(key.*);
             attrs.deinit(a);
             a.destroy(attrs);
             o.coldState().?.attrs = null;
-        }
+        };
         released += 1;
     }
     if (flags.holes) {

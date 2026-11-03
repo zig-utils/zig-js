@@ -2110,6 +2110,54 @@ pub const ObjectNameHashContext = struct {
     }
 };
 
+/// Shared attribute presets hold only fixed engine-chosen keys and are never
+/// written after construction, so no attacker-controlled insertion can reach
+/// them and a fixed seed is as safe as a per-Object one.
+const shared_prop_attr_context: ObjectNameHashContext = .{ .seed = 0x6a09_e667_f3bc_c908 };
+
+/// The `{ writable: false, enumerable: false, configurable: true }` attributes
+/// every function object gives its own `length` and `name`.
+pub const function_prop_attr: PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+
+/// Which of a function's `length` / `name` attribute entries a shared preset
+/// still carries. Deleting one of the properties moves the Object to the
+/// preset without it, so no deletion ever needs to allocate.
+const SharedPropAttrs = enum(u2) { none = 0, length = 1, name = 2, length_name = 3 };
+
+var shared_prop_attr_maps: [4]ObjectNameMapUnmanaged(PropAttr) = .{ .{}, .{}, .{}, .{} };
+var shared_prop_attr_storage: [2048]u8 align(16) = undefined;
+var shared_prop_attr_state: std.atomic.Value(u8) = .init(0);
+
+fn sharedPropAttrs(which: SharedPropAttrs) *ObjectNameMapUnmanaged(PropAttr) {
+    std.debug.assert(which != .none);
+    if (shared_prop_attr_state.load(.acquire) != 2) initSharedPropAttrs();
+    return &shared_prop_attr_maps[@intFromEnum(which)];
+}
+
+fn initSharedPropAttrs() void {
+    if (shared_prop_attr_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
+        var fixed = std.heap.FixedBufferAllocator.init(&shared_prop_attr_storage);
+        const allocator = fixed.allocator();
+        for (1..4) |bits| {
+            const map = &shared_prop_attr_maps[bits];
+            // The buffer is sized for all three two-entry tables.
+            if (bits & 1 != 0) map.put(allocator, "length", function_prop_attr, shared_prop_attr_context) catch unreachable;
+            if (bits & 2 != 0) map.put(allocator, "name", function_prop_attr, shared_prop_attr_context) catch unreachable;
+            map.shared = true;
+        }
+        shared_prop_attr_state.store(2, .release);
+        return;
+    }
+    while (shared_prop_attr_state.load(.acquire) != 2) std.atomic.spinLoopHint();
+}
+
+/// The preset `map` is, or `.none` for an Object's own private table.
+fn sharedPropAttrsKind(map: *const ObjectNameMapUnmanaged(PropAttr)) SharedPropAttrs {
+    if (!map.isShared()) return .none;
+    for (1..4) |bits| if (map == &shared_prop_attr_maps[bits]) return @enumFromInt(bits);
+    unreachable;
+}
+
 /// Object metadata tables borrow one context from their cold sidecar instead
 /// of storing six predictable or independently seeded map headers. Iteration
 /// and finalization do not hash, so those paths remain context-free.
@@ -2133,6 +2181,9 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
     // Accessor and attribute tables are the ones inline caches must rule a
     // name out of; every other table keeps the plain map header.
     const tracks_bloom = MapValue == Accessor or MapValue == PropAttr;
+    // Only attribute tables can be the process-wide immutable presets
+    // (`sharedPropAttrs`) that many objects point at.
+    const can_share = MapValue == PropAttr;
 
     return struct {
         index: Index = .empty,
@@ -2142,6 +2193,19 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
         /// caches use that proof to keep serving other names of an object that
         /// has accessors or attribute overrides.
         bloom: if (tracks_bloom) u64 else void = if (tracks_bloom) 0 else {},
+        /// A shared preset is immutable, is never freed, and hashes with its
+        /// own fixed context instead of the borrowing Object's seed. Writers
+        /// replace an Object's pointer to it rather than mutating it.
+        shared: if (can_share) bool else void = if (can_share) false else {},
+
+        pub inline fn isShared(self: *const @This()) bool {
+            return can_share and self.shared;
+        }
+
+        inline fn lookupContext(self: *const @This(), context: ?ObjectNameHashContext) ?ObjectNameHashContext {
+            if (can_share and self.shared) return shared_prop_attr_context;
+            return context;
+        }
 
         /// False proves `key` was never inserted; true means probe exactly.
         pub inline fn mayContain(self: *const @This(), bits: u64) bool {
@@ -2150,15 +2214,16 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
         }
 
         pub fn get(self: *const @This(), context: ?ObjectNameHashContext, key: []const u8) ?MapValue {
-            return self.index.getContext(key, context orelse return null);
+            return self.index.getContext(key, self.lookupContext(context) orelse return null);
         }
 
         pub fn getPtr(self: *@This(), context: ?ObjectNameHashContext, key: []const u8) ?*MapValue {
+            std.debug.assert(!self.isShared());
             return self.index.getPtrContext(key, context orelse return null);
         }
 
         pub fn contains(self: *const @This(), context: ?ObjectNameHashContext, key: []const u8) bool {
-            return self.index.containsContext(key, context orelse return false);
+            return self.index.containsContext(key, self.lookupContext(context) orelse return false);
         }
 
         pub fn getOrPut(
@@ -2167,6 +2232,7 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
             key: []const u8,
             context: ObjectNameHashContext,
         ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            std.debug.assert(!self.isShared());
             const result = try self.index.getOrPutContext(allocator, key, context);
             if (tracks_bloom) self.bloom |= nameBloomBits(key);
             return result;
@@ -2184,6 +2250,7 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
         }
 
         pub fn fetchRemove(self: *@This(), context: ?ObjectNameHashContext, key: []const u8) ?Index.KV {
+            std.debug.assert(!self.isShared());
             return self.index.fetchRemoveContext(key, context orelse return null);
         }
 
@@ -6023,6 +6090,12 @@ pub const Object = struct {
     /// successful built-in installation.
     fn setAttrUnlockedTracked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!?PropAttr {
         const cold = try self.ensureCold(arena);
+        if (self.attrsMap()) |current| if (current.isShared()) {
+            // Leave the preset's existing value in place when it already
+            // matches, so redefining a function's `length` keeps sharing it.
+            if (current.get(null, name)) |existing| if (std.meta.eql(existing, a)) return existing;
+            try self.unshareAttrsUnlocked(arena, cold, current);
+        };
         const alloc = try self.attrsAllocator(arena);
         if (self.attrsMap() == null) {
             const m = try alloc.create(ObjectNameMapUnmanaged(PropAttr));
@@ -6050,9 +6123,64 @@ pub const Object = struct {
 
     fn deleteAttrUnlocked(self: *Object, name: []const u8) void {
         const m = self.attrsMap() orelse return;
+        if (m.isShared()) {
+            // Step to the preset without `name`; a shared table is never
+            // written, and this path must not allocate.
+            var bits: u2 = @intFromEnum(sharedPropAttrsKind(m));
+            if (std.mem.eql(u8, name, "length")) bits &= ~@as(u2, 1) else if (std.mem.eql(u8, name, "name")) bits &= ~@as(u2, 2) else return;
+            const next: ?*ObjectNameMapUnmanaged(PropAttr) = if (bits == 0) null else sharedPropAttrs(@enumFromInt(bits));
+            @atomicStore(?*ObjectNameMapUnmanaged(PropAttr), &self.coldState().?.attrs, next, .release);
+            return;
+        }
         if (m.fetchRemove(self.installedNameHashContext(), name)) |removed| {
             if (self.activeBackingAllocator("attrs")) |allocator| allocator.free(removed.key);
         }
+    }
+
+    /// Replace a shared attribute preset with a private copy the Object owns,
+    /// before the first write that differs from it. The copy is complete
+    /// before its pointer is published, so OOM leaves the preset in place.
+    fn unshareAttrsUnlocked(self: *Object, arena: std.mem.Allocator, cold: *ObjectColdState, shared: *ObjectNameMapUnmanaged(PropAttr)) std.mem.Allocator.Error!void {
+        const alloc = try self.attrsAllocator(arena);
+        const hash_context = try self.candidateNameHashContext();
+        const copy = try alloc.create(ObjectNameMapUnmanaged(PropAttr));
+        copy.* = .{};
+        errdefer {
+            var keys = copy.keyIterator();
+            while (keys.next()) |key| alloc.free(key.*);
+            copy.deinit(alloc);
+            alloc.destroy(copy);
+        }
+        var entries = shared.iterator();
+        while (entries.next()) |entry| {
+            const owned_name = try alloc.dupe(u8, entry.key_ptr.*);
+            copy.put(alloc, owned_name, entry.value_ptr.*, hash_context) catch |err| {
+                alloc.free(owned_name);
+                return err;
+            };
+        }
+        self.publishNameHashContext(hash_context);
+        @atomicStore(?*ObjectNameMapUnmanaged(PropAttr), &cold.attrs, copy, .release);
+    }
+
+    /// Give a fresh function object the shared `length`/`name` attribute
+    /// preset instead of building its own table. False means the Object
+    /// already has attribute storage and the caller must use `setOwnWithAttr`.
+    pub fn adoptSharedFunctionAttrs(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!bool {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const cold = try self.ensureCold(arena);
+        if (self.attrsMap() != null) return false;
+        @atomicStore(?*ObjectNameMapUnmanaged(PropAttr), &cold.attrs, sharedPropAttrs(.length_name), .release);
+        return true;
+    }
+
+    /// Undo `adoptSharedFunctionAttrs` when installing the properties failed.
+    pub fn dropSharedFunctionAttrs(self: *Object) void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const map = self.attrsMap() orelse return;
+        if (map.isShared()) @atomicStore(?*ObjectNameMapUnmanaged(PropAttr), &self.coldState().?.attrs, null, .release);
     }
 
     /// Own named data + accessor keys whose [[Enumerable]] is true, in insertion
@@ -6659,11 +6787,14 @@ pub const Object = struct {
         const previous_attr = try self.setAttrUnlockedTracked(arena, name, attr);
         errdefer {
             if (previous_attr) |previous| {
-                self.attrsMap().?.getPtr(self.installedNameHashContext(), name).?.* = previous;
+                // A shared preset was left untouched by an equal write.
+                const attrs = self.attrsMap().?;
+                if (!attrs.isShared()) attrs.getPtr(self.installedNameHashContext(), name).?.* = previous;
             } else {
                 self.deleteAttrUnlocked(name);
             }
-            if (!had_hash_context) self.storageState().?.named_hash_context = null;
+            // A copied shared preset keeps entries hashed with the new context.
+            if (!had_hash_context and self.attrsMap().?.count() == 0) self.storageState().?.named_hash_context = null;
         }
         try self.setOwnUnlocked(arena, root, name, v);
     }
@@ -6688,11 +6819,14 @@ pub const Object = struct {
         const previous_attr = try self.setAttrUnlockedTracked(arena, name, attr);
         errdefer {
             if (previous_attr) |previous| {
-                self.attrsMap().?.getPtr(self.installedNameHashContext(), name).?.* = previous;
+                // A shared preset was left untouched by an equal write.
+                const attrs = self.attrsMap().?;
+                if (!attrs.isShared()) attrs.getPtr(self.installedNameHashContext(), name).?.* = previous;
             } else {
                 self.deleteAttrUnlocked(name);
             }
-            if (!had_hash_context) self.storageState().?.named_hash_context = null;
+            // A copied shared preset keeps entries hashed with the new context.
+            if (!had_hash_context and self.attrsMap().?.count() == 0) self.storageState().?.named_hash_context = null;
         }
         try self.setOwnUnlocked(arena, root, name, v);
         return null;
@@ -8753,6 +8887,74 @@ test "ordinary named mutation validates and publishes under one property lock" {
         try object.setOrdinaryOwnData(arena, root, "missing", Value.num(4)),
     );
     try std.testing.expect(object.getOwn("missing") == null);
+}
+
+test "function objects share the length/name attribute preset until one differs" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+
+    var first = Object{ .shape = root };
+    var second = Object{ .shape = root };
+    try std.testing.expect(try first.adoptSharedFunctionAttrs(arena));
+    try std.testing.expect(try second.adoptSharedFunctionAttrs(arena));
+    try std.testing.expect(!try first.adoptSharedFunctionAttrs(arena));
+    try std.testing.expectEqual(first.attrsMap().?, second.attrsMap().?);
+    try first.setOwn(arena, root, "length", Value.num(2));
+    try first.setOwn(arena, root, "name", Value.str("f"));
+    try std.testing.expectEqual(function_prop_attr, first.getAttr("length"));
+    try std.testing.expectEqual(function_prop_attr, first.getAttr("name"));
+    try std.testing.expectEqual(PropAttr{}, first.getAttr("other"));
+    // No seed is installed: the preset hashes with its own context.
+    try std.testing.expect(first.nameHashContextUnlocked() == null);
+    try std.testing.expect(first.hasOwnAccessorOrAttrNamedUnlocked("name", nameBloomBits("name")));
+
+    // An equal redefinition keeps sharing; a different one copies.
+    try first.setAttr(arena, "length", function_prop_attr);
+    try std.testing.expect(first.attrsMap().?.isShared());
+    try first.setAttr(arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
+    try std.testing.expect(!first.attrsMap().?.isShared());
+    try std.testing.expect(first.getAttr("length").writable);
+    try std.testing.expectEqual(function_prop_attr, first.getAttr("name"));
+    try std.testing.expect(second.attrsMap().?.isShared());
+    try std.testing.expectEqual(function_prop_attr, second.getAttr("length"));
+
+    // Deleting steps through the presets without allocating, and a re-added
+    // property gets ordinary attributes.
+    try second.setOwn(arena, root, "length", Value.num(0));
+    try second.setOwn(arena, root, "name", Value.str(""));
+    try std.testing.expect(try second.deleteOrdinaryNamedOwn(arena, root, "name"));
+    try std.testing.expect(second.attrsMap().?.isShared());
+    try std.testing.expectEqual(PropAttr{}, second.getAttr("name"));
+    try std.testing.expectEqual(function_prop_attr, second.getAttr("length"));
+    try std.testing.expect(try second.deleteOrdinaryNamedOwn(arena, root, "length"));
+    try std.testing.expect(second.attrsMap() == null);
+    try second.setOwn(arena, root, "name", Value.str("again"));
+    try std.testing.expectEqual(PropAttr{}, second.getAttr("name"));
+}
+
+test "copying a shared attribute preset is OOM-safe" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var fail_index: usize = 0;
+    var succeeded = false;
+    while (fail_index < 64 and !succeeded) : (fail_index += 1) {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        var failing = std.testing.FailingAllocator.init(arena_state.allocator(), .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        var object = Object{ .shape = root };
+        _ = object.adoptSharedFunctionAttrs(allocator) catch continue;
+        object.setOwnWithAttr(allocator, root, "length", Value.num(1), .{ .writable = true, .enumerable = false, .configurable = true }) catch {
+            // Either untouched preset or a complete private copy.
+            try std.testing.expectEqual(function_prop_attr, object.getAttr("name"));
+            continue;
+        };
+        try std.testing.expect(object.getAttr("length").writable);
+        try std.testing.expectEqual(function_prop_attr, object.getAttr("name"));
+        succeeded = true;
+    }
+    try std.testing.expect(succeeded);
 }
 
 test "accessor-only deletion clears attributes before ordinary data recreation" {
