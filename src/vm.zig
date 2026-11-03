@@ -1148,6 +1148,8 @@ var quick_arguments_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_arguments_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
+var quick_named_inherited_hits: std.atomic.Value(u64) = .init(0);
+var quick_named_resolve_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
@@ -1252,6 +1254,156 @@ inline fn quickPlainObject(value_: Value) ?*value.Object {
     const object = value_.asObj();
     if (!quickPropertyAccessAllowed(object) or object.is_array or object.accessorsMap() != null or object.attrsMap() != null) return null;
     return object;
+}
+
+/// Names a cached named [[Get]] may serve from Shapes alone. The rest have
+/// exotic own or inherited meanings on some receiver kind (Array/arguments and
+/// String-wrapper `length` and indices, sloppy-function `caller`/`arguments`,
+/// lazily materialized function `prototype`, TypedArray numeric keys).
+fn namedGetCacheable(name: []const u8) bool {
+    if (name.len == 0 or value.isPrivateKey(name)) return false;
+    if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "caller") or
+        std.mem.eql(u8, name, "arguments") or std.mem.eql(u8, name, "prototype"))
+        return false;
+    return interp.canonicalNumericIndexString(name) == null;
+}
+
+inline fn siteNameBloom(ic: *bc.InlineCache, name: []const u8) u64 {
+    if (ic.name_bloom != 0) return ic.name_bloom;
+    const bits = value.nameBloomBits(name);
+    ic.name_bloom = bits;
+    return bits;
+}
+
+/// `Interpreter.effectiveProto` for cached paths: the stored link, else the
+/// realm's %Function.prototype% for a callable without an explicit one.
+inline fn quickEffectiveProto(vm: *Interpreter, object: *value.Object) ?*value.Object {
+    if (object.protoAtomic()) |prototype| return prototype;
+    if (!object.hasImplicitFunctionProto()) return null;
+    return vm.functionProto();
+}
+
+/// Revalidate one prototype-chain entry from the receiver's first prototype.
+/// Every object on the path is checked again: its Shape (own data presence),
+/// its live [[Prototype]] link, and `namedGetPathPlain` (no exotic lookup, no
+/// own accessor `name`), so prototype mutation needs no invalidation; a
+/// changed link or Shape is simply a miss.
+inline fn quickCachedPrototypeChain(
+    vm: *Interpreter,
+    chain: *const bc.InlineCache.InheritedChain,
+    first: ?*value.Object,
+    name: []const u8,
+    bits: u64,
+) ?Value {
+    const depth = chain.depth;
+    var next = first;
+    var holder: *value.Object = undefined;
+    var level: u8 = 0;
+    while (level < depth) {
+        const current = next orelse return null;
+        if (current.shape != chain.shapes[level]) return null;
+        if (!current.namedGetPathPlain(name, bits)) return null;
+        holder = current;
+        level += 1;
+        if (level < depth) next = quickEffectiveProto(vm, current);
+    }
+    if (chain.kind == .data) return holder.slotsItems()[chain.slot];
+    if (depth == 0) return if (first == null) Value.undef() else null;
+    return if (quickEffectiveProto(vm, holder) == null) Value.undef() else null;
+}
+
+/// Isolated-realm prototype-chain hit for an object receiver whose Shape
+/// lacks `name`.
+inline fn quickInheritedNamedGet(vm: *Interpreter, ic: *bc.InlineCache, object: *value.Object, name: []const u8) ?Value {
+    const bits = ic.name_bloom;
+    var plain: ?bool = null;
+    for (&ic.inherited_chains) |*chain| {
+        if (chain.kind == .none or chain.string_receiver or object.shape != chain.receiver_shape) continue;
+        if (plain == null) plain = object.namedGetPathPlain(name, bits);
+        if (!plain.?) return null;
+        if (quickCachedPrototypeChain(vm, chain, quickEffectiveProto(vm, object), name, bits)) |hit| return hit;
+    }
+    return null;
+}
+
+/// Resolve `name` through up to `max_inherited_depth` plain prototypes
+/// starting at `first`, recording the entry. Null leaves the lookup
+/// (accessors, exotic objects, deep chains) to the full [[Get]].
+fn quickResolvePrototypeChain(
+    vm: *Interpreter,
+    ic: *bc.InlineCache,
+    receiver_shape: ?*Shape,
+    string_receiver: bool,
+    first: ?*value.Object,
+    name: []const u8,
+    bits: u64,
+) ?Value {
+    var chain: bc.InlineCache.InheritedChain = .{ .receiver_shape = receiver_shape, .string_receiver = string_receiver };
+    var next = first;
+    while (true) {
+        const current = next orelse {
+            chain.kind = .absent;
+            ic.recordInheritedChain(chain);
+            return Value.undef();
+        };
+        if (chain.depth == bc.InlineCache.max_inherited_depth) return null;
+        if (!current.namedGetPathPlain(name, bits)) return null;
+        chain.shapes[chain.depth] = current.shape;
+        chain.depth += 1;
+        if (current.shape) |shape| if (shape.lookup(name)) |slot| {
+            chain.kind = .data;
+            chain.slot = slot;
+            ic.recordInheritedChain(chain);
+            return current.slotsItems()[slot];
+        };
+        next = quickEffectiveProto(vm, current);
+    }
+}
+
+/// Shared name screening for a site's first prototype-chain resolve.
+inline fn siteNameCacheable(ic: *bc.InlineCache, name: []const u8) bool {
+    if (ic.name_uncacheable) return false;
+    if (namedGetCacheable(name)) return true;
+    ic.name_uncacheable = true;
+    return false;
+}
+
+/// Isolated-realm named [[Get]] for a non-Array object whose own-data cache
+/// missed: resolve own data, then the prototype chain, recording the result
+/// in the site cache.
+fn quickResolveNamedGet(vm: *Interpreter, ic: *bc.InlineCache, object: *value.Object, name: []const u8) ?Value {
+    const bits = siteNameBloom(ic, name);
+    if (object.hasOwnAccessorNamedUnlocked(name, bits)) return null;
+    if (object.shape) |shape| if (shape.lookup(name)) |slot| {
+        ic.recordMode(shape, slot, false);
+        return object.slotsItems()[slot];
+    };
+    if (!siteNameCacheable(ic, name)) return null;
+    if (!object.namedGetPathPlain(name, bits)) return null;
+    const first = quickEffectiveProto(vm, object);
+    // The lookup just proved the receiver lacks `name`, so a cached chain
+    // recorded for another receiver Shape still applies from the first
+    // prototype on. Sites reading inherited methods off many differently
+    // shaped receivers stop re-resolving (and evicting) their entries.
+    for (&ic.inherited_chains) |*chain| {
+        if (chain.kind == .none or chain.string_receiver) continue;
+        if (quickCachedPrototypeChain(vm, chain, first, name, bits)) |hit| return hit;
+    }
+    return quickResolvePrototypeChain(vm, ic, object.shape, false, first, name, bits);
+}
+
+/// Isolated-realm named [[Get]] on a primitive String. ToObject would box the
+/// string only for the lookup: the wrapper has no own named properties apart
+/// from `length` and indices (excluded names), so the lookup starts at the
+/// realm's %String.prototype% without allocating the wrapper.
+fn quickStringNamedGet(vm: *Interpreter, ic: *bc.InlineCache, name: []const u8) ?Value {
+    const prototype = vm.env.stringPrototypeIntrinsic() orelse return null;
+    for (&ic.inherited_chains) |*chain| {
+        if (chain.kind == .none or !chain.string_receiver) continue;
+        if (quickCachedPrototypeChain(vm, chain, prototype, name, ic.name_bloom)) |hit| return hit;
+    }
+    if (!siteNameCacheable(ic, name)) return null;
+    return quickResolvePrototypeChain(vm, ic, null, true, prototype, name, siteNameBloom(ic, name));
 }
 
 /// Resolve a direct data property on an Array prototype without walking the
@@ -9142,7 +9294,28 @@ fn runChunk(
                         }
                         if (parallel_sync and o.is_array) o.lockProperties();
                         defer if (parallel_sync and o.is_array) o.unlockProperties();
-                        if (!o.is_array and o.accessorsMap() == null) {
+                        if (!o.is_array and !parallel_sync) {
+                            // Isolated realms: an own-data hit stays valid on an
+                            // object with accessors once the bloom-guarded
+                            // probe rules out an own accessor `name`; misses
+                            // try the prototype-chain entry, then a plain
+                            // resolve that records one.
+                            const ic = &chunk.ics[ip - 1];
+                            if (ic.lookupSlotMode(o.shape, false)) |sl| {
+                                if (o.accessorsMap() == null or !o.hasOwnAccessorNamedUnlocked(name, siteNameBloom(ic, name))) {
+                                    result = o.slotsItems()[sl];
+                                    break :fast;
+                                }
+                            } else if (quickInheritedNamedGet(vm, ic, o, name)) |inherited| {
+                                result = inherited;
+                                if (builtin.is_test) _ = quick_named_inherited_hits.fetchAdd(1, .monotonic);
+                                break :fast;
+                            } else if (quickResolveNamedGet(vm, ic, o, name)) |resolved| {
+                                result = resolved;
+                                if (builtin.is_test) _ = quick_named_resolve_hits.fetchAdd(1, .monotonic);
+                                break :fast;
+                            }
+                        } else if (!o.is_array and o.accessorsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 result = o.slotsItems()[sl];
@@ -9157,6 +9330,12 @@ fn runChunk(
                             }
                         }
                         // An own miss needs the full [[Get]] prototype walk.
+                    } else if (!parallel_sync and obj.isString()) {
+                        if (quickStringNamedGet(vm, &chunk.ics[ip - 1], name)) |inherited| {
+                            result = inherited;
+                            if (builtin.is_test) _ = quick_named_inherited_hits.fetchAdd(1, .monotonic);
+                            break :fast;
+                        }
                     }
                     var inherited_observation: ?interp.InheritedPropertyObservation = null;
                     result = try vm.getPropertyObserved(obj, name, &inherited_observation); // arrays, strings, proto chain, null/undefined
@@ -9424,26 +9603,29 @@ fn runChunk(
                     // Inline cache hits only update an existing slot; adding a
                     // property transitions the shape, so it goes the slow path.
                     // Objects with accessor/attribute overrides also take the
-                    // slow path ([[Set]] honors setters + non-writable).
+                    // slow path ([[Set]] honors setters + non-writable) unless,
+                    // in an isolated realm, the bloom-guarded probes prove this
+                    // name has neither an own accessor nor an attribute
+                    // override: an own writable data property is then a plain
+                    // slot store whatever the object's other names carry.
                     if (obj.isObject()) {
                         const o = obj.asObj();
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
-                        if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
+                        const plain_metadata = o.accessorsMap() == null and o.attrsMap() == null;
+                        if (!o.is_array and (plain_metadata or !parallel_sync)) {
                             const ic = &chunk.ics[ip - 1];
-                            if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
+                            const slot = ic.lookupSlotMode(o.shape, parallel_sync) orelse resolved: {
+                                const sh = o.shape orelse break :resolved null;
+                                const slot = sh.lookup(name) orelse break :resolved null;
+                                ic.recordMode(sh, slot, parallel_sync);
+                                break :resolved slot;
+                            };
+                            if (slot) |sl| if (plain_metadata or !o.hasOwnAccessorOrAttrNamedUnlocked(name, siteNameBloom(ic, name))) {
                                 gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
                                 o.slotsItems()[sl] = v;
                                 break :fast;
-                            }
-                            if (o.shape) |sh| {
-                                if (sh.lookup(name)) |slot| {
-                                    ic.recordMode(sh, slot, parallel_sync);
-                                    gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
-                                    o.slotsItems()[slot] = v;
-                                    break :fast;
-                                }
-                            }
+                            };
                         }
                     }
                     v = try nativeSetPropertyAtSite(vm, null, obj, name, v, vmEvaluationSite(chunk, ip));
@@ -23458,6 +23640,85 @@ test "vm: prototype indexed data path covers ordinary ancestor depth" {
         const hits = quick_array_prototype_index_hits.load(.monotonic) - before;
         try std.testing.expectEqual(@as(u64, 4), hits);
     }
+}
+
+test "vm: cached named reads follow prototype, accessor and shape edits" {
+    const ctx = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    // Shared-realm tests elsewhere leave the process in the seqlock IC mode,
+    // which keeps these caches out of play; this test exercises isolated mode.
+    const original_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+    const inherited_before = quick_named_inherited_hits.load(.monotonic);
+    const resolved_before = quick_named_resolve_hits.load(.monotonic);
+    try std.testing.expect((try ctx.evaluate(
+        \\function read(o) { return o.m; }
+        \\function call(o) { return o.m(); }
+        \\function warm(f, o, n) { let r; for (let i = 0; i < n; i++) r = f(o); return r; }
+        \\class A { m() { return 1; } get g() { return 2; } }
+        \\class B extends A {}
+        \\let a = new A(), b = new B();
+        \\let checks = warm(call, a, 4) === 1 && warm(call, b, 4) === 1;
+        \\A.prototype.m = function () { return 5; };
+        \\checks = checks && call(a) === 5 && call(b) === 5;
+        \\b.m = function () { return 7; };
+        \\checks = checks && call(b) === 7 && call(a) === 5;
+        \\let gets = 0;
+        \\Object.defineProperty(A.prototype, 'm', { get() { gets++; $vm.gc(); return () => 9; }, configurable: true });
+        \\checks = checks && call(a) === 9 && gets === 1;
+        \\Object.defineProperty(A.prototype, 'm', { value: () => 11, writable: true, configurable: true });
+        \\checks = checks && call(a) === 11;
+        \\Object.setPrototypeOf(a, { m() { return 13; } });
+        \\checks = checks && call(a) === 13;
+        \\Object.setPrototypeOf(a, new Proxy({}, { get(target, key, receiver) { return () => receiver === a ? 15 : -1; } }));
+        \\checks = checks && call(a) === 15;
+        \\let deep = Object.create(Object.create(Object.create(Object.create({ m: 17 }))));
+        \\checks = checks && warm(read, deep, 3) === 17;
+        \\function zz(o) { return o.zz; }
+        \\let plain = {};
+        \\checks = checks && warm(zz, plain, 3) === undefined;
+        \\Object.prototype.zz = 19;
+        \\checks = checks && zz(plain) === 19;
+        \\delete Object.prototype.zz;
+        \\checks = checks && zz(plain) === undefined && zz(Object.create(null)) === undefined;
+        \\function own(o) { return o.x; }
+        \\let mixed = { x: 1, get y() { return 2; } };
+        \\checks = checks && warm(own, mixed, 3) === 1 && mixed.y === 2;
+        \\Object.defineProperty(mixed, 'x', { get() { return 21; }, configurable: true });
+        \\checks = checks && own(mixed) === 21;
+        \\function setx(o, v) { o.x = v; }
+        \\let target = { x: 1, get y() { return 2; } };
+        \\for (let i = 0; i < 3; i++) setx(target, i);
+        \\checks = checks && target.x === 2;
+        \\Object.defineProperty(target, 'x', { writable: false });
+        \\setx(target, 5);
+        \\checks = checks && target.x === 2;
+        \\let setterCalls = 0;
+        \\Object.defineProperty(target, 'x', { set(v) { setterCalls += v; }, configurable: true });
+        \\setx(target, 4);
+        \\checks = checks && setterCalls === 4;
+        \\function cl(f) { return f.call; }
+        \\function fn() {}
+        \\checks = checks && warm(cl, fn, 3) === Function.prototype.call;
+        \\Function.prototype.call2 = 1;
+        \\function c2(f) { return f.call2; }
+        \\checks = checks && warm(c2, fn, 3) === 1;
+        \\function up(s) { return s.toUpperCase(); }
+        \\checks = checks && warm(up, 'ab', 3) === 'AB';
+        \\String.prototype.toUpperCase = function () { return 'X' + this; };
+        \\checks = checks && up('ab') === 'Xab';
+        \\function sm(s) { return s.missing; }
+        \\checks = checks && warm(sm, 'ab', 3) === undefined;
+        \\Object.prototype.missing = 23;
+        \\checks && sm('ab') === 23
+    )).asBool());
+    try std.testing.expect(quick_named_inherited_hits.load(.monotonic) > inherited_before);
+    try std.testing.expect(quick_named_resolve_hits.load(.monotonic) > resolved_before);
 }
 
 test "vm: prototype indexed data path follows live descriptors and chain edits" {

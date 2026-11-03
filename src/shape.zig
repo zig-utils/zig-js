@@ -456,7 +456,10 @@ pub const Shape = struct {
         var shape: ?*Shape = self;
         while (shape) |current| {
             if (current.name) |candidate| {
-                if (std.mem.eql(u8, candidate, name))
+                // Most steps are misses between names of equal length; the
+                // last byte rejects nearly all of them without a call.
+                if (candidate.len == name.len and (name.len == 0 or candidate[name.len - 1] == name[name.len - 1]) and
+                    std.mem.eql(u8, candidate, name))
                     return if (current.deleted) .{ .deleted = current.slot } else .{ .present = current.slot };
             }
             shape = current.parent;

@@ -2113,6 +2113,15 @@ pub const ObjectNameHashContext = struct {
 /// Object metadata tables borrow one context from their cold sidecar instead
 /// of storing six predictable or independently seeded map headers. Iteration
 /// and finalization do not hash, so those paths remain context-free.
+/// Two bits of an unseeded hash summarize one property name for the
+/// `ObjectNameMapUnmanaged.bloom` filter. The filter only ever answers
+/// "definitely absent"; colliding names cost an exact probe, never a wrong
+/// answer, so attacker-chosen names can degrade it but not break it.
+pub fn nameBloomBits(name: []const u8) u64 {
+    const hash = std.hash.Wyhash.hash(0x51ed_270b_27a1_9d43, name);
+    return (@as(u64, 1) << @intCast(hash & 63)) | (@as(u64, 1) << @intCast((hash >> 6) & 63));
+}
+
 pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
     const Index = std.HashMapUnmanaged(
         []const u8,
@@ -2121,8 +2130,24 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
         std.hash_map.default_max_load_percentage,
     );
 
+    // Accessor and attribute tables are the ones inline caches must rule a
+    // name out of; every other table keeps the plain map header.
+    const tracks_bloom = MapValue == Accessor or MapValue == PropAttr;
+
     return struct {
         index: Index = .empty,
+        /// Conservative membership summary over every key ever inserted (see
+        /// `nameBloomBits`). Removal never clears bits, so a clear test proves
+        /// the key absent without hashing it with the per-object seed; inline
+        /// caches use that proof to keep serving other names of an object that
+        /// has accessors or attribute overrides.
+        bloom: if (tracks_bloom) u64 else void = if (tracks_bloom) 0 else {},
+
+        /// False proves `key` was never inserted; true means probe exactly.
+        pub inline fn mayContain(self: *const @This(), bits: u64) bool {
+            if (!tracks_bloom) return true;
+            return self.bloom & bits == bits;
+        }
 
         pub fn get(self: *const @This(), context: ?ObjectNameHashContext, key: []const u8) ?MapValue {
             return self.index.getContext(key, context orelse return null);
@@ -2142,7 +2167,9 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
             key: []const u8,
             context: ObjectNameHashContext,
         ) std.mem.Allocator.Error!Index.GetOrPutResult {
-            return self.index.getOrPutContext(allocator, key, context);
+            const result = try self.index.getOrPutContext(allocator, key, context);
+            if (tracks_bloom) self.bloom |= nameBloomBits(key);
+            return result;
         }
 
         pub fn put(
@@ -2153,6 +2180,7 @@ pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
             context: ObjectNameHashContext,
         ) std.mem.Allocator.Error!void {
             try self.index.putContext(allocator, key, map_value, context);
+            if (tracks_bloom) self.bloom |= nameBloomBits(key);
         }
 
         pub fn fetchRemove(self: *@This(), context: ?ObjectNameHashContext, key: []const u8) ?Index.KV {
@@ -3341,6 +3369,55 @@ pub const Object = struct {
         beginAccessorRead(cold);
         defer endAccessorRead(cold);
         return accessors.get(self.installedNameHashContext(), name);
+    }
+
+    /// Whether `name` is an own accessor, using the accessor map's bloom
+    /// summary (`name_bits` = `nameBloomBits(name)`) to skip the seeded probe
+    /// for every other name. Isolated realms or a held `property_lock` only:
+    /// the probe does not enter the shared-realm accessor reader gate.
+    pub inline fn hasOwnAccessorNamedUnlocked(self: *const Object, name: []const u8, name_bits: u64) bool {
+        const accessors = self.accessorsMap() orelse return false;
+        if (!accessors.mayContain(name_bits)) return false;
+        return accessors.contains(self.installedNameHashContext(), name);
+    }
+
+    /// Whether `name` has an own accessor or an attribute override; false
+    /// proves an own data slot for `name` is plain writable data. Same
+    /// locking contract as `hasOwnAccessorNamedUnlocked`.
+    pub inline fn hasOwnAccessorOrAttrNamedUnlocked(self: *const Object, name: []const u8, name_bits: u64) bool {
+        if (self.hasOwnAccessorNamedUnlocked(name, name_bits)) return true;
+        const attrs = self.attrsMap() orelse return false;
+        if (!attrs.mayContain(name_bits)) return false;
+        return attrs.contains(self.installedNameHashContext(), name);
+    }
+
+    /// Guard for one object on a cached named [[Get]] path: ordinary
+    /// [[GetOwnProperty]] semantics for `name` (no Proxy, module namespace,
+    /// buffer view, primitive cell, host get hook or Thread.restrict owner)
+    /// and no own accessor `name`, so the object's Shape alone decides whether
+    /// `name` is an own data slot or absent. Callers exclude the names that
+    /// arrays, functions and String wrappers resolve exotically (`length`,
+    /// `caller`, `arguments`, `prototype`, numeric keys). Isolated realms only.
+    pub inline fn namedGetPathPlain(self: *const Object, name: []const u8, name_bits: u64) bool {
+        if (self.is_symbol or self.is_bigint or self.proxy_revoked) return false;
+        const storage = self.storageState() orelse return true;
+        if (storage.c_api_object_owner.load(.monotonic) != null) return false;
+        const cold = storage.cold.load(.acquire) orelse return true;
+        switch (cold.rare_tag.load(.monotonic)) {
+            .proxy, .module_ns, .buffer_view, .primitive => return false,
+            else => {},
+        }
+        if (cold.restricted_to.load(.monotonic) != 0) return false;
+        const accessors = cold.accessors.load(.acquire) orelse return true;
+        if (!accessors.mayContain(name_bits)) return true;
+        return !accessors.contains(storage.named_hash_context, name);
+    }
+
+    /// A callable with no explicit [[Prototype]] inherits %Function.prototype%
+    /// implicitly (see `Interpreter.effectiveProto`); cached paths stop there.
+    pub inline fn hasImplicitFunctionProto(self: *const Object) bool {
+        return self.protoAtomic() == null and !self.protoExplicitNull() and
+            (self.native != null or self.hostCallback() != null or self.jsFunction() != null or self.boundFunction() != null);
     }
 
     /// The owning thread id for `Thread.restrict`, or zero for the overwhelmingly
@@ -6591,22 +6668,23 @@ pub const Object = struct {
     pub fn setOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
         gcBarrier(self, v); // stored into this cell's slots on either path below
         const base = self.shape orelse root;
-        const state = base.lookupState(name);
-        switch (state) {
+        // A cached transition edge proves the name absent (or names the slot a
+        // cached deletion removed) without walking the parent chain.
+        const transition = switch (try base.planDataWrite(name)) {
             .present => |slot| {
                 self.slotsItems()[slot] = v;
                 return;
             },
-            .absent, .deleted => {},
-        }
-        const child = try base.transitionFromState(name, state);
+            .transition => |planned| planned,
+        };
+        const child = transition.shape;
         var pending_order_key: ?[]const u8 = null;
         if (self.keyOrder()) |order| {
             const should_append = keyOrderNeedsAdd(order, name);
             if (should_append) {
                 const alloc = try self.keyOrderAllocator(arena);
                 try order.ensureUnusedCapacity(alloc, 1);
-                // `transitionFromState` either returns a child whose immutable
+                // `planDataWrite` either returns a child whose immutable
                 // arena-owned operation name is `name`, or undoes an immediate
                 // delete and returns its parent. In that undo case `base` is
                 // the matching delete operation. Either slice outlives Object.
@@ -6617,11 +6695,7 @@ pub const Object = struct {
                 std.debug.assert(std.mem.eql(u8, pending_order_key.?, name));
             }
         }
-        const target_slot = switch (state) {
-            .deleted => |deleted_slot| deleted_slot,
-            .absent => child.slot,
-            .present => unreachable,
-        };
+        const target_slot = transition.slot;
         if (target_slot < self.slotsItems().len) {
             self.slotsItems()[target_slot] = v;
         } else {

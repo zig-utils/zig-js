@@ -2412,6 +2412,27 @@ pub const Environment = struct {
         return if (prototype) intrinsics.array_prototype else intrinsics.array_constructor;
     }
 
+    /// %Function.prototype% from the realm's identity slot (null only while
+    /// the realm bootstraps). Implicit function [[Prototype]] lookups use this
+    /// rather than the writable global `Function` and its `prototype` key.
+    pub fn functionPrototypeIntrinsic(self: *Environment) ?*value.Object {
+        return self.prototypeIntrinsic("Function");
+    }
+
+    /// %String.prototype% from the realm's identity slot.
+    pub fn stringPrototypeIntrinsic(self: *Environment) ?*value.Object {
+        return self.prototypeIntrinsic("String");
+    }
+
+    inline fn prototypeIntrinsic(self: *Environment, comptime name: []const u8) ?*value.Object {
+        const index = comptime RealmIntrinsics.index(name).?;
+        const realm = rootEnv(self);
+        const locked = realm.lockBindingsForRead();
+        defer realm.unlockBindingsForRead(locked);
+        const intrinsics = realm.realm_intrinsics orelse return null;
+        return intrinsics.named[index].prototype;
+    }
+
     fn namedIntrinsic(self: *Environment, name: []const u8, prototype: bool) ?*value.Object {
         const index = RealmIntrinsics.index(name) orelse return null;
         const realm = rootEnv(self);
@@ -13490,6 +13511,7 @@ pub const Interpreter = struct {
     /// `fn instanceof Function`, `Object.getPrototypeOf(fn)`, and inherited
     /// `call`/`apply`/`bind`/`toString` all resolve through the chain.
     pub fn functionProto(self: *Interpreter) ?*value.Object {
+        if (self.env.functionPrototypeIntrinsic()) |prototype| return prototype;
         const fv = self.env.get("Function") orelse return null;
         if (!fv.isObject()) return null;
         const p = fv.asObj().getOwn("prototype") orelse return null;

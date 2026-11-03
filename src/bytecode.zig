@@ -61,9 +61,45 @@ pub const InlineCache = struct {
     inherited_receiver_shape_is_null: bool = false,
     inherited_holder_shape: ?*Shape = null,
     inherited_slot: u32 = 0,
+    /// Interpreter-validated prototype-chain entries (isolated realms only),
+    /// newest first. Unlike the advisory observation above, the VM serves
+    /// reads from these after revalidating every object on the path.
+    inherited_chains: [2]InheritedChain = .{ .{}, .{} },
+    /// `value.nameBloomBits` of this site's property name, filled lazily so
+    /// accessor bloom guards never rehash the name on a hit.
+    name_bloom: u64 = 0,
+    /// The site's name has exotic lookups on some receivers; never chain-cache.
+    name_uncacheable: bool = false,
     /// Seqlock version for the parallel protocol: even = stable, odd = a writer
     /// is mid-update. Untouched on the default (GIL-serialized) path.
     version: std.atomic.Value(u32) = .init(0),
+
+    pub const max_inherited_depth = 3;
+
+    /// One named [[Get]] resolution through a receiver's prototype chain:
+    /// `.data` reads `slot` from prototype number `depth`; `.absent` proves
+    /// the chain ends after prototype `depth` without the name. `shapes[i]`
+    /// guards prototype i+1. A String receiver starts at %String.prototype%
+    /// instead of guarding `receiver_shape`.
+    pub const InheritedChain = struct {
+        kind: enum(u8) { none, data, absent } = .none,
+        depth: u8 = 0,
+        string_receiver: bool = false,
+        slot: u32 = 0,
+        receiver_shape: ?*Shape = null,
+        shapes: [max_inherited_depth]?*Shape = @splat(null),
+    };
+
+    /// Publish an interpreter prototype-chain entry, demoting the previous
+    /// newest one. A one-hop data entry also refreshes the advisory
+    /// observation optimized code consumes. Isolated realms only.
+    pub fn recordInheritedChain(ic: *InlineCache, chain: InheritedChain) void {
+        std.debug.assert(chain.kind != .none and chain.depth <= max_inherited_depth);
+        if (ic.inherited_chains[0].kind != .none) ic.inherited_chains[1] = ic.inherited_chains[0];
+        ic.inherited_chains[0] = chain;
+        if (chain.kind == .data and chain.depth == 1 and !chain.string_receiver)
+            ic.recordInheritedMode(chain.receiver_shape, chain.shapes[0].?, chain.slot, false);
+    }
 
     /// Return the cached slot iff the cache currently maps `obj_shape`. On the
     /// default path this is the plain `shape == ic.shape` test; under
