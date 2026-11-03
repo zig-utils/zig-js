@@ -72,16 +72,15 @@ function repositoryText(relative: any, field: string): string {
   }
 }
 
-function unionTags(source: string, type: string): string[] {
-  const marker = `const ${type} = union(enum) {`,
-    start = source.indexOf(marker);
+function unionTagsAt(source: string, marker: string, type: string): string[] {
+  const start = source.indexOf(marker);
   requireValue(start >= 0, `missing tagged type ${type}`);
   const body = source.slice(start + marker.length);
   let depth = 1;
   const tags: string[] = [];
   for (const line of body.split("\n")) {
     if (depth === 1) {
-      const match = /^    ([a-z][a-z0-9_]*)(?::|,)\s*/.exec(line);
+      const match = /^\s+([a-z][a-z0-9_]*)(?::|,)\s*/.exec(line);
       if (match) tags.push(match[1]);
     }
     depth += (line.match(/{/g) || []).length;
@@ -89,6 +88,10 @@ function unionTags(source: string, type: string): string[] {
     if (depth === 0) break;
   }
   return tags;
+}
+
+function unionTags(source: string, type: string): string[] {
+  return unionTagsAt(source, `const ${type} = union(enum) {`, type);
 }
 
 function enumTags(source: string, type: string): string[] {
@@ -115,6 +118,15 @@ function sourceContract(bytecode: string, vm: string, interpreter: string): any 
   ).sort();
   const taggedTypes: Record<string, string[]> = {};
   for (const type of unionTypes) taggedTypes[type] = unionTags(vm, type);
+  const globalBindingStart = vm.indexOf("const QuickGlobalBinding = struct {");
+  requireValue(globalBindingStart >= 0, "missing QuickGlobalBinding cache record");
+  const globalBindingEnd = vm.indexOf("\n};", globalBindingStart);
+  requireValue(globalBindingEnd > globalBindingStart, "cannot locate QuickGlobalBinding cache record");
+  taggedTypes["QuickGlobalBinding.Target"] = unionTagsAt(
+    vm.slice(globalBindingStart, globalBindingEnd),
+    "    const Target = union(enum) {",
+    "QuickGlobalBinding.Target",
+  );
 
   const chunkStart = bytecode.indexOf("pub const Chunk = struct {");
   const chunkEnd = bytecode.indexOf("    pub fn init(", chunkStart);

@@ -3,7 +3,7 @@
   "kind": "zig_js_vm_quickening_inventory",
   "issue": 659,
   "parent_issue": 498,
-  "date": "2026-10-08",
+  "date": "2026-11-03",
   "status": "inventory_only_no_performance_claim",
   "entries": [
     {
@@ -38,17 +38,19 @@
       "implementation_kind": "adaptive_site_cache",
       "coverage_status": "covered_guarded",
       "surfaces": ["load_var in an isolated VM execution"],
-      "guards": ["exact starting Environment", "no with-object or alias", "exact global object and Shape for object-backed globals", "live declarative binding lookup for environment-backed globals"],
-      "miss_behavior": ["run lookupIdent/globalProp", "replace the site cache only after complete resolution", "decline caching for with and aliases"],
-      "metadata_lifetime": "A lazily allocated instruction-indexed pointer table and QuickGlobalBinding records live in the Chunk arena.",
+      "guards": ["process-wide binding-cache epoch unchanged since resolution", "exact starting Environment", "no with-object or alias", "exact global object and Shape for object-backed globals", "live declarative binding lookup for environment-backed globals"],
+      "miss_behavior": ["run canonical resolveBindingValue", "refresh the site only after complete resolution under the observed epoch", "decline caching for with and aliases"],
+      "metadata_lifetime": "A lazily allocated instruction-indexed pointer table and QuickGlobalBinding records live in the Chunk arena; sloppy-eval binding creation and every GC phase boundary advance the process-wide epoch that retires their address observations.",
       "no_gil_synchronization": "The cache is disabled when parallel_sync is true; shared execution performs locked Environment/property lookup instead of reading mutable cache records.",
       "observable_steps_debugger": "A hit replaces only the load_var lookup inside its existing dispatch and preserves TDZ checks on the ordinary path.",
       "source_anchors": [
-        {"path": "src/vm.zig", "text": "const QuickGlobalBinding = union(enum) {"},
+        {"path": "src/vm.zig", "text": "const QuickGlobalBinding = struct {"},
         {"path": "src/vm.zig", "text": "fn recordQuickGlobalBinding("}
       ],
       "test_anchors": [
-        {"path": "src/vm.zig", "text": "test \"vm: caches live global function bindings\""}
+        {"path": "src/vm.zig", "text": "test \"vm: caches live global function bindings\""},
+        {"path": "src/context.zig", "text": "test \"garbage collection retires cached identifier resolutions\""},
+        {"path": "src/context.zig", "text": "test \"cached identifier reads see bindings a sloppy eval adds later\""}
       ],
       "metrics": ["quick_global_binding_hits"]
     },
@@ -276,7 +278,7 @@
       "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
       "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
       "QuickLeafPlan": ["unsupported", "numeric"],
-      "QuickGlobalBinding": ["object", "environment"]
+      "QuickGlobalBinding.Target": ["object", "environment"]
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
