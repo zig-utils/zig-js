@@ -4679,6 +4679,13 @@ pub const Interpreter = struct {
     /// Robustness counters: function call depth and total evaluation steps.
     depth: u32 = 0,
     steps: u64 = 0,
+    /// The next `steps` value at which the bytecode loop must leave its
+    /// one-compare fast path: the budget overrun or the next 1024-step service
+    /// point, whichever comes first. Derived from `steps` and `step_budget`;
+    /// anything that may change those outside the loop's own counting (a
+    /// native, a host hook, native code) resets it to 0, which forces the next
+    /// instruction to recompute it after the ordinary checks.
+    step_limit: u64 = 0,
     /// Runaway-guard ceiling for `steps`, per interpreter.
     ///
     /// A step count is only a meaningful runaway proxy for work whose duration
@@ -10497,6 +10504,7 @@ pub const Interpreter = struct {
                 self.depth += 1;
                 defer self.depth -= 1;
                 self.recordExecutionTier(.host_callbacks);
+                defer self.step_limit = 0;
                 return call(@ptrCast(self), obj, this_val, args);
             }
         };
@@ -10588,6 +10596,9 @@ pub const Interpreter = struct {
         const saved_nt = self.new_target;
         if (!self.direct_eval_call) self.new_target = Value.undef();
         defer self.new_target = saved_nt;
+        // A native may move `steps` or `step_budget` (a host lowering the
+        // budget expects exhaustion at the very next bytecode instruction).
+        defer self.step_limit = 0;
         return nf(@ptrCast(self), this_val, args);
     }
 

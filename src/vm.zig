@@ -7892,7 +7892,10 @@ fn tryRunLoopOsrAtBackedge(
     if (@as(usize, target) > instruction) return null;
     exec.acc = acc;
     exec.ip = target;
-    return switch (try tryRunLoopOsr(vm, exec, chunk, frame, gen)) {
+    const outcome = try tryRunLoopOsr(vm, exec, chunk, frame, gen);
+    // Native code counts (and on deoptimization restores) steps itself.
+    if (outcome != .miss) vm.step_limit = 0;
+    return switch (outcome) {
         .miss, .deoptimized => null,
         .complete => |result| try finishChunkResult(vm, exec, chunk, result),
     };
@@ -8128,6 +8131,8 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (statementHooksRequireBytecode(vm)) return null;
     const owner = vm.jit_owner orelse return null;
     if (!nativeExecutionPermitted(vm, owner)) return null;
+    // Native code counts (and on deoptimization restores) steps itself.
+    defer vm.step_limit = 0;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
     // Direct native calls copy argument i into slot i and skip buildActivation.
@@ -8431,6 +8436,7 @@ inline fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void 
     if (vm.profile_statement_hook) |hook| {
         vm.resolveStackTraceLocations();
         if (vm.debug_current_location) |location| hook(vm.profile_statement_ctx.?, vm, location);
+        vm.step_limit = 0;
     }
 }
 
@@ -8766,6 +8772,16 @@ fn loadStaticBindingFallback(
     };
 }
 
+/// The first `steps` value at which the bytecode loop's single compare must
+/// take the slow path: one past the budget, or the next multiple of 1024
+/// (the service point), whichever is lower. Both are absolute, so a limit
+/// stays valid while nested execution only advances `steps`; code that may
+/// lower `step_budget` or rewind `steps` resets `step_limit` to 0 instead.
+inline fn nextStepLimit(vm: *const Interpreter) u64 {
+    const checkpoint = (vm.steps | 1023) +| 1;
+    return @min(checkpoint, vm.step_budget +| 1);
+}
+
 fn runChunk(
     vm: *Interpreter,
     exec: *Exec,
@@ -8807,35 +8823,42 @@ fn runChunk(
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
 
     const debug_nodes = chunk.debug_nodes.ptr;
+    // Entry may follow steps/budget changes made outside the loop.
+    vm.step_limit = nextStepLimit(vm);
     while (ip < code.len) {
         if (location_execution) if (debug_nodes[ip]) |node| {
             vm.serviceMutatorStopSafepoint();
-            if (debug_execution)
-                try serviceVmDebugStatement(vm, node, chunk, frame)
-            else
-                serviceVmStackStatement(vm, node);
+            if (debug_execution) {
+                try serviceVmDebugStatement(vm, node, chunk, frame);
+                vm.step_limit = 0;
+            } else serviceVmStackStatement(vm, node);
         };
         vm.steps += 1;
-        if (vm.steps > vm.step_budget) {
-            @branchHint(.cold);
-            return vm.throwError("RangeError", "evaluation step budget exceeded");
-        }
-        if ((vm.steps & 1023) == 0) {
+        // One compare covers both the budget and the 1024-step service point
+        // (see `nextStepLimit`); the slow path below is the exact former check.
+        if (vm.steps >= vm.step_limit) {
             @branchHint(.unlikely);
-            if (vm.stop_flag) |sf| if (sf.load(.monotonic))
-                return vm.throwError("Error", "worker terminated");
-            try vm.serviceVmTraps();
-            if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
-            // Mid-script GC: flush the live accumulator/ip into `exec` so the
-            // precise tracer (which roots `exec.stack`/`exec.acc`) sees the
-            // current operand state, then run a guarded collection. No-op when
-            // the GC is off (`gc_safepoint_fn == null`).
-            if (vm.gc_safepoint_fn != null) {
-                exec.acc = acc;
-                exec.ip = ip;
-                vm.handoffRuntimeSlotIfContended();
-                vm.serviceGcSafepoint();
-            } else vm.handoffRuntimeSlotIfContended();
+            if (vm.steps > vm.step_budget) {
+                @branchHint(.cold);
+                return vm.throwError("RangeError", "evaluation step budget exceeded");
+            }
+            if ((vm.steps & 1023) == 0) {
+                if (vm.stop_flag) |sf| if (sf.load(.monotonic))
+                    return vm.throwError("Error", "worker terminated");
+                try vm.serviceVmTraps();
+                if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
+                // Mid-script GC: flush the live accumulator/ip into `exec` so the
+                // precise tracer (which roots `exec.stack`/`exec.acc`) sees the
+                // current operand state, then run a guarded collection. No-op when
+                // the GC is off (`gc_safepoint_fn == null`).
+                if (vm.gc_safepoint_fn != null) {
+                    exec.acc = acc;
+                    exec.ip = ip;
+                    vm.handoffRuntimeSlotIfContended();
+                    vm.serviceGcSafepoint();
+                } else vm.handoffRuntimeSlotIfContended();
+            }
+            vm.step_limit = nextStepLimit(vm);
         }
         // Profiling only: a branch, rather than a counter kept live (and
         // stored) on every dispatch of the unprofiled loop.
