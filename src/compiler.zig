@@ -67,6 +67,10 @@ const SecureIdentityHashContext = struct {
 /// the state can remain stack-owned by the public compilation entry point.
 const CompileHashState = struct {
     context: ?SecureStringHashContext = null,
+    /// Every identifier each function's subtree reads, found once per
+    /// compilation: TDZ analysis of each enclosing function reuses it instead
+    /// of walking the nested body again.
+    function_identifiers: std.AutoHashMapUnmanaged(*const ast.FunctionNode, []const []const u8) = .empty,
 
     fn candidate(state: *@This()) std.mem.Allocator.Error!SecureStringHashContext {
         if (state.context) |context| return context;
@@ -338,6 +342,9 @@ const FnScope = struct {
     count: u32 = 0,
     lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
     tdz_checks: bool = false,
+    /// With `tdz_checks` off, the lexical names that still need checked slots
+    /// (`Compiler.functionTdzChecks`); null means none.
+    tdz_names: ?*const SecureStringMapUnmanaged(void) = null,
 
     fn addLocal(self: *FnScope, arena: std.mem.Allocator, name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
         if (self.names.get(name)) |binding| return binding.slot;
@@ -361,7 +368,7 @@ const FnScope = struct {
 
     fn addBinding(self: *FnScope, arena: std.mem.Allocator, bindings: *SecureStringMapUnmanaged(SlotBinding), name: []const u8, lexical: bool, immutable: bool, parameter_with_eval_boundary: bool) CompileError!u32 {
         const slot = self.count;
-        const tdz_checked = lexical and self.tdz_checks;
+        const tdz_checked = lexical and (self.tdz_checks or (if (self.tdz_names) |names| names.contains(name) else false));
         try bindings.put(arena, name, .{
             .slot = slot,
             .lexical = lexical,
@@ -1256,25 +1263,18 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
     }
 }
 
-/// Exhaustive identifier-reference walk shared by exact-name capture queries and
-/// the set-valued pending-TDZ query. `in_fn` tracks whether the current subtree
-/// already sits (transitively) inside a function boundary: loop-capture callers
-/// ignore plain body reads, while TDZ callers begin inside the current function.
+/// Exhaustive identifier-reference walk shared by exact-name and set-valued
+/// capture queries. `in_fn` tracks whether the current subtree already sits
+/// (transitively) inside a function boundary: loop-capture callers ignore plain
+/// body reads, while any-reference callers begin inside the current function.
 /// Unlike `nodeHasYield` this descends INTO nested functions. The switch has no
 /// `else`, so a new node kind cannot silently become a capture or TDZ false
 /// negative. It deliberately ignores shadowing and treats deferred class bodies
-/// as closures: over-matching selects checked bytecode or the correct-but-slower
-/// tree-walker, never a wrong lowering.
-const PendingLexicalReferences = struct {
-    bindings: *const SecureStringMapUnmanaged(Compiler.ShadowBind),
-    declared: *const SecureStringMapUnmanaged(void),
-};
+/// as closures: over-matching selects the correct-but-slower lowering, never a
+/// wrong one.
 
 fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
-    return if (comptime @TypeOf(query) == PendingLexicalReferences) pending: {
-        const binding = query.bindings.get(identifier) orelse break :pending false;
-        break :pending binding.lexical and !query.declared.contains(identifier);
-    } else if (comptime @TypeOf(query) == CapturedBindingReferences)
+    return if (comptime @TypeOf(query) == CapturedBindingReferences)
         query.names.contains(identifier)
     else if (comptime @TypeOf(query) == RecordingCapturedBindingReferences) recording: {
         if (query.names.getPtr(identifier)) |captured| if (!captured.*) {
@@ -1294,11 +1294,6 @@ fn directEvalReferenceMatches(query: anytype) bool {
         return false;
     } else if (comptime @TypeOf(query) == CapturedBindingReferences) {
         return query.names.count() != 0;
-    } else if (comptime @TypeOf(query) == PendingLexicalReferences) {
-        var bindings = query.bindings.iterator();
-        while (bindings.next()) |entry|
-            if (entry.value_ptr.lexical and !query.declared.contains(entry.key_ptr.*)) return true;
-        return false;
     } else return true;
 }
 
@@ -2259,179 +2254,335 @@ pub const Compiler = struct {
         return inventory;
     }
 
-    fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *SecureStringMapUnmanaged(void), pattern: *Node, floor: usize) CompileError!void {
-        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
-        switch (pattern.*) {
-            .identifier => |name| try declared.put(arena, name, {}),
-            .obj_pattern => |p| {
-                for (p.props) |prop| try tdzDeclarePattern(arena, declared, prop.target, floor);
-                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest, floor);
-            },
-            .arr_pattern => |p| {
-                for (p.elems) |elem| if (elem.target) |t| try tdzDeclarePattern(arena, declared, t, floor);
-                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest, floor);
-            },
-            else => {},
+    const TdzChecks = union(enum) {
+        none,
+        all,
+        some: *const SecureStringMapUnmanaged(void),
+
+        fn names(self: TdzChecks) ?*const SecureStringMapUnmanaged(void) {
+            return switch (self) {
+                .some => |set| set,
+                else => null,
+            };
         }
-    }
+    };
 
-    /// Binding positions do not read their identifiers, but computed property
-    /// names and defaults execute before BindingInitialization completes. Walk
-    /// only those evaluation regions so `let [x = x] = []` and a reference to a
-    /// later lexical binding select TDZ-checked frame bytecodes without treating
-    /// every declared name as a false-positive read.
-    fn tdzPatternRefsPending(pattern: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void), floor: usize) error{StackExhausted}!bool {
-        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
-        return switch (pattern.*) {
-            .identifier => false,
-            .obj_pattern => |object| blk: {
-                for (object.props) |property| {
-                    if (property.key_expr) |key| if (try tdzRefsPending(key, m, declared, floor)) break :blk true;
-                    if (property.default) |default| if (try tdzRefsPending(default, m, declared, floor)) break :blk true;
-                    if (try tdzPatternRefsPending(property.target, m, declared, floor)) break :blk true;
-                }
-                if (object.rest) |rest| if (try tdzPatternRefsPending(rest, m, declared, floor)) break :blk true;
-                break :blk false;
-            },
-            .arr_pattern => |array| blk: {
-                for (array.elems) |element| {
-                    if (element.default) |default| if (try tdzRefsPending(default, m, declared, floor)) break :blk true;
-                    if (element.target) |target| if (try tdzPatternRefsPending(target, m, declared, floor)) break :blk true;
-                }
-                if (array.rest) |rest| if (try tdzPatternRefsPending(rest, m, declared, floor)) break :blk true;
-                break :blk false;
-            },
-            else => false,
-        };
-    }
-
-    fn tdzRefsPending(node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void), floor: usize) error{StackExhausted}!bool {
-        // The query is the disjunction the old per-binding scans implemented:
-        // visit each identifier once, then test exact pending-lexical membership.
-        // Keeping the shared exhaustive walker means new AST node kinds still
-        // fail compilation until both capture and TDZ classification handle them.
-        return try nameRefInClosure(node, PendingLexicalReferences{
-            .bindings = m,
-            .declared = declared,
-        }, true, floor);
-    }
-
-    /// A statement list's function declarations are instantiated before any
-    /// of its statements run, so their bodies can be called (and read the
-    /// list's lexical bindings) before those bindings are initialized:
-    /// `{ let y = f(); function f() { return y; } }` throws a ReferenceError.
-    fn tdzHoistedFunctionsRefsPending(stmts: []const *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void), floor: usize) error{StackExhausted}!bool {
-        for (stmts) |stmt| if (annex_b.functionDeclaration(stmt)) |declaration| {
-            if (try tdzRefsPending(declaration.func_decl.body, m, declared, floor)) return true;
-        };
-        return false;
-    }
-
-    fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *SecureStringMapUnmanaged(void), floor: usize) CompileError!bool {
-        if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
-        switch (node.*) {
-            .var_decl => |d| {
-                if (d.init) |init| if (try tdzRefsPending(init, m, declared, floor)) return true;
-                if (d.kind != .@"var") try declared.put(arena, d.name, {});
-            },
-            .destructure_decl => |d| {
-                if (try tdzRefsPending(d.init, m, declared, floor)) return true;
-                if (d.kind != .@"var" and try tdzPatternRefsPending(d.pattern, m, declared, floor)) return true;
-                if (d.kind != .@"var") try tdzDeclarePattern(arena, declared, d.pattern, floor);
-            },
-            .expr_stmt => |expr| return try tdzRefsPending(expr, m, declared, floor),
-            .return_stmt => |maybe| if (maybe) |expr| return try tdzRefsPending(expr, m, declared, floor),
-            .throw_stmt => |expr| return try tdzRefsPending(expr, m, declared, floor),
-            .if_stmt => |stmt| {
-                if (try tdzRefsPending(stmt.cond, m, declared, floor)) return true;
-                if (try tdzScanStmt(arena, stmt.consequent, m, declared, floor)) return true;
-                if (stmt.alternate) |alternate| if (try tdzScanStmt(arena, alternate, m, declared, floor)) return true;
-            },
-            .while_stmt => |stmt| {
-                if (try tdzRefsPending(stmt.cond, m, declared, floor)) return true;
-                return try tdzScanStmt(arena, stmt.body, m, declared, floor);
-            },
-            .do_while_stmt => |stmt| {
-                if (try tdzScanStmt(arena, stmt.body, m, declared, floor)) return true;
-                return try tdzRefsPending(stmt.cond, m, declared, floor);
-            },
-            .for_stmt => |stmt| {
-                if (stmt.init) |init| if (try tdzScanStmt(arena, init, m, declared, floor)) return true;
-                if (stmt.cond) |cond| if (try tdzRefsPending(cond, m, declared, floor)) return true;
-                if (stmt.update) |update| if (try tdzRefsPending(update, m, declared, floor)) return true;
-                return try tdzScanStmt(arena, stmt.body, m, declared, floor);
-            },
-            .for_in => |stmt| {
-                if (try tdzRefsPending(stmt.iterable, m, declared, floor)) return true;
-                if (stmt.decl_kind) |kind| if (kind != .@"var") try tdzDeclarePattern(arena, declared, stmt.target, floor);
-                return try tdzScanStmt(arena, stmt.body, m, declared, floor);
-            },
-            .block => |stmts| {
-                if (try tdzHoistedFunctionsRefsPending(stmts, m, declared, floor)) return true;
-                for (stmts) |stmt| {
-                    if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
-                }
-            },
-            .decl_group => |stmts| for (stmts) |stmt| {
-                if (try tdzScanStmt(arena, stmt, m, declared, floor)) return true;
-            },
-            .switch_stmt => |stmt| {
-                if (try tdzRefsPending(stmt.disc, m, declared, floor)) return true;
-                // One scope spans every clause, and a jump to a later clause
-                // skips the declarations of the earlier ones: source order
-                // proves nothing, so a clause-level lexical declaration is a
-                // hazard outright.
-                for (stmt.cases) |case| {
-                    if (try tdzHoistedFunctionsRefsPending(case.body, m, declared, floor)) return true;
-                    for (case.body) |body_stmt| if (try nodeDeclaresLexical(body_stmt, floor) or body_stmt.* == .class_expr) return true;
-                }
-                for (stmt.cases) |case| {
-                    if (case.@"test") |test_node| if (try tdzRefsPending(test_node, m, declared, floor)) return true;
-                    for (case.body) |body_stmt| if (try tdzScanStmt(arena, body_stmt, m, declared, floor)) return true;
-                }
-            },
-            .labeled_stmt => |stmt| return try tdzScanStmt(arena, stmt.body, m, declared, floor),
-            .try_stmt => |stmt| {
-                if (try tdzScanStmt(arena, stmt.block, m, declared, floor)) return true;
-                if (stmt.catch_param) |param| try tdzDeclarePattern(arena, declared, param, floor);
-                if (stmt.catch_block) |catch_block| if (try tdzScanStmt(arena, catch_block, m, declared, floor)) return true;
-                if (stmt.finally_block) |finally_block| if (try tdzScanStmt(arena, finally_block, m, declared, floor)) return true;
-            },
-            .func_decl => |function_node| if (try tdzRefsPending(function_node.body, m, declared, floor)) return true,
-            else => return try tdzRefsPending(node, m, declared, floor),
-        }
-        return false;
-    }
-
-    /// Classify functions that need runtime TDZ checks. The conservative scan is
-    /// retained as a code-shape decision: only these chunks receive checked
-    /// lexical opcodes, so ordinary initialized `let` loops keep their existing
-    /// native-tier and quickening eligibility.
-    fn functionHasTdzHazard(
-        arena: std.mem.Allocator,
-        fnode: *const ast.FunctionNode,
-        bindings: *const SecureStringMapUnmanaged(ShadowBind),
-        floor: usize,
-    ) CompileError!bool {
-        if (fnode.is_expr_body) return false;
-        var declared: SecureStringMapUnmanaged(void) = .{ .state = bindings.state };
-        return try tdzScanStmt(arena, fnode.body, bindings, &declared, floor);
-    }
-
-    fn functionNeedsTdzChecks(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode, floor: usize) CompileError!bool {
+    /// Which lexical slots of `fnode` need TDZ checks. Shadowed spellings and
+    /// direct eval keep every slot checked; otherwise `TdzHazards` names the
+    /// bindings some read can reach before their initialization, and only
+    /// those get checked slots.
+    fn functionTdzChecks(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode, floor: usize) CompileError!TdzChecks {
         const binding_inventory = try functionBindingInventory(arena, hash_state, fnode, floor);
-        if (binding_inventory.has_shadowing) return true;
-        // With no lexical binding, no identifier can require a TDZ check. The
-        // exhaustive inventory proves that negative without a second AST walk.
-        if (!binding_inventory.has_lexical) return false;
-        // A direct eval string is opaque to the static pending-reference walk:
-        // it can name any lexical binding before that binding's declaration is
-        // evaluated. FunctionDeclarationInstantiation still creates every such
-        // binding uninitialized, so expose TDZ-marked activation slots to the
-        // materialized direct-eval Environment from the first instruction.
-        if (fnode.uses_direct_eval) return true;
-        return try functionHasTdzHazard(arena, fnode, &binding_inventory.bindings, floor);
+        if (binding_inventory.has_shadowing or (binding_inventory.has_lexical and fnode.uses_direct_eval)) return .all;
+        if (!binding_inventory.has_lexical or fnode.is_expr_body) return .none;
+        var analysis = TdzHazards{
+            .arena = arena,
+            .floor = floor,
+            .state = hash_state,
+            .bindings = &binding_inventory.bindings,
+            .declared = .{ .state = hash_state },
+            .hazards = .{ .state = hash_state },
+            .hoisted = .{ .state = hash_state },
+            .referenced = .{ .state = hash_state },
+            .invocable_refs = .{ .state = hash_state },
+        };
+        try analysis.scan(fnode.body);
+        if (analysis.all) return .all;
+        if (analysis.hazards.count() == 0) return .none;
+        const set = try arena.create(SecureStringMapUnmanaged(void));
+        set.* = analysis.hazards;
+        return .{ .some = set };
     }
+
+    /// Per-binding TDZ hazards of one function, in evaluation order. A read can
+    /// precede a binding's initialization when it appears in code that runs
+    /// earlier (including any closure created earlier, which may be called at
+    /// once), or inside a function that can be invoked earlier. A hoisted
+    /// function declaration exists from its scope's entry, but it can only be
+    /// invoked once code that may run has named it, directly or through
+    /// another invocable function: until then its body's reads do not count.
+    /// That keeps a bundle's module-level bindings, initialized before the
+    /// functions reading them are first named, on unchecked slots.
+    const TdzHazards = struct {
+        arena: std.mem.Allocator,
+        floor: usize,
+        state: *CompileHashState,
+        bindings: *const SecureStringMapUnmanaged(ShadowBind),
+        declared: SecureStringMapUnmanaged(void),
+        hazards: SecureStringMapUnmanaged(void),
+        /// Hoisted function declarations of the scopes entered so far.
+        hoisted: SecureStringMapUnmanaged(*const ast.FunctionNode),
+        /// Every name read by code that may have run (or whose closures may).
+        referenced: SecureStringMapUnmanaged(void),
+        /// Every name read inside a function that may have been invoked.
+        invocable_refs: SecureStringMapUnmanaged(void),
+        invocable: std.AutoHashMapUnmanaged(*const ast.FunctionNode, void) = .empty,
+        names_buffer: std.ArrayListUnmanaged([]const u8) = .empty,
+        /// Direct eval somewhere that may run can read any binding by name.
+        all: bool = false,
+
+        /// The identifiers `node` reads anywhere beneath it, nested functions
+        /// included (their reads count once they may run), that name one of
+        /// this function's bindings or `eval`.
+        fn identifiers(self: *TdzHazards, node: *const Node) CompileError![]const []const u8 {
+            self.names_buffer.clearRetainingCapacity();
+            try self.gather(Node, node.*);
+            return try self.arena.dupe([]const u8, self.names_buffer.items);
+        }
+
+        fn keep(self: *TdzHazards, name: []const u8) CompileError!void {
+            // Only this function's own bindings (hoisted functions among them)
+            // and `eval` can matter to the analysis.
+            if (self.bindings.contains(name) or std.mem.eql(u8, name, "eval"))
+                try self.names_buffer.append(self.arena, name);
+        }
+
+        fn gather(self: *TdzHazards, comptime T: type, item: T) CompileError!void {
+            if (stack_scan.stackAddress() <= self.floor) return error.StackExhausted;
+            if (T == Node) {
+                switch (item) {
+                    .identifier => |name| try self.keep(name),
+                    .function, .func_decl => |function| for (try functionIdentifiers(self.arena, self.state, function, self.floor)) |name| try self.keep(name),
+                    inline else => |payload| try self.gather(@TypeOf(payload), payload),
+                }
+                return;
+            }
+            try gatherChildren(T, item, self);
+        }
+
+        fn gatherChildren(comptime T: type, item: T, self: anytype) CompileError!void {
+            switch (@typeInfo(T)) {
+                .optional => |info| if (item) |present| try gatherChildren(info.child, present, self),
+                .pointer => |info| switch (info.size) {
+                    .one => {
+                        if (info.child == Node) return self.gather(Node, item.*);
+                        if (info.child == ast.FunctionNode or info.child == ast.TryNode or info.child == ast.ExportNode)
+                            return gatherChildren(info.child, item.*, self);
+                    },
+                    .slice => if (info.child != u8) for (item) |element| try gatherChildren(info.child, element, self),
+                    else => {},
+                },
+                .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try gatherChildren(Field, @field(item, name), self),
+                .@"union" => if (T == Node) try self.gather(Node, item),
+                else => {},
+            }
+        }
+
+        /// Every identifier `function` reads (parameters' defaults and body,
+        /// nested functions included), deduplicated and memoized.
+        fn functionIdentifiers(arena: std.mem.Allocator, state: *CompileHashState, function: *const ast.FunctionNode, floor: usize) CompileError![]const []const u8 {
+            if (state.function_identifiers.get(function)) |known| return known;
+            var collector = Collector{ .arena = arena, .state = state, .floor = floor };
+            try gatherChildren(ast.FunctionNode, function.*, &collector);
+            const names = try arena.dupe([]const u8, collector.names.keys());
+            try state.function_identifiers.put(arena, function, names);
+            return names;
+        }
+
+        const Collector = struct {
+            arena: std.mem.Allocator,
+            state: *CompileHashState,
+            floor: usize,
+            names: std.StringArrayHashMapUnmanaged(void) = .empty,
+
+            fn gather(self: *Collector, comptime T: type, item: T) CompileError!void {
+                if (stack_scan.stackAddress() <= self.floor) return error.StackExhausted;
+                switch (item) {
+                    .identifier => |name| try self.names.put(self.arena, name, {}),
+                    .function, .func_decl => |function| for (try functionIdentifiers(self.arena, self.state, function, self.floor)) |name| try self.names.put(self.arena, name, {}),
+                    inline else => |payload| try gatherChildren(@TypeOf(payload), payload, self),
+                }
+            }
+        };
+
+        fn isLexical(self: *const TdzHazards, name: []const u8) bool {
+            const binding = self.bindings.get(name) orelse return false;
+            return binding.lexical;
+        }
+
+        /// Code in `node` may run now.
+        fn absorb(self: *TdzHazards, node: *const Node) CompileError!void {
+            for (try self.identifiers(node)) |name| {
+                if (std.mem.eql(u8, name, "eval")) self.all = true;
+                if (self.isLexical(name) and !self.declared.contains(name)) try self.hazards.put(self.arena, name, {});
+                try self.referenced.put(self.arena, name, {});
+                if (self.hoisted.get(name)) |function| try self.makeInvocable(function);
+            }
+        }
+
+        fn makeInvocable(self: *TdzHazards, first: *const ast.FunctionNode) CompileError!void {
+            var pending: std.ArrayListUnmanaged(*const ast.FunctionNode) = .empty;
+            try pending.append(self.arena, first);
+            while (pending.pop()) |function| {
+                const entry = try self.invocable.getOrPut(self.arena, function);
+                if (entry.found_existing) continue;
+                self.names_buffer.clearRetainingCapacity();
+                for (try functionIdentifiers(self.arena, self.state, function, self.floor)) |name| try self.keep(name);
+                for (try self.arena.dupe([]const u8, self.names_buffer.items)) |name| {
+                    if (std.mem.eql(u8, name, "eval")) self.all = true;
+                    try self.invocable_refs.put(self.arena, name, {});
+                    try self.referenced.put(self.arena, name, {});
+                    if (self.hoisted.get(name)) |callee| try pending.append(self.arena, callee);
+                }
+            }
+        }
+
+        fn hoist(self: *TdzHazards, node: *Node) CompileError!void {
+            const declaration = annex_b.functionDeclaration(node) orelse return;
+            const function = declaration.func_decl;
+            try self.hoisted.put(self.arena, function.name, function);
+            if (self.referenced.contains(function.name)) try self.makeInvocable(function);
+        }
+
+        fn declare(self: *TdzHazards, name: []const u8) CompileError!void {
+            if (self.invocable_refs.contains(name)) try self.hazards.put(self.arena, name, {});
+            try self.declared.put(self.arena, name, {});
+        }
+
+        fn declarePattern(self: *TdzHazards, pattern: *const Node) CompileError!void {
+            switch (pattern.*) {
+                .identifier => |name| try self.declare(name),
+                .obj_pattern => |object| {
+                    for (object.props) |property| try self.declarePattern(property.target);
+                    if (object.rest) |rest| try self.declarePattern(rest);
+                },
+                .arr_pattern => |array| {
+                    for (array.elems) |element| if (element.target) |target| try self.declarePattern(target);
+                    if (array.rest) |rest| try self.declarePattern(rest);
+                },
+                else => {},
+            }
+        }
+
+        /// Defaults and computed keys run during BindingInitialization.
+        fn absorbPatternEvaluation(self: *TdzHazards, pattern: *const Node) CompileError!void {
+            if (stack_scan.stackAddress() <= self.floor) return error.StackExhausted;
+            switch (pattern.*) {
+                .obj_pattern => |object| {
+                    for (object.props) |property| {
+                        if (property.key_expr) |key| try self.absorb(key);
+                        if (property.default) |default| try self.absorb(default);
+                        try self.absorbPatternEvaluation(property.target);
+                    }
+                    if (object.rest) |rest| try self.absorbPatternEvaluation(rest);
+                },
+                .arr_pattern => |array| {
+                    for (array.elems) |element| {
+                        if (element.default) |default| try self.absorb(default);
+                        if (element.target) |target| try self.absorbPatternEvaluation(target);
+                    }
+                    if (array.rest) |rest| try self.absorbPatternEvaluation(rest);
+                },
+                else => {},
+            }
+        }
+
+        fn scanList(self: *TdzHazards, stmts: []const *Node) CompileError!void {
+            for (stmts) |stmt| try self.hoist(stmt);
+            for (stmts) |stmt| try self.scan(stmt);
+        }
+
+        fn scan(self: *TdzHazards, node: *Node) CompileError!void {
+            if (stack_scan.stackAddress() <= self.floor) return error.StackExhausted;
+            switch (node.*) {
+                .var_decl => |declaration| {
+                    if (declaration.init) |init| try self.absorb(init);
+                    if (declaration.kind != .@"var") try self.declare(declaration.name);
+                },
+                .destructure_decl => |declaration| {
+                    try self.absorb(declaration.init);
+                    try self.absorbPatternEvaluation(declaration.pattern);
+                    if (declaration.kind != .@"var") try self.declarePattern(declaration.pattern);
+                },
+                // Hoisted by the enclosing list (or just below, for Annex B
+                // statement positions); its body counts once it is invocable.
+                .func_decl => try self.hoist(node),
+                .block => |stmts| try self.scanList(stmts),
+                .decl_group => |stmts| for (stmts) |stmt| try self.scan(stmt),
+                .if_stmt => |statement| {
+                    try self.absorb(statement.cond);
+                    try self.scan(statement.consequent);
+                    if (statement.alternate) |alternate| try self.scan(alternate);
+                },
+                .while_stmt => |statement| {
+                    try self.absorb(statement.cond);
+                    try self.scan(statement.body);
+                },
+                .do_while_stmt => |statement| {
+                    try self.scan(statement.body);
+                    try self.absorb(statement.cond);
+                },
+                .for_stmt => |statement| {
+                    if (statement.init) |init| switch (init.*) {
+                        .var_decl, .destructure_decl, .decl_group => try self.scan(init),
+                        else => try self.absorb(init),
+                    };
+                    if (statement.cond) |cond| try self.absorb(cond);
+                    if (statement.update) |update| try self.absorb(update);
+                    try self.scan(statement.body);
+                },
+                .for_in => |statement| {
+                    try self.absorb(statement.iterable);
+                    if (statement.var_init) |init| try self.absorb(init);
+                    if (statement.decl_kind) |kind| {
+                        try self.absorbPatternEvaluation(statement.target);
+                        if (kind != .@"var") try self.declarePattern(statement.target);
+                    } else try self.absorb(statement.target);
+                    try self.scan(statement.body);
+                },
+                .switch_stmt => |statement| {
+                    try self.absorb(statement.disc);
+                    for (statement.cases) |case| for (case.body) |body| try self.hoist(body);
+                    // A jump to a later clause skips the declarations of the
+                    // earlier ones: every clause-level lexical is a hazard.
+                    for (statement.cases) |case| for (case.body) |body| try self.markClauseLexicals(body);
+                    for (statement.cases) |case| {
+                        if (case.@"test") |test_node| try self.absorb(test_node);
+                        for (case.body) |body| try self.scan(body);
+                    }
+                },
+                .labeled_stmt => |statement| try self.scan(statement.body),
+                .with_stmt => |statement| {
+                    try self.absorb(statement.obj);
+                    try self.scan(statement.body);
+                },
+                .try_stmt => |statement| {
+                    try self.scan(statement.block);
+                    if (statement.catch_param) |param| {
+                        try self.absorbPatternEvaluation(param);
+                        try self.declarePattern(param);
+                    }
+                    if (statement.catch_block) |block| try self.scan(block);
+                    if (statement.finally_block) |block| try self.scan(block);
+                },
+                else => try self.absorb(node),
+            }
+        }
+
+        fn markClauseLexicals(self: *TdzHazards, node: *const Node) CompileError!void {
+            switch (node.*) {
+                .var_decl => |declaration| if (declaration.kind != .@"var") try self.hazards.put(self.arena, declaration.name, {}),
+                .destructure_decl => |declaration| if (declaration.kind != .@"var") try self.markPattern(declaration.pattern),
+                .decl_group => |declarations| for (declarations) |declaration| try self.markClauseLexicals(declaration),
+                else => {},
+            }
+        }
+
+        fn markPattern(self: *TdzHazards, pattern: *const Node) CompileError!void {
+            switch (pattern.*) {
+                .identifier => |name| try self.hazards.put(self.arena, name, {}),
+                .obj_pattern => |object| {
+                    for (object.props) |property| try self.markPattern(property.target);
+                    if (object.rest) |rest| try self.markPattern(rest);
+                },
+                .arr_pattern => |array| {
+                    for (array.elems) |element| if (element.target) |target| try self.markPattern(target);
+                    if (array.rest) |rest| try self.markPattern(rest);
+                },
+                else => {},
+            }
+        }
+    };
 
     pub const PlainFunctionCode = struct {
         chunk: *Chunk,
@@ -2574,10 +2725,10 @@ pub const Compiler = struct {
             return rejectPlainFunction(rejection, .generator_or_async);
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
-        // binding identity rather than spelling.
-        const tdz_checks = try functionNeedsTdzChecks(arena, hash_state, fnode, stack_floor);
+        // binding identity rather than spelling (see `functionTdzChecks`).
+        const tdz = try functionTdzChecks(arena, hash_state, fnode, stack_floor);
         const scope = try arena.create(FnScope);
-        scope.* = .{ .parent = null, .hash_state = hash_state, .names = .{ .state = hash_state }, .tdz_checks = tdz_checks };
+        scope.* = .{ .parent = null, .hash_state = hash_state, .names = .{ .state = hash_state }, .tdz_checks = tdz == .all, .tdz_names = tdz.names() };
         const parameter_layout = configurePlainParameters(arena, scope, fnode, stack_floor) catch |err| switch (err) {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
@@ -6954,7 +7105,7 @@ pub const Compiler = struct {
             self.environment_depth,
             self_environment_depth,
         ) catch return error.Unsupported;
-        const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, self.hash_state, fnode, self.stack_floor);
+        const tdz: TdzChecks = if (fnode.is_generator) .none else try functionTdzChecks(self.arena, self.hash_state, fnode, self.stack_floor);
         scope.* = .{
             .parent = self.scope,
             .parent_binding_phase = self.function_binding_phase,
@@ -6963,7 +7114,8 @@ pub const Compiler = struct {
             .parent_environment_depth = self.environment_depth,
             .parent_direct_eval_environment_depth = parent_direct_eval_environment_depth,
             .parent_with_depth = self.with_depth,
-            .tdz_checks = tdz_checks,
+            .tdz_checks = tdz == .all,
+            .tdz_names = tdz.names(),
         };
 
         var template_admission: bc.FnTemplateAdmission = undefined;
@@ -7897,7 +8049,7 @@ test "compiler checks hoisted function closure over later lexical TDZ" {
     try std.testing.expect(saw_captured_check);
 }
 
-test "compiler pending lexical query preserves TDZ classifications" {
+test "compiler TDZ hazards follow what can run before each initialization" {
     const cases = [_]struct { source: []const u8, hazardous: bool }{
         .{ .source = "function f(){ let value = 1; return value; }", .hazardous = false },
         .{ .source = "function f(){ unrelated; let value = 1; }", .hazardous = false },
@@ -7908,10 +8060,18 @@ test "compiler pending lexical query preserves TDZ classifications" {
         .{ .source = "function f(){ let [value = later] = []; let later = 1; }", .hazardous = true },
         .{ .source = "function f(){ let earlier = 1; let [value = earlier] = []; }", .hazardous = false },
         .{ .source = "function f(){ let { [later]: value } = {}; let later = 1; }", .hazardous = true },
-        .{ .source = "function f(){ function read(){ return value; } let value = 1; }", .hazardous = true },
         .{ .source = "function f(){ class Box { field = value; } let value = 1; }", .hazardous = true },
         .{ .source = "function f(){ class Box { static field = value; } let value = 1; }", .hazardous = true },
         .{ .source = "function f(){ let value = 1; class Box { field = value; } }", .hazardous = false },
+        // A hoisted function's reads count once code that may run names it.
+        .{ .source = "function f(){ function read(){ return value; } let value = 1; return read; }", .hazardous = false },
+        .{ .source = "function f(){ let value = 1; read(); function read(){ return value; } }", .hazardous = false },
+        .{ .source = "function f(){ read(); function read(){ return value; } let value = 1; }", .hazardous = true },
+        .{ .source = "function f(){ let value = read(); function read(){ return value; } }", .hazardous = true },
+        .{ .source = "function f(){ var g = read; let value = 1; function read(){ return value; } }", .hazardous = true },
+        .{ .source = "function f(){ helper(); function helper(){ read(); } function read(){ return value; } let value = 1; }", .hazardous = true },
+        .{ .source = "function f(){ [1].map(() => read()); function read(){ return value; } let value = 1; }", .hazardous = true },
+        .{ .source = "function f(x){ switch (x) { case 0: let v = 1; case 1: v; } }", .hazardous = true },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -7919,16 +8079,11 @@ test "compiler pending lexical query preserves TDZ classifications" {
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
         var hash_state = CompileHashState{ .context = .{ .seed = 0x5444_5a5f_5445_5354 } };
-        const binding_inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl, stack_scan.nestingStackFloor());
-        try std.testing.expectEqual(
-            case.hazardous,
-            try Compiler.functionHasTdzHazard(
-                arena.allocator(),
-                program.program[0].func_decl,
-                &binding_inventory.bindings,
-                stack_scan.nestingStackFloor(),
-            ),
-        );
+        const checks = try Compiler.functionTdzChecks(arena.allocator(), &hash_state, program.program[0].func_decl, stack_scan.nestingStackFloor());
+        std.testing.expectEqual(case.hazardous, checks != .none) catch |err| {
+            std.debug.print("source: {s}\n", .{case.source});
+            return err;
+        };
     }
 }
 
