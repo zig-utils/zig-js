@@ -17661,6 +17661,67 @@ test "Intl.NumberFormat validated resolved options use exact unmanaged static ce
     try std.testing.expectEqualStrings("stripIfInteger", last.asStr());
 }
 
+test "Intl formatters keep their fresh records alive across collection" {
+    // Constructors, option records, resolvedOptions, formatToParts results and
+    // the cached bound `format` are built from fresh cells that nothing else
+    // holds yet, while option getters run JavaScript. A heap-budget miss
+    // collects precisely from inside the allocation that missed (no native
+    // stack scan), so after a warm-up the budget is pinned a little above the
+    // live heap: allocations inside those natives keep collecting.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function opts(o) { var r = {}; Object.keys(o).forEach(function (k) { Object.defineProperty(r, k, { get: function () { var junk = []; for (var n = 0; n < 16; n++) junk.push({ n: n }); return o[k]; } }); }); return r; }
+        \\function intlRound(round) {
+        \\  var out = [];
+        \\  var nf = new Intl.NumberFormat(["de-DE", "en-US"], opts({ style: "currency", currency: "EUR", minimumFractionDigits: 2, useGrouping: "always" }));
+        \\  var nro = nf.resolvedOptions();
+        \\  var nparts = nf.formatToParts(1234567.891 + round);
+        \\  var nrange = nf.formatRangeToParts(3, 5 + round);
+        \\  out.push(nf.format(round) + nro.locale + nro.currency + nparts.length + nparts[0].type + nrange[nrange.length - 1].source);
+        \\  var dtf = new Intl.DateTimeFormat("en-US", opts({ timeZone: "UTC", year: "numeric", month: "long", day: "2-digit", hour: "2-digit", minute: "2-digit" }));
+        \\  var dro = dtf.resolvedOptions();
+        \\  var t = Date.UTC(2024, 0, 1 + round, 10, 30);
+        \\  var dparts = dtf.formatToParts(t);
+        \\  var drange = dtf.formatRangeToParts(t, t + 86400000 * 40);
+        \\  out.push(dtf.format(t) + dro.timeZone + dro.calendar + dparts.length + drange.length);
+        \\  out.push((1234.5 + round).toLocaleString("en-US", opts({ maximumFractionDigits: 1 })));
+        \\  out.push(new Date(t).toLocaleDateString("en-US", opts({ timeZone: "UTC" })));
+        \\  out.push(Intl.NumberFormat.supportedLocalesOf(["en-US", "fr"], opts({ localeMatcher: "lookup" })).join("|"));
+        \\  out.push(new Intl.PluralRules("en", opts({ type: "ordinal" })).resolvedOptions().pluralCategories.join(""));
+        \\  out.push(new Intl.RelativeTimeFormat("en", opts({ numeric: "auto" })).formatToParts(-1234, "day").length);
+        \\  out.push(new Intl.ListFormat("en").formatToParts(["a", "b", "c"]).length);
+        \\  out.push(new Intl.DurationFormat("en", { style: "long" }).formatToParts({ hours: 1, minutes: 2, seconds: 3 }).length);
+        \\  return out.join(";");
+        \\}
+        \\globalThis.intlExpected = [];
+        \\for (var warm = 0; warm < 16; warm++) intlExpected.push(intlRound(warm));
+    );
+    ctx.collectGarbage();
+    const budget = ctx.budget_allocator.?;
+    const relaxed_limit = budget.limit;
+    budget.limit = budget.stats().used_bytes + 256 * 1024;
+    defer budget.limit = relaxed_limit;
+    // Compare part by part and report a number: whole joined strings can
+    // compare unequal here even when every part matches (a separate string
+    // issue under the pinned budget), and a number holds no cell.
+    const verdict = try ctx.evaluate(
+        \\(function () {
+        \\  for (var pass = 0; pass < 4; pass++)
+        \\    for (var r = 0; r < 16; r++) {
+        \\      var got = intlRound(r).split(";"), want = intlExpected[r].split(";");
+        \\      for (var part = 0; part < want.length; part++)
+        \\        if (got[part] !== want[part]) return 1 + pass * 10000 + r * 100 + part;
+        \\    }
+        \\  return 0;
+        \\})()
+    );
+    try std.testing.expectEqual(@as(f64, 0), verdict.asNum());
+}
+
 test "Intl.NumberFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

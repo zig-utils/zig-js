@@ -15101,6 +15101,27 @@ pub const Interpreter = struct {
         }
     };
 
+    /// A new ordinary object filled in steps that each allocate (and may
+    /// collect, move or age it): it stays rooted while it is built, and every
+    /// stored value, often a string made just before the store, stays rooted
+    /// across the store's own slot growth.
+    const RootedObject = struct {
+        interpreter: *Interpreter,
+        root: usize,
+        object: Value,
+
+        fn set(self: RootedObject, name: []const u8, item: Value) EvalError!void {
+            const it = self.interpreter;
+            const item_root = try it.pushTempRoot(item);
+            defer it.restoreTempRoots(item_root);
+            try it.setProp(self.value().asObj(), name, it.tempRoot(item_root, item));
+        }
+
+        fn value(self: RootedObject) Value {
+            return self.interpreter.tempRoot(self.root, self.object);
+        }
+    };
+
     fn appendSplitSegment(self: *Interpreter, out: RootedArray, s: []const u8, cursor: *RxCursor, start: usize, end: usize) EvalError!void {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         try appendUtf16SliceFrom(&buf, self.arena, s, cursor, start, end);
@@ -15377,12 +15398,15 @@ pub const Interpreter = struct {
             if (std.math.isNan(t)) return Value.str("Invalid Date");
             const required: DtfRequired = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .any;
             const defaults: DtfDefaults = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .all;
-            const dtf = (try self.newObject()).asObj();
-            const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            const loc = localeListFirstOr(locs, "en");
+            const locs = try rootedLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            defer self.restoreTempRoots(locs.root);
+            const loc = localeListFirstOr(locs.object(), "en");
             const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), required, defaults);
-            try dtfStoreOptions(self, dtf, loc, r, false);
-            return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{Value.num(t)});
+            const dtf = try self.newObject();
+            const dtf_root = try self.pushTempRoot(dtf);
+            defer self.restoreTempRoots(dtf_root);
+            try dtfStoreOptions(self, self.tempRoot(dtf_root, dtf).asObj(), loc, r, false);
+            return try intlDateTimeFormatFn(@ptrCast(self), self.tempRoot(dtf_root, dtf), &.{Value.num(t)});
         }
         if (eq(name, "setTime")) {
             var nt = try self.toNumberV(arg0(args));
@@ -21364,12 +21388,17 @@ pub const Interpreter = struct {
         // Number.prototype.toLocaleString(locales, options) ===
         // new Intl.NumberFormat(locales, options).format(this).
         if (eq(name, "toLocaleString")) {
-            const o = (try self.newObject()).asObj();
-            const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            const loc = localeListFirstOr(locs, "en");
-            const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
-            try installNumberFormatData(self, o, loc, ro);
-            return try intlNumberFormatFn(@ptrCast(self), Value.obj(o), &.{Value.num(n)});
+            const locs = try rootedLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            defer self.restoreTempRoots(locs.root);
+            const loc = localeListFirstOr(locs.object(), "en");
+            const ro = Value.obj(try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef()));
+            const ro_root = try self.pushTempRoot(ro);
+            defer self.restoreTempRoots(ro_root);
+            const formatter = try self.newObject();
+            const formatter_root = try self.pushTempRoot(formatter);
+            defer self.restoreTempRoots(formatter_root);
+            try installNumberFormatData(self, self.tempRoot(formatter_root, formatter).asObj(), loc, self.tempRoot(ro_root, ro).asObj());
+            return try intlNumberFormatFn(@ptrCast(self), self.tempRoot(formatter_root, formatter), &.{Value.num(n)});
         }
         if (eq(name, "toString")) {
             var radix: usize = 10;
@@ -26628,10 +26657,13 @@ fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "'this' value must be a BigInt or BigIntObject");
-    const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-    const loc = localeListFirstOr(locs, "en");
-    const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
-    const data = try nfResolvedData(self, loc, ro);
+    const locs = try rootedLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+    defer self.restoreTempRoots(locs.root);
+    const loc = localeListFirstOr(locs.object(), "en");
+    const ro = Value.obj(try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef()));
+    const ro_root = try self.pushTempRoot(ro);
+    defer self.restoreTempRoots(ro_root);
+    const data = try nfResolvedData(self, loc, self.tempRoot(ro_root, ro).asObj());
     var output = NfOutput{ .mode = .text };
     try nfBuildOutputResolved(self, Value.obj(big), &data, &output, null);
     return try Value.strOwned(self.arena, try output.text.toOwnedSlice(self.arena));
@@ -31519,8 +31551,14 @@ const CanonicalLocaleScratchIndex = struct {
 /// linear path. Wider lists promote once to a securely seeded native content
 /// index; exact canonical bytes remain authoritative under hash collisions.
 fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object {
-    const arr = (try self.newArray()).asObj();
-    if (v.isUndefined()) return arr;
+    // Element reads can run JavaScript (getters, Proxy traps, toString) that
+    // collects and moves cells: the result list and a boxed input stay rooted
+    // and are re-read after each step. The caller roots the result.
+    const list = try self.newArray();
+    const list_root = try self.pushTempRoot(list);
+    defer self.restoreTempRoots(list_root);
+    const out = Interpreter.RootedArray{ .interpreter = self, .root = list_root, .array = list };
+    if (v.isUndefined()) return out.value().asObj();
     const scratch = gc_mod.temporaryAllocator(self.arena);
     // A string or a single Intl.Locale is wrapped as a one-element list (its
     // [[Locale]] slot is used; toString is not observed).
@@ -31532,13 +31570,15 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         var canonical_arena = std.heap.ArenaAllocator.init(scratch);
         defer canonical_arena.deinit();
         const c = try canonicalizeLocaleTagForIntlNaming(self, canonical_arena.allocator(), s, true);
-        try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
-        return arr;
+        try out.append(try Value.strAlloc(self.arena, c));
+        return out.value().asObj();
     }
     // Anything else (incl. a primitive) is ToObject'd (null/undefined excluded
     // above; a Symbol/BigInt/number/boolean becomes a wrapper, length 0).
-    const ov: Value = Value.obj(try self.toObject(v));
-    const len = toLen((try self.toNumberV(try self.getProperty(ov, "length"))));
+    const boxed: Value = Value.obj(try self.toObject(v));
+    const boxed_root = try self.pushTempRoot(boxed);
+    defer self.restoreTempRoots(boxed_root);
+    const len = toLen((try self.toNumberV(try self.getProperty(self.tempRoot(boxed_root, boxed), "length"))));
     // The map and its key copies share one invocation arena so all native index
     // storage is released together on success, invalid input, a user throw, or
     // OOM. Key copies cannot be invalidated by a moving GC triggered from a
@@ -31558,9 +31598,9 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         // avoids publishing invocation scratch into realm ownership.
         var key_storage: [32]u8 = undefined;
         const key = std.fmt.bufPrint(&key_storage, "{d}", .{i}) catch unreachable;
-        try self.checkRestricted(ov.asObj());
-        if (!try self.hasPropertyResult(ov.asObj(), key)) continue;
-        const ev = try self.getProperty(ov, key);
+        try self.checkRestricted(self.tempRoot(boxed_root, boxed).asObj());
+        if (!try self.hasPropertyResult(self.tempRoot(boxed_root, boxed).asObj(), key)) continue;
+        const ev = try self.getProperty(self.tempRoot(boxed_root, boxed), key);
         if (!ev.isString() and !ev.isObject()) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
         // toString must not be observed).
@@ -31570,17 +31610,17 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         var duplicate = if (locale_index) |*index|
             index.contains(c)
         else
-            localeListContains(arr, c);
+            localeListContains(out.value().asObj(), c);
 
         // Promote immediately before the ninth unique result. Pre-sizing the
         // invocation-local table makes publication failure-atomic: no output
         // append occurs unless every existing first occurrence is indexed.
-        if (!duplicate and locale_index == null and arr.elementsLen() == canonical_locale_index_threshold) {
+        if (!duplicate and locale_index == null and out.len() == canonical_locale_index_threshold) {
             const ctx = CanonicalLocaleHashContext{ .seed = try self.newSecureHashSeed() };
             locale_index = CanonicalLocaleScratchIndex.init(scratch, ctx);
             const index = &locale_index.?;
-            try index.ensureTotalCapacity(arr.elementsLen() + 1);
-            for (arr.elementsItems()) |locale| {
+            try index.ensureTotalCapacity(out.len() + 1);
+            for (out.value().asObj().elementsItems()) |locale| {
                 if (!locale.isString()) continue;
                 const inserted = try index.put(locale.asStr());
                 std.debug.assert(inserted);
@@ -31593,10 +31633,10 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
                 const inserted = try index.put(c);
                 std.debug.assert(inserted);
             }
-            try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
+            try out.append(try Value.strAlloc(self.arena, c));
         }
     }
-    return arr;
+    return out.value().asObj();
 }
 
 fn localeListContains(locs: *const value.Object, tag: []const u8) bool {
@@ -31612,6 +31652,24 @@ fn localeListContains(locs: *const value.Object, tag: []const u8) bool {
 fn localeListFirstOr(locs: *const value.Object, fallback: []const u8) []const u8 {
     const v = locs.elementAt(0) orelse return fallback;
     return if (v.isString()) v.asStr() else fallback;
+}
+
+/// `canonicalizeLocaleList`, with the list left rooted: the locale tags a
+/// caller picks from it borrow its strings while later steps allocate and run
+/// JavaScript. Release with `self.restoreTempRoots(list.root)`.
+const RootedLocaleList = struct {
+    interpreter: *Interpreter,
+    root: usize,
+    list: Value,
+
+    fn object(self: RootedLocaleList) *value.Object {
+        return self.interpreter.tempRoot(self.root, self.list).asObj();
+    }
+};
+
+fn rootedLocaleList(self: *Interpreter, locales: Value) EvalError!RootedLocaleList {
+    const list = Value.obj(try canonicalizeLocaleList(self, locales));
+    return .{ .interpreter = self, .root = try self.pushTempRoot(list), .list = list };
 }
 
 fn localeListFirstSupportedOr(locs: *const value.Object, fallback: []const u8) []const u8 {
@@ -32811,85 +32869,93 @@ fn isWellFormedUnitIdentifier(u: []const u8) bool {
 /// values, which both `format` and `resolvedOptions` read (so user getters fire
 /// exactly once and bad values throw at construction).
 fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
-    const ro = (try self.newObject()).asObj();
-    ro.setProtoAtomic(null); // an internal record — not affected by Object.prototype
+    // The record and a boxed options object are published nowhere else while
+    // option getters run JavaScript and every store allocates: keep both
+    // rooted and re-read them after each step. The caller roots the result.
+    const record = try self.newObject();
+    record.asObj().setProtoAtomic(null); // an internal record — not affected by Object.prototype
+    const record_root = try self.pushTempRoot(record);
+    defer self.restoreTempRoots(record_root);
+    const ro = Interpreter.RootedObject{ .interpreter = self, .root = record_root, .object = record };
     // CoerceOptionsToObject: undefined → none; null → TypeError; primitive → boxed.
-    if (raw_in.isUndefined()) return ro;
-    const raw: Value = Value.obj(try self.toObject(raw_in));
+    if (raw_in.isUndefined()) return ro.value().asObj();
+    const raw_value: Value = Value.obj(try self.toObject(raw_in));
+    const raw_root = try self.pushTempRoot(raw_value);
+    defer self.restoreTempRoots(raw_root);
 
     const H = struct {
         // GetOption(string) with an allowed set; stores the canonical value when
         // present (RangeError otherwise). Returns the value or null.
-        fn str(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
+        fn str(s: *Interpreter, opts: Value, dst: Interpreter.RootedObject, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return null;
             const sval = try s.toStringWtf8(v);
             for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
-                try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
+                try dst.set(name, try Value.strAlloc(s.arena, a));
                 return a;
             };
             return intlBadOptionValue(s, name, allowed, true);
         }
         // GetNumberOption in [lo, hi]; stores the integer value when present.
-        fn num(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, lo: f64, hi: f64) EvalError!void {
+        fn num(s: *Interpreter, opts: Value, dst: Interpreter.RootedObject, name: []const u8, lo: f64, hi: f64) EvalError!void {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return;
             const n = @trunc(try s.toNumberV(v));
             if (std.math.isNan(n) or n < lo or n > hi) return s.throwErrorFmt("RangeError", "{s} is out of range", .{name});
-            try s.setProp(dst, name, Value.num(n));
+            try dst.set(name, Value.num(n));
         }
     };
 
     // localeMatcher: validated against the allowed set, but not retained.
     {
-        const lm = try self.getProperty(raw, "localeMatcher");
+        const lm = try self.getProperty(self.tempRoot(raw_root, raw_value), "localeMatcher");
         if (!lm.isUndefined()) {
             const s = try self.toStringWtf8(lm);
             if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
         }
     }
-    const nsv = try self.getProperty(raw, "numberingSystem");
+    const nsv = try self.getProperty(self.tempRoot(raw_root, raw_value), "numberingSystem");
     if (!nsv.isUndefined()) {
         const ns = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(nsv));
         if (!dtfWellFormedType(ns)) return self.throwError("RangeError", "numberingSystem is not a well-formed numbering system value");
-        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
+        try ro.set("numberingSystem", try Value.strAlloc(self.arena, ns));
     }
     // SetNumberFormatUnitOptions: style, then currency*/unit* (all read).
-    const style = (try H.str(self, raw, ro, "style", &.{ "decimal", "percent", "currency", "unit" })) orelse "decimal";
-    const cv = try self.getProperty(raw, "currency");
+    const style = (try H.str(self, self.tempRoot(raw_root, raw_value), ro, "style", &.{ "decimal", "percent", "currency", "unit" })) orelse "decimal";
+    const cv = try self.getProperty(self.tempRoot(raw_root, raw_value), "currency");
     const cur_code: ?[]const u8 = if (cv.isUndefined()) null else try self.toStringWtf8(cv);
     // A present currency is validated regardless of style (IsWellFormedCurrencyCode
     // = exactly three ASCII letters).
     if (cur_code) |code| {
         if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) return self.throwError("RangeError", "currency is not a well-formed currency code");
     }
-    const cdisp = try H.str(self, raw, ro, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
-    const csign = try H.str(self, raw, ro, "currencySign", &.{ "standard", "accounting" });
-    const uv = try self.getProperty(raw, "unit");
+    const cdisp = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
+    const csign = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "currencySign", &.{ "standard", "accounting" });
+    const uv = try self.getProperty(self.tempRoot(raw_root, raw_value), "unit");
     const unit: ?[]const u8 = if (uv.isUndefined()) null else try self.toStringWtf8(uv);
-    const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "narrow", "long" });
+    const udisp = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "unitDisplay", &.{ "short", "narrow", "long" });
     // A missing currency under style:"currency" is a TypeError (takes precedence
     // over the unit check); a present-but-malformed unit is a RangeError for any
     // style.
     if (std.mem.eql(u8, style, "currency") and cur_code == null) return self.throwError("TypeError", "currency must be a string");
     if (unit) |u| if (!isWellFormedUnitIdentifier(u)) return self.throwError("RangeError", "unit is not a well-formed unit identifier");
     if (std.mem.eql(u8, style, "currency")) {
-        try self.setProp(ro, "currency", try Value.strOwned(self.arena, try std.ascii.allocUpperString(self.arena, cur_code.?)));
-        if (cdisp == null) try self.setProp(ro, "currencyDisplay", Value.str("symbol"));
-        if (csign == null) try self.setProp(ro, "currencySign", Value.str("standard"));
+        try ro.set("currency", try Value.strOwned(self.arena, try std.ascii.allocUpperString(self.arena, cur_code.?)));
+        if (cdisp == null) try ro.set("currencyDisplay", Value.str("symbol"));
+        if (csign == null) try ro.set("currencySign", Value.str("standard"));
     } else if (std.mem.eql(u8, style, "unit")) {
         if (unit == null) return self.throwError("TypeError", "unit must be a string");
-        try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit.?));
-        if (udisp == null) try self.setProp(ro, "unitDisplay", Value.str("short"));
+        try ro.set("unit", try Value.strAlloc(self.arena, unit.?));
+        if (udisp == null) try ro.set("unitDisplay", Value.str("short"));
     }
     // notation, then SetNumberFormatDigitOptions, then compactDisplay/useGrouping/signDisplay.
-    _ = try H.str(self, raw, ro, "notation", &.{ "standard", "scientific", "engineering", "compact" });
-    try H.num(self, raw, ro, "minimumIntegerDigits", 1, 21);
-    try H.num(self, raw, ro, "minimumFractionDigits", 0, 100);
-    try H.num(self, raw, ro, "maximumFractionDigits", 0, 100);
-    try H.num(self, raw, ro, "minimumSignificantDigits", 1, 21);
-    try H.num(self, raw, ro, "maximumSignificantDigits", 1, 21);
-    const riv = try self.getProperty(raw, "roundingIncrement");
+    _ = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "notation", &.{ "standard", "scientific", "engineering", "compact" });
+    try H.num(self, self.tempRoot(raw_root, raw_value), ro, "minimumIntegerDigits", 1, 21);
+    try H.num(self, self.tempRoot(raw_root, raw_value), ro, "minimumFractionDigits", 0, 100);
+    try H.num(self, self.tempRoot(raw_root, raw_value), ro, "maximumFractionDigits", 0, 100);
+    try H.num(self, self.tempRoot(raw_root, raw_value), ro, "minimumSignificantDigits", 1, 21);
+    try H.num(self, self.tempRoot(raw_root, raw_value), ro, "maximumSignificantDigits", 1, 21);
+    const riv = try self.getProperty(self.tempRoot(raw_root, raw_value), "roundingIncrement");
     if (!riv.isUndefined()) {
         // The exact value (not truncated) must be one of the sanctioned
         // increments, so 5000.1 is rejected even though trunc(5000.1)=5000.
@@ -32905,49 +32971,49 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
         // significant digits or a non-auto roundingPriority is a TypeError, and the
         // resolved min/max fraction digits must be equal (RangeError otherwise).
         if (n != 1) {
-            const has_sd = ro.getOwn("minimumSignificantDigits") != null or ro.getOwn("maximumSignificantDigits") != null;
+            const has_sd = ro.value().asObj().getOwn("minimumSignificantDigits") != null or ro.value().asObj().getOwn("maximumSignificantDigits") != null;
             if (has_sd) return self.throwError("TypeError", "roundingIncrement is incompatible with significant-digits options");
-            const has_fd = ro.getOwn("minimumFractionDigits") != null or ro.getOwn("maximumFractionDigits") != null;
-            const rp = try self.getProperty(raw, "roundingPriority");
+            const has_fd = ro.value().asObj().getOwn("minimumFractionDigits") != null or ro.value().asObj().getOwn("maximumFractionDigits") != null;
+            const rp = try self.getProperty(self.tempRoot(raw_root, raw_value), "roundingPriority");
             if (!rp.isUndefined()) {
                 const rps = try self.toStringWtf8(rp);
                 if (std.mem.eql(u8, rps, "morePrecision") or std.mem.eql(u8, rps, "lessPrecision"))
                     return self.throwError("TypeError", "roundingIncrement is incompatible with roundingPriority");
             }
-            const resolved_notation = ro.getOwn("notation") orelse Value.str("standard");
+            const resolved_notation = ro.value().asObj().getOwn("notation") orelse Value.str("standard");
             if (!has_fd and resolved_notation.isString() and std.mem.eql(u8, resolved_notation.asStr(), "compact"))
                 return self.throwError("TypeError", "roundingIncrement is incompatible with compact default precision");
-            const mnf = ro.getOwn("minimumFractionDigits");
-            const mxf = ro.getOwn("maximumFractionDigits");
+            const mnf = ro.value().asObj().getOwn("minimumFractionDigits");
+            const mxf = ro.value().asObj().getOwn("maximumFractionDigits");
             if (mnf != null and mxf != null and mnf.?.asNum() != mxf.?.asNum())
                 return self.throwError("RangeError", "roundingIncrement requires equal min/max fraction digits");
         }
-        try self.setProp(ro, "roundingIncrement", Value.num(n));
+        try ro.set("roundingIncrement", Value.num(n));
     }
-    _ = try H.str(self, raw, ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
-    _ = try H.str(self, raw, ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
-    _ = try H.str(self, raw, ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
-    _ = try H.str(self, raw, ro, "compactDisplay", &.{ "short", "long" });
+    _ = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
+    _ = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
+    _ = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
+    _ = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "compactDisplay", &.{ "short", "long" });
     // GetBooleanOrStringNumberFormatOption: true -> "always"; a falsy value ->
     // false; otherwise a string in {min2,auto,always} is kept, any other string
     // falls back to the default ("auto", left unset) rather than throwing.
-    const ug = try self.getProperty(raw, "useGrouping");
+    const ug = try self.getProperty(self.tempRoot(raw_root, raw_value), "useGrouping");
     if (!ug.isUndefined()) {
         if (ug.isBoolean() and ug.asBool()) {
-            try self.setProp(ro, "useGrouping", Value.str("always"));
+            try ro.set("useGrouping", Value.str("always"));
         } else if (!ug.toBoolean()) {
-            try self.setProp(ro, "useGrouping", Value.boolVal(false));
+            try ro.set("useGrouping", Value.boolVal(false));
         } else {
             const s = try self.toStringWtf8(ug);
             if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false")) {
                 // The strings "true"/"false" fall back to the default ("auto").
             } else if (std.mem.eql(u8, s, "min2") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "always")) {
-                try self.setProp(ro, "useGrouping", try Value.strAlloc(self.arena, s));
+                try ro.set("useGrouping", try Value.strAlloc(self.arena, s));
             } else return self.throwError("RangeError", "useGrouping must be either true, false, \"min2\", \"auto\", or \"always\"");
         }
     }
-    _ = try H.str(self, raw, ro, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
-    return ro;
+    _ = try H.str(self, self.tempRoot(raw_root, raw_value), ro, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
+    return ro.value().asObj();
 }
 
 fn nfStaticOptionName(name: []const u8) []const u8 {
@@ -33103,26 +33169,31 @@ fn numberFormatDataFor(self: *Interpreter, formatter: *value.Object) EvalError!*
 /// stores the normalized values; throwing getters propagate because every option
 /// is read.
 fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
-    const ro = (try self.newObject()).asObj();
-    if (raw.isUndefined()) return ro;
+    // Option getters run JavaScript and every store allocates: keep the
+    // record rooted and re-read it. The caller roots the result.
+    const record = try self.newObject();
+    const record_root = try self.pushTempRoot(record);
+    defer self.restoreTempRoots(record_root);
+    const ro = Interpreter.RootedObject{ .interpreter = self, .root = record_root, .object = record };
+    if (raw.isUndefined()) return ro.value().asObj();
     if (!raw.isObject()) return self.throwError("TypeError", "options must be an object");
     const H = struct {
-        fn str(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
+        fn str(s: *Interpreter, opts: Value, dst: Interpreter.RootedObject, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return null;
             const sval = try s.toStringWtf8(v);
             for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
-                try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
+                try dst.set(name, try Value.strAlloc(s.arena, a));
                 return a;
             };
             return intlBadOptionValue(s, name, allowed, false);
         }
-        fn num(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, lo: f64, hi: f64) EvalError!void {
+        fn num(s: *Interpreter, opts: Value, dst: Interpreter.RootedObject, name: []const u8, lo: f64, hi: f64) EvalError!void {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return;
             const n = @trunc(try s.toNumberV(v));
             if (std.math.isNan(n) or n < lo or n > hi) return s.throwErrorFmt("RangeError", "{s} is out of range", .{name});
-            try s.setProp(dst, name, Value.num(n));
+            try dst.set(name, Value.num(n));
         }
     };
     _ = try H.str(self, raw, ro, "localeMatcher", &.{ "lookup", "best fit" }); // validate, then discard
@@ -33164,12 +33235,12 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
             if (!mnf.isUndefined() and !mxf.isUndefined() and try self.toNumberV(mnf) != try self.toNumberV(mxf))
                 return self.throwError("RangeError", "roundingIncrement requires equal min/max fraction digits");
         }
-        try self.setProp(ro, "roundingIncrement", Value.num(n));
+        try ro.set("roundingIncrement", Value.num(n));
     }
     _ = try H.str(self, raw, ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
     _ = try H.str(self, raw, ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
     _ = try H.str(self, raw, ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
-    return ro;
+    return ro.value().asObj();
 }
 
 /// The ten Intl.DurationFormat units, in resolvedOptions / format order.
@@ -33278,10 +33349,13 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             // the receiver via %Intl%.[[FallbackSymbol]] and the receiver is
             // returned (ChainNumberFormat / ChainDateTimeFormat / ChainCollator).
             var chain_this: ?*value.Object = null;
-            const o = blk: {
+            const instance_obj = blk: {
                 if (self.new_target.isObject()) {
+                    // Reading the prototype can run JavaScript; make the
+                    // instance afterwards so nothing unrooted spans it.
+                    const proto = try self.ctorRealmProto(self.new_target.asObj(), service);
                     const oo = (try self.newObject()).asObj();
-                    oo.setProtoAtomic(try self.ctorRealmProto(self.new_target.asObj(), service));
+                    oo.setProtoAtomic(proto);
                     break :blk oo;
                 }
                 if (!can_call) return self.throwError("TypeError", "Constructor Intl." ++ service ++ " requires 'new'");
@@ -33309,8 +33383,17 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 };
                 break :blk oo;
             };
+            // Locale and option processing below runs JavaScript and allocates:
+            // the instance, the locale list (which `resolved` borrows from)
+            // and each options record stay rooted until the instance returns.
+            const instance = Value.obj(instance_obj);
+            const instance_root = try self.pushTempRoot(instance);
+            defer self.restoreTempRoots(instance_root);
             // Resolve the locale (first supported requested, else "en").
-            const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            const locs_obj = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            const locs_root = try self.pushTempRoot(Value.obj(locs_obj));
+            defer self.restoreTempRoots(locs_root);
+            const locs = self.tempRoot(locs_root, Value.obj(locs_obj)).asObj();
             const resolved = if (comptime std.mem.eql(u8, service, "DisplayNames"))
                 localeListFirstDisplayNamesOr(locs, "en")
             else
@@ -33321,17 +33404,21 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const r = try dtfProcessOptions(self, raw);
-                try dtfStoreOptions(self, o, resolved, r, false);
+                try dtfStoreOptions(self, self.tempRoot(instance_root, instance).asObj(), resolved, r, false);
             } else if (comptime std.mem.eql(u8, service, "NumberFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
-                const ro = try nfProcessOptions(self, raw);
-                try installNumberFormatData(self, o, resolved, ro);
+                const ro = Value.obj(try nfProcessOptions(self, raw));
+                const ro_root = try self.pushTempRoot(ro);
+                defer self.restoreTempRoots(ro_root);
+                try installNumberFormatData(self, self.tempRoot(instance_root, instance).asObj(), resolved, self.tempRoot(ro_root, ro).asObj());
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 // Read every observable option in InitializeRelativeTimeFormat
                 // order, then publish one immutable native record.
                 const raw_arg = if (args.len > 1) args[1] else Value.undef();
                 // RelativeTimeFormat uses CoerceOptionsToObject (primitive -> boxed).
                 const raw: Value = if (raw_arg.isUndefined()) Value.undef() else Value.obj(try self.toObject(raw_arg));
+                const raw_root = try self.pushTempRoot(raw);
+                defer self.restoreTempRoots(raw_root);
                 var numbering_system: ?[]const u8 = null;
                 var style: []const u8 = "long";
                 var numeric: []const u8 = "always";
@@ -33341,7 +33428,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     style = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, "long")).?;
                     numeric = (try dtfGetStr(self, raw, "numeric", &.{ "always", "auto" }, "always")).?;
                 }
-                try installRelativeTimeFormatData(self, o, resolved, numbering_system, style, numeric);
+                try installRelativeTimeFormatData(self, self.tempRoot(instance_root, instance).asObj(), resolved, numbering_system, style, numeric);
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 // Validate in InitializeListFormat order, then publish one
                 // immutable record after every observable option read.
@@ -33356,7 +33443,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     kind = (try dtfGetStr(self, raw, "type", &.{ "conjunction", "disjunction", "unit" }, "conjunction")).?;
                     style = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, "long")).?;
                 }
-                try installListFormatData(self, o, resolved, kind, style);
+                try installListFormatData(self, self.tempRoot(instance_root, instance).asObj(), resolved, kind, style);
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // options is required; `type` is required. Read in spec order.
                 const raw = if (args.len > 1) args[1] else Value.undef();
@@ -33367,7 +33454,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 if (typ == null) return self.throwError("TypeError", "type must not be undefined");
                 const fallback = (try dtfGetStr(self, raw, "fallback", &.{ "code", "none" }, "code")).?;
                 const ld = (try dtfGetStr(self, raw, "languageDisplay", &.{ "dialect", "standard" }, "dialect")).?;
-                try installDisplayNamesData(self, o, resolved, style, typ.?, fallback, ld);
+                try installDisplayNamesData(self, self.tempRoot(instance_root, instance).asObj(), resolved, style, typ.?, fallback, ld);
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
@@ -33378,36 +33465,41 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
                     granularity = (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, "grapheme")).?;
                 }
-                try installSegmenterData(self, o, resolved, granularity);
+                try installSegmenterData(self, self.tempRoot(instance_root, instance).asObj(), resolved, granularity);
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
-                const ro = (try self.newObject()).asObj();
+                const collator_options = try self.newObject();
+                const collator_options_root = try self.pushTempRoot(collator_options);
+                defer self.restoreTempRoots(collator_options_root);
+                const ro = Interpreter.RootedObject{ .interpreter = self, .root = collator_options_root, .object = collator_options };
                 if (raw.isObject()) {
-                    if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| try self.setProp(ro, "usage", try Value.strAlloc(self.arena, u));
+                    if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| try ro.set("usage", try Value.strAlloc(self.arena, u));
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
                     // collation: a well-formed Unicode collation type, else RangeError.
                     const cov = try self.getProperty(raw, "collation");
                     if (!cov.isUndefined()) {
                         const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(cov));
                         if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "collation is not a well-formed collation value");
-                        try self.setProp(ro, "collation", try Value.strAlloc(self.arena, cstr));
+                        try ro.set("collation", try Value.strAlloc(self.arena, cstr));
                     }
                     const num = try self.getProperty(raw, "numeric");
-                    if (!num.isUndefined()) try self.setProp(ro, "numeric", Value.boolVal(num.toBoolean()));
-                    if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| try self.setProp(ro, "caseFirst", try Value.strAlloc(self.arena, cf));
-                    if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |se| try self.setProp(ro, "sensitivity", try Value.strAlloc(self.arena, se));
+                    if (!num.isUndefined()) try ro.set("numeric", Value.boolVal(num.toBoolean()));
+                    if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| try ro.set("caseFirst", try Value.strAlloc(self.arena, cf));
+                    if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |se| try ro.set("sensitivity", try Value.strAlloc(self.arena, se));
                     const ip = try self.getProperty(raw, "ignorePunctuation");
-                    if (!ip.isUndefined()) try self.setProp(ro, "ignorePunctuation", Value.boolVal(ip.toBoolean()));
+                    if (!ip.isUndefined()) try ro.set("ignorePunctuation", Value.boolVal(ip.toBoolean()));
                 }
-                try installCollatorData(self, o, resolved, ro);
+                try installCollatorData(self, self.tempRoot(instance_root, instance).asObj(), resolved, ro.value().asObj());
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const options = try durationFormatProcessOptions(self, raw);
-                try installDurationFormatData(self, o, resolved, &options);
+                try installDurationFormatData(self, self.tempRoot(instance_root, instance).asObj(), resolved, &options);
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
-                const ro = try prProcessOptions(self, raw);
-                try installPluralRulesData(self, o, resolved, ro);
+                const ro = Value.obj(try prProcessOptions(self, raw));
+                const ro_root = try self.pushTempRoot(ro);
+                defer self.restoreTempRoots(ro_root);
+                try installPluralRulesData(self, self.tempRoot(instance_root, instance).asObj(), resolved, self.tempRoot(ro_root, ro).asObj());
             }
             if (chain_this) |ct| {
                 // DefinePropertyOrThrow(this, [[FallbackSymbol]], { value: o,
@@ -33417,12 +33509,12 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     // Register the symbol so keyToValue recovers it (with its
                     // description) for getOwnPropertySymbols.
                     try self.cacheSymbol(fs.asObj().symbolKey(), fs.asObj());
-                    try ct.setOwn(self.arena, self.root_shape, fs.asObj().symbolKey(), Value.obj(o));
+                    try ct.setOwn(self.arena, self.root_shape, fs.asObj().symbolKey(), self.tempRoot(instance_root, instance));
                     try ct.setAttr(self.arena, fs.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = false });
                 };
                 return Value.obj(ct);
             }
-            return Value.obj(o);
+            return self.tempRoot(instance_root, instance);
         }
     }.call;
 }
@@ -34151,20 +34243,53 @@ fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     return try Value.strOwned(self.arena, try dtfBuildText(self, this, args));
 }
 
+/// A new rooted array for an Intl `formatToParts`-style result.
+fn newIntlPartsArray(self: *Interpreter) EvalError!Interpreter.RootedArray {
+    const array = try self.newArray();
+    return .{ .interpreter = self, .root = try self.pushTempRoot(array), .array = array };
+}
+
+/// One part field's value, made only once the record holding it is rooted:
+/// a static Value, a byte slice to copy, or a DateTimeFormat part.
+fn intlPartValue(self: *Interpreter, field: anytype) EvalError!Value {
+    const T = @TypeOf(field);
+    if (T == Value) return field;
+    if (T == DtfPart) return field.materialize(self.arena);
+    return Value.strAlloc(self.arena, field);
+}
+
+/// Append `{ type, value[, extra_name: extra] }` to a parts array. Every
+/// allocation here can collect under heap pressure, so the record is rooted
+/// before its value strings are made and each string stays rooted across its
+/// store (`Interpreter.RootedObject`).
+fn appendIntlPart(
+    self: *Interpreter,
+    out: Interpreter.RootedArray,
+    typ: Value,
+    part_value: anytype,
+    comptime extra_name: ?[]const u8,
+    extra: anytype,
+) EvalError!void {
+    const record = try self.newObject();
+    const record_root = try self.pushTempRoot(record);
+    defer self.restoreTempRoots(record_root);
+    const part = Interpreter.RootedObject{ .interpreter = self, .root = record_root, .object = record };
+    try part.set("type", typ);
+    try part.set("value", try intlPartValue(self, part_value));
+    if (extra_name) |name| try part.set(name, try intlPartValue(self, extra));
+    try out.append(part.value());
+}
+
 fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatToParts on incompatible receiver");
     var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
     defer scratch.deinit();
     const parts = try dtfBuildParts(self, this, args, scratch.allocator());
-    const arr = (try self.newArray()).asObj();
-    for (parts.items()) |p| {
-        const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", p.typ.value());
-        try self.setProp(o, "value", try p.materialize(self.arena));
-        try arr.appendElement(self.arena, Value.obj(o));
-    }
-    return Value.obj(arr);
+    const out = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(out.root);
+    for (parts.items()) |p| try appendIntlPart(self, out, p.typ.value(), p, null, {});
+    return out.value();
 }
 
 /// Range separator shared by DateTimeFormat formatRange/formatRangeToParts.
@@ -34334,76 +34459,50 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const yp = if (dtfFormattableSame(start, end)) xp else try dtfBuildParts(self, this, &.{end}, scratch.allocator());
     const xparts = xp.items();
     const yparts = yp.items();
-    const arr = (try self.newArray()).asObj();
+    const arr = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(arr.root);
     const emit = struct {
-        fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: IntlRangeSource) value.HostError!void {
-            const o = (try s.newObject()).asObj();
-            try s.setProp(o, "type", p.typ.value());
-            try s.setProp(o, "value", try p.materialize(s.arena));
-            try s.setProp(o, "source", src.value());
-            try a.appendElement(s.arena, Value.obj(o));
-        }
-        fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: IntlRangeSource) value.HostError!void {
-            for (prts) |p| try part(s, a, p, src);
+        fn one(s: *Interpreter, a: Interpreter.RootedArray, prts: []const DtfPart, src: IntlRangeSource) value.HostError!void {
+            for (prts) |p| try appendIntlPart(s, a, p.typ.value(), p, "source", src.value());
         }
     }.one;
     if (dtfPartsSameValues(xparts, yparts)) {
         try emit(self, arr, xparts, .shared);
-        return Value.obj(arr);
+        return arr.value();
     }
     if (dtfIsTextualDateOnly(xparts) and dtfIsTextualDateOnly(yparts) and std.mem.eql(u8, xparts[4].value, yparts[4].value)) {
         if (std.mem.eql(u8, xparts[0].value, yparts[0].value)) {
             try emit(self, arr, xparts[0..2], .shared);
             try emit(self, arr, xparts[2..3], .start_range);
-            const lo = (try self.newObject()).asObj();
-            try self.setProp(lo, "type", Value.str("literal"));
-            try self.setProp(lo, "value", Value.str("\u{2009}\u{2013}\u{2009}"));
-            try self.setProp(lo, "source", Value.str("shared"));
-            try arr.appendElement(self.arena, Value.obj(lo));
+            try appendIntlPart(self, arr, Value.str("literal"), Value.str(dtf_range_sep), "source", Value.str("shared"));
             try emit(self, arr, yparts[2..3], .end_range);
             try emit(self, arr, xparts[3..5], .shared);
         } else {
             try emit(self, arr, xparts[0..3], .start_range);
-            const lo = (try self.newObject()).asObj();
-            try self.setProp(lo, "type", Value.str("literal"));
-            try self.setProp(lo, "value", Value.str("\u{2009}\u{2013}\u{2009}"));
-            try self.setProp(lo, "source", Value.str("shared"));
-            try arr.appendElement(self.arena, Value.obj(lo));
+            try appendIntlPart(self, arr, Value.str("literal"), Value.str(dtf_range_sep), "source", Value.str("shared"));
             try emit(self, arr, yparts[0..3], .end_range);
             try emit(self, arr, xparts[3..5], .shared);
         }
-        return Value.obj(arr);
+        return arr.value();
     }
     if (dtfIsTextualDateOnly(xparts) and dtfIsTextualDateOnly(yparts)) {
         try emit(self, arr, xparts, .start_range);
-        const lo = (try self.newObject()).asObj();
-        try self.setProp(lo, "type", Value.str("literal"));
-        try self.setProp(lo, "value", Value.str("\u{2009}\u{2013}\u{2009}"));
-        try self.setProp(lo, "source", Value.str("shared"));
-        try arr.appendElement(self.arena, Value.obj(lo));
+        try appendIntlPart(self, arr, Value.str("literal"), Value.str(dtf_range_sep), "source", Value.str("shared"));
         try emit(self, arr, yparts, .end_range);
-        return Value.obj(arr);
+        return arr.value();
     }
     const shared_prefix = dtfSharedDateTimePrefixLen(xparts, yparts);
     if (shared_prefix > 0) {
         try emit(self, arr, xparts[0..shared_prefix], .shared);
         try emit(self, arr, xparts[shared_prefix..], .start_range);
-        const lo = (try self.newObject()).asObj();
-        try self.setProp(lo, "type", Value.str("literal"));
-        try self.setProp(lo, "value", Value.str("\u{2009}\u{2013}\u{2009}"));
-        try self.setProp(lo, "source", Value.str("shared"));
-        try arr.appendElement(self.arena, Value.obj(lo));
+        try appendIntlPart(self, arr, Value.str("literal"), Value.str(dtf_range_sep), "source", Value.str("shared"));
         try emit(self, arr, yparts[shared_prefix..], .end_range);
-        return Value.obj(arr);
+        return arr.value();
     }
     try emit(self, arr, xparts, .start_range);
-    const lo = (try self.newObject()).asObj();
-    try self.setProp(lo, "type", Value.str("literal"));
-    try self.setProp(lo, "value", Value.str("\u{2009}\u{2013}\u{2009}"));
-    try self.setProp(lo, "source", Value.str("shared"));
-    try arr.appendElement(self.arena, Value.obj(lo));
+    try appendIntlPart(self, arr, Value.str("literal"), Value.str(dtf_range_sep), "source", Value.str("shared"));
     try emit(self, arr, yparts, .end_range);
-    return Value.obj(arr);
+    return arr.value();
 }
 
 fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool, sep: u8, v: anytype, two_digit: bool) EvalError!void {
@@ -35090,8 +35189,12 @@ fn collatorResolvedLocaleAlloc(allocator: std.mem.Allocator, tag: []const u8, op
 const CollatorOptions = value.IntlCollatorData;
 
 fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalError!CollatorOptions {
-    const locs = try canonicalizeLocaleList(self, locales);
-    const locale = localeListFirstOr(locs, "en");
+    // Option getters below run JavaScript: keep the list `locale` borrows
+    // from rooted until they are done. (The caller compares right away,
+    // without allocating, as it always has.)
+    const locs = try rootedLocaleList(self, locales);
+    defer self.restoreTempRoots(locs.root);
+    const locale = localeListFirstOr(locs.object(), "en");
     var opts = CollatorOptions{
         .locale = locale,
         .ignore_punctuation = std.mem.eql(u8, parseTriple(locale).l, "th"),
@@ -36343,16 +36446,13 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const yv = try nfMathematicalArg(self, args[1]);
     if ((xv.isNumber() and std.math.isNan(xv.asNum())) or (yv.isNumber() and std.math.isNan(yv.asNum())))
         return self.throwError("RangeError", "formatRangeToParts arguments must not be NaN");
-    const arr = (try self.newArray()).asObj();
+    const arr = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(arr.root);
     const Emit = struct {
-        fn part(s: *Interpreter, a: *value.Object, typ: NfPartType, part_value: []const u8, src: IntlRangeSource) value.HostError!void {
-            const po = (try s.newObject()).asObj();
-            try s.setProp(po, "type", typ.value());
-            try s.setProp(po, "value", try Value.strAlloc(s.arena, part_value));
-            try s.setProp(po, "source", src.value());
-            try a.appendElement(s.arena, Value.obj(po));
+        fn part(s: *Interpreter, a: Interpreter.RootedArray, typ: NfPartType, part_value: []const u8, src: IntlRangeSource) value.HostError!void {
+            try appendIntlPart(s, a, typ.value(), part_value, "source", src.value());
         }
-        fn one(s: *Interpreter, a: *value.Object, prts: []const NfPart, src: IntlRangeSource) value.HostError!void {
+        fn one(s: *Interpreter, a: Interpreter.RootedArray, prts: []const NfPart, src: IntlRangeSource) value.HostError!void {
             for (prts) |p| try part(s, a, p.typ, p.value, src);
         }
     };
@@ -36367,7 +36467,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
         try Emit.part(self, arr, .approximately_sign, pattern.approximately, .shared);
         if (pattern.approximately_suffix_literal.len > 0) try Emit.part(self, arr, .literal, pattern.approximately_suffix_literal, .shared);
         try Emit.one(self, arr, xp.items, .shared);
-        return Value.obj(arr);
+        return arr.value();
     }
     const shared_prefix = nfSharedAffixLen(xp.items, yp.items);
     const shared_suffix = nfSharedSuffixLen(xp.items, yp.items);
@@ -36376,15 +36476,11 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     if (pattern.leading.len > 0) try Emit.part(self, arr, .literal, pattern.leading, .shared);
     if (shared_prefix > 0) try Emit.one(self, arr, xp.items[0..shared_prefix], .shared);
     try Emit.one(self, arr, xp.items[shared_prefix..x_end], .start_range);
-    const lo = (try self.newObject()).asObj();
-    try self.setProp(lo, "type", Value.str("literal"));
-    try self.setProp(lo, "value", try Value.strAlloc(self.arena, nfRangeBetween(pattern, xp.items[shared_prefix..x_end], yp.items[shared_prefix..y_end])));
-    try self.setProp(lo, "source", Value.str("shared"));
-    try arr.appendElement(self.arena, Value.obj(lo));
+    try appendIntlPart(self, arr, Value.str("literal"), nfRangeBetween(pattern, xp.items[shared_prefix..x_end], yp.items[shared_prefix..y_end]), "source", Value.str("shared"));
     try Emit.one(self, arr, yp.items[shared_prefix..y_end], .end_range);
     if (shared_suffix > 0) try Emit.one(self, arr, xp.items[x_end..], .shared);
     if (pattern.trailing.len > 0) try Emit.part(self, arr, .literal, pattern.trailing, .shared);
-    return Value.obj(arr);
+    return arr.value();
 }
 
 fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -36393,14 +36489,10 @@ fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
     defer scratch.deinit();
     const parts = try nfBuildParts(self, this, args, scratch.allocator());
-    const arr = (try self.newArray()).asObj();
-    for (parts.items) |p| {
-        const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", p.typ.value());
-        try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
-        try arr.appendElement(self.arena, Value.obj(o));
-    }
-    return Value.obj(arr);
+    const out = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(out.root);
+    for (parts.items) |p| try appendIntlPart(self, out, p.typ.value(), p.value, null, {});
+    return out.value();
 }
 
 /// `get Intl.{Number,DateTime}Format.prototype.format`: per spec `format` is an
@@ -36512,27 +36604,80 @@ fn durMinutesRequired(data: *const value.IntlDurationFormatData, need_sep: bool,
 /// plain digits (useGrouping:false, +2-digit padding); non-first units suppress
 /// the sign. Returns the formatted string.
 /// Build the NumberFormat instance used to format one duration unit's value.
+/// The options record a DurationFormat unit formatter is built from. It is
+/// made rooted and filled with fresh strings, so `durNumberFormat` can build
+/// the formatter from it while both stay alive.
+const DurNfOptions = struct {
+    numbering_system: ?[]const u8,
+    style: ?[]const u8 = null,
+    unit: ?[]const u8 = null,
+    unit_display: ?[]const u8 = null,
+    use_grouping: ?bool = null,
+    minimum_integer_digits: ?f64 = null,
+    minimum_fraction_digits: ?f64 = null,
+    maximum_fraction_digits: ?f64 = null,
+    rounding_mode: ?[]const u8 = null,
+    sign_never: bool,
+};
+
+/// A fresh NumberFormat for one DurationFormat unit. Every step allocates and
+/// can collect: the options record and the formatter stay rooted until the
+/// formatter is complete. The caller roots the returned formatter.
+fn durNumberFormat(self: *Interpreter, locale: []const u8, opts: DurNfOptions) value.HostError!Value {
+    const record = try self.newObject();
+    const record_root = try self.pushTempRoot(record);
+    defer self.restoreTempRoots(record_root);
+    const ro = Interpreter.RootedObject{ .interpreter = self, .root = record_root, .object = record };
+    if (opts.numbering_system) |name| try ro.set("numberingSystem", try Value.strAlloc(self.arena, name));
+    if (opts.style) |style| try ro.set("style", try Value.strAlloc(self.arena, style));
+    if (opts.unit) |unit| try ro.set("unit", try Value.strAlloc(self.arena, unit));
+    if (opts.unit_display) |display| try ro.set("unitDisplay", try Value.strAlloc(self.arena, display));
+    if (opts.use_grouping) |grouping| try ro.set("useGrouping", Value.boolVal(grouping));
+    if (opts.minimum_integer_digits) |digits| try ro.set("minimumIntegerDigits", Value.num(digits));
+    if (opts.minimum_fraction_digits) |digits| try ro.set("minimumFractionDigits", Value.num(digits));
+    if (opts.maximum_fraction_digits) |digits| try ro.set("maximumFractionDigits", Value.num(digits));
+    if (opts.rounding_mode) |mode| try ro.set("roundingMode", try Value.strAlloc(self.arena, mode));
+    if (opts.sign_never) try ro.set("signDisplay", Value.str("never"));
+    const formatter = try self.newObject();
+    const formatter_root = try self.pushTempRoot(formatter);
+    defer self.restoreTempRoots(formatter_root);
+    try installNumberFormatData(self, self.tempRoot(formatter_root, formatter).asObj(), locale, ro.value().asObj());
+    return self.tempRoot(formatter_root, formatter);
+}
+
 fn durUnitNf(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError!Value {
-    const ro = (try self.newObject()).asObj();
-    if (numbering_system) |name|
-        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, name));
     const standalone = !std.mem.eql(u8, style, "numeric") and !std.mem.eql(u8, style, "2-digit");
-    if (standalone) {
-        try self.setProp(ro, "style", Value.str("unit"));
-        try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit_singular));
-        try self.setProp(ro, "unitDisplay", try Value.strAlloc(self.arena, style));
-    } else {
-        try self.setProp(ro, "useGrouping", Value.boolVal(false));
-        if (std.mem.eql(u8, style, "2-digit")) try self.setProp(ro, "minimumIntegerDigits", Value.num(2));
-    }
-    if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
-    const nf = (try self.newObject()).asObj();
-    try installNumberFormatData(self, nf, locale, ro);
-    return Value.obj(nf);
+    return durNumberFormat(self, locale, if (standalone) .{
+        .numbering_system = numbering_system,
+        .style = "unit",
+        .unit = unit_singular,
+        .unit_display = style,
+        .sign_never = sign_never,
+    } else .{
+        .numbering_system = numbering_system,
+        .use_grouping = false,
+        .minimum_integer_digits = if (std.mem.eql(u8, style, "2-digit")) 2 else null,
+        .sign_never = sign_never,
+    });
+}
+
+/// Format `input` with a fresh DurationFormat unit formatter. The formatter
+/// is rooted before the input string is made, and both stay rooted for the
+/// formatting call.
+fn durFormatWith(self: *Interpreter, formatter: Value, input: union(enum) { number: f64, decimal: []const u8 }) value.HostError![]const u8 {
+    const formatter_root = try self.pushTempRoot(formatter);
+    defer self.restoreTempRoots(formatter_root);
+    const argument = switch (input) {
+        .number => |n| Value.num(n),
+        .decimal => |dec| try Value.strAlloc(self.arena, dec),
+    };
+    const argument_root = try self.pushTempRoot(argument);
+    defer self.restoreTempRoots(argument_root);
+    return nfFormatOne(self, self.tempRoot(formatter_root, formatter), self.tempRoot(argument_root, argument));
 }
 
 fn durFmtVal(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, num: f64, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError![]const u8 {
-    return nfFormatOne(self, try durUnitNf(self, locale, numbering_system, style, unit_singular, sign_never), Value.num(num));
+    return durFormatWith(self, try durUnitNf(self, locale, numbering_system, style, unit_singular, sign_never), .{ .number = num });
 }
 
 /// Format a combined fractional value (a decimal string like "444.055006") for a
@@ -36541,33 +36686,29 @@ fn durFmtVal(self: *Interpreter, locale: []const u8, numbering_system: ?[]const 
 /// string is fed verbatim so precision matches the conformance reference, which
 /// formats the same constructed string.
 fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, dec: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
-    const ro = (try self.newObject()).asObj();
-    if (numbering_system) |name|
-        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, name));
-    try self.setProp(ro, "style", Value.str("unit"));
-    try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit_singular));
-    try self.setProp(ro, "unitDisplay", try Value.strAlloc(self.arena, style));
-    try self.setProp(ro, "minimumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 0));
-    try self.setProp(ro, "maximumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 9));
-    try self.setProp(ro, "roundingMode", Value.str("trunc"));
-    if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
-    const nf = (try self.newObject()).asObj();
-    try installNumberFormatData(self, nf, locale, ro);
-    return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
+    const formatter = try durNumberFormat(self, locale, .{
+        .numbering_system = numbering_system,
+        .style = "unit",
+        .unit = unit_singular,
+        .unit_display = style,
+        .minimum_fraction_digits = if (fd) |f| @floatFromInt(f) else 0,
+        .maximum_fraction_digits = if (fd) |f| @floatFromInt(f) else 9,
+        .rounding_mode = "trunc",
+        .sign_never = sign_never,
+    });
+    return durFormatWith(self, formatter, .{ .decimal = dec });
 }
 
 fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, dec: []const u8, min_int: usize, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
-    const ro = (try self.newObject()).asObj();
-    if (numbering_system) |name|
-        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, name));
-    try self.setProp(ro, "useGrouping", Value.boolVal(false));
-    try self.setProp(ro, "minimumIntegerDigits", Value.num(@floatFromInt(min_int)));
-    try self.setProp(ro, "minimumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 0));
-    try self.setProp(ro, "maximumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 9));
-    if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
-    const nf = (try self.newObject()).asObj();
-    try installNumberFormatData(self, nf, locale, ro);
-    return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
+    const formatter = try durNumberFormat(self, locale, .{
+        .numbering_system = numbering_system,
+        .use_grouping = false,
+        .minimum_integer_digits = @floatFromInt(min_int),
+        .minimum_fraction_digits = if (fd) |f| @floatFromInt(f) else 0,
+        .maximum_fraction_digits = if (fd) |f| @floatFromInt(f) else 9,
+        .sign_never = sign_never,
+    });
+    return durFormatWith(self, formatter, .{ .decimal = dec });
 }
 
 /// The combined sub-second total for `unit` is non-zero (so it must display even
@@ -36771,7 +36912,10 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
                     try grp.append(scratch, .{ .typ = .integer, .value = try rtfTranslateNumberAlloc(scratch, s, data.numbering_system), .unit = sing });
                 }
             } else {
-                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, numbering_system, style, sing, sign_never), &.{Value.num(fnum)}, scratch);
+                const unit_formatter = try durUnitNf(self, locale, numbering_system, style, sing, sign_never);
+                const unit_formatter_root = try self.pushTempRoot(unit_formatter);
+                defer self.restoreTempRoots(unit_formatter_root);
+                const nf_parts = try nfBuildParts(self, self.tempRoot(unit_formatter_root, unit_formatter), &.{Value.num(fnum)}, scratch);
                 for (nf_parts.items) |p| try grp.append(scratch, .{ .typ = p.typ, .value = p.value, .unit = sing });
             }
         }
@@ -36780,24 +36924,21 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     // Flatten: a type:"unit" list literal between element groups (locale/style aware).
     const lstyle = if (data.style == .digital) "short" else base;
     const uc = unitConnectors(localeLanguage(locale), lstyle);
-    const arr = (try self.newArray()).asObj();
+    const out = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(out.root);
     for (groups.items, 0..) |grp, gi| {
         if (gi != 0) {
             const sep = if (gi == groups.items.len - 1) (if (groups.items.len == 2) uc.pair else uc.fin) else uc.mid;
-            const lo = (try self.newObject()).asObj();
-            try self.setProp(lo, "type", Value.str("literal"));
-            try self.setProp(lo, "value", try Value.strAlloc(self.arena, sep));
-            try arr.appendElement(self.arena, Value.obj(lo));
+            try appendIntlPart(self, out, Value.str("literal"), sep, null, {});
         }
         for (grp.items) |p| {
-            const o = (try self.newObject()).asObj();
-            try self.setProp(o, "type", p.typ.value());
-            try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
-            if (p.unit) |un| try self.setProp(o, "unit", try Value.strAlloc(self.arena, un));
-            try arr.appendElement(self.arena, Value.obj(o));
+            if (p.unit) |un|
+                try appendIntlPart(self, out, p.typ.value(), p.value, "unit", un)
+            else
+                try appendIntlPart(self, out, p.typ.value(), p.value, null, {});
         }
     }
-    return Value.obj(arr);
+    return out.value();
 }
 
 /// `get Intl.<service>.prototype.<prop>`: per spec `format`/`compare` are
@@ -36828,13 +36969,17 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
             // nor observable here. Publish once under the formatter property
             // lock so concurrent first reads share one identity.
             const bound = try self.makeBoundExact(impl.asObj(), target, &.{}, length, Value.str(""));
+            // Publishing it allocates the cache slot and its attributes; until
+            // then the new bound function is held only here.
+            const bound_root = try self.pushTempRoot(bound);
+            defer self.restoreTempRoots(bound_root);
             return (try target.asObj().setOwnIfAbsentWithAttr(
                 self.arena,
                 self.root_shape,
                 cache_key,
-                bound,
+                self.tempRoot(bound_root, bound),
                 .{ .writable = false, .enumerable = false, .configurable = false },
-            )) orelse bound;
+            )) orelse self.tempRoot(bound_root, bound);
         }
     }.call;
 }
@@ -37861,14 +38006,10 @@ fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!this.isObject() or this.asObj().intlListFormatData() == null)
         return self.throwError("TypeError", "Intl.ListFormat.prototype.formatToParts on incompatible receiver");
     const parts = try lfBuildParts(self, this, args);
-    const arr = (try self.newArray()).asObj();
-    for (parts.items) |p| {
-        const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", p.typ.value());
-        try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
-        try arr.appendElement(self.arena, Value.obj(o));
-    }
-    return Value.obj(arr);
+    const out = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(out.root);
+    for (parts.items) |p| try appendIntlPart(self, out, p.typ.value(), p.value, null, {});
+    return out.value();
 }
 
 /// The eight relative-time units, with their long-form names and the
@@ -38105,19 +38246,19 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
     if (!this.isObject() or this.asObj().intlRelativeTimeFormatData() == null)
         return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.formatToParts on incompatible receiver");
     const r = try rtfCompute(self, this, args);
-    const arr = (try self.newArray()).asObj();
+    const arr = try newIntlPartsArray(self);
+    defer self.restoreTempRoots(arr.root);
     const addPart = struct {
-        fn p(s: *Interpreter, a: *value.Object, typ: NfPartType, v: []const u8, unit: ?[]const u8) EvalError!void {
-            const o = (try s.newObject()).asObj();
-            try s.setProp(o, "type", typ.value());
-            try s.setProp(o, "value", try Value.strAlloc(s.arena, v));
-            if (unit) |u| try s.setProp(o, "unit", try Value.strOwned(s.arena, try std.fmt.allocPrint(s.arena, "{s}", .{u})));
-            try a.appendElement(s.arena, Value.obj(o));
+        fn p(s: *Interpreter, a: Interpreter.RootedArray, typ: NfPartType, v: []const u8, unit: ?[]const u8) EvalError!void {
+            if (unit) |u|
+                try appendIntlPart(s, a, typ.value(), v, "unit", u)
+            else
+                try appendIntlPart(s, a, typ.value(), v, null, {});
         }
     }.p;
     if (r.term) |t| {
         try addPart(self, arr, .literal, t, null);
-        return Value.obj(arr);
+        return arr.value();
     }
     if (r.prefix.len > 0) try addPart(self, arr, .literal, r.prefix, null);
     // Number, split into integer/group parts, each tagged with the unit.
@@ -38136,7 +38277,7 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
         try addPart(self, arr, .fraction, try rtfTranslateNumber(self, r.frac_str, r.numbering), r.unit);
     }
     if (r.suffix.len > 0) try addPart(self, arr, .literal, r.suffix, null);
-    return Value.obj(arr);
+    return arr.value();
 }
 
 /// Project a constructor-validated ECMA-402 string choice without allocating.
@@ -38176,7 +38317,12 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 if (this_recv.isObject() and this_recv.asObj().intlCollatorData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.Collator.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
-            const o = (try self.newObject()).asObj();
+            // Every property below is made (strings, arrays) and stored with
+            // steps that allocate and can collect: keep the record rooted.
+            const record = try self.newObject();
+            const record_root = try self.pushTempRoot(record);
+            defer self.restoreTempRoots(record_root);
+            const o = Interpreter.RootedObject{ .interpreter = self, .root = record_root, .object = record };
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
                 try Value.strAlloc(self.arena, this.asObj().intlDisplayNamesData().?.locale)
             else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat"))
@@ -38197,24 +38343,24 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlDateTimeFormatData().?.resolved_locale)
             else
                 unreachable;
-            try self.setProp(o, "locale", loc);
+            try o.set("locale", loc);
             // The spec resolvedOptions field set (with default values) per
             // service. `numberingSystem` belongs to the number/date/plural
             // services, not Collator/ListFormat.
             if (comptime std.mem.eql(u8, service, "NumberFormat")) {
                 const data = try numberFormatDataFor(self, this.asObj());
-                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
-                try self.setProp(o, "style", intlValidatedChoiceValue(data.style, &.{ "decimal", "percent", "currency", "unit" }));
+                try o.set("numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try o.set("style", intlValidatedChoiceValue(data.style, &.{ "decimal", "percent", "currency", "unit" }));
                 if (data.currency) |c| {
-                    try self.setProp(o, "currency", try Value.strAlloc(self.arena, c));
-                    try self.setProp(o, "currencyDisplay", intlValidatedChoiceValue(data.currency_display, &.{ "code", "symbol", "narrowSymbol", "name" }));
-                    try self.setProp(o, "currencySign", intlValidatedChoiceValue(data.currency_sign, &.{ "standard", "accounting" }));
+                    try o.set("currency", try Value.strAlloc(self.arena, c));
+                    try o.set("currencyDisplay", intlValidatedChoiceValue(data.currency_display, &.{ "code", "symbol", "narrowSymbol", "name" }));
+                    try o.set("currencySign", intlValidatedChoiceValue(data.currency_sign, &.{ "standard", "accounting" }));
                 }
                 if (data.unit) |unit| {
-                    try self.setProp(o, "unit", try Value.strAlloc(self.arena, unit));
-                    try self.setProp(o, "unitDisplay", intlValidatedChoiceValue(data.unit_display, &.{ "short", "long", "narrow" }));
+                    try o.set("unit", try Value.strAlloc(self.arena, unit));
+                    try o.set("unitDisplay", intlValidatedChoiceValue(data.unit_display, &.{ "short", "long", "narrow" }));
                 }
-                try self.setProp(o, "minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
+                try o.set("minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
                 // Significant-digits resolution: with the default ("auto") rounding
                 // priority a set of significant digits replaces the fraction
                 // digits; morePrecision/lessPrecision reports both.
@@ -38223,12 +38369,12 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const has_sig = min_sig != null or max_sig != null;
                 const both = !std.mem.eql(u8, data.rounding_priority, "auto");
                 if (!has_sig or both) {
-                    try self.setProp(o, "minimumFractionDigits", Value.num(@floatFromInt(data.minimum_fraction_digits)));
-                    try self.setProp(o, "maximumFractionDigits", Value.num(@floatFromInt(data.maximum_fraction_digits)));
+                    try o.set("minimumFractionDigits", Value.num(@floatFromInt(data.minimum_fraction_digits)));
+                    try o.set("maximumFractionDigits", Value.num(@floatFromInt(data.maximum_fraction_digits)));
                 }
                 if (has_sig) {
-                    try self.setProp(o, "minimumSignificantDigits", Value.num(@floatFromInt(min_sig orelse 1)));
-                    try self.setProp(o, "maximumSignificantDigits", Value.num(@floatFromInt(max_sig orelse 21)));
+                    try o.set("minimumSignificantDigits", Value.num(@floatFromInt(min_sig orelse 1)));
+                    try o.set("maximumSignificantDigits", Value.num(@floatFromInt(max_sig orelse 21)));
                 }
                 const grouping = switch (data.grouping) {
                     .off => Value.boolVal(false),
@@ -38236,70 +38382,73 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     .auto => Value.str("auto"),
                     .always => Value.str("always"),
                 };
-                try self.setProp(o, "useGrouping", grouping);
-                try self.setProp(o, "notation", intlValidatedChoiceValue(data.notation, &.{ "standard", "scientific", "engineering", "compact" }));
-                if (std.mem.eql(u8, data.notation, "compact")) try self.setProp(o, "compactDisplay", intlValidatedChoiceValue(data.compact_display, &.{ "short", "long" }));
-                try self.setProp(o, "signDisplay", intlValidatedChoiceValue(data.sign_display, &.{ "auto", "never", "always", "exceptZero", "negative" }));
-                try self.setProp(o, "roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
-                try self.setProp(o, "roundingMode", intlValidatedChoiceValue(data.rounding_mode, &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }));
-                try self.setProp(o, "roundingPriority", intlValidatedChoiceValue(data.rounding_priority, &.{ "auto", "morePrecision", "lessPrecision" }));
-                try self.setProp(o, "trailingZeroDisplay", intlValidatedChoiceValue(data.trailing_zero_display, &.{ "auto", "stripIfInteger" }));
+                try o.set("useGrouping", grouping);
+                try o.set("notation", intlValidatedChoiceValue(data.notation, &.{ "standard", "scientific", "engineering", "compact" }));
+                if (std.mem.eql(u8, data.notation, "compact")) try o.set("compactDisplay", intlValidatedChoiceValue(data.compact_display, &.{ "short", "long" }));
+                try o.set("signDisplay", intlValidatedChoiceValue(data.sign_display, &.{ "auto", "never", "always", "exceptZero", "negative" }));
+                try o.set("roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
+                try o.set("roundingMode", intlValidatedChoiceValue(data.rounding_mode, &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }));
+                try o.set("roundingPriority", intlValidatedChoiceValue(data.rounding_priority, &.{ "auto", "morePrecision", "lessPrecision" }));
+                try o.set("trailingZeroDisplay", intlValidatedChoiceValue(data.trailing_zero_display, &.{ "auto", "stripIfInteger" }));
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 const data = this.asObj().intlCollatorData().?;
-                try self.setProp(o, "usage", data.usage.value());
-                try self.setProp(o, "sensitivity", data.sensitivity.value());
-                try self.setProp(o, "ignorePunctuation", Value.boolVal(data.ignore_punctuation));
-                try self.setProp(o, "collation", data.collation.value());
-                try self.setProp(o, "numeric", Value.boolVal(data.numeric));
-                try self.setProp(o, "caseFirst", data.case_first.value());
+                try o.set("usage", data.usage.value());
+                try o.set("sensitivity", data.sensitivity.value());
+                try o.set("ignorePunctuation", Value.boolVal(data.ignore_punctuation));
+                try o.set("collation", data.collation.value());
+                try o.set("numeric", Value.boolVal(data.numeric));
+                try o.set("caseFirst", data.case_first.value());
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 // Spec key order: locale (set above), type, notation,
                 // minimumIntegerDigits, then significant-OR-fraction digits,
                 // pluralCategories, rounding*, trailingZeroDisplay. No
                 // numberingSystem.
                 const data = this.asObj().intlPluralRulesData().?;
-                try self.setProp(o, "type", data.kind.value());
-                try self.setProp(o, "notation", data.notation.value());
+                try o.set("type", data.kind.value());
+                try o.set("notation", data.notation.value());
                 // compactDisplay is reported only when notation is "compact".
                 if (data.notation == .compact) {
-                    try self.setProp(o, "compactDisplay", data.compact_display.value());
+                    try o.set("compactDisplay", data.compact_display.value());
                 }
-                try self.setProp(o, "minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
+                try o.set("minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
                 if (data.minimum_significant_digits != null or data.maximum_significant_digits != null) {
-                    try self.setProp(o, "minimumSignificantDigits", Value.num(@floatFromInt(data.minimum_significant_digits orelse 1)));
-                    try self.setProp(o, "maximumSignificantDigits", Value.num(@floatFromInt(data.maximum_significant_digits orelse 21)));
+                    try o.set("minimumSignificantDigits", Value.num(@floatFromInt(data.minimum_significant_digits orelse 1)));
+                    try o.set("maximumSignificantDigits", Value.num(@floatFromInt(data.maximum_significant_digits orelse 21)));
                 } else {
-                    try self.setProp(o, "minimumFractionDigits", Value.num(@floatFromInt(data.minimum_fraction_digits)));
-                    try self.setProp(o, "maximumFractionDigits", Value.num(@floatFromInt(data.maximum_fraction_digits)));
+                    try o.set("minimumFractionDigits", Value.num(@floatFromInt(data.minimum_fraction_digits)));
+                    try o.set("maximumFractionDigits", Value.num(@floatFromInt(data.maximum_fraction_digits)));
                 }
                 // pluralCategories: the categories the locale's rules define,
                 // in CLDR order (zero, one, two, few, many, other).
-                const cats = (try self.newArray()).asObj();
+                const categories = try self.newArray();
+                const categories_root = try self.pushTempRoot(categories);
+                defer self.restoreTempRoots(categories_root);
+                const cats = Interpreter.RootedArray{ .interpreter = self, .root = categories_root, .array = categories };
                 const prules = pluralRulesFor(data);
                 for (plural_category_order) |cat| {
                     for (prules) |r| if (PluralCategory.fromString(r.cat) == cat) {
-                        try cats.appendElement(self.arena, cat.value());
+                        try cats.append(cat.value());
                         break;
                     };
                 }
-                try self.setProp(o, "pluralCategories", Value.obj(cats));
-                try self.setProp(o, "roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
-                try self.setProp(o, "roundingMode", data.rounding_mode.value());
-                try self.setProp(o, "roundingPriority", data.rounding_priority.value());
-                try self.setProp(o, "trailingZeroDisplay", data.trailing_zero_display.value());
+                try o.set("pluralCategories", cats.value());
+                try o.set("roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
+                try o.set("roundingMode", data.rounding_mode.value());
+                try o.set("roundingPriority", data.rounding_priority.value());
+                try o.set("trailingZeroDisplay", data.trailing_zero_display.value());
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 const data = this.asObj().intlDateTimeFormatData() orelse
                     return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
-                try self.setProp(o, "calendar", try Value.strAlloc(self.arena, data.calendar));
-                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
-                try self.setProp(o, "timeZone", try Value.strAlloc(self.arena, data.time_zone));
+                try o.set("calendar", try Value.strAlloc(self.arena, data.calendar));
+                try o.set("numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try o.set("timeZone", try Value.strAlloc(self.arena, data.time_zone));
                 if (data.hour_cycle.value()) |hour_cycle| {
-                    try self.setProp(o, "hourCycle", hour_cycle);
-                    try self.setProp(o, "hour12", Value.boolVal(data.hour12));
+                    try o.set("hourCycle", hour_cycle);
+                    try o.set("hour12", Value.boolVal(data.hour12));
                 }
                 const put = struct {
-                    fn field(s: *Interpreter, target: *value.Object, name: []const u8, resolved: value.IntlDateTimeFormatData.Field) EvalError!void {
-                        if (resolved.value()) |projected| try s.setProp(target, name, projected);
+                    fn field(_: *Interpreter, target: Interpreter.RootedObject, name: []const u8, resolved: value.IntlDateTimeFormatData.Field) EvalError!void {
+                        if (resolved.value()) |projected| try target.set(name, projected);
                     }
                 }.field;
                 const component_record = data.date_style == .none and data.time_style == .none;
@@ -38314,44 +38463,44 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try put(self, o, "minute", data.minute);
                     try put(self, o, "second", data.second);
                     if (data.fractional_second_digits > 0)
-                        try self.setProp(o, "fractionalSecondDigits", Value.num(@floatFromInt(data.fractional_second_digits)));
+                        try o.set("fractionalSecondDigits", Value.num(@floatFromInt(data.fractional_second_digits)));
                     try put(self, o, "timeZoneName", data.time_zone_name);
                 }
                 try put(self, o, "dateStyle", data.date_style);
                 try put(self, o, "timeStyle", data.time_style);
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 const data = this.asObj().intlRelativeTimeFormatData().?;
-                try self.setProp(o, "style", data.style.value());
-                try self.setProp(o, "numeric", data.numeric.value());
-                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try o.set("style", data.style.value());
+                try o.set("numeric", data.numeric.value());
+                try o.set("numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 const data = this.asObj().intlListFormatData().?;
-                try self.setProp(o, "type", data.kind.value());
-                try self.setProp(o, "style", data.style.value());
+                try o.set("type", data.kind.value());
+                try o.set("style", data.style.value());
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // Reflect the immutable normalized record in Table-6 order.
                 const data = this.asObj().intlDisplayNamesData() orelse
                     return self.throwError("TypeError", "Intl.DisplayNames has no resolved state");
-                try self.setProp(o, "style", data.style.value());
-                try self.setProp(o, "type", data.kind.value());
-                try self.setProp(o, "fallback", data.fallback.value());
+                try o.set("style", data.style.value());
+                try o.set("type", data.kind.value());
+                try o.set("fallback", data.fallback.value());
                 if (data.kind == .language)
-                    try self.setProp(o, "languageDisplay", data.language_display.value());
+                    try o.set("languageDisplay", data.language_display.value());
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
                 const data = this.asObj().intlSegmenterData().?;
-                try self.setProp(o, "granularity", data.granularity.value());
+                try o.set("granularity", data.granularity.value());
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const data = this.asObj().intlDurationFormatData().?;
-                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
-                try self.setProp(o, "style", data.style.value());
+                try o.set("numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try o.set("style", data.style.value());
                 inline for (duration_units, 0..) |u, i| {
-                    try self.setProp(o, u, data.unit_styles[i].value());
-                    try self.setProp(o, u ++ "Display", data.unit_displays[i].value());
+                    try o.set(u, data.unit_styles[i].value());
+                    try o.set(u ++ "Display", data.unit_displays[i].value());
                 }
                 if (data.fractional_digits) |digits|
-                    try self.setProp(o, "fractionalDigits", Value.num(@floatFromInt(digits)));
+                    try o.set("fractionalDigits", Value.num(@floatFromInt(digits)));
             }
-            return Value.obj(o);
+            return o.value();
         }
     }.call;
 }
@@ -38362,7 +38511,10 @@ fn intlSupportedLocalesOfFn(comptime service: []const u8) value.NativeFn {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             // CanonicalizeLocaleList(locales) first (throws on a structurally invalid tag).
-            const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            // The options read below runs JavaScript, and building the result
+            // allocates: keep the requested list and the result rooted.
+            const locs = try rootedLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            defer self.restoreTempRoots(locs.root);
             // SupportedLocales: if options is not undefined, ToObject it (TypeError for
             // null) and validate the localeMatcher option (RangeError otherwise).
             if (args.len > 1 and !args[1].isUndefined()) {
@@ -38376,20 +38528,23 @@ fn intlSupportedLocalesOfFn(comptime service: []const u8) value.NativeFn {
             // A service can advertise only locales for which its own immutable
             // data exists. DisplayNames has an explicit generated locale set;
             // other services retain the engine-wide CLDR availability rule.
-            const out = (try self.newArray()).asObj();
-            const n = arr.elementsLen();
+            const result = try self.newArray();
+            const result_root = try self.pushTempRoot(result);
+            defer self.restoreTempRoots(result_root);
+            const out = Interpreter.RootedArray{ .interpreter = self, .root = result_root, .array = result };
+            const n = locs.object().elementsLen();
             var i: usize = 0;
             while (i < n) : (i += 1) {
-                const lv = arr.elementAt(i) orelse continue;
+                const lv = locs.object().elementAt(i) orelse continue;
                 if (!lv.isString()) continue;
                 const supported = if (comptime std.mem.eql(u8, service, "DisplayNames"))
                     dnLocaleIndex(lv.asStr()) != null
                 else
                     intlLocaleSupported(lv.asStr());
                 if (!supported) continue;
-                try out.appendElement(self.arena, lv);
+                try out.append(lv);
             }
-            return Value.obj(out);
+            return out.value();
         }
     }.call;
 }
@@ -48388,12 +48543,15 @@ fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 }
 
 fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options: Value) value.HostError!*value.Object {
-    const o = (try self.newObject()).asObj();
-    const locs = try canonicalizeLocaleList(self, locales);
-    const resolved = localeListFirstSupportedOr(locs, "en");
+    const locs = try rootedLocaleList(self, locales);
+    defer self.restoreTempRoots(locs.root);
+    const resolved = localeListFirstSupportedOr(locs.object(), "en");
     const normalized = try durationFormatProcessOptions(self, options);
-    try installDurationFormatData(self, o, resolved, &normalized);
-    return o;
+    const formatter = try self.newObject();
+    const formatter_root = try self.pushTempRoot(formatter);
+    defer self.restoreTempRoots(formatter_root);
+    try installDurationFormatData(self, self.tempRoot(formatter_root, formatter).asObj(), resolved, &normalized);
+    return self.tempRoot(formatter_root, formatter).asObj();
 }
 
 /// `Temporal.<Type>.prototype.toLocaleString(locales, options)` via the local
@@ -48403,9 +48561,11 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!this.isObject() or this.asObj().temporalData() == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
     const t = this.asObj().temporalData().?;
     if (t.kind != .duration) {
-        const dtf = (try self.newObject()).asObj();
-        const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-        const loc = localeListFirstOr(locs, "en");
+        // Option reads run JavaScript: `loc` borrows from the rooted list, and
+        // the formatter is made only once every option has been read.
+        const locs = try rootedLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+        defer self.restoreTempRoots(locs.root);
+        const loc = localeListFirstOr(locs.object(), "en");
         if (t.kind == .zoned_date_time and args.len > 1 and !args[1].isUndefined()) {
             const raw = Value.obj(try self.toObject(args[1]));
             if (!(try self.getProperty(raw, "timeZone")).isUndefined())
@@ -48456,8 +48616,11 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             r.hour_cycle = "h23";
             r.hour12 = false;
         }
-        try dtfStoreOptions(self, dtf, loc, r, t.kind == .zoned_date_time);
-        return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{this});
+        const dtf = try self.newObject();
+        const dtf_root = try self.pushTempRoot(dtf);
+        defer self.restoreTempRoots(dtf_root);
+        try dtfStoreOptions(self, self.tempRoot(dtf_root, dtf).asObj(), loc, r, t.kind == .zoned_date_time);
+        return try intlDateTimeFormatFn(@ptrCast(self), self.tempRoot(dtf_root, dtf), &.{this});
     }
     const df = try makeDurationFormatForLocaleString(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef());
     return try intlDurationFormatFn(@ptrCast(self), Value.obj(df), &.{this});
