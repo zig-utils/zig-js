@@ -17494,6 +17494,18 @@ export fn ZJSContextGetCollectionEpoch(ctx: JSContextRef) callconv(.c) u64 {
     return group.collection_epoch;
 }
 
+/// zig-js extension: keep the parsed trees of large scripts this context
+/// evaluates in the directory `path` (created when missing; NULL turns the
+/// cache off), so a later evaluation of the same source, in this or a later
+/// process, skips lexing and parsing. Entries are keyed on the source's
+/// SHA-256 and on the running executable, and a stale or damaged entry is a
+/// miss that is rewritten. `path` must be private to the application.
+export fn ZJSContextSetScriptCacheDirectory(ctx: JSContextRef, path: [*c]const u8) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    c.setScriptCacheDirectory(if (path) |p| std.mem.span(p) else null) catch return false;
+    return true;
+}
+
 /// zig-js extension: semantic reachability from every strong realm root in the
 /// value's context group. WeakRef and weak-collection edges do not retain it.
 export fn ZJSValueIsReachable(ctx: JSContextRef, value_ref: JSValueRef) callconv(.c) bool {

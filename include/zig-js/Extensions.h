@@ -32,6 +32,13 @@ JS_EXPORT ZJSGCCompactionStatus ZJSContextCompactGarbage(
 JS_EXPORT bool ZJSContextStartCPUProfile(JSContextRef ctx, uint32_t intervalMicroseconds);
 JS_EXPORT JSStringRef ZJSContextStopCPUProfile(JSContextRef ctx);
 
+/* Keep the parsed trees of large scripts (32 KB and up) this context evaluates
+ * in the directory `path` (created when missing; NULL turns it off), so the next
+ * evaluation of the same source, here or in a later process, skips parsing.
+ * Entries are keyed on the source's SHA-256 and the running executable; stale or
+ * damaged entries are misses and get rewritten. Keep `path` private to the app. */
+JS_EXPORT bool ZJSContextSetScriptCacheDirectory(JSContextRef ctx, const char* path);
+
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);

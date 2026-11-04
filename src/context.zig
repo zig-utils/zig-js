@@ -22,6 +22,7 @@ const gc_runtime = @import("gc_runtime.zig");
 const agent = @import("agent.zig");
 const promise = @import("promise.zig");
 const parser_mod = @import("parser.zig");
+const script_cache = @import("script_cache.zig");
 const object_profile = @import("object_profile.zig");
 const structured_clone = @import("structured_clone.zig");
 const jit = @import("jit.zig");
@@ -4863,6 +4864,10 @@ pub const Context = struct {
     /// the dynamic-import hook using this as the importing script's path, so
     /// `import('./x.js')` resolves relative to the script's directory.
     script_referrer: []const u8 = "",
+    /// Directory of the script parse cache; null leaves it off (the default).
+    script_cache_dir: ?[]const u8 = null,
+    /// Evaluations whose tree came from the script cache.
+    script_cache_hits: u64 = 0,
 
     pub const Options = struct {
         /// Enable hot bytecode functions' baseline native tier when the host
@@ -10293,6 +10298,26 @@ pub const Context = struct {
         self.bytecode_execution_mode = mode;
     }
 
+    /// Publish a parsed script's statement locations to the debugger
+    /// registry: under the host-registered script when there is one.
+    fn registerEvaluationDebugLocations(self: *Context, source: []const u8, locations: []const parser_mod.StatementLocation) !void {
+        if (self.debug_script_id != 0) {
+            const script = self.debugScriptById(self.debug_script_id).?;
+            try self.registerDebugLocations(script, locations);
+        } else {
+            _ = try self.registerDebugScriptWithLocations(source, "", 1, locations);
+        }
+    }
+
+    /// Keep the parsed trees of large scripts in `dir` (null: no cache), so a
+    /// later evaluation of the same source, in this process or a later one,
+    /// skips lexing and parsing. See `script_cache.zig` for what an entry is
+    /// keyed on and why `dir` must be private to the application.
+    pub fn setScriptCacheDirectory(self: *Context, dir: ?[]const u8) error{OutOfMemory}!void {
+        self.assertOwnerThread();
+        self.script_cache_dir = if (dir) |path| try self.arena().dupe(u8, path) else null;
+    }
+
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         return self.evaluateWithThis(source, Value.obj(self.global_object));
     }
@@ -10366,40 +10391,52 @@ pub const Context = struct {
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
         self.last_evaluation_diagnostic = null;
-        var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initForScript(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
-            try self.recordEvaluationDiagnostic(null, lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
-            return err;
+        // A script cache entry stands for the whole parse, including the
+        // early-error scan below: only scripts that passed it are stored.
+        const cache_dir: ?[]const u8 = if (owned_source.len >= script_cache.min_source_len) self.script_cache_dir else null;
+        const source_digest: script_cache.Digest = if (cache_dir != null) script_cache.digestSource(owned_source) else undefined;
+        const cached: ?script_cache.Parsed = if (cache_dir) |dir|
+            try script_cache.load(a, self.gpa, agent.engineIo(), dir, owned_source, &source_digest)
+        else
+            null;
+        const parsed: script_cache.Parsed = cached orelse parse: {
+            var lex_diagnostic: ?parser_mod.SourceLocation = null;
+            var parser = Parser.initForScript(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
+                try self.recordEvaluationDiagnostic(null, lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
+                return err;
+            };
+            // The tokens are dead once the tree is checked; drop them before
+            // the script runs rather than holding them for its execution.
+            defer parser.deinit();
+            parser.useRealmHashKeys(self.root_shape);
+            const program = parser.parseProgram() catch |err| {
+                try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
+                return err;
+            };
+            try self.registerEvaluationDebugLocations(owned_source, parser.statement_locations.items);
+            // Global (Script) code has no `super` binding, so a top-level SuperCall or
+            // SuperProperty — including inside a top-level arrow — is an early
+            // SyntaxError. (Direct/indirect `eval` runs its own context-aware scan
+            // via the interpreter, so this entry is genuine global code only.) The
+            // scan descends into arrows but stops at nested functions/classes/methods.
+            if (program.* == .program) parser.scanEvalContext(program.program, true, true) catch |err| {
+                try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
+                return err;
+            };
+            const fresh: script_cache.Parsed = .{
+                .program = program,
+                .statement_locations = parser.statement_locations.items,
+                .strict = parser.strict,
+            };
+            // Stored before execution, which may bake values into the tree.
+            if (cache_dir) |dir| script_cache.store(self.gpa, agent.engineIo(), dir, owned_source, &source_digest, fresh);
+            break :parse fresh;
         };
-        defer parser.deinit();
-        parser.useRealmHashKeys(self.root_shape);
-        const prog = parser.parseProgram() catch |err| {
-            try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
-            return err;
-        };
-        if (self.debug_script_id != 0) {
-            const script = self.debugScriptById(self.debug_script_id).?;
-            try self.registerDebugLocations(script, parser.statement_locations.items);
-        } else {
-            _ = try self.registerDebugScriptWithLocations(
-                owned_source,
-                "",
-                1,
-                parser.statement_locations.items,
-            );
+        if (cached != null) {
+            self.script_cache_hits += 1;
+            try self.registerEvaluationDebugLocations(owned_source, parsed.statement_locations);
         }
-        // Global (Script) code has no `super` binding, so a top-level SuperCall or
-        // SuperProperty — including inside a top-level arrow — is an early
-        // SyntaxError. (Direct/indirect `eval` runs its own context-aware scan
-        // via the interpreter, so this entry is genuine global code only.) The
-        // scan descends into arrows but stops at nested functions/classes/methods.
-        if (prog.* == .program) parser.scanEvalContext(prog.program, true, true) catch |err| {
-            try self.recordEvaluationDiagnostic(&parser, parser.errorLocation(), err);
-            return err;
-        };
-        // The tokens are dead once the tree is checked; drop them before the
-        // script runs rather than holding them for its whole execution.
-        parser.deinit();
+        const prog = parsed.program;
         var machine = self.interpreter();
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
@@ -10419,7 +10456,7 @@ pub const Context = struct {
         try machine.pollTimers();
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
-        machine.strict = parser.strict;
+        machine.strict = parsed.strict;
         var stack_trace_frame = interp.StackTraceCallFrame{
             .function_identity = @intFromPtr(self.global_object),
             .code_type = .global,
@@ -29325,6 +29362,54 @@ test "bytecode admission inventory retains exact runtime reasons" {
     try std.testing.expectEqual(before.count(.template_plain_fallback), after.count(.template_plain_fallback));
     try std.testing.expectEqual(before.count(.template_generator_fallback), after.count(.template_generator_fallback));
     try std.testing.expectEqual(before.count(.template_async_fallback), after.count(.template_async_fallback));
+}
+
+test "script cache reuses a parsed tree across contexts and replaces a damaged entry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = agent.engineIo();
+    var dir_buf: [128]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, ".zig-cache/tmp/{s}/scripts", .{&tmp.sub_path});
+
+    // Large enough to be cached: a function per line, then a result that
+    // depends on the tree, a regexp, a template and Function.prototype.toString.
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    var index: usize = 0;
+    while (source.items.len < script_cache.min_source_len) : (index += 1)
+        try source.print(std.testing.allocator, "function f{d}(x) {{ return x + {d}; }}\n", .{ index, index });
+    try source.appendSlice(std.testing.allocator,
+        \\var total = 0; for (let i = 0; i < 10; i++) total = f3(total);
+        \\`${total}:${/a(b)/.exec("xab")[1]}:${f2.toString()}`;
+    );
+    const expected = "30:b:function f2(x) { return x + 2; }";
+
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        if (round == 2) {
+            // Damage the entry: the next evaluation must miss, parse, and
+            // write a fresh one.
+            var walker = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+            defer walker.close(io);
+            var it = walker.iterate();
+            while (try it.next(io)) |entry| {
+                var file = try walker.openFile(io, entry.name, .{ .mode = .read_write });
+                defer file.close(io);
+                try file.writePositionalAll(io, "garbage", 200);
+            }
+        }
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        try ctx.setScriptCacheDirectory(dir);
+        const result = try ctx.evaluate(source.items);
+        try std.testing.expectEqualStrings(expected, result.asStr());
+        try std.testing.expectEqual(@as(u64, if (round == 1) 1 else 0), ctx.script_cache_hits);
+    }
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try ctx.setScriptCacheDirectory(dir);
+    _ = try ctx.evaluate(source.items);
+    try std.testing.expectEqual(@as(u64, 1), ctx.script_cache_hits);
 }
 
 test "scripts run on the VM unless a loop of their own repeats an Environment Record" {
