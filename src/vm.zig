@@ -8782,6 +8782,80 @@ inline fn nextStepLimit(vm: *const Interpreter) u64 {
     return @min(checkpoint, vm.step_budget +| 1);
 }
 
+/// Run the per-instruction checkpoint work and decode the next instruction,
+/// or return null at the end of the code. Shared by the loop head and the
+/// bodies that dispatch their successor directly.
+inline fn nextInstruction(
+    vm: *Interpreter,
+    ip: *usize,
+    code: []const bc.Inst,
+    debug_nodes: [*]const ?*const ast.Node,
+    location_execution: bool,
+    debug_execution: bool,
+    chunk: *Chunk,
+    frame: ?*Frame,
+    exec: *Exec,
+    acc: *Value,
+    execution_inventory: ?*interp.ExecutionTierInventory,
+    vm_dispatches: *u64,
+) EvalError!?*const bc.Inst {
+    if (ip.* >= code.len) return null;
+    if (location_execution) if (debug_nodes[ip.*]) |node| {
+        try serviceInstructionStatement(vm, node, debug_execution, chunk, frame);
+    };
+    vm.steps += 1;
+    // One compare covers both the budget and the 1024-step service point
+    // (see `nextStepLimit`); the out-of-line slow path is the exact former
+    // check. Keeping it out of line keeps each inlined copy of this head small.
+    if (vm.steps >= vm.step_limit) {
+        @branchHint(.unlikely);
+        try serviceStepLimit(vm, exec, acc.*, ip.*);
+    }
+    // Profiling only: a branch, rather than a counter kept live (and stored)
+    // on every dispatch of the unprofiled loop.
+    if (execution_inventory != null) {
+        @branchHint(.unlikely);
+        vm_dispatches.* += 1;
+    }
+    // Fields are read where a body needs them; bytecode is immutable while it
+    // runs, so the loop keeps no decoded copy live across each body.
+    const inst = &code[ip.*];
+    ip.* += 1;
+    return inst;
+}
+
+noinline fn serviceInstructionStatement(vm: *Interpreter, node: *const ast.Node, debug_execution: bool, chunk: *Chunk, frame: ?*Frame) EvalError!void {
+    vm.serviceMutatorStopSafepoint();
+    if (debug_execution) {
+        try serviceVmDebugStatement(vm, node, chunk, frame);
+        vm.step_limit = 0;
+    } else serviceVmStackStatement(vm, node);
+}
+
+noinline fn serviceStepLimit(vm: *Interpreter, exec: *Exec, acc: Value, ip: usize) EvalError!void {
+    if (vm.steps > vm.step_budget) {
+        @branchHint(.cold);
+        return vm.throwError("RangeError", "evaluation step budget exceeded");
+    }
+    if ((vm.steps & 1023) == 0) {
+        if (vm.stop_flag) |sf| if (sf.load(.monotonic))
+            return vm.throwError("Error", "worker terminated");
+        try vm.serviceVmTraps();
+        if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
+        // Mid-script GC: flush the live accumulator/ip into `exec` so the
+        // precise tracer (which roots `exec.stack`/`exec.acc`) sees the
+        // current operand state, then run a guarded collection. No-op when
+        // the GC is off (`gc_safepoint_fn == null`).
+        if (vm.gc_safepoint_fn != null) {
+            exec.acc = acc;
+            exec.ip = ip;
+            vm.handoffRuntimeSlotIfContended();
+            vm.serviceGcSafepoint();
+        } else vm.handoffRuntimeSlotIfContended();
+    }
+    vm.step_limit = nextStepLimit(vm);
+}
+
 fn runChunk(
     vm: *Interpreter,
     exec: *Exec,
@@ -8825,67 +8899,58 @@ fn runChunk(
     const debug_nodes = chunk.debug_nodes.ptr;
     // Entry may follow steps/budget changes made outside the loop.
     vm.step_limit = nextStepLimit(vm);
-    while (ip < code.len) {
-        if (location_execution) if (debug_nodes[ip]) |node| {
-            vm.serviceMutatorStopSafepoint();
-            if (debug_execution) {
-                try serviceVmDebugStatement(vm, node, chunk, frame);
-                vm.step_limit = 0;
-            } else serviceVmStackStatement(vm, node);
-        };
-        vm.steps += 1;
-        // One compare covers both the budget and the 1024-step service point
-        // (see `nextStepLimit`); the slow path below is the exact former check.
-        if (vm.steps >= vm.step_limit) {
-            @branchHint(.unlikely);
-            if (vm.steps > vm.step_budget) {
-                @branchHint(.cold);
-                return vm.throwError("RangeError", "evaluation step budget exceeded");
-            }
-            if ((vm.steps & 1023) == 0) {
-                if (vm.stop_flag) |sf| if (sf.load(.monotonic))
-                    return vm.throwError("Error", "worker terminated");
-                try vm.serviceVmTraps();
-                if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
-                // Mid-script GC: flush the live accumulator/ip into `exec` so the
-                // precise tracer (which roots `exec.stack`/`exec.acc`) sees the
-                // current operand state, then run a guarded collection. No-op when
-                // the GC is off (`gc_safepoint_fn == null`).
-                if (vm.gc_safepoint_fn != null) {
-                    exec.acc = acc;
-                    exec.ip = ip;
-                    vm.handoffRuntimeSlotIfContended();
-                    vm.serviceGcSafepoint();
-                } else vm.handoffRuntimeSlotIfContended();
-            }
-            vm.step_limit = nextStepLimit(vm);
-        }
-        // Profiling only: a branch, rather than a counter kept live (and
-        // stored) on every dispatch of the unprofiled loop.
-        if (execution_inventory != null) {
-            @branchHint(.unlikely);
-            vm_dispatches += 1;
-        }
-        // Fields are read where a body needs them; bytecode is immutable while
-        // it runs, so the loop keeps no decoded copy live across each body.
-        const inst: *const bc.Inst = &code[ip];
-        ip += 1;
-        switch (inst.op) {
+    var inst: *const bc.Inst = undefined;
+    while (true) {
+        inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break;
+        // Hot bodies end by dispatching their successor directly
+        // (`continue :sw`), giving each its own indirect branch; every other
+        // body returns here.
+        sw: switch (inst.op) {
             .nop => {},
-            .load_const => try stack.append(stack_alloc, chunk.consts.items[inst.a]),
+            .load_const => {
+                try stack.append(stack_alloc, chunk.consts.items[inst.a]);
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
             .load_bigint => try stack.append(stack_alloc, try vm.makeBigIntText(chunk.names.items[inst.a])),
-            .load_undefined => try stack.append(stack_alloc, Value.undef()),
-            .load_null => try stack.append(stack_alloc, Value.nul()),
-            .load_true => try stack.append(stack_alloc, Value.boolVal(true)),
-            .load_false => try stack.append(stack_alloc, Value.boolVal(false)),
+            .load_undefined => {
+                try stack.append(stack_alloc, Value.undef());
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
+            .load_null => {
+                try stack.append(stack_alloc, Value.nul());
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
+            .load_true => {
+                try stack.append(stack_alloc, Value.boolVal(true));
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
+            .load_false => {
+                try stack.append(stack_alloc, Value.boolVal(false));
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
             .load_import_meta => try stack.append(stack_alloc, try vm.importMetaValue()),
-            .pop => stack.shrinkRetainingCapacity(stack.items.len - 1),
-            .dup => try stack.append(stack_alloc, stack.items[stack.items.len - 1]),
+            .pop => {
+                stack.shrinkRetainingCapacity(stack.items.len - 1);
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
+            .dup => {
+                try stack.append(stack_alloc, stack.items[stack.items.len - 1]);
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
+            },
             .swap => {
                 const top = stack.items.len - 1;
                 const tmp = stack.items[top];
                 stack.items[top] = stack.items[top - 1];
                 stack.items[top - 1] = tmp;
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .set_acc => acc = stack.pop().?,
 
@@ -8972,6 +9037,8 @@ fn runChunk(
                     }
                 }
                 try stack.append(stack_alloc, local);
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .load_local_lexical => {
                 const cf = frame.?;
@@ -8982,6 +9049,8 @@ fn runChunk(
                 const local = cf.slots[inst.a];
                 if (vm.isTdz(local)) return throwTdzSlot(vm, chunk, inst.a);
                 try stack.append(stack_alloc, local);
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .store_local => {
                 const cf = frame.?;
@@ -8990,12 +9059,16 @@ fn runChunk(
                     continue;
                 }
                 cf.slots[inst.a] = stack.items[stack.items.len - 1];
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .store_local_mapped, .store_local_lexical => {
                 _ = try executeLocalBinding(vm, frame.?, chunk, inst.*, stack.items[stack.items.len - 1], parallel_sync);
             },
             .load_upval, .load_upval_mapped, .load_upval_lexical => {
                 try stack.append(stack_alloc, try loadCapturedBinding(vm, frame, inst.*, parallel_sync));
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .store_upval, .store_upval_mapped, .store_upval_lexical => {
                 _ = try storeCapturedBinding(vm, frame, inst.*, stack.items[stack.items.len - 1], parallel_sync);
@@ -9003,6 +9076,8 @@ fn runChunk(
 
             .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {
                 try stack.append(stack_alloc, try vm.applyUnary(unaryOp(inst.op), stack.pop().?));
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .to_numeric => {
                 try stack.append(stack_alloc, try vm.toNumericValue(stack.pop().?));
@@ -9080,6 +9155,8 @@ fn runChunk(
                     break :binary try vm.applyBinary(binOp(inst.op), l, r);
                 };
                 try stack.append(stack_alloc, result);
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
 
             .jump => {
@@ -9137,6 +9214,8 @@ fn runChunk(
                         }
                     }
                 }
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .jump_if_true_peek => {
                 const taken = stack.items[stack.items.len - 1].toBoolean();
@@ -9389,6 +9468,8 @@ fn runChunk(
             .get_prop => {
                 const obj = stack.pop().?;
                 try stack.append(stack_alloc, try getPropAtSite(vm, chunk, optimizer_delta, parallel_sync, ip - 1, inst.a, obj));
+                inst = (try nextInstruction(vm, &ip, code, debug_nodes, location_execution, debug_execution, chunk, frame, exec, &acc, execution_inventory, &vm_dispatches)) orelse break :sw;
+                continue :sw inst.op;
             },
             .get_index => {
                 const key = stack.pop().?;
