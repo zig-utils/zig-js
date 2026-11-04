@@ -4759,21 +4759,26 @@ pub const Object = struct {
 
     fn lockPropertySnapshot(self: *const Object) bool {
         if (!property_snapshot_locks_enabled.load(.acquire)) return false;
-        self.lockPropertiesFor(.named_snapshot);
+        @constCast(self).lockPropertiesFor(.named_snapshot);
         return true;
     }
 
     fn unlockPropertySnapshot(self: *const Object, held: bool) void {
-        if (held) self.unlockProperties();
+        if (held) @constCast(self).unlockProperties();
     }
 
-    pub fn lockProperties(self: *const Object) void {
+    // The lock helpers mutate the object, so they take `*Object`. With a
+    // `*const Object` the compiler may assume no write happens through the
+    // pointer and hand the helper a read-only copy: a stack `Object{}` that is
+    // only ever read became the constant default-initializer template, and the
+    // lock's compare-and-swap faulted on that read-only page (Bus error).
+    pub fn lockProperties(self: *Object) void {
         self.lockPropertiesFor(.other);
     }
 
-    pub fn lockPropertiesFor(self: *const Object, reason: object_profile.PropertyLockReason) void {
+    pub fn lockPropertiesFor(self: *Object, reason: object_profile.PropertyLockReason) void {
         var spins: usize = 0;
-        const mutex = &@constCast(self).property_lock;
+        const mutex = &self.property_lock;
         while (!mutex.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) {
                 std.Thread.yield() catch {};
@@ -4785,14 +4790,14 @@ pub const Object = struct {
         gc_runtime.enterTraceSensitiveLock();
     }
 
-    pub fn unlockProperties(self: *const Object) void {
+    pub fn unlockProperties(self: *Object) void {
         gc_runtime.leaveTraceSensitiveLock();
-        @constCast(self).property_lock.unlock();
+        self.property_lock.unlock();
     }
 
-    pub fn lockIndexedProperty(self: *const Object) void {
+    pub fn lockIndexedProperty(self: *Object) void {
         var spins: usize = 0;
-        const mutex = &@constCast(self).indexed_property_lock;
+        const mutex = &self.indexed_property_lock;
         while (!mutex.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) {
                 std.Thread.yield() catch {};
@@ -4803,9 +4808,9 @@ pub const Object = struct {
         gc_runtime.enterTraceSensitiveLock();
     }
 
-    pub fn unlockIndexedProperty(self: *const Object) void {
+    pub fn unlockIndexedProperty(self: *Object) void {
         gc_runtime.leaveTraceSensitiveLock();
-        @constCast(self).indexed_property_lock.unlock();
+        self.indexed_property_lock.unlock();
     }
 
     /// [[Prototype]], read/written atomically: `setPrototypeOf` (and internal
@@ -4850,10 +4855,10 @@ pub const Object = struct {
     /// gate is enable-only and may change while a new threaded Context starts.
     pub var element_locks_enabled: std.atomic.Value(bool) = .init(false);
 
-    pub fn lockElements(self: *const Object) bool {
+    pub fn lockElements(self: *Object) bool {
         if (!element_locks_enabled.load(.acquire)) return false;
         var spins: usize = 0;
-        const mutex = &@constCast(self).elements_lock;
+        const mutex = &self.elements_lock;
         while (!mutex.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) {
                 std.Thread.yield() catch {};
@@ -4866,10 +4871,10 @@ pub const Object = struct {
         return true;
     }
 
-    pub fn unlockElements(self: *const Object, held: bool) void {
+    pub fn unlockElements(self: *Object, held: bool) void {
         if (!held) return;
         gc_runtime.leaveTraceSensitiveLock();
-        @constCast(self).elements_lock.unlock();
+        self.elements_lock.unlock();
     }
 
     /// `Date`'s [[DateValue]] slot, read/written atomically: a shared Date can be
@@ -4903,8 +4908,8 @@ pub const Object = struct {
     }
 
     pub fn elementsLen(self: *const Object) usize {
-        const elements_locked_1 = self.lockElements();
-        defer self.unlockElements(elements_locked_1);
+        const elements_locked_1 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_1);
         return self.elementsItems().len;
     }
 
@@ -4924,14 +4929,14 @@ pub const Object = struct {
     }
 
     pub fn arrayLength(self: *const Object) usize {
-        const elements_locked_2 = self.lockElements();
-        defer self.unlockElements(elements_locked_2);
+        const elements_locked_2 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_2);
         return @max(self.elementsItems().len, self.arrayLengthFloor());
     }
 
     pub fn elementAt(self: *const Object, i: usize) ?Value {
-        const elements_locked_3 = self.lockElements();
-        defer self.unlockElements(elements_locked_3);
+        const elements_locked_3 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_3);
         if (i >= self.elementsItems().len) return null;
         return self.elementsItems()[i];
     }
@@ -5522,8 +5527,8 @@ pub const Object = struct {
     }
 
     pub fn packedDenseElementsCoverLength(self: *const Object) bool {
-        const elements_locked_26 = self.lockElements();
-        defer self.unlockElements(elements_locked_26);
+        const elements_locked_26 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_26);
         return self.holesMap() == null and self.arrayLengthFloor() <= self.elementsItems().len;
     }
 
@@ -5539,8 +5544,8 @@ pub const Object = struct {
     /// current element backing. Private contiguous-vector consumers compare
     /// both the encoded snapshot and this address before every direct read.
     pub fn packedDenseStorageSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?PackedDenseStorageSnapshot {
-        const elements_locked_27 = self.lockElements();
-        defer self.unlockElements(elements_locked_27);
+        const elements_locked_27 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_27);
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len or self.accessorsMap() != null) return null;
         const out = try arena.alloc(Value, self.elementsItems().len);
         @memcpy(out, self.elementsItems());
@@ -5552,16 +5557,16 @@ pub const Object = struct {
     /// semantics; callers use it only for engine-owned element lists such as
     /// iterator-helper source arrays.
     pub fn internalElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]Value {
-        const elements_locked_28 = self.lockElements();
-        defer self.unlockElements(elements_locked_28);
+        const elements_locked_28 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_28);
         const out = try arena.alloc(Value, self.elementsItems().len);
         @memcpy(out, self.elementsItems());
         return out;
     }
 
     pub fn denseElementLimit(self: *const Object, logical_len: usize) usize {
-        const elements_locked_29 = self.lockElements();
-        defer self.unlockElements(elements_locked_29);
+        const elements_locked_29 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_29);
         return @min(self.elementsItems().len, logical_len);
     }
 
@@ -5591,20 +5596,20 @@ pub const Object = struct {
     }
 
     pub fn denseElementInBounds(self: *const Object, i: usize) bool {
-        const elements_locked_30 = self.lockElements();
-        defer self.unlockElements(elements_locked_30);
+        const elements_locked_30 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_30);
         return i < self.elementsItems().len;
     }
 
     pub fn denseElementPresent(self: *const Object, i: usize) bool {
-        const elements_locked_31 = self.lockElements();
-        defer self.unlockElements(elements_locked_31);
+        const elements_locked_31 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_31);
         return i < self.elementsItems().len and !self.isHoleUnlocked(i);
     }
 
     pub fn denseElement(self: *const Object, i: usize) ?Value {
-        const elements_locked_32 = self.lockElements();
-        defer self.unlockElements(elements_locked_32);
+        const elements_locked_32 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_32);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         return self.elementsItems()[i];
     }
@@ -5616,15 +5621,15 @@ pub const Object = struct {
     /// an accessor/data conversion cannot expose an impossible mixed state.
     pub fn denseElementWithoutAccessor(self: *const Object, key: []const u8, i: usize) ?Value {
         const indexed_locked = element_locks_enabled.load(.acquire);
-        if (indexed_locked) self.lockIndexedProperty();
-        defer if (indexed_locked) self.unlockIndexedProperty();
+        if (indexed_locked) @constCast(self).lockIndexedProperty();
+        defer if (indexed_locked) @constCast(self).unlockIndexedProperty();
         if (self.getAccessor(key) != null) return null;
         return self.denseElement(i);
     }
 
     pub fn denseElementIndices(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]usize {
-        const elements_locked_33 = self.lockElements();
-        defer self.unlockElements(elements_locked_33);
+        const elements_locked_33 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_33);
         var list: std.ArrayListUnmanaged(usize) = .empty;
         errdefer list.deinit(arena);
         for (self.elementsItems(), 0..) |_, i| {
@@ -5875,8 +5880,8 @@ pub const Object = struct {
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {
-        const elements_locked_45 = self.lockElements();
-        defer self.unlockElements(elements_locked_45);
+        const elements_locked_45 = @constCast(self).lockElements();
+        defer @constCast(self).unlockElements(elements_locked_45);
         return self.isHoleUnlocked(i);
     }
 
@@ -5914,8 +5919,8 @@ pub const Object = struct {
     /// Own keys retain arena-backed result slices while transient membership
     /// indexes use separately freeable scratch backing.
     pub fn ownKeysWithScratch(self: *const Object, arena: std.mem.Allocator, scratch: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         return self.ownKeysUnlockedWithScratch(arena, scratch);
     }
 
@@ -6061,8 +6066,8 @@ pub const Object = struct {
         // defineProperty may linearize on either side of this read, as allowed
         // for a JavaScript program race, without exposing mutable map storage.
         if (self.attrsMap() == null) return .{};
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         return self.getAttrUnlocked(name);
     }
 
@@ -6202,8 +6207,8 @@ pub const Object = struct {
     /// the table (observed as an infinite grow-recursion). Uncontended in GIL
     /// mode (one tryLock, like `getOwn`).
     pub fn hasPrivateBrand(self: *const Object, name: []const u8) bool {
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         const m = self.privateBrands() orelse return false;
         return m.contains(self.installedNameHashContext(), name);
     }
@@ -6268,8 +6273,8 @@ pub const Object = struct {
     }
 
     pub fn customAccessorDescriptorCell(self: *const Object, name: []const u8) ?*Object {
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         const owner = self.cApiObjectOwner() orelse return null;
         return owner.custom_accessor_cells.get(self.installedNameHashContext(), name);
     }
@@ -6301,8 +6306,8 @@ pub const Object = struct {
     /// The snapshot is stable; the subsequent per-key work re-locks via the
     /// `getAttr`/`setAttr` accessors.
     pub fn accessorKeysSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         const m = self.accessorsMap() orelse return &.{};
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         try list.ensureTotalCapacityPrecise(arena, m.count());
@@ -6495,8 +6500,8 @@ pub const Object = struct {
     /// conversion from exposing a mixed result to shared-realm fast paths.
     pub fn indexedOwnPropertySnapshot(self: *const Object, name: []const u8, index: usize) IndexedOwnPropertySnapshot {
         const indexed_locked = element_locks_enabled.load(.acquire);
-        if (indexed_locked) self.lockIndexedProperty();
-        defer if (indexed_locked) self.unlockIndexedProperty();
+        if (indexed_locked) @constCast(self).lockIndexedProperty();
+        defer if (indexed_locked) @constCast(self).unlockIndexedProperty();
         switch (self.namedOwnPropertySnapshot(name)) {
             .data => |own| return .{ .data = own.value },
             .accessor => return .accessor,
@@ -6513,10 +6518,10 @@ pub const Object = struct {
     /// in the indexed -> property -> element lock order used for publication.
     pub fn indexedOwnDataWritableSnapshot(self: *const Object, name: []const u8, index: usize) ?bool {
         const indexed_locked = element_locks_enabled.load(.acquire);
-        if (indexed_locked) self.lockIndexedProperty();
-        defer if (indexed_locked) self.unlockIndexedProperty();
-        self.lockPropertiesFor(.named_snapshot);
-        defer self.unlockProperties();
+        if (indexed_locked) @constCast(self).lockIndexedProperty();
+        defer if (indexed_locked) @constCast(self).unlockIndexedProperty();
+        @constCast(self).lockPropertiesFor(.named_snapshot);
+        defer @constCast(self).unlockProperties();
         if (self.getAccessorUnlocked(name) != null) return false;
         if (self.shape) |shape| if ((@constCast(shape)).lookup(name) != null)
             return self.getAttrUnlocked(name).writable;
@@ -6696,8 +6701,8 @@ pub const Object = struct {
         }
         if (!any_data) return true;
 
-        self.lockPropertiesFor(.named_snapshot);
-        defer self.unlockProperties();
+        @constCast(self).lockPropertiesFor(.named_snapshot);
+        defer @constCast(self).unlockProperties();
         if (self.accessorsMap()) |accessors| {
             var iterator = accessors.iterator();
             while (iterator.next()) |entry| if (classify(entry.key_ptr.*) != null) return false;
@@ -6717,8 +6722,8 @@ pub const Object = struct {
     /// `property_lock` snapshot; rereading `shape` after `getOwn` returns would
     /// race a peer's transition and could publish a torn inherited IC record.
     pub fn getOwnSnapshot(self: *const Object, name: []const u8) ?OwnPropertySnapshot {
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         const shape = self.shape orelse return null;
         const slot = (@constCast(shape)).lookup(name) orelse return null;
         return .{ .value = self.slotsItems()[slot], .shape = shape, .slot = slot };
@@ -6728,8 +6733,8 @@ pub const Object = struct {
     /// immutable once installed, but the Object's pointer changes on every
     /// transition and therefore cannot be sampled concurrently as a plain read.
     pub fn shapeSnapshot(self: *const Object) ?*Shape {
-        self.lockProperties();
-        defer self.unlockProperties();
+        @constCast(self).lockProperties();
+        defer @constCast(self).unlockProperties();
         return self.shape;
     }
 

@@ -4862,8 +4862,8 @@ pub const Interpreter = struct {
             // mutator may be transitioning the same object concurrently; read
             // the exact pre-store shape under that same lock rather than racing
             // the writer or consulting a torn/stale pointer.
-            o.lockProperties();
-            defer o.unlockProperties();
+            @constCast(o).lockProperties();
+            defer @constCast(o).unlockProperties();
             break :token if (o.shape) |shape|
                 @intFromPtr(shape)
             else
