@@ -846,6 +846,10 @@ pub const FnTemplate = struct {
     /// therefore causal rather than an unclassified tree-walker fallback.
     admission: FnTemplateAdmission = .plain_unsupported_lowering,
     chunk: ?*Chunk,
+    /// A plain function whose body compiles on its first call: the
+    /// compiler's `LazyFunction` record (type-erased). `chunk` stays null and
+    /// `local_count` 0 until `Compiler.ensureLazyFunction` publishes them.
+    lazy: ?*anyopaque = null,
     /// Number of frame slots (params + function-scoped declarations) the VM
     /// allocates per call.
     local_count: u32,

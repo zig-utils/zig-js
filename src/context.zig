@@ -10501,7 +10501,15 @@ pub const Context = struct {
                     break :admission machine.eval(prog);
                 }
             }
-            const program_admission = compiler.Compiler.admitProgram(a, prog) catch |err| switch (err) {
+            // `required` is a coverage contract: every nested function must
+            // compile up front. Automatic mode defers plain function bodies
+            // to their first call, since most of a large script's functions
+            // never run while it loads.
+            const admit = if (self.bytecode_execution_mode == .automatic)
+                &compiler.Compiler.admitProgramLazy
+            else
+                &compiler.Compiler.admitProgram;
+            const program_admission = admit(a, prog) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // Nested deeper than the compiler can recurse (#937). Not a
                 // lowering limit: the tree-walker recurses over the same tree.
@@ -28364,6 +28372,8 @@ test "enable_gc: persistent bytecode string constants survive collection" {
         return error.TestUnexpectedResult;
     const function = interp.Interpreter.funcOf(function_value) orelse
         return error.TestUnexpectedResult;
+    // The first call compiles the deferred body and attaches its chunk.
+    try std.testing.expectEqualStrings("en-US", (try ctx.evaluate("persistentBytecodeLiteral(0)")).asStr());
     try std.testing.expect(function.chunk != null);
 
     // The Function is globally reachable while its compiled string literal is
@@ -29309,8 +29319,8 @@ test "vm admission: safe sloppy loops and dynamic calls tier safely" {
     );
     const indexed_raw = indexed.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const indexed_func: *interp.Function = @ptrCast(@alignCast(indexed_raw));
-    try std.testing.expect(indexed_func.chunk != null);
     try std.testing.expectEqual(@as(f64, 9), (try ctx.evaluate("indexedSum([1, 2], 6)")).asNum());
+    try std.testing.expect(indexed_func.chunk != null);
 
     const caller = try ctx.evaluate(
         \\function indexedCall(a) { return String(a[0]); }
@@ -29319,8 +29329,8 @@ test "vm admission: safe sloppy loops and dynamic calls tier safely" {
     );
     const caller_raw = caller.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const caller_func: *interp.Function = @ptrCast(@alignCast(caller_raw));
-    try std.testing.expect(caller_func.chunk != null);
     try std.testing.expectEqualStrings("3", (try ctx.evaluate("indexedCall([3])")).asStr());
+    try std.testing.expect(caller_func.chunk != null);
 
     const dynamic = try ctx.evaluate(
         \\globalThis.dynamicTarget = function (x) { return x + 1; };
@@ -39336,7 +39346,8 @@ test "required bytecode preserves automatic host helper provenance" {
     );
     const compiled_host_value = ctx.global_object.getOwn("compiledHostHelper") orelse return error.TestUnexpectedResult;
     const compiled_host: *interp.Function = @ptrCast(@alignCast(compiled_host_value.asObj().jsFunction() orelse return error.TestUnexpectedResult));
-    try std.testing.expect(compiled_host.chunk != null);
+    // Admitted to bytecode: its body compiles on its first call.
+    try std.testing.expect(compiled_host.chunk != null or compiled_host.lazy_template != null);
     ctx.setBytecodeExecutionModeForTesting(.required);
     const result = try ctx.evaluate("hostHelper()();");
     try std.testing.expectEqual(@as(f64, 17), result.asNum());
@@ -47879,4 +47890,41 @@ test "parallel_js: optimizer activation reads survive actual relocation in a nat
         .parallel_js = true,
         .bytecode_execution_mode = .required,
     }, true);
+}
+
+test "a rejected deferred body runs on the tree-walker over its defining frame" {
+    const compiler_mod = @import("compiler.zig");
+    compiler_mod.LazyFunction.testing_reject_nested = true;
+    defer compiler_mod.LazyFunction.testing_reject_nested = false;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function outer() {
+        \\  let count = 0;
+        \\  { let step = 2;
+        \\    var bump = function named(n) { count += step; return n ? named(n - 1) : count; };
+        \\  }
+        \\  const read = () => count;
+        \\  return [bump(2), read(), (count = 10, bump(0)), count];
+        \\}
+        \\JSON.stringify(outer())
+    );
+    try std.testing.expectEqualStrings("[6,6,12,12]", result.asStr());
+}
+
+test "deferred function bodies compile on first call and keep their closures" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function make(seed) {
+        \\  let total = seed;
+        \\  const fns = [];
+        \\  for (let i = 0; i < 3; i++) fns.push(() => (total += i));
+        \\  function unused() { return total; }
+        \\  return () => fns.map((f) => f()).join(",") + ":" + unused();
+        \\}
+        \\const first = make(1), second = make(10);
+        \\first() + "|" + second() + "|" + first()
+    );
+    try std.testing.expectEqualStrings("1,2,4:4|10,11,13:13|4,5,7:7", result.asStr());
 }

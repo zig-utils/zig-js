@@ -9607,7 +9607,8 @@ export fn JSC__JSFunction__optimizeSoon(encoded: EncodedValue) callconv(.c) void
     const boxed = privateBoxedFrom(encoded) orelse return;
     if (boxed.private_kind != .value) return;
     const function = interp.Interpreter.funcOf(boxed.value) orelse return;
-    const chunk = function.chunk orelse return;
+    // A body deferred to its first call compiles now, so the request applies.
+    const chunk = (vm.compileDeferredForHost(function) catch return) orelse return;
     if (chunk.tier.loadState() != .cold) return;
     // `observeEntry` increments before checking its threshold. A saturated
     // pre-threshold count therefore makes the next invocation claim compilation
@@ -31744,13 +31745,14 @@ test "private JSFunction source and tier-up controls preserve exact contracts" {
     const tier_value = try internal.evaluate("(function tier(n) { if (n <= 0) return 0; return tier(n - 1) + 1; })");
     const tier_encoded = privateEncodedFromValue(internal, tier_value);
     const tier_function = interp.Interpreter.funcOf(tier_value) orelse return error.MissingFunction;
-    const chunk = tier_function.chunk orelse return error.MissingBytecode;
-    try std.testing.expectEqual(@as(u32, 0), chunk.tier.entries.load(.acquire));
-    try std.testing.expectEqual(.cold, chunk.tier.loadState());
+    // The body is deferred to its first call; a tier-up request compiles it.
+    try std.testing.expect(tier_function.chunk == null);
     try internal.global_object.setOwn(internal.arena(), internal.root_shape, "__private_tier_222", tier_value);
 
     JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(222));
     JSC__JSFunction__optimizeSoon(tier_encoded);
+    const chunk = tier_function.chunk orelse return error.MissingBytecode;
+    try std.testing.expectEqual(.cold, chunk.tier.loadState());
     try std.testing.expectEqual(@as(u32, std.math.maxInt(u32) - 1), chunk.tier.entries.load(.acquire));
     const preserved = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(222), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));

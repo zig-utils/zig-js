@@ -345,6 +345,64 @@ const FnScope = struct {
     /// With `tdz_checks` off, the lexical names that still need checked slots
     /// (`Compiler.functionTdzChecks`); null means none.
     tdz_names: ?*const SecureStringMapUnmanaged(void) = null,
+    /// Bumped by every change a nested function can observe through `get`
+    /// or a direct-eval plan, so `freeze` can reuse an unchanged snapshot.
+    version: u32 = 0,
+    /// A deferred function's view of this scope as it stood at the
+    /// function's definition (see `LazyFunction`); never changed again.
+    frozen: bool = false,
+    /// Bindings in slots at or past this bound were added after the frozen
+    /// definition point and are invisible to it.
+    visible_slot_limit: u32 = std.math.maxInt(u32),
+    /// A frozen scope's live original. Its body bindings are read through
+    /// it: the live map keeps growing (and may rehash) after the freeze.
+    live: ?*const FnScope = null,
+    /// The latest snapshot of this live scope and the `version` it froze.
+    snapshot: ?*FnScope = null,
+    snapshot_version: u32 = 0,
+
+    fn visible(self: *const FnScope, binding: SlotBinding) bool {
+        return binding.environment or binding.slot < self.visible_slot_limit;
+    }
+
+    fn bodyNames(self: *const FnScope) *const SecureStringMapUnmanaged(SlotBinding) {
+        return if (self.live) |live| &live.names else &self.names;
+    }
+
+    /// This scope chain as a deferred nested function must see it later:
+    /// the lexical records open now, and only the bindings that exist now.
+    /// Ancestors that are already frozen (a deferred function's own
+    /// definition context) are shared rather than copied.
+    fn freeze(self: *FnScope, arena: std.mem.Allocator) CompileError!*FnScope {
+        if (self.frozen) return self;
+        if (self.snapshot) |snapshot| if (self.snapshot_version == self.version) return snapshot;
+        const copy = try arena.create(FnScope);
+        copy.* = self.*;
+        copy.frozen = true;
+        copy.live = self;
+        copy.snapshot = null;
+        copy.names = .{ .state = self.hash_state };
+        copy.annex_b_variables = .{};
+        copy.visible_slot_limit = self.count;
+        copy.parent = if (self.parent) |parent| try parent.freeze(arena) else null;
+        copy.lexical_scopes = .empty;
+        copy.lexical_scope_is_catch_param = .empty;
+        copy.lexical_scope_environment_depth = .empty;
+        copy.lexical_slots = .empty;
+        copy.slot_names = .empty;
+        copy.lexical_name_counts = null;
+        try copy.lexical_scopes.appendSlice(arena, self.lexical_scopes.items);
+        try copy.lexical_scope_is_catch_param.appendSlice(arena, self.lexical_scope_is_catch_param.items);
+        try copy.lexical_scope_environment_depth.appendSlice(arena, self.lexical_scope_environment_depth.items);
+        // Counts for exactly the copied records; the live counts keep moving.
+        for (copy.lexical_scopes.items) |bindings| {
+            var names = bindings.keyIterator();
+            while (names.next()) |name| try copy.noteLexicalName(arena, name.*);
+        }
+        self.snapshot = copy;
+        self.snapshot_version = self.version;
+        return copy;
+    }
 
     fn addLocal(self: *FnScope, arena: std.mem.Allocator, name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
         if (self.names.get(name)) |binding| return binding.slot;
@@ -383,6 +441,9 @@ const FnScope = struct {
         if (tdz_checked) try self.lexical_slots.append(arena, slot);
         try self.slot_names.append(arena, name);
         self.count += 1;
+        // Activation temps are unnameable, so a snapshot that predates one
+        // still describes everything a nested function can resolve.
+        if (isUserVisibleBindingName(name)) self.version +%= 1;
         return slot;
     }
 
@@ -396,9 +457,12 @@ const FnScope = struct {
         try self.lexical_scopes.append(arena, bindings);
         try self.lexical_scope_is_catch_param.append(arena, false);
         try self.lexical_scope_environment_depth.append(arena, environment_depth);
+        self.version +%= 1;
     }
 
     fn popLexicalScope(self: *FnScope) void {
+        std.debug.assert(!self.frozen);
+        self.version +%= 1;
         const bindings = self.lexical_scopes.pop().?;
         var names = bindings.keyIterator();
         while (names.next()) |name| self.forgetLexicalName(name.*);
@@ -410,6 +474,7 @@ const FnScope = struct {
         std.debug.assert(self.lexical_scope_is_catch_param.items.len == self.lexical_scopes.items.len);
         std.debug.assert(self.lexical_scope_is_catch_param.items.len != 0);
         self.lexical_scope_is_catch_param.items[self.lexical_scope_is_catch_param.items.len - 1] = true;
+        self.version +%= 1;
     }
 
     fn currentLexicalScope(self: *FnScope) *SecureStringMapUnmanaged(SlotBinding) {
@@ -465,9 +530,11 @@ const FnScope = struct {
             .tdz_checked = true,
             .environment = true,
         });
+        self.version +%= 1;
     }
 
     fn get(self: *const FnScope, name: []const u8) ?SlotBinding {
+        if (self.frozen) return self.getFrozen(name);
         if (self.bindsLexically(name)) {
             var index = self.lexical_scopes.items.len;
             while (index > 0) {
@@ -485,7 +552,21 @@ const FnScope = struct {
         return null;
     }
 
+    fn getFrozen(self: *const FnScope, name: []const u8) ?SlotBinding {
+        if (self.bindsLexically(name)) {
+            var index = self.lexical_scopes.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (self.lexical_scopes.items[index].get(name)) |binding| if (self.visible(binding)) return binding;
+            }
+        }
+        if (self.bodyNames().get(name)) |binding| if (self.visible(binding)) return binding;
+        if (self.parameter_names) |parameters| if (parameters.get(name)) |binding| if (self.visible(binding)) return binding;
+        return null;
+    }
+
     fn getHashed(self: *const FnScope, key: HashedName) ?SlotBinding {
+        if (self.frozen) return self.getFrozen(key.name);
         if (self.bindsLexicallyHashed(key)) {
             var index = self.lexical_scopes.items.len;
             while (index > 0) {
@@ -501,6 +582,7 @@ const FnScope = struct {
     }
 
     fn getParameterHashed(self: *const FnScope, key: HashedName) ?SlotBinding {
+        if (self.frozen) return self.getParameter(key.name);
         if (self.parameter_names) |parameters| return parameters.getHashed(key);
         return self.names.getHashed(key);
     }
@@ -518,8 +600,229 @@ const FnScope = struct {
     }
 
     fn getParameter(self: *const FnScope, name: []const u8) ?SlotBinding {
-        if (self.parameter_names) |parameters| return parameters.get(name);
-        return self.names.get(name);
+        const binding = if (self.parameter_names) |parameters| parameters.get(name) else self.bodyNames().get(name);
+        if (binding) |found| if (!self.visible(found)) return null;
+        return binding;
+    }
+};
+
+/// What a plain function body compiles with, beyond its own scope. A
+/// deferred body (`LazyFunction`) rebuilds exactly this at its first call.
+const PlainBodyContext = struct {
+    arena: std.mem.Allocator,
+    hash_state: *CompileHashState,
+    stack_floor: usize,
+    derived_instance_initializers: []const *ast.Node,
+    debug_checkpoints: bool,
+    lazy_program: ?*LazyProgram,
+};
+
+/// `error.Rejected` is an unsupported parameter prologue or body lowering,
+/// whose function can run on the tree-walker by itself; any other
+/// `error.Unsupported` rejects whatever is being compiled around it.
+const PlainBodyError = CompileError || error{Rejected};
+
+fn rejectUnsupported(err: CompileError) PlainBodyError {
+    return switch (err) {
+        error.Unsupported => error.Rejected,
+        else => |e| e,
+    };
+}
+
+/// Lower a plain (not generator, not async) function body into a fresh
+/// chunk. `scope` is the function's new FnScope, chained to its definition
+/// context. `error.Rejected` leaves the reason in `admission`.
+fn compilePlainBody(
+    context: PlainBodyContext,
+    scope: *FnScope,
+    fnode: *const ast.FunctionNode,
+    admission: *bc.FnTemplateAdmission,
+) PlainBodyError!*Chunk {
+    const arena = context.arena;
+    const compiled = try arena.create(Chunk);
+    compiled.* = Chunk.init(arena);
+    admission.* = .plain_parameter_prologue;
+    const parameter_layout = configurePlainParameters(arena, scope, fnode, context.stack_floor) catch |err| return rejectUnsupported(err);
+    const arguments_slot = try addArgumentsSlot(arena, scope, fnode, context.stack_floor);
+    try planFunctionDeclarations(arena, scope, fnode, arguments_slot != null, context.stack_floor);
+    const mapped_parameter_indices = try configureMappedParameters(
+        arena,
+        scope,
+        fnode,
+        arguments_slot != null or functionSupportsLegacyArguments(fnode),
+        arguments_slot != null,
+    );
+
+    compiled.param_count = @intCast(fnode.params.len);
+    compiled.parameter_slots = parameter_layout.slots;
+    compiled.destructuring_parameter_indices = parameter_layout.destructuring_indices;
+    compiled.default_parameter_indices = parameter_layout.default_indices;
+    compiled.rest_parameter_index = parameter_layout.rest_index;
+    compiled.has_non_simple_parameters = parameter_layout.hasNonSimple();
+    compiled.arguments_slot = arguments_slot;
+    compiled.mapped_parameter_indices = mapped_parameter_indices;
+
+    var sub_c = Compiler{
+        .arena = arena,
+        .chunk = compiled,
+        .mode = .function,
+        .hash_state = context.hash_state,
+        .stack_floor = context.stack_floor,
+        .scope = scope,
+        .is_strict = fnode.is_strict,
+        .is_derived_constructor = false,
+        .derived_instance_initializers = context.derived_instance_initializers,
+        .debug_checkpoints = context.debug_checkpoints,
+        .lazy_program = context.lazy_program,
+    };
+    sub_c.compilePlainParameterEntries(fnode, &parameter_layout) catch |err| return rejectUnsupported(err);
+    try sub_c.emitParameterBodyCopies();
+    admission.* = .plain_unsupported_lowering;
+    if (fnode.is_expr_body) {
+        sub_c.compileTailExpr(fnode.body) catch |err| return rejectUnsupported(err);
+    } else {
+        sub_c.compileStmt(fnode.body) catch |err| return rejectUnsupported(err); // body is a block
+        _ = try compiled.emit(.ret_undef, 0);
+    }
+    compiled.local_count = scope.count;
+    compiled.mapped_parameter_indices = try finalizeMappedParameterIndices(arena, scope, mapped_parameter_indices);
+    compiled.lexical_slots = scope.lexical_slots.items;
+    try retainDebugLocalNames(arena, compiled, scope);
+    try compiled.finalize();
+    admission.* = .plain_compiled;
+    return compiled;
+}
+
+/// One lazily compiled program's shared compile state. Deferred bodies
+/// allocate from the program's arena and share its keyed hashing and
+/// identifier cache, so their compiles are serialized here: closures of one
+/// program can first run on several threads at once.
+pub const LazyProgram = struct {
+    arena: std.mem.Allocator,
+    hash_state: *CompileHashState,
+    lock: std.atomic.Mutex = .unlocked,
+
+    fn acquire(self: *LazyProgram) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+};
+
+/// A plain function template whose body compiles on its first call
+/// (`FnTemplate.lazy`). Most functions a large script defines never run
+/// during its first evaluation; deferring them saves their whole lowering.
+///
+/// The body compiles against `parent`, a frozen copy of the defining scope
+/// chain as it stood at the definition (`FnScope.freeze`), with every other
+/// input captured here, so the chunk is the one an eager compile would have
+/// produced. An eager compile that hits an unsupported construct sends the
+/// whole enclosing function to the tree-walker, which can no longer happen
+/// once that parent runs; a rejected deferred body therefore runs on the
+/// tree-walker over a live Environment view of its defining frames,
+/// exactly as a generator body sees them (`fallback_plan`).
+pub const LazyFunction = struct {
+    program: *LazyProgram,
+    fnode: *const ast.FunctionNode,
+    /// Null for a function defined directly in program code.
+    parent: ?*FnScope,
+    parent_binding_phase: FunctionBindingPhase,
+    environment_depth: u32,
+    with_depth: u32,
+    named_expr: bool,
+    debug_checkpoints: bool,
+    state: std.atomic.Value(State) = .init(.pending),
+    /// Set with `.rejected` when `parent` is non-null.
+    fallback_plan: ?*bc.DirectEvalPlan = null,
+
+    pub const State = enum(u8) { pending, compiled, rejected };
+
+    /// Tests only: reject every deferred body that has a defining frame, to
+    /// exercise the tree-walker fallback over the frame view.
+    pub var testing_reject_nested = false;
+
+    pub fn of(tmpl: *const bc.FnTemplate) ?*LazyFunction {
+        const raw = tmpl.lazy orelse return null;
+        return @ptrCast(@alignCast(raw));
+    }
+
+    /// Compile the body once. Returns the template's chunk, or null when the
+    /// body runs on the tree-walker (`fallback_plan` then says how).
+    pub fn ensureCompiled(self: *LazyFunction, tmpl: *bc.FnTemplate) error{ OutOfMemory, StackExhausted }!?*Chunk {
+        switch (self.state.load(.acquire)) {
+            .compiled => return tmpl.chunk,
+            .rejected => return null,
+            .pending => {},
+        }
+        self.program.acquire();
+        defer self.program.lock.unlock();
+        switch (self.state.load(.acquire)) {
+            .compiled => return tmpl.chunk,
+            .rejected => return null,
+            .pending => {},
+        }
+        const arena = self.program.arena;
+        const hash_state = self.program.hash_state;
+        const stack_floor = stack_scan.nestingStackFloor();
+        const fnode = self.fnode;
+        var admission: bc.FnTemplateAdmission = .plain_unsupported_lowering;
+        const tdz = Compiler.functionTdzChecks(arena, hash_state, fnode, stack_floor) catch |err| switch (err) {
+            error.Unsupported => return self.reject(tmpl, admission),
+            else => |e| return e,
+        };
+        const scope = try arena.create(FnScope);
+        const self_environment_depth: u32 = @intFromBool(self.named_expr and fnode.has_name_binding and !fnode.is_arrow);
+        scope.* = .{
+            .parent = self.parent,
+            .parent_binding_phase = self.parent_binding_phase,
+            .hash_state = hash_state,
+            .names = .{ .state = hash_state },
+            .parent_environment_depth = self.environment_depth,
+            .parent_direct_eval_environment_depth = std.math.add(u32, self.environment_depth, self_environment_depth) catch std.math.maxInt(u32),
+            .parent_with_depth = self.with_depth,
+            .tdz_checks = tdz == .all,
+            .tdz_names = tdz.names(),
+        };
+        const context: PlainBodyContext = .{
+            .arena = arena,
+            .hash_state = hash_state,
+            .stack_floor = stack_floor,
+            .derived_instance_initializers = &.{},
+            .debug_checkpoints = self.debug_checkpoints,
+            .lazy_program = self.program,
+        };
+        const outcome: PlainBodyError!*Chunk = if (@import("builtin").is_test and testing_reject_nested and self.parent != null) rejected: {
+            admission = .plain_unsupported_lowering;
+            break :rejected error.Rejected;
+        } else compilePlainBody(context, scope, fnode, &admission);
+        const compiled = outcome catch |err| switch (err) {
+            // A body an eager compile would have rejected together with its
+            // enclosing function runs on the tree-walker by itself instead.
+            error.Rejected, error.Unsupported => return self.reject(tmpl, admission),
+            error.OutOfMemory => return error.OutOfMemory,
+            error.StackExhausted => return error.StackExhausted,
+        };
+        tmpl.local_count = scope.count;
+        tmpl.chunk = compiled;
+        self.state.store(.compiled, .release);
+        return compiled;
+    }
+
+    /// Called with the program lock held.
+    fn reject(self: *LazyFunction, tmpl: *bc.FnTemplate, admission: bc.FnTemplateAdmission) error{ OutOfMemory, StackExhausted }!?*Chunk {
+        if (self.parent) |parent| {
+            const plan = try self.program.arena.create(bc.DirectEvalPlan);
+            plan.* = buildDirectEvalPlan(self.program.arena, parent, .variable, self.environment_depth) catch |err| switch (err) {
+                // Eligibility admits only chains whose body records exist.
+                error.Unsupported => unreachable,
+                else => |e| return e,
+            };
+            self.fallback_plan = plan;
+        }
+        tmpl.admission = admission;
+        self.state.store(.rejected, .release);
+        return null;
     }
 };
 
@@ -534,12 +837,13 @@ fn isUserVisibleBindingName(name: []const u8) bool {
 fn directEvalBindings(
     arena: std.mem.Allocator,
     bindings: *const SecureStringMapUnmanaged(SlotBinding),
+    slot_limit: u32,
 ) CompileError![]const bc.DirectEvalBinding {
     var visible_count: usize = 0;
     var count_it = bindings.iterator();
     while (count_it.next()) |entry|
         visible_count += @intFromBool(
-            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment,
+            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment and entry.value_ptr.slot < slot_limit,
         );
 
     const retained = try arena.alloc(bc.DirectEvalBinding, visible_count);
@@ -550,7 +854,7 @@ fn directEvalBindings(
         const binding = entry.value_ptr.*;
         // Captured runtime cells are supplied by their original Environment,
         // not by the placeholder slot used for static name classification.
-        if (!isUserVisibleBindingName(name) or binding.environment) continue;
+        if (!isUserVisibleBindingName(name) or binding.environment or binding.slot >= slot_limit) continue;
         retained[retained_index] = .{
             .name = name,
             .slot = binding.slot,
@@ -570,12 +874,12 @@ fn directEvalBindings(
     return retained;
 }
 
-fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBinding)) usize {
+fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBinding), slot_limit: u32) usize {
     var count: usize = 0;
     var it = bindings.iterator();
     while (it.next()) |entry|
         count += @intFromBool(
-            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment,
+            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment and entry.value_ptr.slot < slot_limit,
         );
     return count;
 }
@@ -607,7 +911,7 @@ fn buildDirectEvalPlan(
             scope_count += 1;
             scope_count += @intFromBool(frame_scope.parameter_names != null);
             for (frame_scope.lexical_scopes.items) |lexical|
-                scope_count += @intFromBool(directEvalFrameBindingCount(lexical) != 0);
+                scope_count += @intFromBool(directEvalFrameBindingCount(lexical, frame_scope.visible_slot_limit) != 0);
         }
         cursor_phase = frame_scope.parent_binding_phase;
     }
@@ -637,7 +941,7 @@ fn buildDirectEvalPlan(
         const frame_depth: u32 = @intCast(frame_count - outer_index - 1);
         if (frame_scope.parameter_names) |parameters| {
             scopes[scope_index] = .{
-                .bindings = try directEvalBindings(arena, parameters),
+                .bindings = try directEvalBindings(arena, parameters, frame_scope.visible_slot_limit),
                 .kind = .parameter,
                 .declaration_target = frame_depth == 0 and current_target == .parameter,
                 .frame_depth = frame_depth,
@@ -646,7 +950,7 @@ fn buildDirectEvalPlan(
         }
         if (frame.phase == .body) {
             scopes[scope_index] = .{
-                .bindings = try directEvalBindings(arena, &frame_scope.names),
+                .bindings = try directEvalBindings(arena, frame_scope.bodyNames(), frame_scope.visible_slot_limit),
                 .kind = .variable,
                 .declaration_target = frame_depth == 0 and current_target == .variable,
                 .frame_depth = frame_depth,
@@ -657,9 +961,9 @@ fn buildDirectEvalPlan(
                 frame_scope.lexical_scope_is_catch_param.items,
                 frame_scope.lexical_scope_environment_depth.items,
             ) |lexical, is_catch_param, environment_depth| {
-                if (directEvalFrameBindingCount(lexical) == 0) continue;
+                if (directEvalFrameBindingCount(lexical, frame_scope.visible_slot_limit) == 0) continue;
                 scopes[scope_index] = .{
-                    .bindings = try directEvalBindings(arena, lexical),
+                    .bindings = try directEvalBindings(arena, lexical, frame_scope.visible_slot_limit),
                     .kind = .lexical,
                     .is_catch_param = is_catch_param,
                     .frame_depth = frame_depth,
@@ -1573,7 +1877,7 @@ fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnSco
     var current: ?*const FnScope = scope;
     while (current) |frame_scope| : (current = frame_scope.parent) {
         if (frame_scope.may_extend_environment) return true;
-        var names = frame_scope.names.keyIterator();
+        var names = frame_scope.bodyNames().keyIterator();
         while (names.next()) |name| {
             // Deferred class elements resolve the class's own name through the
             // class Environment, even when an outer frame slot has the same
@@ -1990,6 +2294,10 @@ pub const Compiler = struct {
     /// publish it on their Chunk so each execution allocates an Exec-owned,
     /// GC-rooted scratch array of exactly that size.
     scratch_count: u32 = 0,
+    /// Non-null when plain nested function bodies compile on their first
+    /// call (see `LazyFunction`). Set for script evaluation; direct compiler
+    /// callers keep eager templates.
+    lazy_program: ?*LazyProgram = null,
     /// Program block bindings currently in scope that live in scratch slots,
     /// innermost last. A name maps to at most one entry: eligibility rules
     /// out any nested redeclaration, so nothing can shadow one of these.
@@ -2009,8 +2317,17 @@ pub const Compiler = struct {
     };
 
     pub fn admitProgram(arena: std.mem.Allocator, program: *Node) error{ OutOfMemory, StackExhausted }!ProgramAdmission {
+        return admitProgramWith(arena, program, false);
+    }
+
+    /// `admitProgram` with plain nested functions compiled on first call.
+    pub fn admitProgramLazy(arena: std.mem.Allocator, program: *Node) error{ OutOfMemory, StackExhausted }!ProgramAdmission {
+        return admitProgramWith(arena, program, true);
+    }
+
+    fn admitProgramWith(arena: std.mem.Allocator, program: *Node, lazy_functions: bool) error{ OutOfMemory, StackExhausted }!ProgramAdmission {
         var rejection: ?ProgramRejection = null;
-        const chunk = compileProgramInner(arena, program, &rejection) catch |err| switch (err) {
+        const chunk = compileProgramInner(arena, program, &rejection, lazy_functions) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
             error.StackExhausted => return error.StackExhausted,
@@ -2033,15 +2350,23 @@ pub const Compiler = struct {
         return false;
     }
 
-    fn compileProgramInner(arena: std.mem.Allocator, program: *Node, rejection: *?ProgramRejection) CompileError!*Chunk {
+    fn compileProgramInner(arena: std.mem.Allocator, program: *Node, rejection: *?ProgramRejection, lazy_functions: bool) CompileError!*Chunk {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var hash_state: CompileHashState = .{};
+        // Deferred function bodies compile after this call returns, against
+        // the scopes and keyed maps built here: keep the hash state with them.
+        const hash_state = try arena.create(CompileHashState);
+        hash_state.* = .{};
         // Keep latent source-node checkpoints in every chunk. With no debugger
         // hook the VM performs no checkpoint work; retaining the metadata lets a
         // later attachment inspect already-compiled functions without rebuilding
         // their frame/upvalue layout.
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .hash_state = &hash_state, .stack_floor = stack_scan.nestingStackFloor(), .debug_checkpoints = true };
+        const lazy_program: ?*LazyProgram = if (lazy_functions) blk: {
+            const program_state = try arena.create(LazyProgram);
+            program_state.* = .{ .arena = arena, .hash_state = hash_state };
+            break :blk program_state;
+        } else null;
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .hash_state = hash_state, .stack_floor = stack_scan.nestingStackFloor(), .debug_checkpoints = true, .lazy_program = lazy_program };
         if (program.* != .program) {
             rejection.* = .invalid_root;
             return error.Unsupported;
@@ -7072,6 +7397,30 @@ pub const Compiler = struct {
         return plan_index;
     }
 
+    /// Whether a plain nested function can wait for its first call. Its body
+    /// then compiles against a frozen copy of this scope chain, so anything
+    /// the compiler reads from this Compiler rather than from that chain
+    /// keeps the function eager. If the deferred body is later rejected,
+    /// its closures run on the tree-walker over a live view of the defining
+    /// frame (`LazyFunction.fallback_plan`), which needs the body record of
+    /// every frame in the chain.
+    fn lazyEligible(self: *Compiler, fnode: *const ast.FunctionNode) bool {
+        if (self.lazy_program == null) return false;
+        if (self.function_binding_phase == .parameters) return false;
+        if (self.in_field_initializer or self.in_generator or self.in_async) return false;
+        if (fnode.is_arrow and self.derived_instance_initializers.len != 0) return false;
+        if (fnode.uses_direct_eval) return false;
+        var scope = self.scope;
+        var phase = self.function_binding_phase;
+        while (scope) |sc| : ({
+            phase = sc.parent_binding_phase;
+            scope = sc.parent;
+        }) {
+            if (phase == .parameters or sc.may_extend_environment) return false;
+        }
+        return self.withDepthOfChain() == 0;
+    }
+
     fn compileFunction(
         self: *Compiler,
         definition_node: *const Node,
@@ -7105,7 +7454,7 @@ pub const Compiler = struct {
             self.environment_depth,
             self_environment_depth,
         ) catch return error.Unsupported;
-        const tdz: TdzChecks = if (fnode.is_generator) .none else try functionTdzChecks(self.arena, self.hash_state, fnode, self.stack_floor);
+        const tdz: TdzChecks = if (fnode.is_generator or !fnode.is_async) .none else try functionTdzChecks(self.arena, self.hash_state, fnode, self.stack_floor);
         scope.* = .{
             .parent = self.scope,
             .parent_binding_phase = self.function_binding_phase,
@@ -7119,6 +7468,7 @@ pub const Compiler = struct {
         };
 
         var template_admission: bc.FnTemplateAdmission = undefined;
+        var lazy: ?*LazyFunction = null;
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
             var rejection: ?GeneratorRejection = null;
             const compiled = try compileGeneratorInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, self.stack_floor, &rejection);
@@ -7129,96 +7479,42 @@ pub const Compiler = struct {
             const compiled = try compileAsyncInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, self.stack_floor, &rejection);
             template_admission = .async_compiled;
             break :blk compiled;
-        } else blk: {
-            const compiled = try self.arena.create(Chunk);
-            compiled.* = Chunk.init(self.arena);
-            const parameter_layout = configurePlainParameters(self.arena, scope, fnode, self.stack_floor) catch |err| switch (err) {
-                error.Unsupported => {
-                    if (self.scope == null) {
-                        template_admission = .plain_parameter_prologue;
-                        break :blk null;
-                    }
-                    return error.Unsupported;
-                },
-                error.OutOfMemory => return error.OutOfMemory,
-                error.StackExhausted => return error.StackExhausted,
-            };
-            const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode, self.stack_floor);
-            try planFunctionDeclarations(self.arena, scope, fnode, arguments_slot != null, self.stack_floor);
-            const mapped_parameter_indices = try configureMappedParameters(
-                self.arena,
-                scope,
-                fnode,
-                arguments_slot != null or functionSupportsLegacyArguments(fnode),
-                arguments_slot != null,
-            );
-
-            compiled.param_count = @intCast(fnode.params.len);
-            compiled.parameter_slots = parameter_layout.slots;
-            compiled.destructuring_parameter_indices = parameter_layout.destructuring_indices;
-            compiled.default_parameter_indices = parameter_layout.default_indices;
-            compiled.rest_parameter_index = parameter_layout.rest_index;
-            compiled.has_non_simple_parameters = parameter_layout.hasNonSimple();
-            compiled.arguments_slot = arguments_slot;
-            compiled.mapped_parameter_indices = mapped_parameter_indices;
-
-            var sub_c = Compiler{
-                .arena = self.arena,
-                .chunk = compiled,
-                .mode = .function,
-                .hash_state = self.hash_state,
-                .stack_floor = self.stack_floor,
-                .scope = scope,
-                .is_strict = fnode.is_strict,
-                .is_derived_constructor = false,
-                .derived_instance_initializers = if (fnode.is_arrow) self.derived_instance_initializers else &.{},
+        } else if (self.lazyEligible(fnode)) blk: {
+            // Defer the body to its first call, against the scope chain as it
+            // stands here (see `LazyFunction`).
+            lazy = try self.arena.create(LazyFunction);
+            lazy.?.* = .{
+                .program = self.lazy_program.?,
+                .fnode = fnode,
+                .parent = if (self.scope) |parent| try parent.freeze(self.arena) else null,
+                .parent_binding_phase = self.function_binding_phase,
+                .environment_depth = self.environment_depth,
+                .with_depth = self.with_depth,
+                .named_expr = named_expr,
                 .debug_checkpoints = self.debug_checkpoints,
             };
-            sub_c.compilePlainParameterEntries(fnode, &parameter_layout) catch |err| switch (err) {
-                error.Unsupported => {
-                    if (self.scope == null) {
-                        template_admission = .plain_parameter_prologue;
-                        break :blk null;
-                    }
-                    return error.Unsupported;
-                },
+            template_admission = .plain_compiled;
+            break :blk null;
+        } else blk: {
+            const body_tdz: TdzChecks = try functionTdzChecks(self.arena, self.hash_state, fnode, self.stack_floor);
+            scope.tdz_checks = body_tdz == .all;
+            scope.tdz_names = body_tdz.names();
+            const body: PlainBodyContext = .{
+                .arena = self.arena,
+                .hash_state = self.hash_state,
+                .stack_floor = self.stack_floor,
+                .derived_instance_initializers = if (fnode.is_arrow) self.derived_instance_initializers else &.{},
+                .debug_checkpoints = self.debug_checkpoints,
+                .lazy_program = self.lazy_program,
+            };
+            break :blk compilePlainBody(body, scope, fnode, &template_admission) catch |err| switch (err) {
+                // A function defined directly in program code runs on the
+                // tree-walker; a nested one takes its parent along.
+                error.Rejected => if (self.scope == null) break :blk null else return error.Unsupported,
+                error.Unsupported => return error.Unsupported,
                 error.OutOfMemory => return error.OutOfMemory,
                 error.StackExhausted => return error.StackExhausted,
             };
-            try sub_c.emitParameterBodyCopies();
-            if (fnode.is_expr_body) {
-                sub_c.compileTailExpr(fnode.body) catch |e| switch (e) {
-                    error.Unsupported => {
-                        if (self.scope == null) {
-                            template_admission = .plain_unsupported_lowering;
-                            break :blk null;
-                        }
-                        return error.Unsupported;
-                    },
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.StackExhausted => return error.StackExhausted,
-                };
-            } else {
-                sub_c.compileStmt(fnode.body) catch |e| switch (e) {
-                    error.Unsupported => {
-                        if (self.scope == null) {
-                            template_admission = .plain_unsupported_lowering;
-                            break :blk null;
-                        }
-                        return error.Unsupported;
-                    },
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.StackExhausted => return error.StackExhausted,
-                }; // body is a block
-                _ = try compiled.emit(.ret_undef, 0);
-            }
-            compiled.local_count = scope.count;
-            compiled.mapped_parameter_indices = try finalizeMappedParameterIndices(self.arena, scope, mapped_parameter_indices);
-            compiled.lexical_slots = scope.lexical_slots.items;
-            try retainDebugLocalNames(self.arena, compiled, scope);
-            try compiled.finalize();
-            template_admission = .plain_compiled;
-            break :blk compiled;
         };
         if (fnode.is_generator or fnode.is_async) {
             for (fnode.params) |p| _ = try scope.addLocal(self.arena, p.name, false, false);
@@ -7247,7 +7543,8 @@ pub const Compiler = struct {
             .is_strict = fnode.is_strict,
             .admission = template_admission,
             .chunk = sub,
-            .local_count = scope.count,
+            .lazy = lazy,
+            .local_count = if (lazy == null) scope.count else 0,
         };
         return self.chunk.addFn(tmpl);
     }
@@ -10575,5 +10872,67 @@ test "program loops keep unobservable block bindings in scratch slots" {
             std.debug.print("source: {s}\n", .{case.source});
             return err;
         };
+    }
+}
+
+fn compileDeferredBodies(chunk: *Chunk) !void {
+    for (chunk.fns.items) |template| {
+        if (LazyFunction.of(template)) |lazy|
+            _ = (try lazy.ensureCompiled(template)) orelse return error.TestUnexpectedResult;
+        if (template.chunk) |nested| try compileDeferredBodies(nested);
+    }
+}
+
+test "deferred function bodies compile to the chunks an eager compile emits" {
+    const sources = [_][]const u8{
+        \\let shared = 1;
+        \\var later;
+        \\function outer(a, b = a + 1, ...rest) {
+        \\  var hoisted = a;
+        \\  let blockOuter = 2;
+        \\  {
+        \\    let inner = 3;
+        \\    const fixed = 4;
+        \\    function annex() { return inner + fixed + hoisted; }
+        \\    var arrow = (x) => x + inner + blockOuter + arguments.length + this;
+        \\    for (let i = 0; i < 3; i++) rest.push(() => i + inner);
+        \\    try { throw 1; } catch (e) { var fromCatch = () => e + inner; }
+        \\    later = function named() { return named && laterBlock; };
+        \\  }
+        \\  let laterBlock = 5;
+        \\  class Box { method() { return blockOuter + shared; } }
+        \\  label: for (const k of [1]) { if (k) break label; }
+        \\  return [annex, arrow, later, fromCatch, Box, function deep() { return function deeper(q) { return q + hoisted + laterBlock; }; }];
+        \\}
+        \\const top = (p) => ({ p, q: shared });
+        \\function sloppyMapped(a) { function inner() { return arguments[0] + a; } a = 2; return inner(); }
+        ,
+        \\"use strict";
+        \\function counter() {
+        \\  let count = 0;
+        \\  const step = () => count++;
+        \\  { let count = 10; var shadow = () => count; }
+        \\  switch (count) { case 0: { let c = 1; var inCase = () => c + count; } }
+        \\  return { step, shadow, inCase, get value() { return count; } };
+        \\}
+        \\(function iife(x) { return function () { return x; }; })(1);
+        ,
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var eager_parser = try @import("parser.zig").Parser.init(allocator, source);
+        const eager = try Compiler.compileProgram(allocator, try eager_parser.parseProgram());
+        var lazy_parser = try @import("parser.zig").Parser.init(allocator, source);
+        const deferred = switch (try Compiler.admitProgramLazy(allocator, try lazy_parser.parseProgram())) {
+            .compiled => |chunk| chunk,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        var pending: usize = 0;
+        for (deferred.fns.items) |template| pending += @intFromBool(template.lazy != null and template.chunk == null);
+        try std.testing.expect(pending != 0);
+        try compileDeferredBodies(deferred);
+        try expectChunkLayoutEqual(eager, deferred);
     }
 }

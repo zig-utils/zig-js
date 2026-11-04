@@ -3482,6 +3482,10 @@ pub const Function = struct {
     /// compiler does not lower yet, in which case the function is invoked via the
     /// tree-walker (`callFunction`). Generators/async use `gen_chunk`/`async_chunk`.
     chunk: ?*bc.Chunk = null,
+    /// A closure over a template whose body compiles on its first call
+    /// (`compiler.LazyFunction`): `chunk` is null until `vm.lazyChunk`
+    /// compiles it or moves this closure to the tree-walker.
+    lazy_template: ?*bc.FnTemplate = null,
     /// True when a plain VM chunk can execute through the bounded native-stack
     /// call fast path. Chunks containing a tail-call opcode must stay entirely
     /// under the heap activation driver because those opcodes yield a pending
@@ -10484,7 +10488,7 @@ pub const Interpreter = struct {
         if (!self.lock_microtasks and !obj.proxy_revoked and obj.native == null) if (obj.coldState()) |cold| if (cold.hasRare(.js_function)) {
             const func: *Function = @ptrCast(@alignCast(cold.rare.js_function.ptr));
             if (!func.is_generator and !func.is_async and !func.is_class_constructor and obj.hostClassHooks() == null) {
-                if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, Value.undef());
+                if (func.chunk orelse try vm.lazyChunk(self, func)) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, Value.undef());
             }
         };
         if (obj.proxyHandler() != null or obj.proxy_revoked)
@@ -10912,7 +10916,7 @@ pub const Interpreter = struct {
         if (new_target.isUndefined() and func.is_class_constructor)
             return throwClassConstructorCallError(self, func);
         if (!func.is_generator and !func.is_async) {
-            if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
+            if (func.chunk orelse try vm.lazyChunk(self, func)) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
             if (func.bytecode_execution_mode == .required)
                 return self.throwMissingRequiredChunk(func, "plain");
         }
@@ -10936,7 +10940,7 @@ pub const Interpreter = struct {
             const next_func: *Function = @ptrCast(@alignCast(erased));
             if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
                 return self.callValueWithThisAtSite(tail.callee, tail.args, tail.this_value, tail.site);
-            if (next_func.chunk) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, tail.this_value, Value.undef());
+            if (next_func.chunk orelse try vm.lazyChunk(self, next_func)) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, tail.this_value, Value.undef());
             if (next_func.bytecode_execution_mode == .required)
                 return self.throwMissingRequiredChunk(next_func, "plain");
             cur_func = next_func;

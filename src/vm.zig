@@ -13125,6 +13125,11 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         vm.initEnvironment(fenv, vm.env, false);
         break :blk fenv;
     } else vm.env;
+    // A deferred template's body, once some closure of it has compiled it.
+    const plain_chunk: ?*bc.Chunk = if (LazyFunction.of(tmpl)) |lazy|
+        if (lazy.state.load(.acquire) == .compiled) tmpl.chunk else null
+    else
+        tmpl.chunk;
     // The function object and its Function share one cell; the Function is
     // initialized here, before the next allocation can collect.
     const closure = try gc_mod.allocClosure(vm.arena);
@@ -13150,12 +13155,13 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         .import_meta_slot = vm.import_meta_slot,
         .module_referrer = vm.cur_module,
         .private_map = vm.current_private_map,
-        .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
-        .vm_inline_calls_safe = if (tmpl.chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
+        .chunk = if (tmpl.is_generator or tmpl.is_async) null else plain_chunk,
+        .lazy_template = if (tmpl.lazy != null and plain_chunk == null) tmpl else null,
+        .vm_inline_calls_safe = if (plain_chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .async_chunk = if (tmpl.is_async and !tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
-        .local_count = tmpl.local_count,
+        .local_count = if (plain_chunk != null or tmpl.lazy == null) tmpl.local_count else 0,
         .is_method = tmpl.is_method,
         // An arrow captures `this`/`new.target`/`super`/field-init context
         // LEXICALLY at creation — exactly like the tree-walker's makeFunction.
@@ -13197,6 +13203,99 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, Value.obj(obj));
     return Value.obj(obj);
+}
+
+/// The chunk to run for a plain closure whose `chunk` is null: compiles a
+/// deferred template's body on the closure's first call (see
+/// `compiler.LazyFunction`). Null means the closure runs on the tree-walker,
+/// as it always has when no template is pending.
+pub inline fn lazyChunk(vm: *Interpreter, func: *Function) EvalError!?*bc.Chunk {
+    if (func.lazy_template == null) return null;
+    return resolveLazyFunction(vm, func);
+}
+
+fn publishLazyChunk(func: *Function, tmpl: *const bc.FnTemplate, chunk: *bc.Chunk) void {
+    func.local_count = tmpl.local_count;
+    func.vm_inline_calls_safe = interp.vmChunkAllowsInlineCalls(chunk);
+    @atomicStore(?*bc.Chunk, &func.chunk, chunk, .release);
+    func.lazy_template = null;
+    // Constants of the new chunk are now reachable from an object that may
+    // already be old.
+    gc_mod.rememberFunction(func);
+}
+
+/// For hosts that act on a function's bytecode before it has run (tier-up
+/// requests): compile a deferred body now. Null when there is no chunk; a
+/// rejected body is left for its first call to move to the tree-walker.
+pub fn compileDeferredForHost(func: *Function) error{ OutOfMemory, StackExhausted }!?*bc.Chunk {
+    if (func.chunk) |chunk| return chunk;
+    const tmpl = func.lazy_template orelse return null;
+    const chunk = (try LazyFunction.of(tmpl).?.ensureCompiled(tmpl)) orelse return null;
+    publishLazyChunk(func, tmpl, chunk);
+    return chunk;
+}
+
+fn resolveLazyFunction(vm: *Interpreter, func: *Function) EvalError!?*bc.Chunk {
+    const tmpl = func.lazy_template orelse return func.chunk;
+    const lazy = LazyFunction.of(tmpl).?;
+    const compiled = lazy.ensureCompiled(tmpl) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.StackExhausted => return vm.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
+    };
+    if (compiled) |chunk| {
+        publishLazyChunk(func, tmpl, chunk);
+        return chunk;
+    }
+    // The body cannot run on the VM. A function defined in program code
+    // simply tree-walks; a nested one first trades its closure Environment
+    // for a live view of the defining frames, which its body resolves
+    // through by name.
+    const viewed = if (lazy.fallback_plan) |plan| try viewDefiningFrames(vm, func, tmpl, plan) else func;
+    viewed.bytecode_admission_reason = switch (tmpl.admission) {
+        .plain_parameter_prologue => .template_plain_rejected_parameter_prologue,
+        else => .template_plain_rejected_unsupported_lowering,
+    };
+    viewed.lazy_template = null;
+    return null;
+}
+
+/// Rebuild a rejected deferred closure's Environment as the one a generator
+/// gets at creation: the defining activation's slot bindings as live
+/// Environment records over its Frame, beneath the closure's own self-name
+/// record when it has one. Returns the (possibly relocated) Function.
+fn viewDefiningFrames(vm: *Interpreter, func: *Function, tmpl: *const bc.FnTemplate, plan: *const bc.DirectEvalPlan) EvalError!*Function {
+    const raw_frame = func.frame orelse return vm.throwError("InternalError", "deferred closure requires its defining activation");
+    const defining_frame: *Frame = @ptrCast(@alignCast(raw_frame));
+    const self_named = tmpl.self_name.len != 0;
+    const defining_environment = if (self_named)
+        func.closure.parent orelse return vm.throwError("InternalError", "deferred closure lost its self-name record")
+    else
+        func.closure;
+    const callee_object = func.obj orelse return vm.throwError("InternalError", "deferred closure has no function object");
+    const callee_root = try vm.pushTempRoot(Value.obj(callee_object));
+    defer vm.restoreTempRoots(callee_root);
+    const saved_environment = vm.env;
+    const environment_root = try vm.pushTempEnvRoot(saved_environment);
+    defer {
+        vm.env = vm.tempEnvRoot(environment_root, saved_environment);
+        vm.restoreTempEnvRoots(environment_root);
+    }
+    vm.env = defining_environment;
+    const materialized = try materializeDirectEvalEnvironment(vm, defining_frame, plan);
+    materialized.environment.markCaptured();
+    var closure_env = materialized.environment;
+    if (self_named) {
+        const view_root = try vm.pushTempEnvRoot(closure_env);
+        defer vm.restoreTempEnvRoots(view_root);
+        const fenv = try gc_mod.allocEnv(vm.arena);
+        vm.initEnvironment(fenv, vm.tempEnvRoot(view_root, closure_env), false);
+        try fenv.putFnName(tmpl.self_name, vm.tempRoot(callee_root, Value.obj(callee_object)));
+        closure_env = fenv;
+    }
+    const current = Interpreter.funcOf(vm.tempRoot(callee_root, Value.obj(callee_object))).?;
+    current.closure = closure_env;
+    gc_mod.barrierFunctionEdge(current, @ptrCast(closure_env));
+    return current;
 }
 
 test "nested suspendable closure allocation failure restores the defining environment" {
@@ -13268,7 +13367,7 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
         if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (!func.is_generator and !func.is_async and !func.is_class_constructor) {
-                if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
+                if (func.chunk orelse try lazyChunk(vm, func)) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
             }
         }
     }
@@ -13399,7 +13498,7 @@ fn constructAtSite(vm: *Interpreter, callee: Value, args: []const Value, site: i
             // chunk shortcut (a plain-function chunk is the only constructible one).
             if (func.is_arrow or func.is_method or func.is_generator or func.is_async)
                 return interp.throwNotAConstructor(vm, callee, site);
-            if (func.chunk) |fchunk| {
+            if (func.chunk orelse try lazyChunk(vm, func)) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
                 const this_root = try vm.pushTempRoot(this_val);
                 defer vm.restoreTempRoots(this_root);
@@ -14295,6 +14394,7 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
 
 const Parser = @import("parser.zig").Parser;
 const Compiler = @import("compiler.zig").Compiler;
+const LazyFunction = @import("compiler.zig").LazyFunction;
 
 /// Standalone VM fixtures need the same TDZ sentinel supplied by Context.
 /// Keeping initialization here prevents a test from silently omitting lexical
