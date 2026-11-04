@@ -236,8 +236,11 @@ pub const Lexer = struct {
             .numeric_escaped_identifier => self.rawEscapedIdentifierEnd(start),
             else => self.errorOffset(),
         };
-        const end = @max(start, @min(raw_end, self.src.len));
-        const spelling = self.src[start..end];
+        // The quoted spelling is whole code points: an offending non-ASCII
+        // character can leave the cursor inside its UTF-8 sequence, and a
+        // message holding half a sequence is not a valid string.
+        const end = codePointBoundaryAfter(self.src, @max(start, @min(raw_end, self.src.len)));
+        const spelling = self.src[codePointBoundaryBefore(self.src, start)..end];
         return switch (self.last_error_reason) {
             .invalid_character => std.fmt.allocPrint(allocator, "Invalid character: '{s}'", .{spelling}),
             .invalid_identifier_escape => std.fmt.allocPrint(allocator, "Invalid escape in identifier: '{s}'", .{spelling}),
@@ -255,6 +258,22 @@ pub const Lexer = struct {
             .unterminated_comment => "Multiline comment was not closed properly",
             .generic => fallbackDiagnosticMessage(err),
         };
+    }
+
+    fn isContinuationByte(byte: u8) bool {
+        return byte & 0xC0 == 0x80;
+    }
+
+    fn codePointBoundaryBefore(src: []const u8, offset: usize) usize {
+        var index = @min(offset, src.len);
+        while (index > 0 and index < src.len and isContinuationByte(src[index])) index -= 1;
+        return index;
+    }
+
+    fn codePointBoundaryAfter(src: []const u8, offset: usize) usize {
+        var index = @min(offset, src.len);
+        while (index < src.len and isContinuationByte(src[index])) index += 1;
+        return index;
     }
 
     pub fn restoreErrorDiagnostic(self: *Lexer, saved: *const Lexer) void {

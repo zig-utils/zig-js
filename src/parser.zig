@@ -8244,6 +8244,8 @@ test "parser retains lexer diagnostics and offending source locations" {
     const cases = [_]Case{
         .{ .source = "@", .err = ParseError.UnexpectedToken, .marker = "@", .message = "Invalid character: '@'" },
         .{ .source = "# x", .err = lex.LexError.UnexpectedCharacter, .marker = "#", .message = "Invalid character: '#'" },
+        // U+180E MONGOLIAN VOWEL SEPARATOR is format (Cf), not white space.
+        .{ .source = "var\u{180E}foo", .err = lex.LexError.UnexpectedCharacter, .marker = "\u{180E}", .message = "Invalid character: '\u{180E}'" },
         .{ .source = "var \\x = 1", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Invalid escape in identifier: '\\'" },
         .{ .source = "var \\u00 = 1", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Invalid unicode escape in identifier: '\\u00'" },
         .{ .source = "var a\\u002D = 1", .err = lex.LexError.UnexpectedCharacter, .marker = "\\", .message = "Invalid unicode escape in identifier: 'a\\u002D'" },
