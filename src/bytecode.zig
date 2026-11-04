@@ -952,6 +952,10 @@ pub const Chunk = struct {
     /// references above all — live in an Exec-owned, GC-rooted `Value` array
     /// sized by this count. Function and env-mode chunks leave it at zero.
     scratch_count: u32 = 0,
+    /// Program chunks only: some loop of the program body creates a fresh
+    /// Environment Record per iteration (a captured or otherwise
+    /// slot-ineligible block-scoped binding).
+    program_repeats_environments: bool = false,
     /// Immutable names/kinds only. Runtime global eligibility belongs to each
     /// Exec, never the shared chunk; frame-mode functions need no such plan.
     environment_declarations: EnvironmentDeclarations = .{},

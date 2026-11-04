@@ -10257,17 +10257,17 @@ pub const Context = struct {
         try self.active_interpreters.ensureTotalCapacity(self.gpa, required);
     }
 
+    /// Source text that keeps a whole Script on the tree-walker. Only the
+    /// legacy `caller`/`arguments` reflection, which reads tree-walker call
+    /// frames, remains: lexical declarations, `catch`, `switch`, labels and
+    /// nested function declarations all run on the VM now, so a bundle (which
+    /// always contains `let ` or `const `) no longer tree-walks its top level
+    /// and creates its functions one compile at a time.
     fn scriptTreeWalkPolicy(source: []const u8) ?interp.BytecodeAdmissionReason {
         const policies = [_]struct { needle: []const u8, reason: interp.BytecodeAdmissionReason }{
-            .{ .needle = "let ", .reason = .program_policy_lexical_declaration },
-            .{ .needle = "const ", .reason = .program_policy_lexical_declaration },
-            .{ .needle = "catch", .reason = .program_policy_catch },
-            .{ .needle = "switch", .reason = .program_policy_switch },
-            .{ .needle = "label:", .reason = .program_policy_label },
             .{ .needle = "function arguments", .reason = .program_policy_arguments_function },
             .{ .needle = ".caller", .reason = .program_policy_legacy_caller },
             .{ .needle = ".arguments", .reason = .program_policy_legacy_arguments },
-            .{ .needle = "\n    function ", .reason = .program_policy_nested_function_declaration },
         };
         for (policies) |policy| {
             if (std.mem.indexOf(u8, source, policy.needle) != null) return policy.reason;
@@ -10464,6 +10464,18 @@ pub const Context = struct {
             };
             switch (program_admission) {
                 .compiled => |chunk| {
+                    // Program bytecode has no frame: a loop whose block-scoped
+                    // bindings a closure (or eval, or `with`) can observe gets a
+                    // fresh Environment Record per iteration, resolved by name,
+                    // which ran a top-level `for (let ...)` at ~8,200 instructions
+                    // per iteration against ~4,500 tree-walked. Unobservable
+                    // bindings live in scratch slots instead (compiler.zig,
+                    // `programScratchNames`) and keep the program on the VM.
+                    if (chunk.program_repeats_environments and self.bytecode_execution_mode != .required) {
+                        self.bytecode_admission_inventory.record(.program_policy_lexical_declaration);
+                        machine.recordExecutionTier(.tree_walker_entries);
+                        break :admission machine.eval(prog);
+                    }
                     self.bytecode_admission_inventory.record(.program_compiled);
                     break :admission vm.run(&machine, chunk, null);
                 },
@@ -25251,7 +25263,10 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
     // returned but torn object (#100). The counts stay small deliberately; this
     // is a correctness witness, not a stress run.
     const full_collections_before = ctx.runtimeHeapAccounting().full_collections;
+    // The legacy-reflection text keeps these Scripts on the tree-walker, whose
+    // allocation profile this pressure budget was sized for.
     const pressure_result = try ctx.evaluate(
+        \\void "the legacy .caller text keeps this Script tree-walked";
         \\globalThis.recoveryReserve = [];
         \\for (let i = 0; i < 128; ++i)
         \\  recoveryReserve.push({ idx: -i, arr: new Array(64).fill(i), s: "reserve_" + i });
@@ -25267,6 +25282,7 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
     ctx.collectGarbage();
 
     const result = try ctx.evaluate(
+        \\void "the legacy .caller text keeps this Script tree-walked";
         \\let torn = 0, made = 0, ooms = 0;
         // Keep the recovery probe's loop control predeclared: the body `try`
         // deliberately scores complete Object publication, not an unrelated
@@ -25468,6 +25484,26 @@ test "Context heap_limit_bytes allocation pressure is catchable with catch bindi
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "Context heap_limit_bytes pressure lands in a top-level catch binding on every tier" {
+    // Program bytecode keeps a simple catch binding in a scratch slot, so
+    // entering the catch allocates nothing once the heap limit is exhausted.
+    const sources = [_][]const u8{
+        "var ok = false; try { var keep = []; for (var i = 0;; i++) keep.push(new ArrayBuffer(1 << 20)); } catch (e) { ok = e !== undefined; } ok;",
+        "let ok = false; try { const keep = []; for (let i = 0;; i++) keep.push(new ArrayBuffer(1 << 20)); } catch (e) { ok = e !== undefined; } ok;",
+        "(function(){ let ok = false; try { const keep = []; for (let i = 0;; i++) keep.push(new ArrayBuffer(1 << 20)); } catch (e) { ok = e !== undefined; } return ok; })();",
+        "void '.caller'; let ok = false; try { const keep = []; for (let i = 0;; i++) keep.push(new ArrayBuffer(1 << 20)); } catch (e) { ok = e !== undefined; } ok;",
+    };
+    for (sources) |source| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
+        defer ctx.destroy();
+        const result = ctx.evaluate(source) catch |err| {
+            std.debug.print("source: {s}\n", .{source});
+            return err;
+        };
+        try std.testing.expect(result.asBool());
+    }
+}
+
 test "Context heap_limit_bytes string allocation pressure does not panic" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
     defer ctx.destroy();
@@ -25493,7 +25529,10 @@ test "Context heap_limit_bytes object side-store pressure recovers garbage" {
         .heap_limit_bytes = 4 * 1024 * 1024,
     });
     defer ctx.destroy();
+    // The legacy-reflection text keeps this Script on the tree-walker, whose
+    // allocation profile this pressure budget was sized for.
     const result = try ctx.evaluate(
+        \\void "the legacy .caller text keeps this Script tree-walked";
         \\(() => {
         \\  const names = [];
         \\  for (let i = 0; i < 96; i++)
@@ -29189,7 +29228,9 @@ test "vm admission: safe sloppy loops and dynamic calls tier safely" {
     if (jit.supported and builtin.cpu.arch == .aarch64) {
         try std.testing.expectEqual(jit.OptimizerTierState.ready, dynamic_func.chunk.?.optimizer_tier.state.load(.acquire));
         try std.testing.expectEqual(@as(u64, 1), dynamic_func.chunk.?.optimizer_tier.compileCount());
-        try std.testing.expectEqual(@as(u64, 1), ctx.jit_owner.optimizerPublications());
+        // The calling top-level loop runs as program bytecode and may tier up
+        // too; the dynamic function itself published exactly once above.
+        try std.testing.expect(ctx.jit_owner.optimizerPublications() >= 1);
     }
 }
 
@@ -29200,8 +29241,10 @@ test "bytecode admission inventory retains exact runtime reasons" {
     const before = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(@as(f64, 3), (try ctx.evaluate("1 + 2")).asNum());
 
+    // The legacy-reflection text keeps this Script on the tree-walker, so
+    // every function below is created (and admitted) one at a time.
     _ = try ctx.evaluate(
-        \\let marker = { x: 1 };
+        \\let marker = { x: 1 }; void "fn.caller";
         \\globalThis.admitted = function admitted(p) { "use strict"; return p.x; };
         \\globalThis.computedTagged = function computedTagged(holder, key, value) { "use strict"; return holder[key]`a${value}b`; };
         \\globalThis.withArguments = function withArguments() { return arguments[0]; };
@@ -29269,7 +29312,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
 
     const after = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
-    try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
+    try std.testing.expectEqual(before.count(.program_policy_legacy_caller) + 1, after.count(.program_policy_legacy_caller));
     try std.testing.expectEqual(before.count(.plain_compiled) + 4, after.count(.plain_compiled));
     try std.testing.expectEqual(before.count(.generator_compiled) + 7, after.count(.generator_compiled));
     try std.testing.expectEqual(before.count(.async_compiled) + 7, after.count(.async_compiled));
@@ -29284,17 +29327,92 @@ test "bytecode admission inventory retains exact runtime reasons" {
     try std.testing.expectEqual(before.count(.template_async_fallback), after.count(.template_async_fallback));
 }
 
+test "scripts run on the VM unless a loop of their own repeats an Environment Record" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const cases = [_]struct { source: []const u8, tree_walked: bool }{
+        .{ .source = "let a = 1; const b = 2; try { throw a; } catch (e) { e + b; }", .tree_walked = false },
+        .{ .source = "(() => { let s = 0; for (let i = 0; i < 3; i++) s += i; return s; })();", .tree_walked = false },
+        .{ .source = "var t = 0; for (var i = 0; i < 3; i++) t += i;", .tree_walked = false },
+        .{ .source = "var u = 0; for (let i = 0; i < 3; i++) u += i;", .tree_walked = false },
+        .{ .source = "var v = 0; while (v < 3) { const w = v; v = w + 1; }", .tree_walked = false },
+        .{ .source = "if (true) { for (;;) { try { break; } catch (e) {} } }", .tree_walked = false },
+        .{ .source = "var fs = []; for (let i = 0; i < 3; i++) fs.push(() => i);", .tree_walked = true },
+        .{ .source = "for (const k of [1]) k;", .tree_walked = true },
+    };
+    for (cases) |case| {
+        const before = ctx.bytecodeAdmissionSnapshot();
+        _ = try ctx.evaluate(case.source);
+        const after = ctx.bytecodeAdmissionSnapshot();
+        const walked = after.count(.program_policy_lexical_declaration) - before.count(.program_policy_lexical_declaration);
+        const compiled = after.count(.program_compiled) - before.count(.program_compiled);
+        std.testing.expectEqual(@as(u64, @intFromBool(case.tree_walked)), walked) catch |err| {
+            std.debug.print("source: {s}\n", .{case.source});
+            return err;
+        };
+        try std.testing.expectEqual(@as(u64, @intFromBool(!case.tree_walked)), compiled);
+    }
+}
+
+test "program block bindings in scratch slots keep their Environment semantics" {
+    // Each case runs on the tree-walker and as required program bytecode,
+    // where eligible `let`/`const` bindings of top-level blocks and loop
+    // heads live in scratch slots and the rest keep Environment Records.
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "var r = 0; for (let i = 0; i < 5; i++) { const d = i * 2; r += d; } String(r)", .expected = "20" },
+        .{ .source = "var out = 'none'; try { { x; let x = 1; } } catch (e) { out = e.constructor.name } out", .expected = "ReferenceError" },
+        .{ .source = "var fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); fs.map(f => f()).join()", .expected = "0,1,2" },
+        .{ .source = "var t = ''; for (let i = 0; i < 3; i++) { const c = String(i); t += c } t", .expected = "012" },
+        .{ .source = "var u = []; for (let i = 0; i < 2; i++) { let v; u.push(v); v = i; } u.length + ':' + u[1]", .expected = "2:undefined" },
+        .{ .source = "var w = 0; outer: for (let i = 0; i < 4; i++) { for (let j = 0; j < 4; j++) { if (j == 2) continue outer; if (i == 3) break outer; w += 1 } } String(w)", .expected = "6" },
+        .{ .source = "{ let d = 1; String(delete d) }", .expected = "false" },
+        .{ .source = "{ let k = 1; k += 2; k++; String(k) }", .expected = "4" },
+        .{ .source = "{ let e1 = 5; String(eval('e1')) }", .expected = "5" },
+        .{ .source = "{ let q = 1; typeof q }", .expected = "number" },
+        .{ .source = "{ let z = 3; function fz() { return z } String(fz()) }", .expected = "3" },
+        .{ .source = "let topLevel = 7; { let inner = topLevel; String(inner) + typeof globalThis.inner }", .expected = "7undefined" },
+        .{ .source = "var g2out = 'ok'; { let g2 = 1; } typeof g2", .expected = "undefined" },
+        .{ .source = "var sw = ''; { let a = 'x'; switch (a) { case 'x': sw = a + '!'; } } sw", .expected = "x!" },
+        .{ .source = "var cerr = 'none'; try { for (const c = 0; c < 1; c++) {} } catch (e) { cerr = e.constructor.name } cerr", .expected = "TypeError" },
+        .{ .source = "var shadow = 'g'; for (let i = 0; i < 1; i++) { { let shadow = 'inner'; } } shadow", .expected = "g" },
+        .{ .source = "var acc = ''; for (let i = 0, n = 3; i < n; i++) acc += i; acc", .expected = "012" },
+        .{ .source = "var wv = 0; while (wv < 3) { const step = 1; wv += step; } String(wv)", .expected = "3" },
+        .{ .source = "var lw = ''; for (let i = 0; i < 2; i++) { with ({ i: 'w' }) lw += i; } lw", .expected = "ww" },
+        .{ .source = "var ce = ''; try { throw 'x'; } catch (e) { e += '!'; ce = e; } ce + typeof e", .expected = "x!undefined" },
+        .{ .source = "var cf; try { throw 'y'; } catch (e) { cf = () => e; } cf()", .expected = "y" },
+        .{ .source = "var cg = ''; try { throw 'z'; } catch (e) { var e = 'shadow'; cg = e; } cg", .expected = "shadow" },
+        .{ .source = "var ch = ''; for (let i = 0; i < 2; i++) { try { throw i; } catch (e) { ch += e; } } ch", .expected = "01" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (cases) |case| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const result = ctx.evaluate(case.source) catch |err| {
+                std.debug.print("{s}: {s}\n", .{ @tagName(mode), case.source });
+                return err;
+            };
+            std.testing.expectEqualStrings(case.expected, result.asStr()) catch |err| {
+                std.debug.print("{s}: {s}\n", .{ @tagName(mode), case.source });
+                return err;
+            };
+        }
+    }
+}
+
 test "bytecode admission source policies retain causal reasons" {
     const cases = [_]struct { source: []const u8, reason: ?interp.BytecodeAdmissionReason }{
-        .{ .source = "let value = 1", .reason = .program_policy_lexical_declaration },
-        .{ .source = "const value = 1", .reason = .program_policy_lexical_declaration },
-        .{ .source = "try {} catch (error) {}", .reason = .program_policy_catch },
-        .{ .source = "switch (value) {}", .reason = .program_policy_switch },
-        .{ .source = "label: while (false) {}", .reason = .program_policy_label },
+        .{ .source = "let value = 1", .reason = null },
+        .{ .source = "const value = 1", .reason = null },
+        .{ .source = "try {} catch (error) {}", .reason = null },
+        .{ .source = "switch (value) {}", .reason = null },
+        .{ .source = "label: while (false) {}", .reason = null },
         .{ .source = "function arguments() {}", .reason = .program_policy_arguments_function },
         .{ .source = "fn.caller", .reason = .program_policy_legacy_caller },
         .{ .source = "fn.arguments", .reason = .program_policy_legacy_arguments },
-        .{ .source = "\n    function nested() {}", .reason = .program_policy_nested_function_declaration },
+        .{ .source = "\n    function nested() {}", .reason = null },
         .{ .source = "var value = 1", .reason = null },
     };
     for (cases) |case| try std.testing.expectEqual(case.reason, Context.scriptTreeWalkPolicy(case.source));
@@ -32499,7 +32617,7 @@ test "forced tree-walker and required bytecode preserve strict arguments objects
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 8), (try automatic.evaluate(
-        \\let scriptPolicyWitness = 0;
+        \\var scriptPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticArguments(value) { "use strict"; return (() => arguments[0])(); }
         \\function strictTailEval() { "use strict"; return eval("arguments.length"); }
         \\automaticArguments(6) + strictTailEval(1, 2);
@@ -32621,7 +32739,7 @@ test "compiled ordinary functions publish exact active legacy arguments" {
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 19), (try automatic.evaluate(
-        \\let legacyPolicyWitness = 0;
+        \\var legacyPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticLegacy(value) { return automaticLegacy.arguments[0]; }
         \\automaticLegacy(19);
     )).asNum());
@@ -32918,7 +33036,7 @@ test "forced tree-walker and required bytecode preserve named rest parameters" {
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let restPolicyWitness = 0;
+        \\var restPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticRest(head, ...tail) { return head + tail.length + tail[0]; }
         \\automaticRest(3, 4, 5);
     )).asNum());
@@ -33135,7 +33253,7 @@ test "forced tree-walker and required bytecode preserve initializer-free destruc
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let destructuringParameterPolicyWitness = 0;
+        \\var destructuringParameterPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticPattern([first, second]) { return first + second; }
         \\automaticPattern([4, 5]);
     )).asNum());
@@ -33252,7 +33370,7 @@ test "forced tree-walker and required bytecode preserve closed primitive default
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let primitiveDefaultPolicyWitness = 0;
+        \\var primitiveDefaultPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticLiteralDefault(value = 4 + 5) { return [value][0]; }
         \\automaticLiteralDefault();
     )).asNum());
@@ -33348,7 +33466,7 @@ test "forced tree-walker and required bytecode preserve invocation-context defau
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 1), (try automatic.evaluate(
-        \\let invocationDefaultPolicyWitness = 0;
+        \\var invocationDefaultPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticInvocationDefault(receiver = this, args = arguments) { return receiver === globalThis && args === arguments ? 1 : 0; }
         \\automaticInvocationDefault();
     )).asNum());
@@ -33449,7 +33567,7 @@ test "forced tree-walker and required bytecode preserve earlier parameter defaul
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 7), (try automatic.evaluate(
-        \\let earlierParameterPolicyWitness = 0;
+        \\var earlierParameterPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticEarlier(first, second = first) { return [second][0]; }
         \\automaticEarlier(7);
     )).asNum());
@@ -35835,7 +35953,7 @@ test "forced tree-walker and required bytecode preserve parameter-safe default e
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let parameterExpressionPolicyWitness = 0;
+        \\var parameterExpressionPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticParameterExpression(first, second = first + 2) { return [second][0]; }
         \\automaticParameterExpression(7);
     )).asNum());
@@ -35943,7 +36061,7 @@ test "forced tree-walker and required bytecode preserve parameter-local property
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let parameterPropertyPolicyWitness = 0;
+        \\var parameterPropertyPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticParameterProperty(first, second = first.value) { return [second][0]; }
         \\automaticParameterProperty({ value: 9 });
     )).asNum());
@@ -36046,7 +36164,7 @@ test "forced tree-walker and required bytecode preserve parameter-local call def
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let parameterCallPolicyWitness = 0;
+        \\var parameterCallPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function automaticParameterCall(callee, second = callee(8)) { return [second][0]; }
         \\automaticParameterCall(function (value) { return value + 1; });
     )).asNum());
@@ -36153,7 +36271,7 @@ test "forced tree-walker and required bytecode preserve parameter-local construc
     });
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
-        \\let parameterConstructionPolicyWitness = 0;
+        \\var parameterConstructionPolicyWitness = "the legacy .caller text keeps this Script tree-walked";
         \\function AutomaticParameterBox(value) { this.value = value; }
         \\function automaticParameterConstruction(Ctor, second = new Ctor(9)) { return [second.value][0]; }
         \\automaticParameterConstruction(AutomaticParameterBox);
@@ -42945,7 +43063,10 @@ test "parallel_js heap_limit_bytes recovers ArrayBuffer bytes while peer runs" {
     const before_running_peer_requests = ctx.gc_par_running_peer_requests.load(.monotonic);
     const before_cooperative_peer_parks = ctx.gc_cooperative_peer_parks.load(.monotonic);
 
+    // The legacy-reflection text keeps this Script on the tree-walker, as the
+    // recovery sequence below was written against.
     const result = try ctx.evaluate(
+        \\void "the legacy .caller text keeps this Script tree-walked";
         \\(() => {
         \\  globalThis.__abRecoveryGate = { ready: 0, stop: 0 };
         \\  globalThis.__abRecoveryWorker = new Thread((gate) => {

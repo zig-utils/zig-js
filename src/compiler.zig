@@ -1687,10 +1687,220 @@ fn stmtListCanEscapeAbruptly(stmts: []*Node, floor: usize) error{StackExhausted}
 }
 
 /// Where a referenced name lives.
+const ScratchBinding = struct { name: []const u8, slot: u32 };
+
+/// Whether `pred` holds for `node` or any node beneath it, nested functions
+/// and classes included: a structural walk over every child the tree types
+/// can hold, so no node kind is forgotten.
+fn anyNode(node: *const Node, context: anytype, floor: usize) error{StackExhausted}!bool {
+    if (stack_scan.stackAddress() <= floor) return error.StackExhausted;
+    if (context.matches(node)) return true;
+    switch (node.*) {
+        inline else => |payload| return anyChild(@TypeOf(payload), payload, context, floor),
+    }
+}
+
+fn anyChild(comptime T: type, item: T, context: anytype, floor: usize) error{StackExhausted}!bool {
+    switch (@typeInfo(T)) {
+        .optional => |info| return if (item) |present| anyChild(info.child, present, context, floor) else false,
+        .pointer => |info| switch (info.size) {
+            .one => {
+                if (info.child == Node) return anyNode(item, context, floor);
+                if (info.child == ast.FunctionNode or info.child == ast.TryNode or info.child == ast.ExportNode)
+                    return anyChild(info.child, item.*, context, floor);
+                return false;
+            },
+            .slice => {
+                if (info.child == u8) return false;
+                for (item) |element| if (try anyChild(info.child, element, context, floor)) return true;
+                return false;
+            },
+            else => return false,
+        },
+        .@"struct" => |info| {
+            inline for (info.field_names, info.field_types) |name, Field| {
+                if (try anyChild(Field, @field(item, name), context, floor)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// Matches any binding of `name` a nested scope could introduce.
+const DeclaresName = struct {
+    name: []const u8,
+    floor: usize,
+
+    fn matches(self: @This(), node: *const Node) bool {
+        return switch (node.*) {
+            .var_decl => |declaration| std.mem.eql(u8, declaration.name, self.name),
+            .destructure_decl => |declaration| patternBindsName(declaration.pattern, self.name, self.floor) catch true,
+            .func_decl => |function| std.mem.eql(u8, function.name, self.name),
+            .function => |function| std.mem.eql(u8, function.name, self.name),
+            .class_expr => |class| std.mem.eql(u8, class.name, self.name),
+            .try_stmt => |statement| if (statement.catch_param) |param| patternBindsName(param, self.name, self.floor) catch true else false,
+            .for_in => |statement| statement.decl_kind != null and (patternBindsName(statement.target, self.name, self.floor) catch true),
+            else => false,
+        };
+    }
+};
+
+/// Matches any write to `name`, or any pattern that could write it.
+const AssignsName = struct {
+    name: []const u8,
+    floor: usize,
+
+    fn isName(self: @This(), target: *const Node) bool {
+        return target.* == .identifier and std.mem.eql(u8, target.identifier, self.name);
+    }
+
+    fn matches(self: @This(), node: *const Node) bool {
+        return switch (node.*) {
+            .assign => |assignment| self.isName(assignment.target),
+            .op_assign => |assignment| self.isName(assignment.target),
+            .logical_assign => |assignment| self.isName(assignment.target),
+            .update => |update| self.isName(update.target),
+            .obj_pattern, .arr_pattern => patternBindsName(node, self.name, self.floor) catch true,
+            .for_in => |statement| statement.decl_kind == null and self.isName(statement.target),
+            else => false,
+        };
+    }
+};
+
+/// Matches a destructuring pattern that could write `name`. Destructuring
+/// assignment resolves its targets as References, which scratch slots do not
+/// model, so such a binding keeps its Environment Record.
+const PatternWritesName = struct {
+    name: []const u8,
+    floor: usize,
+
+    fn matches(self: @This(), node: *const Node) bool {
+        return switch (node.*) {
+            .obj_pattern, .arr_pattern => patternBindsName(node, self.name, self.floor) catch true,
+            else => false,
+        };
+    }
+};
+
+/// Matches what can reach a binding by name at run time: direct eval (any
+/// `eval` reference, conservatively) and `with`.
+const DynamicScope = struct {
+    fn matches(_: @This(), node: *const Node) bool {
+        return switch (node.*) {
+            .identifier => |name| std.mem.eql(u8, name, "eval"),
+            .with_stmt => true,
+            else => false,
+        };
+    }
+};
+
+/// The simple `let`/`const` names `node` declares, or null when it declares
+/// anything a scratch slot cannot hold (a pattern, `using`, a function or
+/// class declaration).
+fn simpleLexicalNames(arena: std.mem.Allocator, node: *const Node, names: *std.ArrayListUnmanaged(*const Node)) CompileError!bool {
+    switch (node.*) {
+        .var_decl => |declaration| {
+            if (declaration.kind == .@"var") return true;
+            if (declaration.dispose != 0) return false;
+            if (declaration.init) |init| if (init.* == .class_expr) return false;
+            try names.append(arena, node);
+            return true;
+        },
+        .decl_group => |declarations| {
+            for (declarations) |declaration| if (!try simpleLexicalNames(arena, declaration, names)) return false;
+            return true;
+        },
+        .destructure_decl => |declaration| return declaration.kind == .@"var",
+        .func_decl, .class_expr => return false,
+        else => return true,
+    }
+}
+
+/// Program code has no frame, so its block-scoped bindings live in a fresh
+/// Environment Record per block entry (per iteration in a loop), resolved by
+/// name. The `let`/`const` declarations of `region` (a block's statements, or
+/// a classic for head followed by its test, update and body) may instead
+/// live in activation scratch slots when nothing can observe the difference:
+/// no closure references them, no direct eval or `with` can reach them by
+/// name, no read can precede their initialization (no reference appears
+/// before the declaring statement, or in any initializer of its own
+/// declaration list), a `const` is never written, and no nested scope reuses
+/// their names, so no other binding can shadow them. Returns the declaring
+/// nodes, or null when the region keeps its Environment Records.
+fn programScratchNames(
+    arena: std.mem.Allocator,
+    declarations: []const *Node,
+    region: []const ?*const Node,
+    floor: usize,
+) CompileError!?[]const *const Node {
+    var names: std.ArrayListUnmanaged(*const Node) = .empty;
+    for (declarations) |declaration| if (!try simpleLexicalNames(arena, declaration, &names)) return null;
+    if (names.items.len == 0) return null;
+    for (region) |maybe| if (maybe) |node| if (try anyNode(node, DynamicScope{}, floor)) return null;
+    for (names.items) |declaring| {
+        const declaration = declaring.var_decl;
+        const name = declaration.name;
+        const redeclares = DeclaresName{ .name = name, .floor = floor };
+        var before_declaration = true;
+        for (region) |maybe| {
+            const node = maybe orelse continue;
+            if (try nameRefInClosure(node, name, false, floor)) return null;
+            if (declaration.kind == .@"const" and try anyNode(node, AssignsName{ .name = name, .floor = floor }, floor)) return null;
+            if (try anyNode(node, PatternWritesName{ .name = name, .floor = floor }, floor)) return null;
+            if (try declaresNode(node, declaring, floor)) {
+                before_declaration = false;
+                // Its own list may bind the name nowhere else, not even in
+                // an initializer's nested scopes.
+                if (try listRedeclares(node, declaring, redeclares, floor)) return null;
+            } else {
+                if (try anyNode(node, redeclares, floor)) return null;
+                if (before_declaration and try nameRefInClosure(node, name, true, floor)) return null;
+            }
+        }
+    }
+    // Every initializer of a declaration list runs before the names after
+    // it exist; refuse any initializer reading any of the region's names.
+    for (names.items) |declaring| if (declaring.var_decl.init) |init| {
+        for (names.items) |other| if (try nameRefInClosure(init, other.var_decl.name, true, floor)) return null;
+    };
+    return names.items;
+}
+
+/// Whether the declaration list `node` binds `redeclares.name` anywhere but
+/// in `declaring` itself.
+fn listRedeclares(node: *const Node, declaring: *const Node, redeclares: DeclaresName, floor: usize) error{StackExhausted}!bool {
+    switch (node.*) {
+        .decl_group => |declarations| {
+            for (declarations) |declaration| if (try listRedeclares(declaration, declaring, redeclares, floor)) return true;
+            return false;
+        },
+        .var_decl => |declaration| {
+            if (node != declaring and std.mem.eql(u8, declaration.name, redeclares.name)) return true;
+            return if (declaration.init) |init| try anyNode(init, redeclares, floor) else false;
+        },
+        else => return anyNode(node, redeclares, floor),
+    }
+}
+
+/// Whether `node` is `target` or a declaration list holding it.
+fn declaresNode(node: *const Node, target: *const Node, floor: usize) error{StackExhausted}!bool {
+    if (node == target) return true;
+    return switch (node.*) {
+        .decl_group => |declarations| for (declarations) |declaration| {
+            if (try declaresNode(declaration, target, floor)) break true;
+        } else false,
+        else => false,
+    };
+}
+
 const Resolved = union(enum) {
     local: SlotBinding, // slot in the current frame
     upval: struct { depth: u32, environment_depth: u32, binding: SlotBinding }, // an enclosing function's frame
     environment: SlotBinding, // statically known declarative Environment binding
+    /// A program block binding kept in an activation scratch slot (see
+    /// `programScratchNames`). Only program chunks have scratch slots.
+    scratch: u32,
     global, // by name, against the Environment
 };
 
@@ -1785,6 +1995,10 @@ pub const Compiler = struct {
     /// publish it on their Chunk so each execution allocates an Exec-owned,
     /// GC-rooted scratch array of exactly that size.
     scratch_count: u32 = 0,
+    /// Program block bindings currently in scope that live in scratch slots,
+    /// innermost last. A name maps to at most one entry: eligibility rules
+    /// out any nested redeclaration, so nothing can shadow one of these.
+    program_scratch: std.ArrayListUnmanaged(ScratchBinding) = .empty,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -2454,6 +2668,14 @@ pub const Compiler = struct {
         var with_depth = self.with_depth;
         var scope = self.scope;
         var phase = self.function_binding_phase;
+        if (self.scope == null) {
+            var index = self.program_scratch.items.len;
+            while (index > 0) {
+                index -= 1;
+                const binding = self.program_scratch.items[index];
+                if (std.mem.eql(u8, binding.name, name)) return .{ .resolved = .{ .scratch = binding.slot }, .with_depth = self.with_depth };
+            }
+        }
         const key = HashedName.of(self.hash_state, name) orelse
             return .{ .resolved = .global, .with_depth = self.withDepthOfChain() };
         while (scope) |sc| {
@@ -2503,6 +2725,7 @@ pub const Compiler = struct {
         switch (resolution.resolved) {
             .local => |binding| _ = try self.chunk.emit(if (binding.mapped_parameter) .load_local_mapped else if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
             .upval => |u| _ = try self.chunk.emitAB(if (u.binding.mapped_parameter) .load_upval_mapped else if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
+            .scratch => |slot| _ = try self.chunk.emit(.scratch_load, slot),
             .environment, .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
         }
     }
@@ -2518,12 +2741,19 @@ pub const Compiler = struct {
                 try self.chunk.emitAB(.store_upval_mapped, u.depth, u.binding.slot)
             else
                 try self.chunk.emitAB(if (u.binding.tdz_checked or u.binding.immutable) .store_upval_lexical else .store_upval, u.depth, u.binding.slot | (if (u.binding.immutable) @as(u32, 1) << 31 else 0)),
+            .scratch => |slot| {
+                _ = try self.chunk.emit(.dup, 0);
+                _ = try self.chunk.emit(.scratch_store, slot);
+            },
             .environment, .global => _ = try self.chunk.emit(.store_var, try self.chunk.addName(name)),
         }
     }
 
     fn bindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
         const resolved = self.resolve(name);
+        // Eligibility excludes `with` and direct eval around a scratch binding;
+        // a dynamic Reference to one is a case it did not foresee.
+        if (resolved == .scratch) return error.Unsupported;
         const direct_eval_frame_depth: ?u32 = switch (resolved) {
             .local => |binding| if (binding.parameter_with_eval_boundary) 0 else null,
             // A parameter that acquires a nearer body binding names the frame
@@ -2536,7 +2766,7 @@ pub const Compiler = struct {
             // A name with no static binding anywhere: any `var` an enclosing
             // sloppy direct eval created is nearer than the global.
             .global => self.directEvalExtendableFrameDepth(),
-            .environment => null,
+            .environment, .scratch => null,
         };
         const fallback: bc.BindingReferenceFallback = switch (resolved) {
             .local => |binding| .{
@@ -2561,18 +2791,18 @@ pub const Compiler = struct {
             },
             // A full Environment walk never selects its static fallback: it
             // captures an exact Environment/global-object/unresolvable base.
-            .environment, .global => .{ .op = .store_var },
+            .environment, .global, .scratch => .{ .op = .store_var },
         };
         const environment_depth: u32 = switch (resolved) {
             .local => |binding| self.environment_depth - binding.lexical_environment_depth,
             .upval => |upvalue| self.environment_depth + upvalue.environment_depth,
-            .environment, .global => bc.delete_name_full_environment_depth,
+            .environment, .global, .scratch => bc.delete_name_full_environment_depth,
         };
         // With no intervening Environment Record, a frame/upvalue Reference is
         // already immutable compile-time state and needs no activation slot.
         if (environment_depth == 0 and direct_eval_frame_depth == null) switch (resolved) {
             .local, .upval => return null,
-            .environment, .global => {},
+            .environment, .global, .scratch => {},
         };
         const name_index = try self.chunk.addName(name);
         const index = try self.chunk.addBindingReferencePlan(.{
@@ -2655,7 +2885,7 @@ pub const Compiler = struct {
         const has_direct_eval_boundary = switch (resolved) {
             .local => |binding| binding.parameter_with_eval_boundary,
             .upval => |upvalue| upvalue.binding.parameter_with_eval_boundary,
-            .environment, .global => false,
+            .environment, .global, .scratch => false,
         };
         if (resolution.with_depth == 0 and
             !has_direct_eval_boundary and
@@ -2674,6 +2904,7 @@ pub const Compiler = struct {
         return switch (resolution.resolved) {
             .local => |binding| if (binding.parameter_with_eval_boundary) try self.bindingReferencePlan(name) else null,
             .upval => |upvalue| if (upvalue.binding.parameter_with_eval_boundary) try self.bindingReferencePlan(name) else null,
+            .scratch => null,
             .environment, .global => try self.bindingReferencePlan(name),
         };
     }
@@ -2695,6 +2926,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.pop, 0);
             },
             .environment => |binding| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (binding.immutable) 2 else 1),
+            .scratch => |slot| _ = try self.chunk.emit(.scratch_store, slot),
             .global => _ = try self.chunk.emitAB(.def_var, try self.chunk.addName(name), 2),
         }
     }
@@ -2714,6 +2946,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.pop, 0);
             },
             .environment => |binding| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (binding.immutable) 2 else 1),
+            .scratch => |slot| _ = try self.chunk.emit(.scratch_store, slot),
             .global => {
                 const ni = try self.chunk.addName(name);
                 // In env-mode (program / generator / async body) a `let`/`const`
@@ -3155,6 +3388,40 @@ pub const Compiler = struct {
         };
     }
 
+    /// Program body code (not a function, generator or async body, which
+    /// have frames or Environment-backed activations of their own).
+    fn compilingProgramBody(self: *const Compiler) bool {
+        return self.mode == .program and self.scope == null;
+    }
+
+    /// Give the `let`/`const` names `declarations` introduce scratch slots for
+    /// `region` when `programScratchNames` admits them; false leaves them to
+    /// Environment Records. The caller pops the bindings when the region ends.
+    fn enterProgramScratch(self: *Compiler, declarations: []const *Node, region: []const ?*const Node) CompileError!bool {
+        if (!self.compilingProgramBody()) return false;
+        const names = (try programScratchNames(self.arena, declarations, region, self.stack_floor)) orelse return false;
+        for (names) |declaring| {
+            try self.program_scratch.append(self.arena, .{ .name = declaring.var_decl.name, .slot = self.scratch_count });
+            self.scratch_count += 1;
+        }
+        return true;
+    }
+
+    /// `enterProgramScratch` for a simple catch parameter: it is initialized
+    /// on entry, so only closures, eval, `with`, destructuring writes and
+    /// nested redeclarations in the catch block can tell it from a record.
+    fn enterProgramScratchCatch(self: *Compiler, name: []const u8, catch_block: *Node) CompileError!bool {
+        if (!self.compilingProgramBody()) return false;
+        const floor = self.stack_floor;
+        if (try anyNode(catch_block, DynamicScope{}, floor)) return false;
+        if (try nameRefInClosure(catch_block, name, false, floor)) return false;
+        if (try anyNode(catch_block, DeclaresName{ .name = name, .floor = floor }, floor)) return false;
+        if (try anyNode(catch_block, PatternWritesName{ .name = name, .floor = floor }, floor)) return false;
+        try self.program_scratch.append(self.arena, .{ .name = name, .slot = self.scratch_count });
+        self.scratch_count += 1;
+        return true;
+    }
+
     fn pushLexicalScope(self: *Compiler) CompileError!void {
         if (self.scope) |scope| try scope.pushLexicalScopeAtDepth(self.arena, self.environment_depth);
     }
@@ -3498,8 +3765,18 @@ pub const Compiler = struct {
                 }
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
+                const scratch_mark = self.program_scratch.items.len;
+                defer self.program_scratch.shrinkRetainingCapacity(scratch_mark);
+                const scratch_block = blk: {
+                    if (!self.compilingProgramBody()) break :blk false;
+                    const region = try self.arena.alloc(?*const Node, stmts.len);
+                    for (region, stmts) |*slot, statement| slot.* = statement;
+                    break :blk try self.enterProgramScratch(stmts, region);
+                };
                 const repeated_captures = self.repeated_body_captures;
-                const captured_environment = if (self.scope == null)
+                const captured_environment = if (scratch_block)
+                    false
+                else if (self.scope == null)
                     try environmentBlockNeedsRecord(stmts, self.stack_floor)
                 else if (repeated_captures) |captures|
                     try repeatedBodyListNeedsEnvironment(stmts, captures, self.stack_floor)
@@ -3523,7 +3800,11 @@ pub const Compiler = struct {
                 if (captured_environment and !disposable_scope) {
                     try self.emitEnterEnvironment();
                 }
-                if (self.scope == null) {
+                if (captured_environment and self.compilingProgramBody() and self.loops.items.len != 0)
+                    self.chunk.program_repeats_environments = true;
+                if (scratch_block) {
+                    // Each declaration initializes its scratch slot when it runs.
+                } else if (self.scope == null) {
                     try self.emitEnvironmentLexicals(stmts);
                 } else if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_captures.?);
                 try self.emitLexicalInitializersForList(stmts);
@@ -3632,6 +3913,11 @@ pub const Compiler = struct {
     /// closures fresh cells; uncaptured function-local bindings stay in checked
     /// frame slots and are reset to TDZ on every entry.
     fn prepareCatchPattern(self: *Compiler, pattern: *Node, catch_block: *Node) CompileError!bool {
+        // A program catch binding nothing else can observe lives in a scratch
+        // slot: entering the catch then allocates nothing, so an allocation
+        // failure in the try block (a heap-limit OutOfMemoryError) can still
+        // land in it, as on the tree-walker, which reserves its catch record.
+        if (pattern.* == .identifier and try self.enterProgramScratchCatch(pattern.identifier, catch_block)) return false;
         const environment = self.catchPatternUsesEnvironment(pattern, catch_block);
         if (environment) {
             try self.markEnvironmentLexicalPattern(pattern, false);
@@ -3690,6 +3976,8 @@ pub const Compiler = struct {
             {
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
+                const scratch_mark = self.program_scratch.items.len;
+                defer self.program_scratch.shrinkRetainingCapacity(scratch_mark);
                 if (t.catch_param) |p| {
                     const environment = try self.prepareCatchPattern(p, catch_block);
                     try self.compileCatchPattern(p, environment);
@@ -3720,6 +4008,8 @@ pub const Compiler = struct {
         if (t.catch_block) |cb| {
             try self.pushLexicalScope();
             defer self.popLexicalScope();
+            const scratch_mark = self.program_scratch.items.len;
+            defer self.program_scratch.shrinkRetainingCapacity(scratch_mark);
             catch_start = self.chunk.here();
             var catch_environment = false;
             if (t.catch_param) |p| {
@@ -3911,12 +4201,16 @@ pub const Compiler = struct {
             head_dispose_handler = try self.emitPushHandler(.push_handler, none, none);
             self.finally_depth += 1;
         }
-        const captured_head = if (init_node) |ini|
+        const scratch_mark = self.program_scratch.items.len;
+        const scratch_head = if (init_node) |ini| try self.enterProgramScratch(&.{ini}, &.{ ini, cond, update, body }) else false;
+        defer self.program_scratch.shrinkRetainingCapacity(scratch_mark);
+        const captured_head = if (scratch_head) false else if (init_node) |ini|
             if (self.scope == null) try nodeDeclaresLexical(ini, self.stack_floor) else try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body, self.stack_floor)
         else
             false;
         if (captured_head and !try loopHeadSupportsEnvironment(init_node.?, self.stack_floor))
             return error.Unsupported;
+        if (captured_head and self.compilingProgramBody()) self.chunk.program_repeats_environments = true;
         const lexical_scope = if (init_node) |init| try nodeDeclaresLexical(init, self.stack_floor) else false;
         if (lexical_scope) {
             try self.pushLexicalScope();
@@ -4080,6 +4374,7 @@ pub const Compiler = struct {
         else
             false;
         const program_lexical_binding = self.scope == null and if (decl_kind) |kind| kind != .@"var" else false;
+        if (program_lexical_binding and self.compilingProgramBody()) self.chunk.program_repeats_environments = true;
         // `for (using x of …)` registers each iteration's resource in that
         // iteration's own Environment Record, so the head always gets one.
         const environment_binding = captured_binding or program_lexical_binding or head_using;
@@ -5082,6 +5377,8 @@ pub const Compiler = struct {
                         else
                             _ = try self.chunk.emitAB(.delete_name, try self.chunk.addName(name), environment_depth);
                     },
+                    // A scratch binding is declarative and nothing shadows it.
+                    .scratch => _ = try self.chunk.emit(.load_false, 0),
                     // Environment-backed suspendable locals and globals need full
                     // ResolveBinding/DeleteBinding semantics at execution time.
                     .environment, .global => _ = try self.chunk.emitAB(
@@ -10085,5 +10382,43 @@ test "compiler reports stable async admission reasons" {
     switch (try Compiler.admitAsync(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
         .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "program loops keep unobservable block bindings in scratch slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { source: []const u8, scratch: bool }{
+        .{ .source = "var r = 0; for (let i = 0; i < 3; i++) { const d = i; r += d; }", .scratch = true },
+        .{ .source = "var w = 0; while (w < 3) { let step = 1; w += step; }", .scratch = true },
+        .{ .source = "var c; try { throw 1; } catch (e) { c = e; }", .scratch = true },
+        // A closure, direct eval, `with`, an early read, a written const or a
+        // nested redeclaration keeps the Environment Record.
+        .{ .source = "var f = []; for (let i = 0; i < 3; i++) f.push(() => i);", .scratch = false },
+        .{ .source = "for (let i = 0; i < 3; i++) eval('i');", .scratch = false },
+        .{ .source = "for (let i = 0; i < 3; i++) with ({}) i;", .scratch = false },
+        .{ .source = "{ x; let x = 1; }", .scratch = false },
+        .{ .source = "for (const c = 0; c < 1; c++) {}", .scratch = false },
+        .{ .source = "for (let i = 0; i < 3; i++) { let i = 2; }", .scratch = false },
+        .{ .source = "for (let i = 0, j = i; i < 3; i++) {}", .scratch = false },
+    };
+    for (cases) |case| {
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        const chunk = switch (try Compiler.admitProgram(arena.allocator(), program)) {
+            .compiled => |compiled| compiled,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        var scratch_stores: usize = 0;
+        var environments: usize = 0;
+        for (chunk.code.items) |instruction| switch (instruction.op) {
+            .scratch_store => scratch_stores += 1,
+            .enter_block => environments += 1,
+            else => {},
+        };
+        std.testing.expectEqual(case.scratch, scratch_stores != 0 and environments == 0) catch |err| {
+            std.debug.print("source: {s}\n", .{case.source});
+            return err;
+        };
     }
 }

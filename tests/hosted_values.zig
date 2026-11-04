@@ -176,8 +176,11 @@ pub fn main() !void {
     try std.testing.expectError(error.Throw, context.callProtected(noncallable, null, &.{}));
     const string = try context.createHostValue(.{ .string = "retained string" });
     defer _ = context.unprotectValue(string);
-    const lexical_admissions_before = context.bytecodeAdmissionSnapshot().count(.program_policy_lexical_declaration);
+    // The legacy-reflection text keeps this Script on the tree-walker, so the
+    // returned closure is created there.
+    const tree_admissions_before = context.bytecodeAdmissionSnapshot().count(.program_policy_legacy_caller);
     const relocating = try context.evaluateProtected(
+        \\void "the legacy .caller text keeps this Script tree-walked";
         \\globalThis.hostedDiscard = [];
         \\for (var dead = 0; dead < 2048; dead = dead + 1)
         \\  hostedDiscard.push({ dead: dead, child: { marker: dead + 1 } });
@@ -195,7 +198,7 @@ pub fn main() !void {
         \\}; })()
     );
     defer _ = context.unprotectValue(relocating);
-    try std.testing.expectEqual(lexical_admissions_before + 1, context.bytecodeAdmissionSnapshot().count(.program_policy_lexical_declaration));
+    try std.testing.expectEqual(tree_admissions_before + 1, context.bytecodeAdmissionSnapshot().count(.program_policy_legacy_caller));
     context.collectGarbage();
     try std.testing.expect(context.requestGarbageCompaction());
     const relocated = try context.callProtected(relocating, receiver, &.{ string, buffer });
