@@ -1432,13 +1432,35 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 
 - (JSValue *)evaluateScript:(NSString *)script withSourceURL:(NSURL *)sourceURL
 {
-    JSStringRef source = ZJSStringCreate(script);
-    JSStringRef url = ZJSStringCreate(sourceURL.absoluteString);
-    if (!source)
+    if (!script)
         return nil;
+    JSStringRef url = ZJSStringCreate(sourceURL.absoluteString);
     JSValueRef exception = NULL;
-    JSValueRef value = JSEvaluateScript(self.JSGlobalContextRef, source, NULL, url, 1, &exception);
-    JSStringRelease(source);
+    JSValueRef value = NULL;
+    // A script is usually a large UTF-8 bundle: hand the engine its UTF-8
+    // bytes in one conversion. A string that does not convert completely
+    // (a lone surrogate) takes the exact UTF-16 path instead.
+    NSUInteger capacity = [script maximumLengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    char *bytes = capacity ? ZJSBridgeMalloc(capacity) : NULL;
+    NSUInteger used = 0;
+    NSRange remaining = NSMakeRange(0, 0);
+    BOOL converted = capacity == 0 || (bytes && [script getBytes:bytes maxLength:capacity usedLength:&used
+        encoding:NSUTF8StringEncoding options:0 range:NSMakeRange(0, script.length) remainingRange:&remaining]
+        && remaining.length == 0);
+    if (converted) {
+        value = ZJSEvaluateScriptUTF8(self.JSGlobalContextRef, bytes, used, NULL, url, 1, &exception);
+        free(bytes);
+    } else {
+        free(bytes);
+        JSStringRef source = ZJSStringCreate(script);
+        if (!source) {
+            if (url)
+                JSStringRelease(url);
+            return nil;
+        }
+        value = JSEvaluateScript(self.JSGlobalContextRef, source, NULL, url, 1, &exception);
+        JSStringRelease(source);
+    }
     if (url)
         JSStringRelease(url);
     if (exception) {

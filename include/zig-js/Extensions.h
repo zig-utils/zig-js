@@ -39,6 +39,11 @@ JS_EXPORT JSStringRef ZJSContextStopCPUProfile(JSContextRef ctx);
  * damaged entries are misses and get rewritten. Keep `path` private to the app. */
 JS_EXPORT bool ZJSContextSetScriptCacheDirectory(JSContextRef ctx, const char* path);
 
+/* JSEvaluateScript for a script held as `length` bytes of UTF-8, without a
+ * JSString (which keeps UTF-8 and UTF-16 copies of a large bundle). */
+JS_EXPORT JSValueRef ZJSEvaluateScriptUTF8(JSContextRef ctx, const char* utf8, size_t length,
+    JSObjectRef thisObject, JSStringRef sourceURL, int startingLineNumber, JSValueRef* exception);
+
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);

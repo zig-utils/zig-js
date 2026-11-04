@@ -20185,6 +20185,46 @@ export fn JSEvaluateScript(
         setException(c, exception, "TypeError: script is null");
         return null;
     };
+    return evaluateScriptBytes(c, s.bytes, this_object, source_url, starting_line_number, exception);
+}
+
+/// zig-js extension: `JSEvaluateScript` for a script the host already holds as
+/// `length` bytes of UTF-8, without building a JSString (which keeps both a
+/// UTF-8 and a UTF-16 copy of a large bundle). Malformed UTF-8 is read the way
+/// `JSStringCreateWithUTF8CString` reads it.
+export fn ZJSEvaluateScriptUTF8(
+    ctx: JSContextRef,
+    utf8: [*c]const u8,
+    length: usize,
+    this_object: JSObjectRef,
+    source_url: JSStringRef,
+    starting_line_number: c_int,
+    exception: ExceptionRef,
+) callconv(.c) JSValueRef {
+    const c = ctxForEvaluation(ctx) orelse return null;
+    if (utf8 == null and length != 0) {
+        setException(c, exception, "TypeError: script is null");
+        return null;
+    }
+    const bytes: []const u8 = if (length == 0) "" else utf8[0..length];
+    if (std.unicode.utf8ValidateSlice(bytes))
+        return evaluateScriptBytes(c, bytes, this_object, source_url, starting_line_number, exception);
+    const converted = JsString.create(gpa, bytes) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer converted.release();
+    return evaluateScriptBytes(c, converted.bytes, this_object, source_url, starting_line_number, exception);
+}
+
+fn evaluateScriptBytes(
+    c: *Context,
+    script_bytes: []const u8,
+    this_object: JSObjectRef,
+    source_url: JSStringRef,
+    starting_line_number: c_int,
+    exception: ExceptionRef,
+) JSValueRef {
     const this_value = if (this_object) |_|
         Value.obj(objectArgFrom(c, this_object, exception) orelse return null)
     else
@@ -20203,7 +20243,7 @@ export fn JSEvaluateScript(
         c.debug_script_start_line = saved_start_line;
     }
     const registered_script = c.registerDebugScript(
-        s.bytes,
+        script_bytes,
         evaluationSourceName(source_url),
         if (starting_line_number > 0) @intCast(starting_line_number) else 1,
     ) catch {
@@ -20212,7 +20252,7 @@ export fn JSEvaluateScript(
     };
     c.debug_script_id = registered_script.id;
     c.debug_script_start_line = registered_script.start_line;
-    const result = c.evaluateWithThis(s.bytes, this_value) catch |err| {
+    const result = c.evaluateWithThis(script_bytes, this_value) catch |err| {
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
         if (err == error.Throw) {
