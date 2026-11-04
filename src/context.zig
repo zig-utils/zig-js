@@ -38347,6 +38347,69 @@ test "block functions preserve shared and repeated closures without the GIL" {
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
+test "a direct native call restores a caller scope moved at its safepoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const Trigger = struct {
+        fn request(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const owner: *Context = @ptrCast(@alignCast(machine.gc_safepoint_ctx.?));
+            owner.gc.?.nursery_threshold_bytes = 1;
+            owner.movingCheckpointRequest().store(true, .release);
+            return Value.undef();
+        }
+    };
+    {
+        const saved_gc = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved_gc);
+        const saved_strings = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(saved_strings);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "requestCallerScopeMove", 0, Trigger.request);
+    }
+    // A numeric leaf compiles to a baseline artifact on its first call. Called
+    // too few times to tier up further, it is entered through the direct
+    // native call path, whose loop reaches a moving safepoint. The
+    // generator's Environment is still young when it calls the leaf.
+    _ = try ctx.evaluate(
+        \\function callerScopeLoop(n) {
+        \\  var total = 0, i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\for (var warm = 0; warm < 2; warm++) callerScopeLoop(4096);
+    );
+    const loop: *interp.Function = @ptrCast(@alignCast(ctx.global_object.getOwn("callerScopeLoop").?.asObj().jsFunction().?));
+    try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+    try std.testing.expect(loop.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\function makeCallerScopeGenerator(holder) {
+        \\  let cell = { value: 1 };
+        \\  return function* () {
+        \\    yield cell.value + holder.value;
+        \\    requestCallerScopeMove(); callerScopeLoop(20000);
+        \\    cell.value += 2;
+        \\    return cell.value + holder.value;
+        \\  };
+        \\}
+        \\globalThis.callerScopeHolder = { value: 10 };
+        \\globalThis.callerScopeIterator = makeCallerScopeGenerator(callerScopeHolder)();
+    );
+    try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate("callerScopeIterator.next().value")).asNum());
+    const moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("callerScopeIterator.next().value")).asNum());
+    try std.testing.expect(heap.accounting().moving_minor_collections > moving_before);
+    ctx.collectGarbage();
+    try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("callerScopeHolder.value + 3")).asNum());
+}
+
 test "block functions and suspendable activations survive actual moving GC across a native safepoint" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

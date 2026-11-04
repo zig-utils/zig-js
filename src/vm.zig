@@ -8161,15 +8161,24 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     // unresolvable `store_var`). `this`, `arguments` and upvalues are excluded
     // from leaf chunks by construction, so nothing else from the activation is
     // observable here.
+    //
+    // The native code below can reach a moving safepoint, so the saved caller
+    // scope must be a GC root: a caller Environment that is still young (a
+    // generator's, for one) is relocated there, and restoring the pre-move
+    // address left the caller running on a freed cell.
     const caller_env = vm.env;
     const caller_global = vm.global_object;
     const caller_strict = vm.strict;
+    const caller_env_root = try vm.pushTempEnvRoot(caller_env);
+    defer vm.restoreTempEnvRoots(caller_env_root);
+    const caller_global_root = try vm.pushTempRoot(if (caller_global) |global| Value.obj(global) else Value.undef());
+    defer vm.restoreTempRoots(caller_global_root);
     vm.env = func.closure;
     if (func.realm_global) |global| vm.global_object = global;
     vm.strict = func.is_strict;
     defer {
-        vm.env = caller_env;
-        vm.global_object = caller_global;
+        vm.env = vm.tempEnvRoot(caller_env_root, caller_env);
+        vm.global_object = if (caller_global) |global| vm.tempRoot(caller_global_root, Value.obj(global)).asObj() else null;
         vm.strict = caller_strict;
     }
 
