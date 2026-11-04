@@ -7758,6 +7758,48 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
 /// scratch wrapper still accounts every byte against the compilation budget.
 const native_compilation_backing: std.mem.Allocator = if (builtin.link_libc) std.heap.c_allocator else std.heap.page_allocator;
 
+/// A bytecode operation the optimizer cannot lower runs through
+/// `nativeOperationDispatch`: a descriptor check, input marshalling and the
+/// full interpreter operation, on top of the native prologue and the exit
+/// bookkeeping around it. An artifact made mostly of those calls is slower
+/// than the bytecode it replaces, so publish only code in which at most
+/// this share of the chunk's instructions became runtime operations.
+const optimizer_max_runtime_operation_percent: usize = 10;
+
+/// Bytecode the optimizer lowers to straight-line native code when its
+/// guards hold: constants, locals, stack shuffles, numeric arithmetic and
+/// comparisons, and control flow. Everything else (property access, calls,
+/// allocation, upvalues, environments) becomes a runtime operation. Counting
+/// the complement bounds the artifact's runtime-operation share from above,
+/// cheaply enough to run before compiling.
+fn optimizerLowersNatively(op: bc.Op) bool {
+    return switch (op) {
+        .nop, .load_const, .load_undefined, .load_null, .load_true, .load_false,
+        .pop, .dup, .swap, .set_acc, .load_local, .store_local,
+        .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict,
+        .not, .inc, .dec, .to_numeric, .neg, .pos,
+        .jump, .jump_if_false, .jump_if_false_peek, .jump_if_true_peek,
+        .ret, .ret_undef, .halt,
+        => true,
+        else => false,
+    };
+}
+
+fn optimizerChunkWorthCompiling(chunk: *const Chunk) bool {
+    const code = chunk.code.items;
+    if (code.len == 0) return false;
+    var runtime_ops: usize = 0;
+    for (code) |inst| {
+        if (!optimizerLowersNatively(inst.op)) runtime_ops += 1;
+    }
+    return runtime_ops * 100 <= code.len * optimizer_max_runtime_operation_percent;
+}
+
+fn optimizerArtifactProfitable(chunk: *const Chunk, compiled: *const jit.CompiledCode) bool {
+    const operations = compiled.native_operations orelse return true;
+    return operations.descriptors.len * 100 <= chunk.code.items.len * optimizer_max_runtime_operation_percent;
+}
+
 fn loadOrCompileOptimizer(
     vm: *Interpreter,
     owner: *jit.Owner,
@@ -7789,6 +7831,14 @@ fn loadOrCompileOptimizer(
         optimizer_tier_entry_threshold,
     )) |claim_value| {
         var claim = claim_value;
+        // Most of a reject's cost is the compile itself (a plan, then up to
+        // six lowering strategies). Refuse chunks that cannot pass the
+        // runtime-operation bound before paying it.
+        if (vm.optimizer_profitability_gate and !optimizerChunkWorthCompiling(chunk)) {
+            _ = chunk.optimizer_tier.publishRejected(claim.claim);
+            claim.release();
+            return null;
+        }
         var work = runtime_threads.beginInternalWork(.native_compilation);
         defer work.end();
         var scratch = runtime_threads.ScratchAllocator.init(.native_compilation, native_compilation_backing);
@@ -7808,6 +7858,13 @@ fn loadOrCompileOptimizer(
             claim.release();
             return null;
         };
+        if (vm.optimizer_profitability_gate and !optimizerArtifactProfitable(chunk, &compiled)) {
+            recordOptimizerTierUp(vm, tier_up_started_ns, false);
+            compiled.deinit();
+            _ = chunk.optimizer_tier.publishRejected(claim.claim);
+            claim.release();
+            return null;
+        }
         _ = owner.adoptOptimizerAndPublishObserved(
             &chunk.optimizer_tier,
             claim.claim,
@@ -7840,6 +7897,7 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, chunk: *c
         const outcome = try tryRunManagedNativeWithProfileContext(vm, native, slots, exec, chunk);
         if (builtin.is_test and native.kind == .optimizer and outcome == .complete)
             _ = optimizer_native_hits.fetchAdd(1, .monotonic);
+        noteOptimizerOutcome(vm, native, outcome);
         return outcome;
     }
 
@@ -7847,6 +7905,20 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, chunk: *c
     if (builtin.is_test and native.kind == .optimizer and result != null)
         _ = optimizer_native_hits.fetchAdd(1, .monotonic);
     return if (result) |value_word| .{ .complete = value_word } else .miss;
+}
+
+/// Feed the optimizer tier's profitability accounting. A miss never entered
+/// native code; a deoptimized entry paid for frame reconstruction on top of
+/// the bytecode it resumes, which is what makes an exit-heavy artifact slower
+/// than not compiling the chunk at all.
+fn noteOptimizerOutcome(vm: *const Interpreter, native: *const jit.CompiledCode, outcome: NativeRunOutcome) void {
+    if (!vm.optimizer_profitability_gate or native.kind != .optimizer) return;
+    const tier = native.optimizer_tier orelse return;
+    switch (outcome) {
+        .miss => {},
+        .complete => tier.noteNativeOutcome(false),
+        .deoptimized => tier.noteNativeOutcome(true),
+    }
 }
 
 fn statementHooksRequireBytecode(vm: *const Interpreter) bool {
@@ -7874,6 +7946,7 @@ fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, g
     const slots: []Value = if (frame) |live_frame| live_frame.slots else empty_slots[0..];
     if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
     const outcome = try tryRunOsrNative(vm, native, chunk, slots, exec);
+    noteOptimizerOutcome(vm, native, outcome);
     if (builtin.is_test and outcome == .complete) _ = optimizer_native_hits.fetchAdd(1, .monotonic);
     if (builtin.is_test and outcome == .deoptimized) _ = optimizer_osr_entries.fetchAdd(1, .monotonic);
     return outcome;
@@ -7892,6 +7965,9 @@ fn tryRunLoopOsrAtBackedge(
     if (@as(usize, target) > instruction) return null;
     exec.acc = acc;
     exec.ip = target;
+    // Every backedge reaches here; only a published optimizer artifact can
+    // take the loop over.
+    if (chunk.optimizer_tier.state.load(.monotonic) != .ready) return null;
     const outcome = try tryRunLoopOsr(vm, exec, chunk, frame, gen);
     // Native code counts (and on deoptimization restores) steps itself.
     if (outcome != .miss) vm.step_limit = 0;
@@ -7914,6 +7990,8 @@ fn finishChunkResult(vm: *Interpreter, exec: *Exec, chunk: *const Chunk, result:
 fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
     if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0 or
         statementHooksRequireBytecode(vm)) return null;
+    // A chunk both of whose tiers refused it never runs natively again.
+    if (chunk.tier.loadState() == .rejected and chunk.optimizer_tier.state.load(.monotonic) == .rejected) return null;
     const owner = vm.jit_owner orelse return null;
 
     if (!nativeExecutionPermitted(vm, owner)) return null;
@@ -7942,11 +8020,11 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     // repays the baseline compiler cost immediately, and cold contexts have no
     // second call. Object/call-heavy chunks retain the ordinary hot threshold
     // so their first invocation does not pay analysis for a known opcode miss.
-    const tier_threshold = if (jit_compiler.isCandidate(chunk))
-        eager_native_tier_entry_threshold
-    else
-        native_tier_entry_threshold;
-    if (code == null) if (owner.claimCompilation(&chunk.tier, tier_threshold)) |claim_value| {
+    // Only a cold tier can still claim; skip the candidate scan otherwise.
+    if (code == null and chunk.tier.loadState() == .cold) if (owner.claimCompilation(
+        &chunk.tier,
+        if (jit_compiler.isCandidate(chunk)) eager_native_tier_entry_threshold else native_tier_entry_threshold,
+    )) |claim_value| {
         var claim = claim_value;
         var work = runtime_threads.beginInternalWork(.native_compilation);
         defer work.end();
@@ -8144,6 +8222,10 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (chunk.lexical_slots.len != 0) return null;
     const slot_count: usize = @intCast(chunk.local_count);
     if (slot_count != func.local_count or slot_count > 64) return null;
+    // With no published tier the direct path can only fall back after
+    // copying the arguments and switching scopes. Let the ordinary call path
+    // run the chunk; its entry still profiles and compiles.
+    if (chunk.tier.loadCode() == null and chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null) return null;
 
     var slots: [64]Value = @splat(Value.undef());
     const parameter_count = @min(func.params.len, slot_count);
@@ -29536,3 +29618,4 @@ test "vm: for-in honors proxy prototypes and candidate descriptors in every mode
         )).asStr());
     };
 }
+

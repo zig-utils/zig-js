@@ -4370,6 +4370,8 @@ pub const Context = struct {
     /// Opt-in benchmark/profile attribution. Ordinary contexts leave recording
     /// disabled and do not add atomics to scored execution paths.
     profile_execution_tiers: bool = false,
+    /// See `Interpreter.optimizer_profitability_gate`.
+    jit_profitability_gate: bool = !builtin.is_test,
     execution_tier_inventory: interp.ExecutionTierInventory = .{},
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: interp.DebugStatementLocationIndex = .{},
@@ -6007,6 +6009,7 @@ pub const Context = struct {
             .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .jit_invalidation_ctx = if (self.parallel_js and self.enable_jit) self else null,
             .jit_invalidation_fn = if (self.parallel_js and self.enable_jit) clearJitCodeFromInterpreter else null,
+            .optimizer_profitability_gate = self.jit_profitability_gate,
             .debug_statement_ctx = self.debug_statement_ctx,
             .debug_statement_hook = self.debug_statement_hook,
             .host_statement_ctx = self.host_statement_ctx,
@@ -25027,6 +25030,47 @@ test "Context native observability is opt in" {
     defer externally_published.destroy();
     try std.testing.expect(externally_published.jit_owner.nativeObservabilityEnabled());
     try std.testing.expect(externally_published.jit_owner.nativeCodePublisher() != null);
+}
+
+fn testFunctionChunk(ctx: *Context, name: []const u8) !*bc.Chunk {
+    const function_value = ctx.global_object.getOwn(name) orelse return error.TestUnexpectedResult;
+    const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const function: *interp.Function = @ptrCast(@alignCast(raw_function));
+    return function.chunk orelse error.TestUnexpectedResult;
+}
+
+test "JIT profitability gate keeps object-heavy chunks in bytecode and tiers numeric ones" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.jit_profitability_gate = true;
+    const result = try ctx.evaluate(
+        \\function gateObjectRow(i) {
+        \\  const row = { id: i, label: 'row ' + i, tags: [i, i + 1] };
+        \\  return row.label.length + row.tags.length + row.id;
+        \\}
+        \\function gateNumericSum(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\var acc = 0;
+        \\for (var k = 0; k < 200; k++) acc += gateObjectRow(k) + gateNumericSum(50);
+        \\acc
+    );
+    try std.testing.expect(result.asNum() > 0);
+    const object_chunk = try testFunctionChunk(ctx, "gateObjectRow");
+    try std.testing.expectEqual(jit.OptimizerTierState.rejected, object_chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(object_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    const numeric_chunk = try testFunctionChunk(ctx, "gateNumericSum");
+    try std.testing.expect(numeric_chunk.tier.loadCode() != null or
+        numeric_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
 test "Context native observability captures published function identity" {

@@ -207,6 +207,20 @@ pub const OptimizerTier = struct {
     generation: std.atomic.Value(u64) = .init(0),
     installed_compiles: std.atomic.Value(u64) = .init(0),
     publication_lock: std.atomic.Mutex = .unlocked,
+    /// Entries into this chunk's optimized code, and how many of them left
+    /// through a side exit or operation exception instead of completing.
+    native_runs: std.atomic.Value(u64) = .init(0),
+    native_exits: std.atomic.Value(u64) = .init(0),
+    /// Set once the exit rate proved native code slower than bytecode for
+    /// this chunk. It stays in bytecode from then on, across invalidations.
+    unprofitable: std.atomic.Value(bool) = .init(false),
+
+    /// Entries observed before the exit rate can retire an artifact.
+    pub const profitability_min_runs: u64 = 16;
+    /// An artifact is retired once at least one entry in this many exits:
+    /// each exit reconstructs the interpreter frame and resumes in bytecode,
+    /// which costs more than the native prefix saved.
+    pub const profitability_exit_divisor: u64 = 4;
 
     pub const CompilationClaim = struct {
         generation: u64,
@@ -255,7 +269,33 @@ pub const OptimizerTier = struct {
         self.state.store(.invalidating, .release);
         _ = self.generation.fetchAdd(1, .acq_rel);
         self.artifact.store(0, .release);
-        self.state.store(.profiling, .release);
+        self.state.store(if (self.unprofitable.load(.acquire)) .rejected else .profiling, .release);
+    }
+
+    /// Account one entry into the published artifact. Once the exit rate
+    /// crosses the profitability bound, retire it: later entries stay in
+    /// bytecode, and the generation bump makes every call link drop it. The
+    /// owner still retains the code for readers already inside it.
+    pub fn noteNativeOutcome(self: *OptimizerTier, exited: bool) void {
+        const runs = self.native_runs.fetchAdd(1, .monotonic) + 1;
+        const exits = if (exited) self.native_exits.fetchAdd(1, .monotonic) + 1 else self.native_exits.load(.monotonic);
+        if (!exited or runs < profitability_min_runs) return;
+        if (exits * profitability_exit_divisor < runs) return;
+        self.retireUnprofitable();
+    }
+
+    fn retireUnprofitable(self: *OptimizerTier) void {
+        self.acquirePublicationLock();
+        defer self.publication_lock.unlock();
+        if (self.unprofitable.load(.acquire)) return;
+        self.unprofitable.store(true, .release);
+        if (self.state.load(.acquire) != .ready) return;
+        _ = self.generation.fetchAdd(1, .acq_rel);
+        self.state.store(.rejected, .release);
+    }
+
+    pub fn isUnprofitable(self: *const OptimizerTier) bool {
+        return self.unprofitable.load(.monotonic);
     }
 
     pub fn loadArtifact(self: *const OptimizerTier, comptime T: type) ?*const T {
@@ -1836,6 +1876,9 @@ pub const Owner = struct {
     /// Claim compilation as an owner operation so invalidation cannot finish
     /// while a pre-existing compiler is still capable of publishing code.
     pub fn claimCompilation(self: *Owner, tier: *Tier, threshold: u32) ?Compilation {
+        // Every bytecode call reaches here; a chunk that already published or
+        // rejected its baseline tier must not pay the claim's two atomics.
+        if (tier.loadState() != .cold) return null;
         if (self.invalidating.load(.acquire)) return null;
         _ = self.active_compilations.fetchAdd(1, .acquire);
         if (self.invalidating.load(.acquire) or !tier.observeEntry(threshold)) {
@@ -1851,6 +1894,16 @@ pub const Owner = struct {
         profile: *const OptimizerProfile,
         threshold: u64,
     ) ?OptimizerCompilation {
+        // Likewise skip the claim for a ready/rejected tier, and for a
+        // profiling one still below the threshold.
+        switch (tier.state.load(.monotonic)) {
+            .cold, .profiling => {},
+            else => return null,
+        }
+        if (profile.entries.load(.monotonic) < threshold) {
+            tier.beginProfiling();
+            return null;
+        }
         if (self.invalidating.load(.acquire)) return null;
         _ = self.active_compilations.fetchAdd(1, .acquire);
         if (self.invalidating.load(.acquire)) {
@@ -2492,6 +2545,36 @@ test "optimizer tier publishes only installed artifacts and counts recompiles" {
     try std.testing.expectEqual(OptimizerTierState.rejected, tier.state.load(.acquire));
     try std.testing.expectEqual(@as(u64, 3), tier.generation.load(.acquire));
     try std.testing.expectEqual(@as(u64, 2), tier.compileCount());
+}
+
+test "optimizer tier retires an exit-heavy artifact for good" {
+    var tier: OptimizerTier = .{};
+    var profile: OptimizerProfile = .{};
+    var artifact: u8 = 0;
+    profile.observeEntry();
+    const claim = tier.claimCompilation(&profile, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tier.publishReady(claim, &artifact));
+    const generation = tier.generation.load(.acquire);
+
+    // Completions alone never retire, and exits below the bound keep it.
+    for (0..OptimizerTier.profitability_min_runs * 2) |_| tier.noteNativeOutcome(false);
+    tier.noteNativeOutcome(true);
+    try std.testing.expect(tier.loadArtifact(u8) == &artifact);
+    try std.testing.expect(!tier.isUnprofitable());
+
+    // Exits reaching one entry in `profitability_exit_divisor` retire it.
+    while (!tier.isUnprofitable()) tier.noteNativeOutcome(true);
+    try std.testing.expect(tier.loadArtifact(u8) == null);
+    try std.testing.expectEqual(OptimizerTierState.rejected, tier.state.load(.acquire));
+    try std.testing.expect(tier.generation.load(.acquire) != generation);
+    const runs = tier.native_runs.load(.acquire);
+    try std.testing.expect(tier.native_exits.load(.acquire) * OptimizerTier.profitability_exit_divisor >= runs);
+
+    // A later invalidation must not reopen profiling for a retired chunk.
+    tier.invalidate();
+    try std.testing.expectEqual(OptimizerTierState.rejected, tier.state.load(.acquire));
+    for (0..4) |_| profile.observeEntry();
+    try std.testing.expect(tier.claimCompilation(&profile, 1) == null);
 }
 
 test "optimizer publication and invalidation races converge" {

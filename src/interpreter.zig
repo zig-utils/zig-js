@@ -4056,6 +4056,11 @@ pub const Interpreter = struct {
     /// invalidation bridge once native code has published heap assumptions.
     jit_invalidation_ctx: ?*anyopaque = null,
     jit_invalidation_fn: ?*const fn (*anyopaque, *Interpreter, usize) void = null,
+    /// Tier up only chunks whose optimized code is expected to beat bytecode,
+    /// and retire artifacts whose exits prove otherwise (vm.zig). Unit tests
+    /// default to the ungated tier so optimizer coverage keeps compiling the
+    /// object-heavy chunks it exercises; the gate has its own tests.
+    optimizer_profitability_gate: bool = !builtin.is_test,
     /// Prefer a whole-activation baseline artifact over compiling the same
     /// managed loop into a slower generic optimizer region. Unit-test
     /// interpreters default this off so optimizer-specific tests exercise that
@@ -4853,9 +4858,18 @@ pub const Interpreter = struct {
     /// shape, while the assumption any optimized code guards on is the one it
     /// still has here. A shapeless receiver uses the optimizer's explicit
     /// empty-receiver token; only a null `obj` keeps the conservative stop.
+    /// Whether a shape-changing mutation must take the invalidation path.
+    /// Only a context that installs `jit_invalidation_fn` (shared parallel
+    /// realms) retires artifacts on a transition; elsewhere that path does
+    /// nothing, so published code must not cost the fused fast paths.
+    pub inline fn jitHeapFactsWatched(self: *const Interpreter) bool {
+        const owner = self.jit_owner orelse return false;
+        return self.jit_invalidation_fn != null and owner.hasPublishedArtifacts();
+    }
+
     pub fn invalidateJitHeapFactsFor(self: *Interpreter, obj: ?*const value.Object) void {
-        const owner = self.jit_owner orelse return;
-        if (!owner.hasPublishedArtifacts()) return;
+        if (!self.jitHeapFactsWatched()) return;
+        const owner = self.jit_owner.?;
         const shape_token = if (obj) |o| token: {
             // Shape transitions publish under `property_lock`. The watchpoint
             // pre-check runs before this mutator's store, but another shared
@@ -4886,8 +4900,7 @@ pub const Interpreter = struct {
         // invalidates no heap fact. Keep Class-A for an absent key: that path
         // transitions the receiver and remains the compile/link watchpoint
         // boundary until #471's per-artifact transition policy replaces it.
-        const owner = self.jit_owner;
-        if (owner == null or !owner.?.hasPublishedArtifacts()) {
+        if (!self.jitHeapFactsWatched()) {
             try obj.setOwn(self.arena, self.root_shape, key, v);
             return;
         }
@@ -11866,7 +11879,7 @@ pub const Interpreter = struct {
         try self.checkRestricted(o);
         if (!o.is_array or o.is_arguments or o.proxyHandler() != null or o.proxy_revoked)
             return false;
-        if (self.jit_owner != null and self.jit_owner.?.hasPublishedArtifacts()) return false;
+        if (self.jitHeapFactsWatched()) return false;
         var key_storage: [10]u8 = undefined;
         const key = std.fmt.bufPrint(&key_storage, "{d}", .{index}) catch return false;
         if (!try self.arrayPrototypeAllowsIndexedOwnCreation(o, key, index)) return false;
@@ -18415,7 +18428,7 @@ pub const Interpreter = struct {
         // stale descriptor decision. Published JIT artifacts retain the exact
         // pre-transition invalidation path below.
         if (plain_named_receiver and ro == o and
-            (self.jit_owner == null or !self.jit_owner.?.hasPublishedArtifacts()))
+            !self.jitHeapFactsWatched())
         {
             switch (try ro.setOrdinaryOwnData(self.arena, self.root_shape, key, v)) {
                 .blocked => return false,
@@ -18549,7 +18562,7 @@ pub const Interpreter = struct {
         if (value.canonicalIndex(key) == null and
             !(o.is_array and !o.is_arguments and std.mem.eql(u8, key, "length")) and
             !isLazyFunctionPrototypeSlot(o, key) and
-            (self.jit_owner == null or !self.jit_owner.?.hasPublishedArtifacts()))
+            !self.jitHeapFactsWatched())
             return o.deleteOrdinaryNamedOwn(self.arena, self.root_shape, key);
         // Deletion rebuilds the named-data shape or changes the accessor
         // representation. Close code guarding the exact pre-delete shape
