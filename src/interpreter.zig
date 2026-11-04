@@ -4345,6 +4345,13 @@ pub const Interpreter = struct {
     /// publish at a safepoint it won't reach. Set by the park sites, read by the
     /// collector. Atomic for the cross-thread read.
     gc_parked: std.atomic.Value(bool) = .init(false),
+    /// Set with `gc_parked` by a bounded-scheduler handoff at a step
+    /// checkpoint, which can fall inside an expression (between `memory.buffer`
+    /// and the TypedArray constructor consuming it). The collector may still
+    /// trace such a park, but a realm-exclusive mutator stop must not count it
+    /// as an operation boundary; the thread resumes and joins the stop at its
+    /// next statement instead.
+    gc_parked_mid_operation: std.atomic.Value(bool) = .init(false),
     /// Serializes the collector's *direct* read of this interpreter's frozen
     /// roots (operand stacks, frame slots, env) against the owner thread waking
     /// from a `gc_parked` wait and resuming mutation. The `gc_parked` flag alone
@@ -12829,15 +12836,22 @@ pub const Interpreter = struct {
     /// slot. GIL-mode contention is handled by `Gil.yieldIfContended`; retaining
     /// that lock while yielding only the runtime slot would invert the two
     /// schedulers.
+    /// Every caller is a step checkpoint, which can sit inside an expression.
+    /// The park is therefore visible to the collector but is not an operation
+    /// boundary for a realm-exclusive mutator stop: this thread neither joins a
+    /// pending stop here nor counts as stopped while parked (see
+    /// `gc_parked_mid_operation`). It joins at its next statement; the stop's
+    /// owner releases its runnable slot while it waits, so a bounded scheduler
+    /// can still run this thread to that statement.
     pub fn handoffRuntimeSlotIfContended(self: *Interpreter) void {
         if (self.use_thread_gil or !runtime_threads.runnableSlotContended()) return;
-        self.serviceMutatorStopSafepoint();
         self.serviceGcSafepoint();
         self.gc_moving_parked.store(
             self.gc_precise_safepoint and self.gc_moving_safepoint,
             .monotonic,
         );
         stack_scan.beginPark();
+        self.gc_parked_mid_operation.store(true, .release);
         self.gc_parked.store(true, .release);
         defer {
             self.leaveGcPark();
@@ -12909,7 +12923,12 @@ pub const Interpreter = struct {
                 owner.load(.acquire) == self
             else
                 false;
-            if (request == 0 or owns_stop) {
+            // A mid-operation park never counted as stopped, so the stop's owner
+            // is still waiting for this thread: resume and join at the next
+            // statement rather than mid-expression.
+            const mid_operation = self.gc_parked_mid_operation.load(.acquire);
+            if (request == 0 or owns_stop or mid_operation) {
+                self.gc_parked_mid_operation.store(false, .release);
                 self.gc_moving_parked.store(false, .monotonic);
                 self.gc_parked.store(false, .release);
                 self.unlockGcRoots();

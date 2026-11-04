@@ -8502,8 +8502,11 @@ pub const Context = struct {
             // joins it, or clears the flag before this check and remains an
             // ordinary running peer that must reach a statement boundary.
             machine.lockGcRoots();
+            // A bounded-scheduler handoff can park a thread inside an
+            // expression; only whole-statement and native-operation parks are
+            // operation boundaries.
             const stopped = machine.mutator_stop_published_gen.load(.acquire) == request or
-                machine.gc_parked.load(.acquire);
+                (machine.gc_parked.load(.acquire) and !machine.gc_parked_mid_operation.load(.acquire));
             machine.unlockGcRoots();
             if (!stopped) return false;
         }
@@ -8550,6 +8553,11 @@ pub const Context = struct {
                 self.mutator_stop_request.store(request, .release);
                 self.leaveJitGcConductor();
 
+                // A peer parked mid-expression by a bounded-scheduler handoff
+                // needs a runnable slot to reach its next statement; do not
+                // hold one while waiting for it.
+                var blocking = runtime_threads.beginBlocking();
+                defer blocking.end();
                 var spins: usize = 0;
                 while (!self.allMutatorsStoppedAtBoundary(request, machine)) : (spins += 1) {
                     if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
