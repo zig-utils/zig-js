@@ -1,0 +1,18 @@
+name: Ecosystem
+
+# Every branch/tag push gets its own exact-SHA run; never cancel an older push.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ecosystem:
+    if: github.event_name != 'push' || github.event.deleted != true
+    uses: zig-utils/zig-js-ecosystem/.github/workflows/ecosystem.yml@5fcaf262a453a2021faf89773377bab60af4e459
+    with:
+      engine_sha: ${{ github.sha }}
+      suite_ref: 5fcaf262a453a2021faf89773377bab60af4e459
+      reference: true
