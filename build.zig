@@ -726,6 +726,18 @@ pub fn build(b: *std.Build) void {
     run_c_api_inspector_smoke.step.dependOn(&c_api_audit_cmd.step);
 
     const c_api_test_step = b.step("test-c-api", "Compile, link, and run C and C++ public-ABI hosts");
+    const c_api_typed_array_offset = b.addExecutable(.{
+        .name = "c-api-typed-array-offset",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
+    });
+    c_api_typed_array_offset.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_typed_array_offset.c") });
+    c_api_typed_array_offset.root_module.addIncludePath(b.path("include"));
+    c_api_typed_array_offset.root_module.linkLibrary(lib);
+    const run_c_api_typed_array_offset = b.addRunArtifact(c_api_typed_array_offset);
+    run_c_api_typed_array_offset.step.dependOn(&c_api_audit_cmd.step);
+    const c_api_typed_array_offset_step = b.step("test-c-api-typed-array-offset", "Verify typed-array backing pointers and view offsets");
+    c_api_typed_array_offset_step.dependOn(&run_c_api_typed_array_offset.step);
+    c_api_test_step.dependOn(&run_c_api_typed_array_offset.step);
     const async_context_step = b.step("test-c-api-async-context", "Verify native async execution scopes, jobs and precise GC");
     const async_job_scope = b.addExecutable(.{
         .name = "async-context-job-scopes",

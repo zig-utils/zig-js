@@ -22474,7 +22474,9 @@ export fn JSObjectGetTypedArrayBytesPtr(ctx: JSContextRef, object: JSObjectRef, 
         setException(c, exception, "TypeError: TypedArray is detached or out of bounds");
         return null;
     }
-    return @ptrCast(bytes.ptr + ta.byte_offset);
+    // JSC exposes the backing store base, including for a nonzero-offset view.
+    // Hosts apply JSObjectGetTypedArrayByteOffset before accessing view bytes.
+    return @ptrCast(bytes.ptr);
 }
 
 export fn JSObjectGetTypedArrayLength(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) usize {
@@ -28436,7 +28438,7 @@ test "C-API: TypedArray ArrayBuffer views preserve offsets and reject invalid ge
 
     const buffer_raw = JSObjectGetArrayBufferBytesPtr(ctx, buffer, &exception) orelse return error.ArrayBufferBytesFailed;
     const view_raw = JSObjectGetTypedArrayBytesPtr(ctx, view, &exception) orelse return error.TypedArrayBytesFailed;
-    try std.testing.expectEqual(@intFromPtr(buffer_raw) + 4, @intFromPtr(view_raw));
+    try std.testing.expectEqual(@intFromPtr(buffer_raw), @intFromPtr(view_raw));
 
     const whole = JSObjectMakeTypedArrayWithArrayBuffer(ctx, .uint16_array, buffer, &exception) orelse return error.TypedArrayViewFailed;
     try std.testing.expectEqual(@as(usize, 6), JSObjectGetTypedArrayLength(ctx, whole, &exception));
