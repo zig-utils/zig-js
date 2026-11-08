@@ -72,6 +72,21 @@ int main(void)
     JSGlobalContextRelease(sibling);
     JSGlobalContextRelease(ctx);
     JSContextGroupRelease(group);
-    puts("OK rejection FIFO, identity, handled filtering, undefined, realm isolation and GC lifetime");
+    /* Exercise physical collection as well as an arena-backed group's epoch. */
+    ctx = ZJSGlobalContextCreateGarbageCollected(false);
+    CHECK(ctx != NULL);
+    CHECK(eval(ctx, "Promise.reject({ marker: 73 });") != NULL);
+    CHECK(ZJSContextTakeUnhandledRejection(ctx, &reason, &rejected, &exception));
+    CHECK(reason && rejected && !exception);
+    JSValueProtect(ctx, reason);
+    JSValueProtect(ctx, rejected);
+    JSGarbageCollect(ctx);
+    CHECK(JSValueIsObject(ctx, rejected));
+    CHECK(JSValueToNumber(ctx, property(ctx, JSValueToObject(ctx, reason, NULL), "marker"), NULL) == 73);
+    CHECK(ZJSValueIsReachable(ctx, reason));
+    JSValueUnprotect(ctx, rejected);
+    JSValueUnprotect(ctx, reason);
+    JSGlobalContextRelease(ctx);
+    puts("OK rejection FIFO, identity, handled filtering, undefined, realm isolation and precise GC lifetime");
     return 0;
 }
