@@ -85,18 +85,21 @@ int main(void)
     CHECK(ctx);
     JSValueRef promise = eval(ctx, "Promise.resolve(73)");
     JSValueProtect(ctx, promise);
-    JSValueRef proxy = eval(ctx, "var pair = Proxy.revocable({}, {}); pair.revoke(); pair.proxy");
+    JSValueRef proxy = eval(ctx, "(function() { var pair = Proxy.revocable({}, {}); pair.revoke(); return pair.proxy; })()");
     JSValueProtect(ctx, proxy);
     CHECK(ZJSValueIsPromise(ctx, promise) && ZJSValueIsProxy(ctx, proxy));
     /* Host private storage must not erase the original native Promise slot. */
     int host_data = 42;
     CHECK(JSObjectSetPrivate(JSValueToObject(ctx, promise, NULL), &host_data));
     CHECK(ZJSValueIsPromise(ctx, promise));
-    CHECK(eval(ctx, "delete globalThis.pair;") != NULL);
+    /* Clear the last evaluation root; neither object has a global binding. */
+    CHECK(eval(ctx, "undefined") != NULL);
     JSGarbageCollect(ctx);
     CHECK(ZJSValueIsPromise(ctx, promise) && ZJSValueIsProxy(ctx, proxy));
     JSValueUnprotect(ctx, proxy);
     JSValueUnprotect(ctx, promise);
+    JSGarbageCollect(ctx);
+    CHECK(!ZJSValueIsReachable(ctx, proxy) && !ZJSValueIsReachable(ctx, promise));
     JSGlobalContextRelease(ctx);
     puts("OK native value brands, zero traps, realm ownership, unhandled rejection and protected GC lifetime");
     return 0;
