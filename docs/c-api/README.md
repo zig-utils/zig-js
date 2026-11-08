@@ -14,9 +14,20 @@ The matrix deliberately separates declarations from completion:
   ABI mismatch. Pending calls must not be used by hosts yet.
 
 Current result: all 117 functions are implemented, none remain pending, and the
-library exports 117 public functions plus 33 zig-js extensions. The extension
+library exports 117 public functions plus 35 zig-js extensions. The extension
 inventory includes the existing script-cache, CPU-profile and UTF-8 evaluation
 entry points as well as the opt-in rejection checkpoint.
+
+`ZJSValueIsPromise` and `ZJSValueIsProxy` inspect native brands without running
+Proxy traps, user getters, jobs or Promise reactions. A revoked Proxy remains
+a Proxy; a Proxy wrapping a Promise is not itself a Promise. Same-group realm
+handles are accepted, while null inputs and foreign-group handles return false.
+These owner-thread inspection calls are zig-js extensions declared in
+`zig-js/Extensions.h`, not additions to system JavaScriptCore's public API.
+`zig build test-c-api-value-brands` runs C and C++ fixtures covering ordinary
+and spoofed objects, subclasses, revoked/callable proxies, realm ownership,
+unchanged rejection notifications, host private-data transfer and protected
+precise-GC lifetime. The aggregate `test-c-api` gate includes both fixtures.
 
 `ZJSContextTakeUnhandledRejection` consumes a still-unhandled notification after
 the host's microtask checkpoint, returning the original reason and Promise.

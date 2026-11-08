@@ -11,6 +11,14 @@ extern "C" {
 JS_EXPORT bool ZJSValueProtect(JSContextRef ctx, JSValueRef value);
 JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
+/* Owner-thread, side-effect-free native brand inspection. No Proxy traps,
+ * user getters, jobs, or Promise reactions run. Revoked proxies retain their
+ * brand; a Proxy wrapping a Promise is not itself a Promise. Same-group realm
+ * handles are accepted; NULL inputs and foreign-group handles return false.
+ * These are zig-js extensions, not system JavaScriptCore API declarations. */
+JS_EXPORT bool ZJSValueIsPromise(JSContextRef ctx, JSValueRef value);
+JS_EXPORT bool ZJSValueIsProxy(JSContextRef ctx, JSValueRef value);
+
 /* Standalone precise-GC context and explicit quiescent compaction. The current
  * pointer-free baseline JIT may remain enabled; live native frames fail closed. */
 JS_EXPORT JSGlobalContextRef ZJSGlobalContextCreateGarbageCollected(bool enableJIT);

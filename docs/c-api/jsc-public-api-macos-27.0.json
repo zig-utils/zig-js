@@ -164,6 +164,7 @@
     "ZJSGlobalContextCreateThreaded", "ZJSGlobalContextCreateGarbageCollected",
     "ZJSContextRequestGarbageCompaction", "ZJSContextCompactGarbage",
     "ZJSValueProtect", "ZJSValueUnprotect",
+    "ZJSValueIsPromise", "ZJSValueIsProxy",
     "ZJSContextGetCollectionEpoch", "ZJSValueIsReachable",
     "ZJSContextTakeUnhandledRejection",
     "ZJSContextGetAsyncContext", "ZJSContextSwapAsyncContext",

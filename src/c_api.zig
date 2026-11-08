@@ -20426,6 +20426,26 @@ export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     return uv.isObject() and uv.asObj().behavior.is_date;
 }
 
+export fn ZJSValueIsPromise(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    const c = ctxForHandleInspection(ctx) orelse return false;
+    const uv = valueFromContext(c, v) orelse return false;
+    // The native state-cell edge is stable during JS execution. Only the
+    // owning C-API thread can transfer its storage through JSObjectSetPrivate.
+    // Do not invoke then/species or attach a reaction merely to inspect it.
+    return promise.promiseOf(uv) != null;
+}
+
+export fn ZJSValueIsProxy(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    const c = ctxForHandleInspection(ctx) orelse return false;
+    const uv = valueFromContext(c, v) orelse return false;
+    if (!uv.isObject()) return false;
+    // Inspect only the atomically published cold pointer and immutable rare
+    // tag. Revocation clears target/handler but never removes this brand;
+    // reading those mutable fields would both lose revoked proxies and race.
+    const cold = uv.asObj().coldState() orelse return false;
+    return cold.hasRare(.proxy);
+}
+
 export fn JSValueGetTypedArrayType(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSTypedArrayType {
     const c = ctxFrom(ctx) orelse return .none;
     const uv = valueFromContext(c, v) orelse {
