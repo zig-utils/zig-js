@@ -11,8 +11,8 @@ permissions:
 jobs:
   ecosystem:
     if: github.event_name != 'push' || github.event.deleted != true
-    uses: zig-utils/zig-js-ecosystem/.github/workflows/ecosystem.yml@6672fd632c5c691b884836e2e63ac9a574f2f24a
+    uses: zig-utils/zig-js-ecosystem/.github/workflows/ecosystem.yml@103da86390155e3e207e6fbd020f26ceae3eaf21
     with:
       engine_sha: ${{ github.sha }}
-      suite_ref: 6672fd632c5c691b884836e2e63ac9a574f2f24a
+      suite_ref: 103da86390155e3e207e6fbd020f26ceae3eaf21
       reference: true
