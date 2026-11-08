@@ -8044,8 +8044,8 @@ pub const Context = struct {
         machine.gc_root_allocator = self.gpa;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
-        const ai_saved = gc_mod.setActiveInterpreter(&machine);
-        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        const async_scope = machine.enterAsyncContextScope();
+        defer async_scope.leave();
         // interpreter() owns the installed loader hooks. Keep the host script
         // referrer while calls restore their own defining module as usual.
         machine.cur_module = self.script_referrer;
@@ -10452,8 +10452,8 @@ pub const Context = struct {
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
-        const ai_saved = gc_mod.setActiveInterpreter(&machine);
-        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        const async_scope = machine.enterAsyncContextScope();
+        defer async_scope.leave();
         // Reserve the successful completion root before any host checkpoint or
         // attacker-controlled script can exhaust the bounded realm. Nested
         // helpers stack above this placeholder; replacing it after evaluation
@@ -10797,8 +10797,8 @@ pub const Context = struct {
         var machine = self.interpreter();
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
-        const ai_saved = gc_mod.setActiveInterpreter(&machine);
-        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        const async_scope = machine.enterAsyncContextScope();
+        defer async_scope.leave();
         const completion_root = try machine.pushTempRoot(Value.undef());
         defer machine.restoreTempRoots(completion_root);
         try machine.pollAbortSignalTimeouts();
@@ -10931,8 +10931,8 @@ pub const Context = struct {
         var machine = self.interpreter();
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
-        const ai_saved = gc_mod.setActiveInterpreter(&machine);
-        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        const async_scope = machine.enterAsyncContextScope();
+        defer async_scope.leave();
         try machine.pollAbortSignalTimeouts();
         try machine.pollTimers();
         machine.strict = true;

@@ -20286,6 +20286,35 @@ fn evaluateScriptBytes(
 
 // ---- JSValue inspection ------------------------------------------------
 
+fn asyncContextMachine(c: *Context, exception: ExceptionRef) ?*interp.Interpreter {
+    const machine = gc_mod.currentInterpreter() orelse {
+        setException(c, exception, "TypeError: async context requires active JavaScript execution");
+        return null;
+    };
+    if (machine.gc_realm_context != @as(*anyopaque, @ptrCast(c))) {
+        setException(c, exception, "TypeError: async context belongs to another active realm");
+        return null;
+    }
+    return machine;
+}
+
+export fn ZJSContextGetAsyncContext(ctx: JSContextRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const machine = asyncContextMachine(c, exception) orelse return null;
+    return boxResult(c, exception, machine.getAsyncContext());
+}
+
+export fn ZJSContextSwapAsyncContext(ctx: JSContextRef, next: JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const machine = asyncContextMachine(c, exception) orelse return null;
+    const replacement = valueArgFrom(c, next, exception) orelse return null;
+    // Reserve the old value's handle before changing the execution slot. An
+    // invalid value or allocation failure must leave the previous scope intact.
+    const previous = boxResult(c, exception, machine.getAsyncContext()) orelse return null;
+    machine.setAsyncContext(replacement);
+    return previous;
+}
+
 /// Opt-in host checkpoint over the existing rejection tracker. Reserve both
 /// handles before removing a notification, so OOM never silently consumes it.
 export fn ZJSContextTakeUnhandledRejection(
@@ -22917,6 +22946,8 @@ export fn JSObjectCallAsFunctionReturnValueHoldingAPILock(
 
 fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+    const async_scope = machine.enterAsyncContextScope();
+    defer async_scope.leave();
     const obj = machine.active_native orelse {
         machine.exception = Value.str("TypeError: host callback missing callee");
         return error.Throw;

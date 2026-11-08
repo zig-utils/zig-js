@@ -34,6 +34,7 @@ pub const State = enum { pending, fulfilled, rejected };
 /// outcome resolves/rejects `result` (the promise `.then` returned).
 pub const Reaction = struct {
     handler: ?Value,
+    async_context: Value = Value.undef(),
     /// Optional second argument supplied after the settlement value. Private
     /// Home/Bun Promise bridges use this to retain and deliver their opaque
     /// context JSValue without allocating a closure per registration.
@@ -318,6 +319,7 @@ pub const Microtask = struct {
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
+    async_context: Value = Value.undef(),
     thenable: Value = Value.undef(),
     then_fn: Value = Value.undef(),
     /// Selected by `kind`: transferred batches own arena-lived backing, while
@@ -1141,6 +1143,7 @@ fn barrierReactionFrom(p: *Promise, r: Reaction) void {
     // Incremental-GC barrier: the reaction's callbacks are stored into the live
     // promise cell (which may already be marked black). Shade them.
     if (r.handler) |h| gc_mod.barrierValueFrom(p, h);
+    gc_mod.barrierValueFrom(p, r.async_context);
     if (r.result) |result| {
         gc_mod.barrierCellFrom(p, @ptrCast(result));
     } else {
@@ -1702,7 +1705,13 @@ pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError
     return Value.obj(result);
 }
 
-fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, react_r: Reaction) EvalError!void {
+fn performThenReactions(self: *Interpreter, p: *Promise, fulfill: Reaction, reject_handler: Reaction) EvalError!void {
+    // Capture at registration, not settlement: an unrelated host scope may
+    // resolve the source. Async/await continuations register through here too.
+    var react_f = fulfill;
+    var react_r = reject_handler;
+    react_f.async_context = self.getAsyncContext();
+    react_r.async_context = react_f.async_context;
     p.lockState();
     if (p.state == .pending) {
         appendReactionPairUnlocked(self, p, .{ .fulfill = react_f, .reject = react_r }) catch |err| {
@@ -2038,6 +2047,7 @@ pub fn enqueueNextTick(self: *Interpreter, callback: Value, args: []const Value)
     const copied_args = try self.arena.dupe(Value, args);
     const task = Microtask{
         .kind = .next_tick,
+        .async_context = self.getAsyncContext(),
         .reaction = undefined,
         .argument = Value.undef(),
         .fulfilled = true,
@@ -2090,9 +2100,11 @@ pub fn takeUnhandledRejection(self: *Interpreter) ?RejectionNotification {
 
 fn enqueueWithReservation(
     self: *Interpreter,
-    task: Microtask,
+    input: Microtask,
     reservation: ?*MicrotaskReservation,
 ) EvalError!void {
+    var task = input;
+    task.async_context = self.getAsyncContext();
     const q = self.microtasks orelse return; // no queue wired → drop (shouldn't happen)
     // Under `parallel_js` a peer thread may drain this queue concurrently; the
     // lock makes the append atomic against the drain's pop. A no-op (single null
@@ -2188,6 +2200,15 @@ fn runThenableJob(self: *Interpreter, task: *Microtask, publication: *PreparedSe
 pub fn runJob(self: *Interpreter, task: *Microtask, publication: *PreparedSettlement) EvalError!void {
     if (task.kind == .engine_failure) return @errorCast(@errorFromInt(task.payload.error_code));
     std.debug.assert(task.kind != .settlement_batch and task.kind != .transferred_batch);
+    const previous = self.getAsyncContext();
+    // A nested checkpoint may compact while the callback runs. Restore the
+    // relocated root, not a stale native copy, including on abrupt completion.
+    const previous_root: ?usize = if (previous.isUndefined()) null else try self.pushTempRoot(previous);
+    defer {
+        self.setAsyncContext(if (previous_root) |root| self.tempRoot(root, previous) else Value.undef());
+        if (previous_root) |root| self.restoreTempRoots(root);
+    }
+    self.setAsyncContext(if (task.kind == .reaction) task.reaction.async_context else task.async_context);
     if (task.kind == .native_callback) {
         promise_profile.recordMicrotaskRun(false);
         if (task.native_callback) |callback| callback(task.native_callback_context);

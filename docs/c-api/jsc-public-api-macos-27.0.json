@@ -166,6 +166,7 @@
     "ZJSValueProtect", "ZJSValueUnprotect",
     "ZJSContextGetCollectionEpoch", "ZJSValueIsReachable",
     "ZJSContextTakeUnhandledRejection",
+    "ZJSContextGetAsyncContext", "ZJSContextSwapAsyncContext",
     "ZJSContextSetScriptCacheDirectory", "ZJSContextStartCPUProfile",
     "ZJSContextStopCPUProfile", "ZJSEvaluateScriptUTF8",
     "ZJSWasmStreamingCompilerCreate", "ZJSWasmStreamingCompilerFinalize",

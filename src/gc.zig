@@ -2228,6 +2228,7 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
 
 inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     markValueOpt(v, r.handler);
+    markValue(v, r.async_context);
     markValueOpt(v, r.extra_argument);
     if (r.retained_async_activation) |activation|
         v.mark(@as(*vm.Generator, @ptrCast(@alignCast(activation))));
@@ -2242,6 +2243,7 @@ inline fn traceReaction(r: promise.Reaction, v: anytype) void {
 
 inline fn relocateReaction(r: *promise.Reaction, v: anytype) void {
     gc_relocation.rewriteOptionalValueSlot(v, &r.handler);
+    gc_relocation.rewriteValueSlot(v, &r.async_context);
     gc_relocation.rewriteOptionalValueSlot(v, &r.extra_argument);
     gc_relocation.rewriteOptionalSlot(v, anyopaque, &r.retained_async_activation);
     if (r.detached) return;
@@ -2402,6 +2404,7 @@ test "Promise relocation rewrites inline and overflow reaction graphs" {
 }
 
 inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
+    markValue(v, mt.async_context);
     switch (mt.kind) {
         .reaction => {
             traceReaction(mt.reaction, v);
@@ -2429,6 +2432,7 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
 }
 
 inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
+    gc_relocation.rewriteValueSlot(v, &mt.async_context);
     switch (mt.kind) {
         .reaction => {
             relocateReaction(&mt.reaction, v);
@@ -3263,6 +3267,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markValue(v, machine.ret_value);
     markValue(v, machine.this_value);
     markValue(v, machine.exception);
+    markValue(v, machine.embedder_async_context);
     markValue(v, machine.out_of_memory_exception);
     markValue(v, machine.new_target);
     if (machine.this_cell) |cell| markValue(v, cell.value());
@@ -3403,6 +3408,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteValueSlot(v, &machine.ret_value);
     gc_relocation.rewriteValueSlot(v, &machine.this_value);
     gc_relocation.rewriteValueSlot(v, &machine.exception);
+    gc_relocation.rewriteValueSlot(v, &machine.embedder_async_context);
     gc_relocation.rewriteValueSlot(v, &machine.out_of_memory_exception);
     gc_relocation.rewriteValueSlot(v, &machine.new_target);
     if (machine.this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);

@@ -14,7 +14,7 @@ The matrix deliberately separates declarations from completion:
   ABI mismatch. Pending calls must not be used by hosts yet.
 
 Current result: all 117 functions are implemented, none remain pending, and the
-library exports 117 public functions plus 31 zig-js extensions. The extension
+library exports 117 public functions plus 33 zig-js extensions. The extension
 inventory includes the existing script-cache, CPU-profile and UTF-8 evaluation
 entry points as well as the opt-in rejection checkpoint.
 
@@ -27,6 +27,18 @@ C-API handles before running more JavaScript or collecting garbage. This is a
 zig-js extension; it does not add a system JavaScriptCore API or claim complete
 Node rejection-event semantics. `zig build test-c-api-rejections` exercises the
 boundary, including handled filtering, realm isolation and protected lifetime.
+
+`ZJSContextGetAsyncContext` and `ZJSContextSwapAsyncContext` expose a rooted
+execution value to owner-thread native callbacks. The inactive value is
+`undefined`; there is no realm-global store. Nested host/JS entries in the same
+realm share the active slot, while other realms and OS mutators remain isolated.
+Promise/await reactions and callback jobs capture the value at registration and
+restore the previous scope on normal or abrupt completion. Calls without an
+active matching execution fail; returned handles retain ordinary C-API lifetime.
+This is an embedder primitive, not a complete Node async_hooks implementation.
+`zig build test-c-api-async-context` exercises identity, nested entry, job scope
+restoration, await/thenable/species capture, real precise compaction, and
+independent owner-thread contexts through C, C++ and a focused native job probe.
 
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to

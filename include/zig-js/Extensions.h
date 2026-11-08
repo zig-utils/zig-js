@@ -54,6 +54,18 @@ JS_EXPORT JSValueRef ZJSEvaluateScriptUTF8(JSContextRef ctx, const char* utf8, s
 JS_EXPORT bool ZJSContextTakeUnhandledRejection(JSContextRef ctx,
     JSValueRef* reason, JSValueRef* rejectedPromise, JSValueRef* exception);
 
+/* Owner-thread embedder context for the currently executing realm. Call from a
+ * native callback invoked by JavaScript; calls with no matching execution fail
+ * with null and an exception. Undefined is the inactive value. Promise/await,
+ * queueMicrotask and process-next-tick jobs capture at registration and restore
+ * the previous execution value after each job, including abrupt completion.
+ * Swap returns the original value, preserving identity; failure does not swap.
+ * Returned handles have ordinary C-API lifetime. Nested host/JS calls in this
+ * realm share the active slot; separate realms/OS mutators do not share it. */
+JS_EXPORT JSValueRef ZJSContextGetAsyncContext(JSContextRef ctx, JSValueRef* exception);
+JS_EXPORT JSValueRef ZJSContextSwapAsyncContext(JSContextRef ctx,
+    JSValueRef next, JSValueRef* exception);
+
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);

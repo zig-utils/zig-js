@@ -4257,6 +4257,12 @@ pub const Interpreter = struct {
     /// Context evaluate entry point (for example Worker structured clone).
     /// Type-erased to keep the interpreter module independent of Context.
     gc_realm_context: ?*anyopaque = null,
+    /// Owned by this mutator; the collector traces/rewrites it under the same
+    /// parked-mutator handshake as the other interpreter roots. Nested host
+    /// entries borrow their caller's stable slot only for their synchronous
+    /// scope. Jobs capture the value, never a pointer into another mutator.
+    embedder_async_context: Value = Value.undef(),
+    embedder_async_parent_slot: ?*Value = null,
     /// Per-mutator half of the Environment private-write/collector handshake.
     /// A private write increments before checking the Context trace flag; a
     /// collector publishes that flag before waiting for every active counter to
@@ -12716,6 +12722,45 @@ pub const Interpreter = struct {
                 return;
             }
         }
+    }
+
+    pub const AsyncContextScope = struct {
+        machine: *Interpreter,
+        previous: ?*Interpreter,
+        previous_slot: ?*Value,
+
+        pub fn leave(scope: @This()) void {
+            scope.machine.embedder_async_parent_slot = scope.previous_slot;
+            _ = gc_mod.setActiveInterpreter(scope.previous);
+        }
+    };
+
+    pub fn asyncContextSlot(self: *Interpreter) *Value {
+        if (gc_mod.currentInterpreter()) |current| {
+            if (current != self and self.gc_realm_context != null and self.gc_realm_context == current.gc_realm_context)
+                return current.embedder_async_parent_slot orelse &current.embedder_async_context;
+        }
+        return self.embedder_async_parent_slot orelse &self.embedder_async_context;
+    }
+
+    pub fn enterAsyncContextScope(self: *Interpreter) AsyncContextScope {
+        const previous = gc_mod.currentInterpreter();
+        const previous_slot = self.embedder_async_parent_slot;
+        if (previous) |caller| {
+            if (caller != self and self.gc_realm_context != null and self.gc_realm_context == caller.gc_realm_context)
+                self.embedder_async_parent_slot = caller.asyncContextSlot();
+        }
+        _ = gc_mod.setActiveInterpreter(self);
+        return .{ .machine = self, .previous = previous, .previous_slot = previous_slot };
+    }
+
+    pub fn getAsyncContext(self: *Interpreter) Value {
+        return self.asyncContextSlot().*;
+    }
+
+    pub fn setAsyncContext(self: *Interpreter, context: Value) void {
+        gc_mod.barrierValue(context);
+        self.asyncContextSlot().* = context;
     }
 
     pub fn pushTempRoot(self: *Interpreter, v: Value) EvalError!usize {

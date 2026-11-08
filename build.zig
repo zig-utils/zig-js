@@ -726,6 +726,43 @@ pub fn build(b: *std.Build) void {
     run_c_api_inspector_smoke.step.dependOn(&c_api_audit_cmd.step);
 
     const c_api_test_step = b.step("test-c-api", "Compile, link, and run C and C++ public-ABI hosts");
+    const async_context_step = b.step("test-c-api-async-context", "Verify native async execution scopes, jobs and precise GC");
+    const async_job_scope = b.addExecutable(.{
+        .name = "async-context-job-scopes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/async_context_scope_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
+        }),
+    });
+    const run_async_job_scope = b.addRunArtifact(async_job_scope);
+    async_context_step.dependOn(&run_async_job_scope.step);
+    c_api_test_step.dependOn(&run_async_job_scope.step);
+    inline for (.{ "c", "cpp" }) |language| {
+        const fixture = b.addExecutable(.{
+            .name = "c-api-async-context-" ++ language,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .link_libcpp = std.mem.eql(u8, language, "cpp"),
+                .sanitize_thread = tsan,
+            }),
+        });
+        fixture.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_async_context." ++ language) });
+        fixture.root_module.addIncludePath(b.path("include"));
+        fixture.root_module.linkLibrary(lib);
+        const run_fixture = b.addRunArtifact(fixture);
+        run_fixture.step.dependOn(&c_api_audit_cmd.step);
+        async_context_step.dependOn(&run_fixture.step);
+        c_api_test_step.dependOn(&run_fixture.step);
+    }
     const c_api_rejections = b.addExecutable(.{
         .name = "c-api-rejections",
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
