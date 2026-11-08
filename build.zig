@@ -726,6 +726,18 @@ pub fn build(b: *std.Build) void {
     run_c_api_inspector_smoke.step.dependOn(&c_api_audit_cmd.step);
 
     const c_api_test_step = b.step("test-c-api", "Compile, link, and run C and C++ public-ABI hosts");
+    const c_api_rejections = b.addExecutable(.{
+        .name = "c-api-rejections",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
+    });
+    c_api_rejections.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_rejections.c") });
+    c_api_rejections.root_module.addIncludePath(b.path("include"));
+    c_api_rejections.root_module.linkLibrary(lib);
+    const run_c_api_rejections = b.addRunArtifact(c_api_rejections);
+    run_c_api_rejections.step.dependOn(&c_api_audit_cmd.step);
+    const c_api_rejections_step = b.step("test-c-api-rejections", "Verify the opt-in host rejection checkpoint");
+    c_api_rejections_step.dependOn(&run_c_api_rejections.step);
+    c_api_test_step.dependOn(&run_c_api_rejections.step);
     c_api_test_step.dependOn(&run_c_api_c_smoke.step);
     c_api_test_step.dependOn(&run_c_api_latin1.step);
     c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);

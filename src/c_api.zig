@@ -20286,6 +20286,40 @@ fn evaluateScriptBytes(
 
 // ---- JSValue inspection ------------------------------------------------
 
+/// Opt-in host checkpoint over the existing rejection tracker. Reserve both
+/// handles before removing a notification, so OOM never silently consumes it.
+export fn ZJSContextTakeUnhandledRejection(
+    ctx: JSContextRef,
+    reason: ExceptionRef,
+    rejected_promise: ExceptionRef,
+    exception: ExceptionRef,
+) callconv(.c) bool {
+    if (reason != null) reason[0] = null;
+    if (rejected_promise != null) rejected_promise[0] = null;
+    const c = ctxFrom(ctx) orelse return false;
+    if (reason == null or rejected_promise == null or reason == rejected_promise) {
+        setException(c, exception, "TypeError: rejection outputs must be non-null and distinct");
+        return false;
+    }
+    const reason_box = boxedFrom(box(c, Value.undef()) orelse {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    }).?;
+    const promise_box = boxedFrom(box(c, Value.undef()) orelse {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    }).?;
+    var machine = c.interpreter();
+    const notification = promise.takeUnhandledRejection(&machine) orelse return false;
+    // No allocation or JS execution between removing the queue's strong roots
+    // and placing their values in the reserved host handles.
+    reason_box.value = notification.reason;
+    promise_box.value = notification.promise;
+    reason[0] = @ptrCast(reason_box);
+    rejected_promise[0] = @ptrCast(promise_box);
+    return true;
+}
+
 export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
     const c = ctxForHandleInspection(ctx) orelse return .invalid;
     const uv = valueFromContext(c, v) orelse return .invalid;

@@ -14,7 +14,19 @@ The matrix deliberately separates declarations from completion:
   ABI mismatch. Pending calls must not be used by hosts yet.
 
 Current result: all 117 functions are implemented, none remain pending, and the
-library exports 117 public functions plus 26 zig-js extensions.
+library exports 117 public functions plus 31 zig-js extensions. The extension
+inventory includes the existing script-cache, CPU-profile and UTF-8 evaluation
+entry points as well as the opt-in rejection checkpoint.
+
+`ZJSContextTakeUnhandledRejection` consumes a still-unhandled notification after
+the host's microtask checkpoint, returning the original reason and Promise.
+It distinguishes an empty queue from a rejection with an `undefined` reason,
+omits rejections handled before consumption, and preserves notification order.
+The host owns event dispatch and failure policy. Protect the returned ordinary
+C-API handles before running more JavaScript or collecting garbage. This is a
+zig-js extension; it does not add a system JavaScriptCore API or claim complete
+Node rejection-event semantics. `zig build test-c-api-rejections` exercises the
+boundary, including handled filtering, realm isolation and protected lifetime.
 
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to
@@ -23,4 +35,4 @@ inventory. On a machine with the pinned SDK, pass its root to
 On macOS, `zig build c-api-jsc-diff` verifies those hashes, compiles
 the value/class and context-group fixtures against both zig-js and the system
 JavaScriptCore framework, and compares their output byte-for-byte.
-The current 34-row fixture digest is `a8ecd5e83f9f35ca`.
+The current 35-row fixture digest is `4738a98b624bd0a6`.

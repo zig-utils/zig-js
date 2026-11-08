@@ -44,6 +44,16 @@ JS_EXPORT bool ZJSContextSetScriptCacheDirectory(JSContextRef ctx, const char* p
 JS_EXPORT JSValueRef ZJSEvaluateScriptUTF8(JSContextRef ctx, const char* utf8, size_t length,
     JSObjectRef thisObject, JSStringRef sourceURL, int startingLineNumber, JSValueRef* exception);
 
+/* Consume one still-unhandled rejection after the host's microtask checkpoint.
+ * Returns false with null outputs when the queue is empty, or sets exception on
+ * failure. Both output pointers must be non-null and distinct. A true result can
+ * carry JavaScript undefined as its reason. Returned values have ordinary C-API
+ * handle lifetime; protect them before executing more JS or collecting garbage.
+ * Does not run jobs or dispatch events. Rejections handled before consumption
+ * are omitted; a rejection is returned at most once, in notification order. */
+JS_EXPORT bool ZJSContextTakeUnhandledRejection(JSContextRef ctx,
+    JSValueRef* reason, JSValueRef* rejectedPromise, JSValueRef* exception);
+
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);
