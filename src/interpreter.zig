@@ -13990,15 +13990,15 @@ pub const Interpreter = struct {
                 // (search_input is arena/cell lifetime — same as the fast path).
                 recordRegexpLegacyBorrowed(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
-                try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
-                for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureValSpan(m, i, input, search_input));
+                try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend, null)));
+                for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureValSpan(m, i, input, search_input, null));
                 try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffsetA(search_input, mstart, ascii))));
                 try self.setProp(arr.asObj(), "input", if (src.isString()) src else try Value.strAlloc(self.arena, input));
-                const groups = try self.regexGroupsSpan(re, m, input, search_input);
+                const groups = try self.regexGroupsSpan(re, m, input, search_input, null);
                 try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
                 if (std.mem.indexOfScalar(u8, flags, 'd') != null)
-                    try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
+                    try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0, null)));
                 return arr;
             }
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -14774,6 +14774,21 @@ pub const Interpreter = struct {
         }
     };
 
+    /// Per-match anchors for mapping the surrogate search image back to the
+    /// original WTF-8 string. Each capture gets a copy: nested/lookahead spans
+    /// can move backward without discarding the global scan's progress.
+    const RxSpanOrigin = struct {
+        search: RxCursor,
+        input: RxCursor,
+    };
+
+    fn searchSpanUnits(input: []const u8, start: usize, end: usize, origin: ?RxCursor) [2]usize {
+        var cursor = origin orelse RxCursor{};
+        const lo = cursor.utf16ForByte(input, start);
+        const hi = cursor.utf16ForByte(input, end);
+        return .{ lo, hi };
+    }
+
     /// True when `rx` is a plain built-in RegExp whose `exec` is the original
     /// (not overridden by a subclass). Only then may an internal global loop take
     /// the fast `regexBuiltinExecWith` path instead of RegExpExec via the property.
@@ -14789,7 +14804,7 @@ pub const Interpreter = struct {
     /// and `input_u16_len` are precomputed once by the caller, and the UTF-16↔byte
     /// conversions resume from the shared `cursor`. Identical result to the
     /// property-`exec` path; used by the internal global loops.
-    fn regexBuiltinExecWith(self: *Interpreter, o: *value.Object, input: []const u8, input_value: Value, search_input: []const u8, flags: []const u8, input_u16_len: usize, cursor: *RxCursor) EvalError!Value {
+    fn regexBuiltinExecWith(self: *Interpreter, o: *value.Object, input: []const u8, input_value: Value, search_input: []const u8, flags: []const u8, input_u16_len: usize, cursor: *RxCursor, input_cursor: *RxCursor) EvalError!Value {
         const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
         const live_flags = o.regexFlags();
         const cached_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
@@ -14818,18 +14833,21 @@ pub const Interpreter = struct {
             const mstart = m.start;
             const mend = m.end;
             const mstart_units = cursor.utf16ForByte(search_input, mstart);
+            const search_origin = cursor.*;
             const mend_units = cursor.utf16ForByte(search_input, mend);
+            _ = input_cursor.byteForUtf16(input, mstart_units);
+            const origin = RxSpanOrigin{ .search = search_origin, .input = input_cursor.* };
             if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(mend_units));
             recordRegexpLegacyBorrowed(self, search_input, mstart, mend, m.captures);
             const arr = try self.newArray();
-            try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
-            for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureValSpan(m, i, input, search_input));
+            try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend, origin)));
+            for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureValSpan(m, i, input, search_input, origin));
             try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(mstart_units)));
             try self.setProp(arr.asObj(), "input", input_value); // shared cell (no per-match re-copy)
-            const groups = try self.regexGroupsSpan(re, m, input, search_input);
+            const groups = try self.regexGroupsSpan(re, m, input, search_input, origin);
             try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
             if (std.mem.indexOfScalar(u8, live_flags, 'd') != null)
-                try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
+                try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0, origin.search)));
             return arr;
         }
         if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -14840,14 +14858,14 @@ pub const Interpreter = struct {
         return regexpSearchInputAlloc(self.arena, input, unicode);
     }
 
-    fn stringSliceFromSearchSpan(self: *Interpreter, input: []const u8, search_input: []const u8, start: usize, end: usize) EvalError![]const u8 {
+    fn stringSliceFromSearchSpan(self: *Interpreter, input: []const u8, search_input: []const u8, start: usize, end: usize, origin: ?RxSpanOrigin) EvalError![]const u8 {
         // Common case: no astral chars, so `search_input` IS `input` and the match
         // byte span is exactly the substring — a direct byte slice (O(match len)).
         if (search_input.ptr == input.ptr) return input[start..end];
-        const start_units = utf16IndexForByteOffset(search_input, start);
-        const end_units = utf16IndexForByteOffset(search_input, end);
+        const units = searchSpanUnits(search_input, start, end, if (origin) |o| o.search else null);
+        var input_cursor = if (origin) |o| o.input else RxCursor{};
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        try appendUtf16Slice(&buf, self.arena, input, start_units, end_units);
+        try appendUtf16SliceFrom(&buf, self.arena, input, &input_cursor, units[0], units[1]);
         return try buf.toOwnedSlice(self.arena);
     }
 
@@ -15006,6 +15024,7 @@ pub const Interpreter = struct {
         const input_ascii = fast and input_value.strIsAscii();
         const input_u16 = if (fast) utf16LenOfStringA(s, input_ascii) else 0;
         var cursor: RxCursor = .{ .ascii = input_ascii };
+        var input_cursor: RxCursor = .{ .ascii = input_ascii };
         // The generic path (a user `exec`) gets one string value for every call.
         const exec_input = if (fast) input_value else try Value.strAlloc(self.arena, s);
         const exec_input_root = try self.pushTempRoot(exec_input);
@@ -15015,7 +15034,7 @@ pub const Interpreter = struct {
         const arr = try self.newArray();
         while (true) {
             const result = if (fast)
-                try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor)
+                try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor, &input_cursor)
             else
                 try self.regexpExecGenericValue(rx, self.tempRoot(exec_input_root, exec_input));
             if (result.isNull()) return if (arr.asObj().elementsLen() == 0) Value.nul() else arr;
@@ -15062,6 +15081,7 @@ pub const Interpreter = struct {
         const input_ascii = fast and input_value.strIsAscii();
         const input_u16 = if (fast) utf16LenOfStringA(s, input_ascii) else 0;
         var cursor: RxCursor = .{ .ascii = input_ascii };
+        var input_cursor: RxCursor = .{ .ascii = input_ascii };
         // One string value serves every generic exec and every replacer call's
         // `string` argument (#971).
         const exec_input = if (fast) input_value else try Value.strAlloc(self.arena, s);
@@ -15071,7 +15091,7 @@ pub const Interpreter = struct {
         var results: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
             const result = if (fast)
-                try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor)
+                try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor, &input_cursor)
             else
                 try self.regexpExecGenericValue(rx, self.tempRoot(exec_input_root, exec_input));
             if (result.isNull()) break;
@@ -15221,6 +15241,7 @@ pub const Interpreter = struct {
         const input_ascii = fast and input_value.strIsAscii();
         const input_u16 = if (fast) size else 0;
         var exec_cursor: RxCursor = .{ .ascii = input_ascii };
+        var input_cursor: RxCursor = .{ .ascii = input_ascii };
         var seg_cursor: RxCursor = .{ .ascii = input_ascii };
         const exec_input = if (fast) input_value else try Value.strAlloc(self.arena, s);
         const exec_input_root = try self.pushTempRoot(exec_input);
@@ -15231,7 +15252,7 @@ pub const Interpreter = struct {
         while (q < size) {
             try self.setRegExpLikeLastIndex(splitter, @floatFromInt(q));
             const z = if (fast)
-                try self.regexBuiltinExecWith(splitter.asObj(), s, input_value, search_input, splitter_flags, input_u16, &exec_cursor)
+                try self.regexBuiltinExecWith(splitter.asObj(), s, input_value, search_input, splitter_flags, input_u16, &exec_cursor, &input_cursor)
             else
                 try self.regexpExecGenericValue(splitter, self.tempRoot(exec_input_root, exec_input));
             if (z.isNull()) {
@@ -22501,23 +22522,23 @@ pub const Interpreter = struct {
     /// byte fragment (a lone `0xED…` lead → malformed WTF-8), whereas the span
     /// remap rebuilds the proper lone-surrogate WTF-8. No-astral case: `search_
     /// input` IS `input` and this is byte-identical to `m.captures[i]`.
-    fn captureValSpan(self: *Interpreter, m: regex.Match, i: usize, input: []const u8, search_input: []const u8) EvalError!Value {
+    fn captureValSpan(self: *Interpreter, m: regex.Match, i: usize, input: []const u8, search_input: []const u8, origin: ?RxSpanOrigin) EvalError!Value {
         if (i < m.captures_present.len and !m.captures_present[i]) return Value.undef();
         if (i >= m.capture_spans.len) return try Value.strOwned(self.arena, try self.arena.dupe(u8, m.captures[i]));
         const span = m.capture_spans[i];
-        return try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, span[0], span[1]));
+        return try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, span[0], span[1], origin));
     }
 
     /// `regexGroups` but each named capture's value comes from its byte SPAN via
     /// `stringSliceFromSearchSpan` (see `captureValSpan`), so astral/lone-surrogate
     /// named captures in a non-`u` match are correct rather than malformed.
-    fn regexGroupsSpan(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, search_input: []const u8) EvalError!?*value.Object {
+    fn regexGroupsSpan(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, search_input: []const u8, origin: ?RxSpanOrigin) EvalError!?*value.Object {
         if (re.named_capture_list.len == 0) return null;
         const o = (try self.newObject()).asObj();
         o.setProtoAtomic(null); // RegExpBuiltinExec: the groups object is ObjectCreate(null)
         for (re.named_capture_list) |entry| {
             const v: Value = if (namedCaptureSpan(re, m, entry.name)) |span|
-                try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, span[0], span[1]))
+                try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, span[0], span[1], origin))
             else
                 Value.undef();
             try self.setProp(o, entry.name, v);
@@ -22545,24 +22566,23 @@ pub const Interpreter = struct {
         return Value.obj(p);
     }
 
+    fn searchSpanIndexPair(self: *Interpreter, input: []const u8, start: usize, end: usize, origin: ?RxCursor) EvalError!Value {
+        const units = searchSpanUnits(input, start, end, origin);
+        return self.indexPair(units[0], units[1]);
+    }
+
     /// MakeIndicesArray: the `.indices` property an `exec` result carries when the
     /// regexp has the `d` (hasIndices) flag — element 0 is `[start, end]` of the
     /// whole match, element i+1 is the i-th capture's `[start, end]` (or undefined
     /// if it did not participate), and `.groups` maps each named group likewise.
     /// `base` is the byte offset of the search window within the original input.
-    fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, base: usize) EvalError!*value.Object {
+    fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, base: usize, origin: ?RxCursor) EvalError!*value.Object {
         const idx = (try self.newArray()).asObj();
-        try idx.appendElement(self.arena, try self.indexPair(
-            utf16IndexForByteOffset(input, base + m.start),
-            utf16IndexForByteOffset(input, base + m.end),
-        ));
+        try idx.appendElement(self.arena, try self.searchSpanIndexPair(input, base + m.start, base + m.end, origin));
         for (0..m.captures.len) |i| {
             const present = i < m.captures_present.len and m.captures_present[i];
             if (present and i < m.capture_spans.len) {
-                try idx.appendElement(self.arena, try self.indexPair(
-                    utf16IndexForByteOffset(input, base + m.capture_spans[i][0]),
-                    utf16IndexForByteOffset(input, base + m.capture_spans[i][1]),
-                ));
+                try idx.appendElement(self.arena, try self.searchSpanIndexPair(input, base + m.capture_spans[i][0], base + m.capture_spans[i][1], origin));
             } else {
                 try idx.appendElement(self.arena, Value.undef());
             }
@@ -22572,10 +22592,7 @@ pub const Interpreter = struct {
             g.setProtoAtomic(null); // MakeIndicesArray: groups is ObjectCreate(null)
             for (re.named_capture_list) |entry| {
                 const v: Value = if (namedCaptureSpan(re, m, entry.name)) |span|
-                    try self.indexPair(
-                        utf16IndexForByteOffset(input, base + span[0]),
-                        utf16IndexForByteOffset(input, base + span[1]),
-                    )
+                    try self.searchSpanIndexPair(input, base + span[0], base + span[1], origin)
                 else
                     Value.undef();
                 try self.setProp(g, entry.name, v);

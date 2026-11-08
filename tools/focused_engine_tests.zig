@@ -26,6 +26,31 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "regexp captures preserve surrogate and lookaround span mappings",
+        .source =
+        \\function equal(actual, expected, label) {if (JSON.stringify(actual) !== JSON.stringify(expected)) throw Error(label + ": " + JSON.stringify(actual));}
+        \\function units(s) {var out=[];for(var i=0;i<s.length;i++)out.push(s.charCodeAt(i));return out;}
+        \\equal("ab😀ab".replace(/(a)(b)/g,"$2$1"),"ba😀ba","global capture reorder");
+        \\equal(units("😀".replace(/(.)(.)/g,"$2$1")),[56832,55357],"split surrogate captures");
+        \\equal(units("😀😀".replace(/(?<high>.)(?<low>.)/g,"$<low>$<high>")),[56832,55357,56832,55357],"named surrogate captures");
+        \\equal("x😀y😀z".match(/./g).map(units),[[120],[55357],[56832],[121],[55357],[56832],[122]],"global halves");
+        \\equal("x😀y😀z".match(/./gu).map(units),[[120],[55357,56832],[121],[55357,56832],[122]],"unicode points");
+        \\equal("a😀b😀c".split(/(😀)/),["a","😀","b","😀","c"],"split with captures");
+        \\equal("a😀b😀c".replace(/(?<before>.)(?=😀)/g,"[$<before>]"),"[a]😀[b]😀c","lookahead before astral");
+        \\equal("😀ab😀ab".replace(/(?<=(😀))(a)(b)/g,"$3$2$1"),"😀ba😀😀ba😀","lookbehind captures before match");
+        \\var seen=[];"x😀y😀z".replace(/(?=(.(.)))/g,function(match,whole,last,offset){seen.push([units(whole),units(last),offset]);return "";});
+        \\equal(seen,[[[120,55357],[55357],0],[[55357,56832],[56832],1],[[56832,121],[121],2],[[121,55357],[55357],3],[[55357,56832],[56832],4],[[56832,122],[122],5]],"lookahead nested captures");
+        \\var indices=[];"x😀y😀z".replace(/(?<high>.)(?<low>.)/dg,function(){return "";});
+        \\var re=/(?<=(😀))(?<a>a)(b)/dg;var m;
+        \\while((m=re.exec("😀ab😀ab"))!==null) indices.push([m.index,m.indices.slice(),m.indices.groups.a,units(m[1]),m.groups.a]);
+        \\equal(indices,[[2,[[2,4],[0,2],[2,3],[3,4]],[2,3],[55357,56832],"a"],[6,[[6,8],[4,6],[6,7],[7,8]],[6,7],[55357,56832],"a"]],"direct exec backward capture indices");
+        \\var callbackSeen=[];"😀ab😀ab".replace(/(?<=(😀))(?<a>a)(b)/dg,function(match,behind,a,b,offset,input,groups){callbackSeen.push([units(behind),a,b,offset,groups.a]);return b+a;});
+        \\equal(callbackSeen,[[[55357,56832],"a","b",2,"a"],[[55357,56832],"a","b",6,"a"]],"fast exec backward captures");
+        \\1;
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "string slices preserve UTF-16 across fixed and variable width storage",
         .source =
         \\var rows = [
