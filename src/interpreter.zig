@@ -3039,8 +3039,8 @@ test "import.meta slot publishes one identity under concurrent first use" {
         fn run(machine: *Interpreter, shared_slot: *ImportMetaSlot, ready_count: *std.atomic.Value(usize), start_flag: *std.atomic.Value(bool), result: *Value) void {
             machine.arena = std.testing.allocator;
             machine.gc = null;
-            machine.import_meta_slot = shared_slot;
-            machine.import_meta_obj = null;
+            machine.call_state.import_meta_slot = shared_slot;
+            machine.call_state.import_meta_obj = null;
             _ = ready_count.fetchAdd(1, .release);
             while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
             result.* = machine.importMetaValue() catch unreachable;
@@ -3068,8 +3068,8 @@ test "import.meta slot retries cleanly after allocation failure" {
     var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
     machine.arena = fixed.allocator();
     machine.gc = null;
-    machine.import_meta_slot = &slot;
-    machine.import_meta_obj = null;
+    machine.call_state.import_meta_slot = &slot;
+    machine.call_state.import_meta_obj = null;
 
     try std.testing.expectError(error.OutOfMemory, machine.importMetaValue());
     try std.testing.expect(slot.load() == null);
@@ -4034,7 +4034,72 @@ pub const JsonStringifyFrameCache = struct {
     }
 };
 
+/// Execution context that ordinary calls replace and restore wholesale. Kept
+/// as one struct inside `Interpreter.call_state` so a VM activation saves and
+/// restores it with a single copy rather than one load/store per field.
+pub const CallerState = struct {
+    /// The referrer path a runtime `import()` resolves against (set by the
+    /// module driver in context.zig; see `Interpreter.dyn_import`).
+    cur_module: []const u8 = "",
+    /// Whether the current syntactic function body permits a direct eval to
+    /// contain `new.target`. Ordinary functions/methods do; arrows, scripts,
+    /// modules, class fields, and indirect eval do not introduce that context.
+    direct_eval_new_target_allowed: bool = false,
+    /// Test-only forced tier contract inherited from the Context. Production
+    /// contexts always use `automatic`.
+    bytecode_execution_mode: BytecodeExecutionMode = .automatic,
+    /// The private-name map of the class whose method/constructor/static element is
+    /// currently executing (see Function.private_map). A direct eval uses it to
+    /// rewrite the private names in the eval'd code to the right storage keys.
+    current_private_map: ?*const PrivateNameMap = null,
+    /// True while a class field initializer (or static block) is executing, so a
+    /// direct eval inside it inherits the field-initializer early errors:
+    /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
+    in_field_initializer: bool = false,
+    /// True while executing the body of a derived class constructor (extends a
+    /// value OR `extends null`), where a `super()` call is syntactically valid.
+    /// Arrows and direct eval inherit it (a `super()` reachable through them is
+    /// still bound to the enclosing derived constructor); a non-arrow function
+    /// resets it. Distinguishes the SyntaxError of `super()` in a disallowed
+    /// context (global eval, a method, a base constructor) from the runtime
+    /// TypeError of `super()` in an `extends null` constructor.
+    in_derived_ctor: bool = false,
+    in_default_ctor: bool = false, // executing a synthesized default derived constructor
+    /// A derived constructor's instance field initializers, awaiting the `super()`
+    /// that runs them. Set when entering the constructor; consumed (and cleared)
+    /// by the SuperCall once `this` is initialized.
+    pending_field_inits: []const *ast.Node = &.{},
+    /// A derived constructor's private brand names, awaiting the `super()` that
+    /// brands `this` with them.
+    pending_brand_names: []const []const u8 = &.{},
+    /// True during parameter initialization when the parameter scope has its
+    /// own `arguments` binding (including arrows with that parameter). A direct
+    /// eval there may not declare `arguments` — an early error.
+    in_param_expr: bool = false,
+    /// True during *any* function's parameter BindingInitialization, including
+    /// destructuring defaults and computed keys. A function with
+    /// parameter expressions keeps its parameters in an environment distinct from
+    /// the body's var environment, so a direct eval in a default that declares a
+    /// `var` shadowing a parameter name is a SyntaxError. Reset to false when
+    /// entering any function body so a nested call's eval doesn't inherit it.
+    in_param_default: bool = false,
+    /// The active module's `import.meta` cell. Functions capture this at creation
+    /// so `import.meta` remains lexical when an exported function is called by a
+    /// different module.
+    import_meta_slot: ?*ImportMetaSlot = null,
+    /// Script fallback for `import.meta` storage. Module code uses
+    /// `import_meta_slot`; this keeps the existing root for non-module internals.
+    import_meta_obj: ?*value.Object = null,
+    /// [[HomeObject]] of the executing method (for `super.x`) and the superclass
+    /// constructor of the executing derived constructor (for `super(...)`).
+    home_object: ?*value.Object = null,
+    super_ctor: ?*value.Object = null,
+};
+
 pub const Interpreter = struct {
+    /// The caller-visible execution context a VM call switches as a unit
+    /// (see `CallerState`): saved, installed and restored with one copy each.
+    call_state: CallerState = .{},
     arena: std.mem.Allocator,
     /// Context-owned freeable backing for invocation-local indexes whose keys
     /// and results are owned elsewhere. Standalone interpreters fall back to
@@ -4083,9 +4148,6 @@ pub const Interpreter = struct {
     /// Test-only differential switch. Production Contexts always leave
     /// instruction-local binary quickening enabled.
     bytecode_binary_quickening: bool = true,
-    /// Test-only forced tier contract inherited from the Context. Production
-    /// contexts always use `automatic`.
-    bytecode_execution_mode: BytecodeExecutionMode = .automatic,
     debug_statement_locations: ?*DebugStatementLocationIndex = null,
     /// Non-null only for a no-GIL shared realm. Script publication mutates one
     /// Context-owned registry while every interpreter reads it at statement
@@ -4543,12 +4605,11 @@ pub const Interpreter = struct {
     /// realm Shape source supplies the unpredictable seed; misses and
     /// interpreters that never reflect a Symbol remain derivation-free.
     symbol_index_hash_context: ?SymbolIndexHashContext = null,
-    /// Dynamic-import support (set by the module driver in context.zig). `cur_module`
-    /// is the referrer path; `dyn_import`/`dyn_import_ctx` resolve+load+evaluate a
-    /// specifier and write the module namespace into `out`, returning true on
-    /// success (false leaves the failure in `self.exception`). Null in plain
-    /// script evaluation (where `import(...)` rejects).
-    cur_module: []const u8 = "",
+    /// Dynamic-import support (set by the module driver in context.zig):
+    /// `dyn_import`/`dyn_import_ctx` resolve+load+evaluate a specifier against
+    /// `call_state.cur_module` and write the module namespace into `out`,
+    /// returning true on success (false leaves the failure in `self.exception`).
+    /// Null in plain script evaluation (where `import(...)` rejects).
     dyn_import_ctx: ?*anyopaque = null,
     dyn_import: ?DynamicImportHook = null,
     /// Deferred-evaluation trigger (set by the module driver): evaluates the
@@ -4557,13 +4618,6 @@ pub const Interpreter = struct {
     /// (the module's own `evaluated` flag makes a re-trigger a no-op).
     defer_trigger_ctx: ?*anyopaque = null,
     defer_trigger: ?*const fn (ctx: *anyopaque, self: *Interpreter, module: *anyopaque) EvalError!void = null,
-    /// The active module's `import.meta` cell. Functions capture this at creation
-    /// so `import.meta` remains lexical when an exported function is called by a
-    /// different module.
-    import_meta_slot: ?*ImportMetaSlot = null,
-    /// Script fallback for `import.meta` storage. Module code uses
-    /// `import_meta_slot`; this keeps the existing root for non-module internals.
-    import_meta_obj: ?*value.Object = null,
     /// Legacy static RegExp match state (Annex B): updated after a successful
     /// match, read by `RegExp.input`/`$_`/`lastMatch`/`$&`/`lastParen`/`$+`/
     /// `leftContext`/`$\``/`rightContext`/`$'`/`$1`..`$9`.
@@ -4612,10 +4666,6 @@ pub const Interpreter = struct {
     /// literal. The cache is interpreter-local, arena-backed, and traced as an
     /// interpreter root while the activation is registered with the Context.
     string_literal_cache: SecureIdentityMapUnmanaged(Value) = .{},
-    /// [[HomeObject]] of the executing method (for `super.x`) and the superclass
-    /// constructor of the executing derived constructor (for `super(...)`).
-    home_object: ?*value.Object = null,
-    super_ctor: ?*value.Object = null,
     /// Scoped flag for a running derived class constructor. `super()` flips this
     /// from false to true; completion reads it to implement GetThisBinding.
     this_initialized: bool = true,
@@ -4651,45 +4701,6 @@ pub const Interpreter = struct {
     /// (notably functions whose source contains syntactic `eval`).
     tree_tail_allowed: bool = false,
     tree_tail_call: ?TreeTailCall = null,
-    /// Whether the current syntactic function body permits a direct eval to
-    /// contain `new.target`. Ordinary functions/methods do; arrows, scripts,
-    /// modules, class fields, and indirect eval do not introduce that context.
-    direct_eval_new_target_allowed: bool = false,
-    /// A derived constructor's instance field initializers, awaiting the `super()`
-    /// that runs them. Set when entering the constructor; consumed (and cleared)
-    /// by the SuperCall once `this` is initialized.
-    pending_field_inits: []const *ast.Node = &.{},
-    /// A derived constructor's private brand names, awaiting the `super()` that
-    /// brands `this` with them.
-    pending_brand_names: []const []const u8 = &.{},
-    /// True while a class field initializer (or static block) is executing, so a
-    /// direct eval inside it inherits the field-initializer early errors:
-    /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
-    in_field_initializer: bool = false,
-    /// True during parameter initialization when the parameter scope has its
-    /// own `arguments` binding (including arrows with that parameter). A direct
-    /// eval there may not declare `arguments` — an early error.
-    in_param_expr: bool = false,
-    /// True during *any* function's parameter BindingInitialization, including
-    /// destructuring defaults and computed keys. A function with
-    /// parameter expressions keeps its parameters in an environment distinct from
-    /// the body's var environment, so a direct eval in a default that declares a
-    /// `var` shadowing a parameter name is a SyntaxError. Reset to false when
-    /// entering any function body so a nested call's eval doesn't inherit it.
-    in_param_default: bool = false,
-    /// True while executing the body of a derived class constructor (extends a
-    /// value OR `extends null`), where a `super()` call is syntactically valid.
-    /// Arrows and direct eval inherit it (a `super()` reachable through them is
-    /// still bound to the enclosing derived constructor); a non-arrow function
-    /// resets it. Distinguishes the SyntaxError of `super()` in a disallowed
-    /// context (global eval, a method, a base constructor) from the runtime
-    /// TypeError of `super()` in an `extends null` constructor.
-    in_derived_ctor: bool = false,
-    in_default_ctor: bool = false, // executing a synthesized default derived constructor
-    /// The private-name map of the class whose method/constructor/static element is
-    /// currently executing (see Function.private_map). A direct eval uses it to
-    /// rewrite the private names in the eval'd code to the right storage keys.
-    current_private_map: ?*const PrivateNameMap = null,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -5105,7 +5116,7 @@ pub const Interpreter = struct {
         // distinct from the body's variable environment, so a `var` shadowing a
         // parameter name is a SyntaxError. The parameters live in `var_env` (the
         // parameter scope); `arguments` has its own separate restriction.
-        if (self.in_param_default) {
+        if (self.call_state.in_param_default) {
             for (vars.items) |n|
                 if (!eq(n, "arguments") and try self.paramsBindName(self.cur_func_params, n))
                     return self.throwError("SyntaxError", "eval cannot var-declare a parameter name in a parameter default");
@@ -6226,7 +6237,7 @@ pub const Interpreter = struct {
         }
         if (frames.items.len == 0) {
             var global_frame = StackTraceCallFrame{
-                .code_type = if (self.cur_module.len > 0) .module else .global,
+                .code_type = if (self.call_state.cur_module.len > 0) .module else .global,
                 .location = self.debug_current_location,
             };
             try self.appendErrorStackFrame(&frames, &global_frame);
@@ -6502,7 +6513,7 @@ pub const Interpreter = struct {
             // inside it — including inside a direct `eval` in it — is undefined.
             // `callPlain` clears `in_field_initializer` for any non-arrow call, so a
             // `new X()` made from a field initializer still sees its own new.target.
-            .new_target_expr => if (self.in_field_initializer) Value.undef() else self.new_target,
+            .new_target_expr => if (self.call_state.in_field_initializer) Value.undef() else self.new_target,
             .identifier => |name| blk: {
                 const resolved = try self.resolveBindingValue(name, false);
                 break :blk resolved.value;
@@ -6743,7 +6754,7 @@ pub const Interpreter = struct {
                 // constructor). When it IS a derived constructor, a null super
                 // constructor is `class … extends null`: GetSuperConstructor yields
                 // %Function.prototype%, not a constructor → a runtime TypeError.
-                if (!self.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
+                if (!self.call_state.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
                 // GetSuperConstructor (the live [[Prototype]]) is read here, but its
                 // IsConstructor check is DEFERRED until after ArgumentListEvaluation:
                 // `super(sideEffect())` must evaluate the arguments even when the
@@ -6757,13 +6768,13 @@ pub const Interpreter = struct {
                         if (active.is_derived_constructor) break :blk2 self.effectiveProto(fn_obj);
                         if (active.derived_constructor) |owner| break :blk2 self.effectiveProto(owner);
                     };
-                    break :blk2 self.super_ctor;
+                    break :blk2 self.call_state.super_ctor;
                 };
                 // A synthesized default derived constructor forwards its arguments
                 // to the super constructor DIRECTLY — its `super(...args)` does not
                 // run a user-observable spread, so a hijacked Array.prototype
                 // @@iterator is never invoked. (`args` is its rest-parameter array.)
-                const args = if (self.in_default_ctor) dblk: {
+                const args = if (self.call_state.in_default_ctor) dblk: {
                     const av = self.env.get("args") orelse Value.undef();
                     break :dblk if (av.isObject() and av.asObj().is_array) try av.asObj().internalElementsSnapshot(self.arena) else &[_]Value{};
                 } else try self.evalArgs(sc.args);
@@ -6789,19 +6800,19 @@ pub const Interpreter = struct {
                 // its private names and runs its field initializers now, once
                 // `super()` has returned and `this` exists. Clear the pending sets
                 // so they apply exactly once.
-                const bns = self.pending_brand_names;
-                self.pending_brand_names = &.{};
+                const bns = self.call_state.pending_brand_names;
+                self.call_state.pending_brand_names = &.{};
                 if (self.this_value.isObject())
-                    for (bns) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), self.home_object, bn);
-                const fis = self.pending_field_inits;
-                self.pending_field_inits = &.{};
+                    for (bns) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), self.call_state.home_object, bn);
+                const fis = self.call_state.pending_field_inits;
+                self.call_state.pending_field_inits = &.{};
                 for (fis) |fi| _ = try self.eval(fi);
                 // SuperCall evaluates to the new `this` (BindThisValue's result),
                 // so `value = super()` observes the bound object.
                 break :blk self.this_value;
             },
             .super_member => |m| blk: {
-                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                const home = self.call_state.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                 // GetThisBinding (SuperProperty step 2) precedes evaluating the
                 // property key (step 3): in a derived constructor before `super()`,
                 // `super[expr]` / `super.x` is a ReferenceError and `expr` never runs.
@@ -6848,9 +6859,9 @@ pub const Interpreter = struct {
                 // Evaluate a class instance field initializer with the
                 // field-initializer context active, so a direct eval inside it
                 // inherits the `super()`/`arguments` early errors.
-                const saved_fi = self.in_field_initializer;
-                self.in_field_initializer = true;
-                defer self.in_field_initializer = saved_fi;
+                const saved_fi = self.call_state.in_field_initializer;
+                self.call_state.in_field_initializer = true;
+                defer self.call_state.in_field_initializer = saved_fi;
                 break :blk try self.evalNamed(inner.expression, inner.name);
             },
             .private_field_def => |d| blk: {
@@ -8092,7 +8103,7 @@ pub const Interpreter = struct {
                 }
             },
             .super_member => |member| {
-                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                const home = self.call_state.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                 if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                 const home_root = try self.pushTempRoot(Value.obj(home));
                 const receiver = self.this_value;
@@ -8265,7 +8276,7 @@ pub const Interpreter = struct {
         }
         if (target.* == .super_member) {
             const m = target.super_member;
-            const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+            const home = self.call_state.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
             if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
             const home_root = try self.pushTempRoot(Value.obj(home));
             defer self.restoreTempRoots(home_root);
@@ -8645,7 +8656,7 @@ pub const Interpreter = struct {
             .name = fnode.name,
             .definition_location = self.currentDebugLocation(),
             .source = fnode.source,
-            .bytecode_execution_mode = self.bytecode_execution_mode,
+            .bytecode_execution_mode = self.call_state.bytecode_execution_mode,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
@@ -8654,9 +8665,9 @@ pub const Interpreter = struct {
                 else => false,
             },
             .is_method = fnode.is_method,
-            .import_meta_slot = self.import_meta_slot,
-            .module_referrer = self.cur_module,
-            .private_map = self.current_private_map,
+            .import_meta_slot = self.call_state.import_meta_slot,
+            .module_referrer = self.call_state.cur_module,
+            .private_map = self.call_state.current_private_map,
         };
         try obj.setJsFunction(self.arena, @ptrCast(func));
         // A `with` block's object Environment Record is part of the lexical chain
@@ -8666,14 +8677,14 @@ pub const Interpreter = struct {
         // the enclosing method, just as they capture `this`/`new.target`. A
         // non-arrow gets its home object later (e.g. when installed as a method).
         if (fnode.is_arrow) {
-            func.home_object = self.home_object;
-            func.super_ctor = self.super_ctor;
+            func.home_object = self.call_state.home_object;
+            func.super_ctor = self.call_state.super_ctor;
             func.arrow_this = self.this_value; // captured lexically; used on every call
             func.arrow_new_target = self.new_target; // new.target is lexical for arrows too
-            func.arrow_direct_eval_new_target_allowed = self.direct_eval_new_target_allowed;
-            func.arrow_in_derived_ctor = self.in_derived_ctor; // super()-legality is lexical
+            func.arrow_direct_eval_new_target_allowed = self.call_state.direct_eval_new_target_allowed;
+            func.arrow_in_derived_ctor = self.call_state.in_derived_ctor; // super()-legality is lexical
             func.this_cell = self.this_cell; // share the enclosing derived ctor's `this` binding
-            func.field_init_ctx = self.in_field_initializer; // field-init eval restrictions are lexical
+            func.field_init_ctx = self.call_state.in_field_initializer; // field-init eval restrictions are lexical
             if (self.active_function) |active_object| if (active_object.jsFunction()) |erased| {
                 const active: *Function = @ptrCast(@alignCast(erased));
                 func.derived_constructor = if (active.is_derived_constructor) active_object else active.derived_constructor;
@@ -8751,14 +8762,14 @@ pub const Interpreter = struct {
     }
 
     fn installPlainFunctionBytecode(self: *Interpreter, func: *Function, fnode: *const ast.FunctionNode) EvalError!BytecodeAdmissionReason {
-        if (self.bytecode_execution_mode == .tree_walker) return .plain_forced_tree_walker;
+        if (self.call_state.bytecode_execution_mode == .tree_walker) return .plain_forced_tree_walker;
         if (self.debug_statement_hook != null) return .plain_policy_debugger;
         // `required` is a coverage contract, not an automatic tier-selection
         // hint. Dynamic eval is parsed and instantiated at runtime, so its
         // nested functions cannot arrive as program FnTemplates; compile every
         // lowerable function here even when it is too cold/simple for automatic
         // admission. Genuine compiler barriers remain causal rejections below.
-        if (self.bytecode_execution_mode != .required)
+        if (self.call_state.bytecode_execution_mode != .required)
             if (plainFunctionPolicyRejection(fnode)) |reason| return reason;
         return switch (Compiler.admitPlainFunction(self.arena, fnode) catch |err| return self.compileAdmissionFailed(err)) {
             .compiled => |code| blk: {
@@ -9450,14 +9461,14 @@ pub const Interpreter = struct {
             has_private_bound_name = true;
             break;
         };
-        if (!has_private_bound_name) return self.current_private_map;
+        if (!has_private_bound_name) return self.call_state.current_private_map;
 
         // The root Shape owns the realm's atomic hash-key domain, so parallel
         // class evaluations derive independent contexts without sharing the
         // Interpreter's invocation-local PRNG state.
         const seed = try self.root_shape.deriveSecureHashSeed();
         const map = try self.arena.create(PrivateNameMap);
-        map.* = PrivateNameMap.initChild(seed, self.current_private_map);
+        map.* = PrivateNameMap.initChild(seed, self.call_state.current_private_map);
         for (members) |m| {
             if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.containsOwn(m.key)) continue;
             try map.put(self.arena, m.key, .{
@@ -9546,7 +9557,7 @@ pub const Interpreter = struct {
             // evaluated before this class creates its own PrivateEnvironment, so
             // resolve a private, evaluation-local copy against the active outer
             // one now; the source AST remains reusable by another evaluation.
-            const heritage = if (self.current_private_map) |map| heritage: {
+            const heritage = if (self.call_state.current_private_map) |map| heritage: {
                 const copy = try self.deepCopyNode(sc);
                 try self.rewritePrivateNamesInNode(copy, map);
                 break :heritage copy;
@@ -9639,9 +9650,9 @@ pub const Interpreter = struct {
         // Execute the class's static elements / field initializers with this
         // class's private map active, so a direct eval in them resolves the
         // class's private names.
-        const saved_pm = self.current_private_map;
-        self.current_private_map = private_map;
-        defer self.current_private_map = saved_pm;
+        const saved_pm = self.call_state.current_private_map;
+        self.call_state.current_private_map = private_map;
+        defer self.call_state.current_private_map = saved_pm;
 
         // `class_env` (created by evalClass or entered by class bytecode, and
         // already current) wraps the class body. The class name is bound there
@@ -9976,8 +9987,8 @@ pub const Interpreter = struct {
                 defer self.restoreTempRoots(saved_this_root);
                 const saved_new_target = self.new_target;
                 const saved_new_target_root = try self.pushTempRoot(saved_new_target);
-                const saved_eval_new_target = self.direct_eval_new_target_allowed;
-                const saved_home = self.home_object;
+                const saved_eval_new_target = self.call_state.direct_eval_new_target_allowed;
+                const saved_home = self.call_state.home_object;
                 const saved_home_value = if (saved_home) |object| Value.obj(object) else Value.nul();
                 const saved_home_root = try self.pushTempRoot(saved_home_value);
                 const saved_env = self.env;
@@ -9986,18 +9997,18 @@ pub const Interpreter = struct {
                 defer {
                     self.this_value = self.tempRoot(saved_this_root, saved_this);
                     self.new_target = self.tempRoot(saved_new_target_root, saved_new_target);
-                    self.direct_eval_new_target_allowed = saved_eval_new_target;
+                    self.call_state.direct_eval_new_target_allowed = saved_eval_new_target;
                     const home_value = self.tempRoot(saved_home_root, saved_home_value);
-                    self.home_object = if (home_value.isNull()) null else home_value.asObj();
+                    self.call_state.home_object = if (home_value.isNull()) null else home_value.asObj();
                     self.env = self.tempEnvRoot(saved_env_root, saved_env);
                 }
                 self.this_value = class_val;
-                self.home_object = class_obj;
+                self.call_state.home_object = class_obj;
                 // ClassStaticBlockDefinitionEvaluation creates a non-lexical
                 // function invoked with Call, not Construct. Its own new.target
                 // is undefined, including through arrows and direct PerformEval.
                 self.new_target = Value.undef();
-                self.direct_eval_new_target_allowed = true;
+                self.call_state.direct_eval_new_target_allowed = true;
                 // A `static {}` block is its own function-like scope: it gets a
                 // fresh variable environment so its `var` declarations stay local
                 // (each block, and the outer scope, are independent).
@@ -10014,26 +10025,26 @@ pub const Interpreter = struct {
             const saved_this = self.this_value;
             const saved_this_root = try self.pushTempRoot(saved_this);
             defer self.restoreTempRoots(saved_this_root);
-            const saved_home = self.home_object;
+            const saved_home = self.call_state.home_object;
             const saved_home_value = if (saved_home) |object| Value.obj(object) else Value.nul();
             const saved_home_root = try self.pushTempRoot(saved_home_value);
-            const saved_fi = self.in_field_initializer;
-            const saved_eval_new_target = self.direct_eval_new_target_allowed;
+            const saved_fi = self.call_state.in_field_initializer;
+            const saved_eval_new_target = self.call_state.direct_eval_new_target_allowed;
             defer {
                 self.this_value = self.tempRoot(saved_this_root, saved_this);
                 const home_value = self.tempRoot(saved_home_root, saved_home_value);
-                self.home_object = if (home_value.isNull()) null else home_value.asObj();
-                self.in_field_initializer = saved_fi;
-                self.direct_eval_new_target_allowed = saved_eval_new_target;
+                self.call_state.home_object = if (home_value.isNull()) null else home_value.asObj();
+                self.call_state.in_field_initializer = saved_fi;
+                self.call_state.direct_eval_new_target_allowed = saved_eval_new_target;
             }
             self.this_value = class_val;
-            self.home_object = class_obj;
-            self.in_field_initializer = true;
+            self.call_state.home_object = class_obj;
+            self.call_state.in_field_initializer = true;
             // ClassFieldDefinitionEvaluation creates an initializer function
             // called by DefineField. Direct eval inherits that function scope,
             // even at global scope; in_field_initializer supplies undefined for
             // new.target. Arrows capture the permission before it is restored.
-            self.direct_eval_new_target_allowed = true;
+            self.call_state.direct_eval_new_target_allowed = true;
             // DefineField order: evaluate the initializer FIRST, then
             // PrivateFieldAdd (brand + extensibility check) — so a static private
             // field whose initializer seals the class object makes its own add throw.
@@ -10303,7 +10314,7 @@ pub const Interpreter = struct {
         // but invoke it with the current `this`.
         if (callee_node.* == .super_member) {
             const sm = callee_node.super_member;
-            const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+            const home = self.call_state.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
             // GetThisBinding precedes the key/lookup (see the super read path): a
             // derived-ctor `super.m()` before `super()` is a ReferenceError.
             if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
@@ -10426,7 +10437,7 @@ pub const Interpreter = struct {
                 receiver = recv;
             },
             .super_member => |m| {
-                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                const home = self.call_state.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                 if (!self.this_initialized)
                     return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                 const key_value: ?Value = if (m.computed) |key| try self.eval(key) else null;
@@ -10873,9 +10884,9 @@ pub const Interpreter = struct {
     /// `callFunction` with an explicit `new.target` (set by `construct`; a plain
     /// call passes undefined). Arrow functions inherit the enclosing new.target.
     fn callFunctionNT(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
-        const saved_bytecode_execution_mode = self.bytecode_execution_mode;
-        self.bytecode_execution_mode = func.bytecode_execution_mode;
-        defer self.bytecode_execution_mode = saved_bytecode_execution_mode;
+        const saved_bytecode_execution_mode = self.call_state.bytecode_execution_mode;
+        self.call_state.bytecode_execution_mode = func.bytecode_execution_mode;
+        defer self.call_state.bytecode_execution_mode = saved_bytecode_execution_mode;
         // Under `parallel_js` the concurrent parallel marker does NOT conservatively
         // scan a running peer's native stack, so `func` — reachable only through this
         // thread's stack while the call is in flight — can be swept mid-call and its
@@ -10997,11 +11008,11 @@ pub const Interpreter = struct {
             .caller_environment = self.env,
             .caller_return = self.ret_value,
             .caller_this = self.this_value,
-            .caller_home = self.home_object,
-            .caller_super = self.super_ctor,
+            .caller_home = self.call_state.home_object,
+            .caller_super = self.call_state.super_ctor,
             .caller_new_target = self.new_target,
             .caller_global = self.global_object,
-            .caller_import_meta = self.import_meta_obj,
+            .caller_import_meta = self.call_state.import_meta_obj,
             .caller_this_cell = self.this_cell,
             .caller_function = self.active_function,
         };
@@ -11021,24 +11032,24 @@ pub const Interpreter = struct {
 
         const saved_signal = self.signal;
         const saved_strict = self.strict;
-        const saved_import_meta_slot = self.import_meta_slot;
-        const saved_cur_module = self.cur_module;
+        const saved_import_meta_slot = self.call_state.import_meta_slot;
+        const saved_cur_module = self.call_state.cur_module;
         const saved_this_initialized = self.this_initialized;
-        const saved_eval_nt = self.direct_eval_new_target_allowed;
-        const saved_fi = self.in_field_initializer;
-        const saved_pe = self.in_param_expr;
-        const saved_pd = self.in_param_default;
-        self.in_param_expr = false;
-        self.in_param_default = false; // a function body is not a parameter default
+        const saved_eval_nt = self.call_state.direct_eval_new_target_allowed;
+        const saved_fi = self.call_state.in_field_initializer;
+        const saved_pe = self.call_state.in_param_expr;
+        const saved_pd = self.call_state.in_param_default;
+        self.call_state.in_param_expr = false;
+        self.call_state.in_param_default = false; // a function body is not a parameter default
         const saved_params = self.cur_func_params;
         const saved_args_needed = self.cur_func_args_needed;
         self.cur_func_params = func.params;
         self.cur_func_args_needed = func.uses_arguments or func.uses_direct_eval;
         const saved_edd = self.eval_decl_deletable;
         self.eval_decl_deletable = false; // a function's own vars aren't eval-deletable, even if called from eval
-        const saved_idc = self.in_derived_ctor;
-        const saved_dfc = self.in_default_ctor;
-        const saved_pm = self.current_private_map;
+        const saved_idc = self.call_state.in_derived_ctor;
+        const saved_dfc = self.call_state.in_default_ctor;
+        const saved_pm = self.call_state.current_private_map;
         const saved_call_frame = self.active_call_frame;
         const saved_debug_call_frame = self.debug_call_frame;
         const saved_stack_trace_call_frame = self.stack_trace_call_frame;
@@ -11061,7 +11072,7 @@ pub const Interpreter = struct {
         };
         self.stack_trace_call_frame = &stack_trace_call_frame;
         if (self.debug_statement_hook != null or self.host_statement_hook != null) self.debug_call_frame = &debug_call_frame;
-        self.current_private_map = func.private_map; // PrepareForOrdinaryCall uses the lexical [[PrivateEnvironment]]
+        self.call_state.current_private_map = func.private_map; // PrepareForOrdinaryCall uses the lexical [[PrivateEnvironment]]
         if (!func.is_arrow) {
             self.active_function = func.obj;
             if (func.obj) |fo| {
@@ -11069,20 +11080,20 @@ pub const Interpreter = struct {
                 self.active_call_frame = &call_frame;
             }
         }
-        const saved_pfi = self.pending_field_inits;
-        const saved_pbn = self.pending_brand_names;
+        const saved_pfi = self.call_state.pending_field_inits;
+        const saved_pbn = self.call_state.pending_brand_names;
         defer {
             self.env = roots.caller_environment;
             self.signal = saved_signal;
             self.ret_value = roots.caller_return;
-            self.home_object = roots.caller_home;
-            self.super_ctor = roots.caller_super;
+            self.call_state.home_object = roots.caller_home;
+            self.call_state.super_ctor = roots.caller_super;
             self.new_target = roots.caller_new_target;
             self.strict = saved_strict;
             self.global_object = roots.caller_global;
-            self.import_meta_slot = saved_import_meta_slot;
-            self.import_meta_obj = roots.caller_import_meta;
-            self.cur_module = saved_cur_module;
+            self.call_state.import_meta_slot = saved_import_meta_slot;
+            self.call_state.import_meta_obj = roots.caller_import_meta;
+            self.call_state.cur_module = saved_cur_module;
             self.this_value = roots.caller_this;
             self.this_initialized = saved_this_initialized;
             self.this_cell = roots.caller_this_cell;
@@ -11099,23 +11110,23 @@ pub const Interpreter = struct {
                 self.this_value = c.value();
                 self.this_initialized = true;
             };
-            self.direct_eval_new_target_allowed = saved_eval_nt;
-            self.in_field_initializer = saved_fi;
-            self.in_param_expr = saved_pe;
-            self.in_param_default = saved_pd;
+            self.call_state.direct_eval_new_target_allowed = saved_eval_nt;
+            self.call_state.in_field_initializer = saved_fi;
+            self.call_state.in_param_expr = saved_pe;
+            self.call_state.in_param_default = saved_pd;
             self.cur_func_params = saved_params;
             self.cur_func_args_needed = saved_args_needed;
             self.eval_decl_deletable = saved_edd;
-            self.in_derived_ctor = saved_idc;
-            self.in_default_ctor = saved_dfc;
-            self.current_private_map = saved_pm;
-            self.pending_field_inits = saved_pfi;
-            self.pending_brand_names = saved_pbn;
+            self.call_state.in_derived_ctor = saved_idc;
+            self.call_state.in_default_ctor = saved_dfc;
+            self.call_state.current_private_map = saved_pm;
+            self.call_state.pending_field_inits = saved_pfi;
+            self.call_state.pending_brand_names = saved_pbn;
         }
         // A derived constructor's field initializers + private brands wait for its
         // SuperCall.
-        self.pending_field_inits = func.field_inits;
-        self.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor))
+        self.call_state.pending_field_inits = func.field_inits;
+        self.call_state.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor))
             func.private_brand_names
         else
             &.{};
@@ -11132,9 +11143,9 @@ pub const Interpreter = struct {
         self.tree_tail_allowed = func.is_strict and new_target.isUndefined() and
             !func.is_async and !func.is_generator;
         self.tree_tail_call = null;
-        self.import_meta_slot = func.import_meta_slot;
-        self.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
-        self.cur_module = func.module_referrer;
+        self.call_state.import_meta_slot = func.import_meta_slot;
+        self.call_state.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+        self.call_state.cur_module = func.module_referrer;
         if (func.realm_global) |global| {
             self.global_object = global;
         } else if (self.env.get("globalThis")) |gt| {
@@ -11157,30 +11168,30 @@ pub const Interpreter = struct {
                 break :blk Value.obj(try self.toObject(this_val));
             break :blk this_val;
         } else this_val;
-        self.home_object = func.home_object;
+        self.call_state.home_object = func.home_object;
         // GetSuperConstructor reads the running constructor's CURRENT [[Prototype]]
         // dynamically (e.g. after `Object.setPrototypeOf(C, …)`), not a value frozen
         // at class definition. For a class constructor that's `func.obj`'s live
         // proto (normally == the captured heritage); arrows keep their lexically
         // captured super constructor.
-        self.super_ctor = if (!func.is_arrow and func.is_class_constructor)
+        self.call_state.super_ctor = if (!func.is_arrow and func.is_class_constructor)
             (if (func.obj) |fo| fo.protoAtomic() else func.super_ctor)
         else
             func.super_ctor;
         self.new_target = if (func.is_arrow) func.arrow_new_target else new_target; // arrows capture lexically at creation
-        self.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
+        self.call_state.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
         // A non-arrow function call is a fresh context that is not a field
         // initializer; an arrow carries the field-initializer context LEXICALLY from
         // where it was defined (so `field = () => eval('arguments')` keeps the
         // restriction even when invoked later, after the field has been built).
-        self.in_field_initializer = func.is_arrow and func.field_init_ctx;
+        self.call_state.in_field_initializer = func.is_arrow and func.field_init_ctx;
         // Arrows inherit the enclosing super()-call legality; a non-arrow function
         // establishes it (only a derived constructor permits `super()`).
         // `super()`-legality is lexical: an arrow uses the value captured where it
         // was defined (so it stays legal even when invoked from a non-constructor
         // context, e.g. an iterator's `return()`); a non-arrow establishes it.
-        self.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
-        if (!func.is_arrow) self.in_default_ctor = func.is_default_ctor;
+        self.call_state.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
+        if (!func.is_arrow) self.call_state.in_default_ctor = func.is_default_ctor;
         // An arrow has no own `this` binding: it inherits the enclosing function's
         // this-initialization state (a non-arrow establishes it — only a derived
         // constructor starts uninitialized).
@@ -11518,15 +11529,15 @@ pub const Interpreter = struct {
         // FunctionDeclarationInstantiation uses the callee's [[Strict]], even
         // when a suspendable function binds its parameters before body entry.
         const saved_strict = self.strict;
-        const saved_private_map = self.current_private_map;
-        const saved_field_initializer = self.in_field_initializer;
+        const saved_private_map = self.call_state.current_private_map;
+        const saved_field_initializer = self.call_state.in_field_initializer;
         self.strict = func.is_strict;
-        self.current_private_map = func.private_map;
-        self.in_field_initializer = func.is_arrow and func.field_init_ctx;
+        self.call_state.current_private_map = func.private_map;
+        self.call_state.in_field_initializer = func.is_arrow and func.field_init_ctx;
         defer {
             self.strict = saved_strict;
-            self.current_private_map = saved_private_map;
-            self.in_field_initializer = saved_field_initializer;
+            self.call_state.current_private_map = saved_private_map;
+            self.call_state.in_field_initializer = saved_field_initializer;
         }
         try self.bindParams2(func.params, args, func.is_arrow);
     }
@@ -11548,19 +11559,19 @@ pub const Interpreter = struct {
         // these bound names, not those of the caller. Parameter bindings are
         // mutable even when the call occurs in a const destructuring default.
         const saved_params = self.cur_func_params;
-        const saved_pe = self.in_param_expr;
-        const saved_pd = self.in_param_default;
+        const saved_pe = self.call_state.in_param_expr;
+        const saved_pd = self.call_state.in_param_default;
         const saved_const = self.binding_const;
         const saved_hoisted = self.binding_hoisted;
         self.cur_func_params = params;
-        self.in_param_expr = param_scope_has_arguments;
-        self.in_param_default = true;
+        self.call_state.in_param_expr = param_scope_has_arguments;
+        self.call_state.in_param_default = true;
         self.binding_const = false;
         self.binding_hoisted = false;
         defer {
             self.cur_func_params = saved_params;
-            self.in_param_expr = saved_pe;
-            self.in_param_default = saved_pd;
+            self.call_state.in_param_expr = saved_pe;
+            self.call_state.in_param_default = saved_pd;
             self.binding_const = saved_const;
             self.binding_hoisted = saved_hoisted;
         }
@@ -13167,27 +13178,27 @@ pub const Interpreter = struct {
     /// `import.meta` — the surrounding module's meta-object (an ordinary
     /// extensible object with a null [[Prototype]]), created once and cached.
     pub fn importMetaValue(self: *Interpreter) EvalError!Value {
-        if (self.import_meta_slot) |slot| {
+        if (self.call_state.import_meta_slot) |slot| {
             if (slot.load()) |o| {
-                self.import_meta_obj = o;
+                self.call_state.import_meta_obj = o;
                 return Value.obj(o);
             }
             slot.lockInitialization();
             defer slot.init_lock.unlock();
             if (slot.load()) |o| {
-                self.import_meta_obj = o;
+                self.call_state.import_meta_obj = o;
                 return Value.obj(o);
             }
             const o = try gc_mod.allocObj(self.arena);
             o.* = .{ .proto = null };
             slot.publish(o);
-            self.import_meta_obj = o;
+            self.call_state.import_meta_obj = o;
             return Value.obj(o);
         }
-        if (self.import_meta_obj) |o| return Value.obj(o);
+        if (self.call_state.import_meta_obj) |o| return Value.obj(o);
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .proto = null };
-        self.import_meta_obj = o;
+        self.call_state.import_meta_obj = o;
         return Value.obj(o);
     }
 
@@ -13253,7 +13264,7 @@ pub const Interpreter = struct {
             data.* = .{
                 .hook = f,
                 .hook_ctx = self.dyn_import_ctx.?,
-                .referrer = self.cur_module,
+                .referrer = self.call_state.cur_module,
                 .specifier = spec,
                 .phase = phase,
                 .module_type = module_type,
@@ -17159,7 +17170,7 @@ pub const Interpreter = struct {
     }
 
     fn throwInvalidPrivateAccess(self: *Interpreter, key: []const u8, site: EvaluationSite) EvalError {
-        const message = if (self.current_private_map) |private_map|
+        const message = if (self.call_state.current_private_map) |private_map|
             if (private_map.kindForStorageKey(key) == .method_or_accessor)
                 "Cannot access private method or acessor"
             else
@@ -23973,9 +23984,9 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // leaks that function's binding into the global code it creates, and a
     // direct eval nested in that code accepts `new.target`. Restored on the way
     // out so the calling function's own binding survives.
-    const saved_eval_new_target = self.direct_eval_new_target_allowed;
-    defer self.direct_eval_new_target_allowed = saved_eval_new_target;
-    if (!self.direct_eval_call) self.direct_eval_new_target_allowed = false;
+    const saved_eval_new_target = self.call_state.direct_eval_new_target_allowed;
+    defer self.call_state.direct_eval_new_target_allowed = saved_eval_new_target;
+    if (!self.direct_eval_call) self.call_state.direct_eval_new_target_allowed = false;
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt(lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
@@ -23984,13 +23995,13 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // eval is global code in the eval function's realm and only becomes strict
     // from its own directive prologue.
     if (self.direct_eval_call and self.strict) parser.strict = true;
-    if (self.direct_eval_call and self.direct_eval_new_target_allowed) parser.new_target_depth = 1;
+    if (self.direct_eval_call and self.call_state.direct_eval_new_target_allowed) parser.new_target_depth = 1;
     // A direct eval inside a class element may reference the class's private names
     // (`eval("this.#x")`): validate against that exact private environment before
     // executing any code, then rewrite them below to the class's storage keys.
-    if (self.direct_eval_call and self.current_private_map != null) {
+    if (self.direct_eval_call and self.call_state.current_private_map != null) {
         parser.in_class = true;
-        parser.eval_private_names = self.current_private_map;
+        parser.eval_private_names = self.call_state.current_private_map;
     }
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError(&parser, err);
     try self.registerParsedDynamicDebugScript(
@@ -23999,7 +24010,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         1,
         &parser,
     );
-    if (self.direct_eval_call) if (self.current_private_map) |pm|
+    if (self.direct_eval_call) if (self.call_state.current_private_map) |pm|
         try self.rewritePrivateNamesInNode(prog, @constCast(pm));
 
     // Eval inherits the caller's syntactic restrictions as *early errors* — they
@@ -24015,20 +24026,20 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         if (!self.direct_eval_call) {
             parser.scanEvalContext(prog.program, true, true) catch |err|
                 return self.evalScanFailed(err, "eval: 'super' is only valid inside a method", &parser);
-        } else if (self.in_field_initializer) {
+        } else if (self.call_state.in_field_initializer) {
             parser.scanEvalFieldContext(prog.program) catch |err|
                 return self.evalScanFailed(err, "eval: 'super()'/'arguments' not allowed in a field initializer", &parser);
-        } else if (self.home_object == null) {
+        } else if (self.call_state.home_object == null) {
             parser.scanEvalContext(prog.program, true, true) catch |err|
                 return self.evalScanFailed(err, "eval: 'super' is only valid inside a method", &parser);
-        } else if (!self.in_derived_ctor) {
+        } else if (!self.call_state.in_derived_ctor) {
             parser.scanEvalContext(prog.program, true, false) catch |err|
                 return self.evalScanFailed(err, "eval: 'super()' is only valid inside a derived constructor", &parser);
         }
         // A direct eval in a non-arrow function's parameter scope may not declare
         // `arguments` (the parameter environment already binds the arguments
         // object) — an early error before any eval'd code runs.
-        if (self.direct_eval_call and self.in_param_expr) {
+        if (self.direct_eval_call and self.call_state.in_param_expr) {
             const declares_arguments = parser.evalDeclaresArguments(prog.program) catch |err| switch (err) {
                 error.StackExhausted => return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
                 error.OutOfMemory => return error.OutOfMemory,
@@ -24058,17 +24069,17 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const saved_glob_value = if (saved_glob) |global| Value.obj(global) else Value.undef();
     const saved_values_root = try self.pushTempRootSlice(&.{ saved_this, saved_glob_value });
     defer self.restoreTempRoots(saved_values_root);
-    const saved_private_map = self.current_private_map;
-    const saved_field_initializer = self.in_field_initializer;
+    const saved_private_map = self.call_state.current_private_map;
+    const saved_field_initializer = self.call_state.in_field_initializer;
     defer {
-        self.current_private_map = saved_private_map;
-        self.in_field_initializer = saved_field_initializer;
+        self.call_state.current_private_map = saved_private_map;
+        self.call_state.in_field_initializer = saved_field_initializer;
     }
     if (!self.direct_eval_call) {
         // PerformEval gives indirect eval a null PrivateEnvironment, including
         // functions created by that eval while its caller is inside a class.
-        self.current_private_map = null;
-        self.in_field_initializer = false;
+        self.call_state.current_private_map = null;
+        self.call_state.in_field_initializer = false;
         const fnobj = self.active_native orelse return Value.undef();
         const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
         self.env = genv;
@@ -26484,7 +26495,7 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const out_p = promise.promiseOf(Value.obj(out_obj)).?;
     if (self.dyn_import) |f| {
         var ns: Value = Value.undef();
-        switch (f(self.dyn_import_ctx.?, self, self.cur_module, spec, "evaluation", "", &ns, null)) {
+        switch (f(self.dyn_import_ctx.?, self, self.call_state.cur_module, spec, "evaluation", "", &ns, null)) {
             .success => {
                 if (!ns.isObject()) {
                     try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue did not produce a namespace"));
@@ -28894,9 +28905,9 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // CreateDynamicFunction parses in the constructor's realm, so
             // SyntaxError instances are from that realm too.
             // CreateDynamicFunction does not close over the caller's private names.
-            const saved_private_map = self.current_private_map;
-            self.current_private_map = null;
-            defer self.current_private_map = saved_private_map;
+            const saved_private_map = self.call_state.current_private_map;
+            self.call_state.current_private_map = null;
+            defer self.call_state.current_private_map = saved_private_map;
             if (self.active_native) |callee| {
                 if (callee.nativeRealm()) |realm| self.env = @ptrCast(@alignCast(realm));
             }
@@ -58627,7 +58638,7 @@ test "reentrant assignment roots unwind on every allocation failure" {
             machine.arena = allocator;
             machine.env = &env;
             machine.root_shape = root_shape;
-            machine.bytecode_execution_mode = .tree_walker;
+            machine.call_state.bytecode_execution_mode = .tree_walker;
             machine.gc_safepoint_fn = null;
             defer {
                 std.debug.assert(machine.gc_temp_roots.items.len == 0);
@@ -63689,7 +63700,7 @@ test "runtime class private environments preserve reuse shadowing and identity" 
     const outer_name = outer.get("#outer") orelse return error.TestUnexpectedResult;
     const outer_shared = outer.get("#shared") orelse return error.TestUnexpectedResult;
 
-    machine.current_private_map = outer;
+    machine.call_state.current_private_map = outer;
     const public_only = [_]ast.ClassMember{.{ .key = "ordinary", .is_field = true }};
     try std.testing.expectEqual(outer, (try machine.prepareClassPrivateEnvironment(&public_only)).?);
 

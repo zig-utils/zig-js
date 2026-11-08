@@ -6027,7 +6027,7 @@ pub const Context = struct {
                 &profile.json_stringify_frame_cache
             else
                 null,
-            .bytecode_execution_mode = self.bytecode_execution_mode,
+            .call_state = .{ .bytecode_execution_mode = self.bytecode_execution_mode },
             .bytecode_binary_quickening = self.bytecode_binary_quickening,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
@@ -8048,7 +8048,7 @@ pub const Context = struct {
         defer async_scope.leave();
         // interpreter() owns the installed loader hooks. Keep the host script
         // referrer while calls restore their own defining module as usual.
-        machine.cur_module = self.script_referrer;
+        machine.call_state.cur_module = self.script_referrer;
         const completed: HostError!Value = switch (operation) {
             .create => |input| self.makeHostValue(&machine, input),
             .call => |call| self.invokeHostValue(&machine, call),
@@ -10481,7 +10481,7 @@ pub const Context = struct {
             machine.dyn_import_ctx = self;
             machine.defer_trigger = deferTriggerHook;
             machine.defer_trigger_ctx = self;
-            machine.cur_module = self.script_referrer;
+            machine.call_state.cur_module = self.script_referrer;
         }
 
         const outcome: interp.EvalError!value.Value = admission: {
@@ -11454,9 +11454,9 @@ pub const Context = struct {
         var machine = self.interpreter();
         machine.env = m.env;
         machine.strict = true;
-        machine.cur_module = m.path;
-        machine.import_meta_slot = &m.import_meta_slot;
-        machine.import_meta_obj = m.import_meta_slot.load();
+        machine.call_state.cur_module = m.path;
+        machine.call_state.import_meta_slot = &m.import_meta_slot;
+        machine.call_state.import_meta_obj = m.import_meta_slot.load();
         for (m.items) |item| self.instantiateModuleFunctionItem(&machine, m, item) catch |err| {
             // Creating a function throws when its body nests deeper than the
             // compiler can recurse (#937). Linking runs outside evalModule, so
@@ -11638,9 +11638,9 @@ pub const Context = struct {
         if (m.evaluated or m.async_suspended) return;
         const saved_env = machine.env;
         const saved_this = machine.this_value;
-        const saved_mod = machine.cur_module;
-        const saved_import_meta_slot = machine.import_meta_slot;
-        const saved_import_meta_obj = machine.import_meta_obj;
+        const saved_mod = machine.call_state.cur_module;
+        const saved_import_meta_slot = machine.call_state.import_meta_slot;
+        const saved_import_meta_obj = machine.call_state.import_meta_obj;
         const saved_stack_trace_call_frame = machine.stack_trace_call_frame;
         var stack_trace_call_frame = interp.StackTraceCallFrame{
             .function_identity = @intFromPtr(m),
@@ -11649,16 +11649,16 @@ pub const Context = struct {
         };
         machine.env = m.env;
         machine.this_value = Value.undef(); // module top-level `this` is undefined
-        machine.cur_module = m.path; // referrer for runtime import()
-        machine.import_meta_slot = &m.import_meta_slot;
-        machine.import_meta_obj = m.import_meta_slot.load();
+        machine.call_state.cur_module = m.path; // referrer for runtime import()
+        machine.call_state.import_meta_slot = &m.import_meta_slot;
+        machine.call_state.import_meta_obj = m.import_meta_slot.load();
         machine.stack_trace_call_frame = &stack_trace_call_frame;
         defer {
             machine.env = saved_env;
             machine.this_value = saved_this;
-            machine.cur_module = saved_mod;
-            machine.import_meta_slot = saved_import_meta_slot;
-            machine.import_meta_obj = saved_import_meta_obj;
+            machine.call_state.cur_module = saved_mod;
+            machine.call_state.import_meta_slot = saved_import_meta_slot;
+            machine.call_state.import_meta_obj = saved_import_meta_obj;
             machine.stack_trace_call_frame = saved_stack_trace_call_frame;
         }
         if (!m.body_hoisted) {

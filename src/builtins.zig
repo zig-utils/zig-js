@@ -147,9 +147,9 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     // CreateDynamicFunction uses the constructor's realm for parsing and for
     // any SyntaxError it creates, not the caller's current realm.
     // CreateDynamicFunction never captures the caller's PrivateEnvironment.
-    const saved_private_map = self.current_private_map;
-    self.current_private_map = null;
-    defer self.current_private_map = saved_private_map;
+    const saved_private_map = self.call_state.current_private_map;
+    self.call_state.current_private_map = null;
+    defer self.call_state.current_private_map = saved_private_map;
     if (self.active_native) |callee| {
         if (callee.nativeRealm()) |realm| self.env = @ptrCast(@alignCast(realm));
     }

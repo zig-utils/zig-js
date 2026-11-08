@@ -312,12 +312,12 @@ pub const Exec = struct {
     saved_env: ?*Environment = null,
     saved_global: ?*value.Object = null,
     saved_nt: Value = Value.undef(),
-    saved_ims: ?*interp.ImportMetaSlot = null,
-    saved_imo: ?*value.Object = null,
     saved_this_cell: ?*interp.ThisCell = null,
     saved_active_function: ?*value.Object = null,
-    saved_home_object: ?*value.Object = null,
-    saved_super_ctor: ?*value.Object = null,
+    /// The caller's rarely changed state (module, private names, class and
+    /// parameter context, import.meta, home object, super constructor), saved
+    /// and restored as one copy. Its object fields are traced here.
+    saved_call_state: interp.CallerState = .{},
     debug_environment: ?*Environment = null,
     /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
     /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
@@ -382,7 +382,7 @@ fn restoreHandlerEnvironment(vm: *Interpreter, gen: ?*Generator, exec: *Exec, ha
     }
     exec.environment_depth = handler.environment_depth;
     exec.class_strict_depth = handler.class_strict_depth;
-    vm.current_private_map = handler.private_map;
+    vm.call_state.current_private_map = handler.private_map;
     if (gen) |activation| activation.private_map = handler.private_map;
     vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
 }
@@ -406,8 +406,8 @@ fn unwindEnvironmentToDepth(vm: *Interpreter, gen: ?*Generator, exec: *Exec, tar
     std.debug.assert(target_depth <= exec.environment_depth);
     while (exec.environment_depth > target_depth) {
         if (vm.env.class_private_environment_active) {
-            vm.current_private_map = vm.env.class_outer_private_map;
-            if (gen) |activation| activation.private_map = vm.current_private_map;
+            vm.call_state.current_private_map = vm.env.class_outer_private_map;
+            if (gen) |activation| activation.private_map = vm.call_state.current_private_map;
         }
         vm.env = vm.env.parent.?;
         exec.environment_depth -= 1;
@@ -2836,7 +2836,7 @@ fn nativeExitBlock(vm: *Interpreter, exec: *Exec, flags: u32) EvalError!Value {
     if (exec.environment_depth == 0) return vm.throwError("InternalError", "class block environment underflow");
     if (vm.env.parent == null) return vm.throwError("InternalError", "class block environment has no parent");
     if (vm.env.class_private_environment_active)
-        vm.current_private_map = vm.env.class_outer_private_map;
+        vm.call_state.current_private_map = vm.env.class_outer_private_map;
     vm.env = vm.env.parent.?;
     exec.environment_depth -= 1;
     if (flags & bc.block_environment_class != 0) {
@@ -2850,11 +2850,11 @@ fn nativeExitBlock(vm: *Interpreter, exec: *Exec, flags: u32) EvalError!Value {
 fn nativePrepareClassPrivateEnvironment(vm: *Interpreter, exec: *Exec, template: *const bc.ClassTemplate) EvalError!Value {
     if (vm.env.class_private_environment_active)
         return vm.throwError("InternalError", "class PrivateEnvironment was prepared twice");
-    const outer_private_map = vm.current_private_map;
+    const outer_private_map = vm.call_state.current_private_map;
     const private_map = try vm.prepareClassPrivateEnvironment(template.node.class_expr.members);
     vm.env.class_outer_private_map = outer_private_map;
     vm.env.class_private_environment_active = true;
-    vm.current_private_map = private_map;
+    vm.call_state.current_private_map = private_map;
     _ = exec;
     return Value.undef();
 }
@@ -3808,15 +3808,15 @@ fn callActivationEvalValue(
     const declaration_scope = directEvalDeclarationScope(plan) orelse
         return vm.throwError("InternalError", "direct-eval activation plan has no declaration target");
     const parameter_phase = declaration_scope.kind == .parameter;
-    const saved_parameter_expression = vm.in_param_expr;
-    const saved_parameter_default = vm.in_param_default;
+    const saved_parameter_expression = vm.call_state.in_param_expr;
+    const saved_parameter_default = vm.call_state.in_param_default;
     if (parameter_phase) {
-        vm.in_param_default = true;
-        vm.in_param_expr = directEvalScopeBinds(declaration_scope, "arguments");
+        vm.call_state.in_param_default = true;
+        vm.call_state.in_param_expr = directEvalScopeBinds(declaration_scope, "arguments");
     }
     defer {
-        vm.in_param_expr = saved_parameter_expression;
-        vm.in_param_default = saved_parameter_default;
+        vm.call_state.in_param_expr = saved_parameter_expression;
+        vm.call_state.in_param_default = saved_parameter_default;
     }
 
     const saved_environment = vm.env;
@@ -4476,13 +4476,10 @@ test "callee parameter initialization restores metadata after allocation failure
             .root_shape = root_shape,
             .tdz_marker = tdz_marker,
             .strict = true,
-            .in_param_expr = false,
-            .in_param_default = true,
             .cur_func_params = &caller_params,
-            .current_private_map = &caller_private_map,
-            .in_field_initializer = true,
             .binding_const = true,
             .binding_hoisted = true,
+            .call_state = .{ .in_param_expr = false, .in_param_default = true, .current_private_map = &caller_private_map, .in_field_initializer = true, },
         };
         var function = Function{
             .params = parsed.params,
@@ -4492,10 +4489,10 @@ test "callee parameter initialization restores metadata after allocation failure
         };
         const attempt = machine.bindFunctionParams(&function, &.{});
         try std.testing.expect(machine.strict);
-        try std.testing.expect(!machine.in_param_expr);
-        try std.testing.expect(machine.in_param_default);
-        try std.testing.expectEqual(&caller_private_map, machine.current_private_map.?);
-        try std.testing.expect(machine.in_field_initializer);
+        try std.testing.expect(!machine.call_state.in_param_expr);
+        try std.testing.expect(machine.call_state.in_param_default);
+        try std.testing.expectEqual(&caller_private_map, machine.call_state.current_private_map.?);
+        try std.testing.expect(machine.call_state.in_field_initializer);
         try std.testing.expectEqual(caller_params[0..].ptr, machine.cur_func_params.ptr);
         try std.testing.expectEqual(@as(usize, 1), machine.cur_func_params.len);
         try std.testing.expect(machine.binding_const);
@@ -4547,8 +4544,8 @@ test "vm parameter direct-eval entry allocation failure restores the caller acti
     machine.this_value = saved_this;
     machine.new_target = saved_new_target;
     machine.strict = true;
-    machine.in_param_expr = true;
-    machine.in_param_default = true;
+    machine.call_state.in_param_expr = true;
+    machine.call_state.in_param_default = true;
     var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
     machine.arena = failing.allocator();
     try std.testing.expectError(
@@ -4560,13 +4557,13 @@ test "vm parameter direct-eval entry allocation failure restores the caller acti
     try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
     try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
     try std.testing.expect(machine.strict);
-    try std.testing.expect(machine.in_param_expr);
-    try std.testing.expect(machine.in_param_default);
+    try std.testing.expect(machine.call_state.in_param_expr);
+    try std.testing.expect(machine.call_state.in_param_default);
     try std.testing.expectEqual(&env, machine.env);
     try std.testing.expect(machine.vm_activation_free != null);
 
-    machine.in_param_expr = false;
-    machine.in_param_default = false;
+    machine.call_state.in_param_expr = false;
+    machine.call_state.in_param_default = false;
     const recovered = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
     try std.testing.expectEqualStrings("ok", recovered.asStr());
     try std.testing.expectEqual(&env, machine.env);
@@ -5358,7 +5355,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (descriptor.bytecode_op == @backingInt(bc.Op.load_this) and inputs.len == 0)
         return finishNativeOperation(frame, vm, operation_id, initializedThis(vm));
     if (descriptor.bytecode_op == @backingInt(bc.Op.load_new_target) and inputs.len == 0)
-        return finishNativeOperation(frame, vm, operation_id, if (vm.in_field_initializer) Value.undef() else vm.new_target);
+        return finishNativeOperation(frame, vm, operation_id, if (vm.call_state.in_field_initializer) Value.undef() else vm.new_target);
     if (descriptor.bytecode_op == @backingInt(bc.Op.load_var) and inputs.len == 0) {
         const name = metadata.nameFor(operation_id) orelse
             return @backingInt(jit.NativeOperationStatus.host_trap);
@@ -8367,30 +8364,30 @@ fn ensureBindingReferenceStorage(vm: *Interpreter, exec: *Exec, chunk: *const Ch
 }
 
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator, exec_rooted: bool) EvalError!Value {
-    const saved_private_map = vm.current_private_map;
-    const saved_field_initializer = vm.in_field_initializer;
+    const saved_private_map = vm.call_state.current_private_map;
+    const saved_field_initializer = vm.call_state.in_field_initializer;
     if (gen) |activation| {
         // The suspended execution context owns its PrivateEnvironment and
         // lexical field-initializer restriction (ECMA-262 PerformEval).
-        vm.current_private_map = activation.private_map;
-        vm.in_field_initializer = activation.field_init_ctx;
+        vm.call_state.current_private_map = activation.private_map;
+        vm.call_state.in_field_initializer = activation.field_init_ctx;
     }
     defer {
-        vm.current_private_map = saved_private_map;
-        vm.in_field_initializer = saved_field_initializer;
+        vm.call_state.current_private_map = saved_private_map;
+        vm.call_state.in_field_initializer = saved_field_initializer;
     }
-    const saved_param_expr = vm.in_param_expr;
-    const saved_param_default = vm.in_param_default;
+    const saved_param_expr = vm.call_state.in_param_expr;
+    const saved_param_default = vm.call_state.in_param_default;
     if (gen != null) {
         // A generator/async body can start inside another call's parameter
         // initializer. Its eval declarations belong to the body, not that
         // caller's parameter context (ECMA-262 10.2.11).
-        vm.in_param_expr = false;
-        vm.in_param_default = false;
+        vm.call_state.in_param_expr = false;
+        vm.call_state.in_param_default = false;
     }
     defer {
-        vm.in_param_expr = saved_param_expr;
-        vm.in_param_default = saved_param_default;
+        vm.call_state.in_param_expr = saved_param_expr;
+        vm.call_state.in_param_default = saved_param_default;
     }
     const saved_execution_strict = vm.strict;
     defer vm.strict = saved_execution_strict;
@@ -9426,15 +9423,15 @@ fn runChunk(
             .load_this => {
                 try stack.append(stack_alloc, try initializedThis(vm));
             },
-            .load_new_target => try stack.append(stack_alloc, if (vm.in_field_initializer) Value.undef() else vm.new_target),
-            .enter_field_initializers => vm.in_field_initializer = true,
-            .exit_field_initializers => vm.in_field_initializer = false,
+            .load_new_target => try stack.append(stack_alloc, if (vm.call_state.in_field_initializer) Value.undef() else vm.new_target),
+            .enter_field_initializers => vm.call_state.in_field_initializer = true,
+            .exit_field_initializers => vm.call_state.in_field_initializer = false,
             .load_super_constructor => {
-                if (!vm.in_derived_ctor)
+                if (!vm.call_state.in_derived_ctor)
                     return vm.throwError("SyntaxError", "'super' keyword unexpected here");
                 try stack.append(stack_alloc, if (derivedConstructorObject(vm)) |owner|
                     if (vm.effectiveProto(owner)) |super| Value.obj(super) else Value.nul()
-                else if (vm.super_ctor) |super|
+                else if (vm.call_state.super_ctor) |super|
                     Value.obj(super)
                 else
                     Value.nul());
@@ -9623,7 +9620,7 @@ fn runChunk(
             .super_get => {
                 // `super.name`: GetSuperBase = home_object.[[Prototype]]; read with
                 // the current `this` as receiver (so an inherited getter sees it).
-                const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const home = vm.call_state.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 const receiver = try initializedThis(vm);
                 const parent = home.proto orelse return vm.throwError("TypeError", "null is not an object");
                 const name = chunk.names.items[inst.a];
@@ -9631,17 +9628,17 @@ fn runChunk(
             },
             .super_get_index => {
                 const key = stack.pop().?;
-                const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const home = vm.call_state.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 const receiver = try initializedThis(vm);
                 const parent = home.proto orelse return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, try getSuperIndex(vm, Value.obj(parent), key, receiver));
             },
             .check_super_this => {
-                _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                _ = vm.call_state.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 _ = try initializedThis(vm);
             },
             .super_base => {
-                const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const home = vm.call_state.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 _ = try initializedThis(vm);
                 const parent = home.protoAtomic();
                 if (parent == null and inst.a != 0)
@@ -9675,8 +9672,8 @@ fn runChunk(
             },
             .exit_block => {
                 if (vm.env.class_private_environment_active) {
-                    vm.current_private_map = vm.env.class_outer_private_map;
-                    if (gen) |activation| activation.private_map = vm.current_private_map;
+                    vm.call_state.current_private_map = vm.env.class_outer_private_map;
+                    if (gen) |activation| activation.private_map = vm.call_state.current_private_map;
                 }
                 vm.env = vm.env.parent.?;
                 if (gen) |g| g.env = vm.env;
@@ -9913,7 +9910,7 @@ fn runChunk(
                 try stack.append(stack_alloc, field_value);
             },
             .delete_super => {
-                _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                _ = vm.call_state.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 _ = try initializedThis(vm);
                 return vm.throwError("ReferenceError", "Cannot delete a super property");
             },
@@ -10560,11 +10557,11 @@ fn runChunk(
                 const template = &chunk.classes.items[inst.a];
                 if (vm.env.class_private_environment_active)
                     return vm.throwError("InternalError", "class PrivateEnvironment was prepared twice");
-                const outer_private_map = vm.current_private_map;
+                const outer_private_map = vm.call_state.current_private_map;
                 const private_map = try vm.prepareClassPrivateEnvironment(template.node.class_expr.members);
                 vm.env.class_outer_private_map = outer_private_map;
                 vm.env.class_private_environment_active = true;
-                vm.current_private_map = private_map;
+                vm.call_state.current_private_map = private_map;
                 if (gen) |activation| activation.private_map = private_map;
             },
             .scratch_store => {
@@ -10625,7 +10622,7 @@ fn runChunk(
                     .environment = if (outer) vm.env.parent.? else vm.env,
                     .environment_depth = if (outer) exec.environment_depth - 1 else exec.environment_depth,
                     .class_strict_depth = exec.class_strict_depth,
-                    .private_map = vm.current_private_map,
+                    .private_map = vm.call_state.current_private_map,
                 });
             },
             .pop_handler => _ = exec.handlers.pop(),
@@ -10767,35 +10764,35 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     // afterward.
     const saved_env = vm.env;
     const saved_this = vm.this_value;
-    const saved_home = vm.home_object;
-    const saved_super = vm.super_ctor;
+    const saved_home = vm.call_state.home_object;
+    const saved_super = vm.call_state.super_ctor;
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
-    const saved_eval_nt = vm.direct_eval_new_target_allowed;
-    const saved_import_meta_slot = vm.import_meta_slot;
-    const saved_import_meta_obj = vm.import_meta_obj;
-    const saved_cur_module = vm.cur_module;
+    const saved_eval_nt = vm.call_state.direct_eval_new_target_allowed;
+    const saved_import_meta_slot = vm.call_state.import_meta_slot;
+    const saved_import_meta_obj = vm.call_state.import_meta_obj;
+    const saved_cur_module = vm.call_state.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
-    vm.home_object = func.home_object;
-    vm.super_ctor = func.super_ctor;
+    vm.call_state.home_object = func.home_object;
+    vm.call_state.super_ctor = func.super_ctor;
     vm.this_initialized = true;
     vm.new_target = Value.undef();
-    vm.direct_eval_new_target_allowed = true;
-    vm.import_meta_slot = func.import_meta_slot;
-    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
-    vm.cur_module = func.module_referrer;
+    vm.call_state.direct_eval_new_target_allowed = true;
+    vm.call_state.import_meta_slot = func.import_meta_slot;
+    vm.call_state.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
-        vm.home_object = saved_home;
-        vm.super_ctor = saved_super;
+        vm.call_state.home_object = saved_home;
+        vm.call_state.super_ctor = saved_super;
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
-        vm.direct_eval_new_target_allowed = saved_eval_nt;
-        vm.import_meta_slot = saved_import_meta_slot;
-        vm.import_meta_obj = saved_import_meta_obj;
-        vm.cur_module = saved_cur_module;
+        vm.call_state.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.call_state.import_meta_slot = saved_import_meta_slot;
+        vm.call_state.import_meta_obj = saved_import_meta_obj;
+        vm.call_state.cur_module = saved_cur_module;
     }
     try vm.bindFunctionParams(func, args);
 
@@ -10872,9 +10869,9 @@ const ResumeCallerRoots = struct {
     fn capture(vm: *Interpreter) EvalError!ResumeCallerRoots {
         const environment = vm.env;
         const this_value = vm.this_value;
-        const home_object = vm.home_object;
-        const super_ctor = vm.super_ctor;
-        const import_meta_obj = vm.import_meta_obj;
+        const home_object = vm.call_state.home_object;
+        const super_ctor = vm.call_state.super_ctor;
+        const import_meta_obj = vm.call_state.import_meta_obj;
         const new_target = vm.new_target;
         const environment_root = try vm.pushTempEnvRoot(environment);
         errdefer vm.restoreTempEnvRoots(environment_root);
@@ -10890,11 +10887,11 @@ const ResumeCallerRoots = struct {
             .this_value = this_value,
             .home_object = home_object,
             .super_ctor = super_ctor,
-            .import_meta_slot = vm.import_meta_slot,
+            .import_meta_slot = vm.call_state.import_meta_slot,
             .import_meta_obj = import_meta_obj,
             .new_target = new_target,
-            .direct_eval_new_target_allowed = vm.direct_eval_new_target_allowed,
-            .module_referrer = vm.cur_module,
+            .direct_eval_new_target_allowed = vm.call_state.direct_eval_new_target_allowed,
+            .module_referrer = vm.call_state.cur_module,
             .environment_root = environment_root,
             .value_roots = value_roots,
         };
@@ -10903,22 +10900,22 @@ const ResumeCallerRoots = struct {
     fn restore(self: ResumeCallerRoots, vm: *Interpreter) void {
         vm.env = vm.tempEnvRoot(self.environment_root, self.environment);
         vm.this_value = vm.tempRoot(self.value_roots, self.this_value);
-        vm.home_object = if (self.home_object) |object|
+        vm.call_state.home_object = if (self.home_object) |object|
             vm.tempRoot(self.value_roots + 1, Value.obj(object)).asObj()
         else
             null;
-        vm.super_ctor = if (self.super_ctor) |object|
+        vm.call_state.super_ctor = if (self.super_ctor) |object|
             vm.tempRoot(self.value_roots + 2, Value.obj(object)).asObj()
         else
             null;
-        vm.import_meta_slot = self.import_meta_slot;
-        vm.import_meta_obj = if (self.import_meta_obj) |object|
+        vm.call_state.import_meta_slot = self.import_meta_slot;
+        vm.call_state.import_meta_obj = if (self.import_meta_obj) |object|
             vm.tempRoot(self.value_roots + 3, Value.obj(object)).asObj()
         else
             null;
         vm.new_target = vm.tempRoot(self.value_roots + 4, self.new_target);
-        vm.direct_eval_new_target_allowed = self.direct_eval_new_target_allowed;
-        vm.cur_module = self.module_referrer;
+        vm.call_state.direct_eval_new_target_allowed = self.direct_eval_new_target_allowed;
+        vm.call_state.cur_module = self.module_referrer;
         vm.restoreTempRoots(self.value_roots);
         vm.restoreTempEnvRoots(self.environment_root);
     }
@@ -11001,12 +10998,12 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     // root-allocation failure must leave the generator resumable and unlocked.
     const s_env = vm.env;
     const s_this = vm.this_value;
-    const s_home = vm.home_object;
-    const s_super = vm.super_ctor;
-    const s_import_meta_slot = vm.import_meta_slot;
-    const s_import_meta_obj = vm.import_meta_obj;
+    const s_home = vm.call_state.home_object;
+    const s_super = vm.call_state.super_ctor;
+    const s_import_meta_slot = vm.call_state.import_meta_slot;
+    const s_import_meta_obj = vm.call_state.import_meta_obj;
     const s_nt = vm.new_target;
-    const s_eval_nt = vm.direct_eval_new_target_allowed;
+    const s_eval_nt = vm.call_state.direct_eval_new_target_allowed;
     const caller_environment_root = try vm.pushTempEnvRoot(s_env);
     defer vm.restoreTempEnvRoots(caller_environment_root);
     const caller_this_root = try vm.pushTempRoot(s_this);
@@ -11092,21 +11089,21 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
 
     vm.env = g.env;
     vm.this_value = g.this_value;
-    vm.home_object = g.home_object;
-    vm.super_ctor = g.super_ctor;
-    vm.import_meta_slot = g.import_meta_slot;
-    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.home_object = g.home_object;
+    vm.call_state.super_ctor = g.super_ctor;
+    vm.call_state.import_meta_slot = g.import_meta_slot;
+    vm.call_state.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.new_target = Value.undef();
-    vm.direct_eval_new_target_allowed = true;
+    vm.call_state.direct_eval_new_target_allowed = true;
     defer {
         vm.env = vm.tempEnvRoot(caller_environment_root, s_env);
         vm.this_value = vm.tempRoot(caller_this_root, s_this);
-        vm.home_object = if (s_home) |object| vm.tempRoot(caller_home_root, Value.obj(object)).asObj() else null;
-        vm.super_ctor = if (s_super) |object| vm.tempRoot(caller_super_root, Value.obj(object)).asObj() else null;
-        vm.import_meta_slot = s_import_meta_slot;
-        vm.import_meta_obj = if (s_import_meta_obj) |object| vm.tempRoot(caller_import_root, Value.obj(object)).asObj() else null;
+        vm.call_state.home_object = if (s_home) |object| vm.tempRoot(caller_home_root, Value.obj(object)).asObj() else null;
+        vm.call_state.super_ctor = if (s_super) |object| vm.tempRoot(caller_super_root, Value.obj(object)).asObj() else null;
+        vm.call_state.import_meta_slot = s_import_meta_slot;
+        vm.call_state.import_meta_obj = if (s_import_meta_obj) |object| vm.tempRoot(caller_import_root, Value.obj(object)).asObj() else null;
         vm.new_target = vm.tempRoot(caller_target_root, s_nt);
-        vm.direct_eval_new_target_allowed = s_eval_nt;
+        vm.call_state.direct_eval_new_target_allowed = s_eval_nt;
     }
 
     try vm.stackGuard();
@@ -11319,35 +11316,35 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     };
     const saved_env = vm.env;
     const saved_this = vm.this_value;
-    const saved_home = vm.home_object;
-    const saved_super = vm.super_ctor;
+    const saved_home = vm.call_state.home_object;
+    const saved_super = vm.call_state.super_ctor;
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
-    const saved_eval_nt = vm.direct_eval_new_target_allowed;
-    const saved_import_meta_slot = vm.import_meta_slot;
-    const saved_import_meta_obj = vm.import_meta_obj;
-    const saved_cur_module = vm.cur_module;
+    const saved_eval_nt = vm.call_state.direct_eval_new_target_allowed;
+    const saved_import_meta_slot = vm.call_state.import_meta_slot;
+    const saved_import_meta_obj = vm.call_state.import_meta_obj;
+    const saved_cur_module = vm.call_state.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
-    vm.home_object = func.home_object;
-    vm.super_ctor = func.super_ctor;
+    vm.call_state.home_object = func.home_object;
+    vm.call_state.super_ctor = func.super_ctor;
     vm.this_initialized = true;
     vm.new_target = Value.undef();
-    vm.direct_eval_new_target_allowed = true;
-    vm.import_meta_slot = func.import_meta_slot;
-    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
-    vm.cur_module = func.module_referrer;
+    vm.call_state.direct_eval_new_target_allowed = true;
+    vm.call_state.import_meta_slot = func.import_meta_slot;
+    vm.call_state.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
-        vm.home_object = saved_home;
-        vm.super_ctor = saved_super;
+        vm.call_state.home_object = saved_home;
+        vm.call_state.super_ctor = saved_super;
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
-        vm.direct_eval_new_target_allowed = saved_eval_nt;
-        vm.import_meta_slot = saved_import_meta_slot;
-        vm.import_meta_obj = saved_import_meta_obj;
-        vm.cur_module = saved_cur_module;
+        vm.call_state.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.call_state.import_meta_slot = saved_import_meta_slot;
+        vm.call_state.import_meta_obj = saved_import_meta_obj;
+        vm.call_state.cur_module = saved_cur_module;
     }
     // An error thrown synchronously while evaluating parameter defaults (or
     // binding `this`) of an async function must settle the result promise as a
@@ -11705,13 +11702,13 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
 
     vm.env = g.env;
     vm.this_value = g.this_value;
-    vm.home_object = g.home_object;
-    vm.super_ctor = g.super_ctor;
+    vm.call_state.home_object = g.home_object;
+    vm.call_state.super_ctor = g.super_ctor;
     vm.new_target = Value.undef();
-    vm.direct_eval_new_target_allowed = true;
-    vm.import_meta_slot = g.import_meta_slot;
-    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
-    vm.cur_module = g.module_referrer;
+    vm.call_state.direct_eval_new_target_allowed = true;
+    vm.call_state.import_meta_slot = g.import_meta_slot;
+    vm.call_state.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.cur_module = g.module_referrer;
     try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
@@ -11802,35 +11799,35 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const bound_this = try bindThisForCall(vm, func, this_val);
     const saved_env = vm.env;
     const saved_this = vm.this_value;
-    const saved_home = vm.home_object;
-    const saved_super = vm.super_ctor;
+    const saved_home = vm.call_state.home_object;
+    const saved_super = vm.call_state.super_ctor;
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
-    const saved_eval_nt = vm.direct_eval_new_target_allowed;
-    const saved_import_meta_slot = vm.import_meta_slot;
-    const saved_import_meta_obj = vm.import_meta_obj;
-    const saved_cur_module = vm.cur_module;
+    const saved_eval_nt = vm.call_state.direct_eval_new_target_allowed;
+    const saved_import_meta_slot = vm.call_state.import_meta_slot;
+    const saved_import_meta_obj = vm.call_state.import_meta_obj;
+    const saved_cur_module = vm.call_state.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
-    vm.home_object = func.home_object;
-    vm.super_ctor = func.super_ctor;
+    vm.call_state.home_object = func.home_object;
+    vm.call_state.super_ctor = func.super_ctor;
     vm.this_initialized = true;
     vm.new_target = Value.undef();
-    vm.direct_eval_new_target_allowed = true;
-    vm.import_meta_slot = func.import_meta_slot;
-    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
-    vm.cur_module = func.module_referrer;
+    vm.call_state.direct_eval_new_target_allowed = true;
+    vm.call_state.import_meta_slot = func.import_meta_slot;
+    vm.call_state.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
-        vm.home_object = saved_home;
-        vm.super_ctor = saved_super;
+        vm.call_state.home_object = saved_home;
+        vm.call_state.super_ctor = saved_super;
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
-        vm.direct_eval_new_target_allowed = saved_eval_nt;
-        vm.import_meta_slot = saved_import_meta_slot;
-        vm.import_meta_obj = saved_import_meta_obj;
-        vm.cur_module = saved_cur_module;
+        vm.call_state.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.call_state.import_meta_slot = saved_import_meta_slot;
+        vm.call_state.import_meta_obj = saved_import_meta_obj;
+        vm.call_state.cur_module = saved_cur_module;
     }
     try vm.bindFunctionParams(func, args);
     // Separate body var-env when the params contain a default (see makeGenerator).
@@ -12000,13 +11997,13 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     g.suspended = false;
     vm.env = g.env;
     vm.this_value = g.this_value;
-    vm.home_object = g.home_object;
-    vm.super_ctor = g.super_ctor;
-    vm.import_meta_slot = g.import_meta_slot;
-    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.home_object = g.home_object;
+    vm.call_state.super_ctor = g.super_ctor;
+    vm.call_state.import_meta_slot = g.import_meta_slot;
+    vm.call_state.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.new_target = Value.undef();
-    vm.direct_eval_new_target_allowed = true;
-    vm.cur_module = g.module_referrer;
+    vm.call_state.direct_eval_new_target_allowed = true;
+    vm.call_state.cur_module = g.module_referrer;
     try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
@@ -12562,7 +12559,7 @@ fn binOp(op: bc.Op) ast.BinaryOp {
 }
 
 fn resolveActivePrivateName(vm: *Interpreter, raw_name: []const u8) EvalError![]const u8 {
-    const private_map = vm.current_private_map orelse
+    const private_map = vm.call_state.current_private_map orelse
         return vm.throwError("InternalError", "private name has no active PrivateEnvironment");
     return private_map.get(raw_name) orelse
         return vm.throwError("InternalError", "private name is absent from the active PrivateEnvironment");
@@ -12593,7 +12590,7 @@ fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame:
         materialized.environment.markCaptured();
     }
     const class = template.node.class_expr;
-    return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys, vm.current_private_map);
+    return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys, vm.call_state.current_private_map);
 }
 
 test "computed class names retain their per-evaluation private environment" {
@@ -12768,7 +12765,7 @@ test "class private environment preparation is allocation-failure atomic" {
         try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
         try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
         try std.testing.expect(machine.pending_activation == null);
-        try std.testing.expect(machine.current_private_map == null);
+        try std.testing.expect(machine.call_state.current_private_map == null);
         if (failing.has_induced_failure) {
             failures += 1;
             if (result) |_| {} else |err| switch (err) {
@@ -12904,7 +12901,7 @@ test "class call guards restore direct VM entry state through allocation failure
             var root = Environment{ .arena = allocator, .fn_scope = true };
             const root_shape = try Shape.createRoot(allocator);
             try interp.installGlobals(&root, root_shape);
-            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape, .bytecode_execution_mode = .required });
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape,.call_state = .{ .bytecode_execution_mode = .required, } });
             const class = try run(&machine, chunk, null);
             const function = Interpreter.funcOf(class) orelse return error.TestUnexpectedResult;
             const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
@@ -12930,7 +12927,7 @@ test "class call guards restore direct VM entry state through allocation failure
             try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
             try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
             try std.testing.expect(machine.pending_activation == null);
-            try std.testing.expect(machine.current_private_map == null);
+            try std.testing.expect(machine.call_state.current_private_map == null);
             if (result) |_| return error.TestUnexpectedResult else |err| {
                 if (err == error.Throw) {
                     try std.testing.expectEqual(root.get("TypeError").?.rawBits(), (try machine.getProperty(machine.exception, "constructor")).rawBits());
@@ -13024,7 +13021,7 @@ test "vm program exits unwind lexical environments before returning to the host"
         }
         try std.testing.expectEqual(&entry, machine.env);
         try std.testing.expect(!machine.strict);
-        try std.testing.expect(machine.current_private_map == null);
+        try std.testing.expect(machine.call_state.current_private_map == null);
         try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
         try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
         try std.testing.expectEqual(@as(u32, 0), machine.depth);
@@ -13054,7 +13051,7 @@ test "vm program exits unwind the class environment on allocation failure" {
         try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
         try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
         try std.testing.expectEqual(@as(u32, 0), machine.depth);
-        try std.testing.expect(machine.current_private_map == null);
+        try std.testing.expect(machine.call_state.current_private_map == null);
         if (result) |_| {
             const class = root.get("C") orelse return error.TestUnexpectedResult;
             const prototype = class.asObj().getOwn("prototype").?;
@@ -13098,7 +13095,7 @@ test "class naming allocation failures restore class evaluation state" {
         try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
         try std.testing.expectEqual(@as(u32, 0), machine.depth);
         try std.testing.expect(!machine.strict);
-        try std.testing.expect(machine.current_private_map == null);
+        try std.testing.expect(machine.call_state.current_private_map == null);
         if (result) |class| {
             try std.testing.expectEqualStrings("Dynamic", class.asObj().getOwn("name").?.asStr());
             try std.testing.expectEqualStrings("Dynamic", class.asObj().getOwn("seen").?.asStr());
@@ -13237,15 +13234,15 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         .definition_location = closureDefinitionLocation(vm, tmpl),
         .source = tmpl.source,
         .bytecode_admission_reason = admission_reason,
-        .bytecode_execution_mode = vm.bytecode_execution_mode,
+        .bytecode_execution_mode = vm.call_state.bytecode_execution_mode,
         .uses_arguments = tmpl.uses_arguments,
         .uses_direct_eval = tmpl.uses_direct_eval,
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
         .is_strict = tmpl.is_strict,
-        .import_meta_slot = vm.import_meta_slot,
-        .module_referrer = vm.cur_module,
-        .private_map = vm.current_private_map,
+        .import_meta_slot = vm.call_state.import_meta_slot,
+        .module_referrer = vm.call_state.cur_module,
+        .private_map = vm.call_state.current_private_map,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else plain_chunk,
         .lazy_template = if (tmpl.lazy != null and plain_chunk == null) tmpl else null,
         .vm_inline_calls_safe = if (plain_chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
@@ -13259,15 +13256,15 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         .is_arrow = tmpl.is_arrow,
         .arrow_this = if (tmpl.is_arrow) vm.this_value else Value.undef(),
         .arrow_new_target = if (tmpl.is_arrow) vm.new_target else Value.undef(),
-        .arrow_direct_eval_new_target_allowed = tmpl.is_arrow and vm.direct_eval_new_target_allowed,
-        .arrow_in_derived_ctor = tmpl.is_arrow and vm.in_derived_ctor,
+        .arrow_direct_eval_new_target_allowed = tmpl.is_arrow and vm.call_state.direct_eval_new_target_allowed,
+        .arrow_in_derived_ctor = tmpl.is_arrow and vm.call_state.in_derived_ctor,
         .this_cell = if (tmpl.is_arrow) vm.this_cell else null,
-        .home_object = if (tmpl.is_arrow) vm.home_object else null,
-        .super_ctor = if (tmpl.is_arrow) vm.super_ctor else null,
+        .home_object = if (tmpl.is_arrow) vm.call_state.home_object else null,
+        .super_ctor = if (tmpl.is_arrow) vm.call_state.super_ctor else null,
         .derived_constructor = if (tmpl.is_arrow) derivedConstructorObject(vm) else null,
         .field_inits = if (tmpl.is_arrow) if (activeFunction(vm)) |active| active.field_inits else &.{} else &.{},
         .private_brand_names = if (tmpl.is_arrow) if (activeFunction(vm)) |active| active.private_brand_names else &.{} else &.{},
-        .field_init_ctx = tmpl.is_arrow and vm.in_field_initializer,
+        .field_init_ctx = tmpl.is_arrow and vm.call_state.in_field_initializer,
     };
     vm.recordBytecodeAdmission(admission_reason);
     // The closure can reach `frame` and all its ancestors via the upvalue walk,
@@ -13642,21 +13639,10 @@ const Activation = struct {
     result_base: usize = 0,
     // Caller VM state, restored by `popActivation`.
     saved_strict: bool,
-    saved_cur_module: []const u8,
-    saved_eval_nt: bool,
-    saved_bytecode_execution_mode: interp.BytecodeExecutionMode,
-    saved_pm: ?*const PrivateNameMap,
     saved_active_call_frame: ?*interp.LegacyCallFrame,
     saved_debug_call_frame: ?*interp.DebugCallFrame,
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
-    saved_field_initializer: bool,
     saved_this_initialized: bool,
-    saved_in_derived_ctor: bool,
-    saved_in_default_ctor: bool,
-    saved_pending_field_inits: []const *ast.Node,
-    saved_pending_brand_names: []const []const u8,
-    saved_in_param_expr: bool,
-    saved_in_param_default: bool,
     saved_cur_func_params: []const ast.Param,
     saved_cur_func_args_needed: bool,
     debug_call_frame: interp.DebugCallFrame = undefined,
@@ -13761,21 +13747,10 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .legacy_call_frame = undefined,
         .legacy_call_frame_active = false,
         .saved_strict = undefined,
-        .saved_cur_module = undefined,
-        .saved_eval_nt = undefined,
-        .saved_bytecode_execution_mode = undefined,
-        .saved_pm = undefined,
         .saved_active_call_frame = undefined,
         .saved_debug_call_frame = undefined,
         .saved_stack_trace_call_frame = undefined,
-        .saved_field_initializer = undefined,
         .saved_this_initialized = undefined,
-        .saved_in_derived_ctor = undefined,
-        .saved_in_default_ctor = undefined,
-        .saved_pending_field_inits = undefined,
-        .saved_pending_brand_names = undefined,
-        .saved_in_param_expr = undefined,
-        .saved_in_param_default = undefined,
         .saved_cur_func_params = undefined,
         .saved_cur_func_args_needed = undefined,
     };
@@ -13922,33 +13897,19 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     act.optimizer_profile_active = false;
     act.result_base = 0;
     act.saved_strict = vm.strict;
-    act.saved_cur_module = vm.cur_module;
-    act.saved_eval_nt = vm.direct_eval_new_target_allowed;
-    act.saved_bytecode_execution_mode = vm.bytecode_execution_mode;
-    act.saved_pm = vm.current_private_map;
     act.saved_active_call_frame = vm.active_call_frame;
     act.saved_debug_call_frame = vm.debug_call_frame;
     act.saved_stack_trace_call_frame = vm.stack_trace_call_frame;
-    act.saved_field_initializer = vm.in_field_initializer;
     act.saved_this_initialized = vm.this_initialized;
-    act.saved_in_derived_ctor = vm.in_derived_ctor;
-    act.saved_in_default_ctor = vm.in_default_ctor;
-    act.saved_pending_field_inits = vm.pending_field_inits;
-    act.saved_pending_brand_names = vm.pending_brand_names;
-    act.saved_in_param_expr = vm.in_param_expr;
-    act.saved_in_param_default = vm.in_param_default;
     act.saved_cur_func_params = vm.cur_func_params;
     act.saved_cur_func_args_needed = vm.cur_func_args_needed;
     act.exec.saved_this = vm.this_value;
     act.exec.saved_env = vm.env;
     act.exec.saved_global = vm.global_object;
     act.exec.saved_nt = vm.new_target;
-    act.exec.saved_ims = vm.import_meta_slot;
-    act.exec.saved_imo = vm.import_meta_obj;
     act.exec.saved_this_cell = vm.this_cell;
     act.exec.saved_active_function = vm.active_function;
-    act.exec.saved_home_object = vm.home_object;
-    act.exec.saved_super_ctor = vm.super_ctor;
+    act.exec.saved_call_state = vm.call_state;
     act.exec.frame = frame;
     act.exec.chunk = fchunk;
     frame.* = .{
@@ -13982,12 +13943,12 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         }
         vm.active_call_frame = &act.legacy_call_frame;
     };
-    vm.current_private_map = func.private_map; // PrepareForOrdinaryCall's lexical [[PrivateEnvironment]]
+    vm.call_state.current_private_map = func.private_map; // PrepareForOrdinaryCall's lexical [[PrivateEnvironment]]
     vm.strict = func.is_strict;
-    vm.home_object = func.home_object;
+    vm.call_state.home_object = func.home_object;
     // GetSuperConstructor observes a class constructor's current [[Prototype]];
     // methods and arrows use their published/lexically captured super target.
-    vm.super_ctor = if (!func.is_arrow and func.is_class_constructor)
+    vm.call_state.super_ctor = if (!func.is_arrow and func.is_class_constructor)
         (if (func.obj) |object| object.protoAtomic() else func.super_ctor)
     else
         func.super_ctor;
@@ -13996,21 +13957,21 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.env = func.closure;
     if (func.realm_global) |global| vm.global_object = global;
     vm.new_target = if (func.is_arrow) func.arrow_new_target else new_target;
-    vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
-    vm.bytecode_execution_mode = func.bytecode_execution_mode;
-    vm.import_meta_slot = func.import_meta_slot;
-    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
-    vm.cur_module = func.module_referrer;
-    vm.in_field_initializer = func.is_arrow and func.field_init_ctx;
-    vm.in_param_expr = false;
-    vm.in_param_default = false;
+    vm.call_state.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
+    vm.call_state.bytecode_execution_mode = func.bytecode_execution_mode;
+    vm.call_state.import_meta_slot = func.import_meta_slot;
+    vm.call_state.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+    vm.call_state.cur_module = func.module_referrer;
+    vm.call_state.in_field_initializer = func.is_arrow and func.field_init_ctx;
+    vm.call_state.in_param_expr = false;
+    vm.call_state.in_param_default = false;
     vm.cur_func_params = func.params;
     vm.cur_func_args_needed = func.uses_arguments or func.uses_direct_eval;
-    vm.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
-    vm.in_default_ctor = !func.is_arrow and func.is_default_ctor;
+    vm.call_state.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
+    vm.call_state.in_default_ctor = !func.is_arrow and func.is_default_ctor;
     vm.active_function = func.obj;
-    vm.pending_field_inits = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.field_inits else &.{};
-    vm.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.private_brand_names else &.{};
+    vm.call_state.pending_field_inits = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.field_inits else &.{};
+    vm.call_state.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.private_brand_names else &.{};
     vm.this_value = try bindThisForCall(vm, func, this_val);
     if (func.is_arrow) {
         vm.this_cell = func.this_cell;
@@ -14143,30 +14104,16 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
 fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.this_value = act.exec.saved_this;
     vm.strict = act.saved_strict;
-    vm.home_object = act.exec.saved_home_object;
-    vm.super_ctor = act.exec.saved_super_ctor;
+    vm.call_state = act.exec.saved_call_state;
     vm.env = act.exec.saved_env.?;
     vm.global_object = act.exec.saved_global;
     vm.new_target = act.exec.saved_nt;
-    vm.import_meta_slot = act.exec.saved_ims;
-    vm.import_meta_obj = act.exec.saved_imo;
-    vm.cur_module = act.saved_cur_module;
-    vm.direct_eval_new_target_allowed = act.saved_eval_nt;
-    vm.bytecode_execution_mode = act.saved_bytecode_execution_mode;
-    vm.current_private_map = act.saved_pm;
     vm.active_call_frame = act.saved_active_call_frame;
     vm.debug_call_frame = act.saved_debug_call_frame;
     vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
-    vm.in_field_initializer = act.saved_field_initializer;
     vm.this_initialized = act.saved_this_initialized;
     vm.this_cell = act.exec.saved_this_cell;
-    vm.in_derived_ctor = act.saved_in_derived_ctor;
-    vm.in_default_ctor = act.saved_in_default_ctor;
     vm.active_function = act.exec.saved_active_function;
-    vm.pending_field_inits = act.saved_pending_field_inits;
-    vm.pending_brand_names = act.saved_pending_brand_names;
-    vm.in_param_expr = act.saved_in_param_expr;
-    vm.in_param_default = act.saved_in_param_default;
     vm.cur_func_params = act.saved_cur_func_params;
     vm.cur_func_args_needed = act.saved_cur_func_args_needed;
     if (vm.this_cell) |cell| if (cell.isInitialized()) {
@@ -14178,32 +14125,18 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.exec.saved_this = src.exec.saved_this;
     dst.saved_strict = src.saved_strict;
-    dst.exec.saved_home_object = src.exec.saved_home_object;
-    dst.exec.saved_super_ctor = src.exec.saved_super_ctor;
+    dst.exec.saved_call_state = src.exec.saved_call_state;
     dst.exec.saved_env = src.exec.saved_env;
     dst.exec.saved_global = src.exec.saved_global;
     dst.exec.saved_nt = src.exec.saved_nt;
-    dst.exec.saved_ims = src.exec.saved_ims;
-    dst.exec.saved_imo = src.exec.saved_imo;
-    dst.saved_cur_module = src.saved_cur_module;
-    dst.saved_eval_nt = src.saved_eval_nt;
-    dst.saved_bytecode_execution_mode = src.saved_bytecode_execution_mode;
-    dst.saved_pm = src.saved_pm;
     dst.saved_active_call_frame = src.saved_active_call_frame;
     if (dst.legacy_call_frame_active)
         dst.legacy_call_frame.caller = src.saved_active_call_frame;
     dst.saved_debug_call_frame = src.saved_debug_call_frame;
     dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;
-    dst.saved_field_initializer = src.saved_field_initializer;
     dst.saved_this_initialized = src.saved_this_initialized;
     dst.exec.saved_this_cell = src.exec.saved_this_cell;
-    dst.saved_in_derived_ctor = src.saved_in_derived_ctor;
-    dst.saved_in_default_ctor = src.saved_in_default_ctor;
     dst.exec.saved_active_function = src.exec.saved_active_function;
-    dst.saved_pending_field_inits = src.saved_pending_field_inits;
-    dst.saved_pending_brand_names = src.saved_pending_brand_names;
-    dst.saved_in_param_expr = src.saved_in_param_expr;
-    dst.saved_in_param_default = src.saved_in_param_default;
     dst.saved_cur_func_params = src.saved_cur_func_params;
     dst.saved_cur_func_args_needed = src.saved_cur_func_args_needed;
     if (dst.exec.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
@@ -14525,7 +14458,7 @@ fn expectActivationDriverRestored(machine: *Interpreter, caller_environment: *En
     try std.testing.expect(!machine.pending_tail_call);
     try std.testing.expect(!machine.driver_active);
     try std.testing.expectEqual(@as(usize, 0), machine.jit_execution_depth);
-    try std.testing.expect(machine.current_private_map == null);
+    try std.testing.expect(machine.call_state.current_private_map == null);
     try std.testing.expect(machine.active_call_frame == null);
     try std.testing.expect(machine.debug_call_frame == null);
     try std.testing.expect(machine.stack_trace_call_frame == null);
@@ -15493,7 +15426,7 @@ test "vm: base class field allocation failure restores the caller activation" {
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .bytecode_execution_mode = .required,
+        .call_state = .{ .bytecode_execution_mode = .required, },
     };
     const constructor = try run(&machine, root, null);
     const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
@@ -15516,7 +15449,7 @@ test "vm: base class field allocation failure restores the caller activation" {
         machine.this_value = saved_this;
         machine.new_target = saved_new_target;
         machine.strict = true;
-        machine.in_field_initializer = true;
+        machine.call_state.in_field_initializer = true;
         var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
         machine.arena = failing.allocator();
         const result = construct(&machine, constructor, &arguments);
@@ -15533,7 +15466,7 @@ test "vm: base class field allocation failure restores the caller activation" {
         try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
         try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
         try std.testing.expect(machine.strict);
-        try std.testing.expect(machine.in_field_initializer);
+        try std.testing.expect(machine.call_state.in_field_initializer);
         try std.testing.expectEqual(&env, machine.env);
         try std.testing.expect(machine.vm_activation_free != null);
         if (recovered) break;
@@ -15563,7 +15496,7 @@ test "vm: derived class field allocation failure restores the caller activation"
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .bytecode_execution_mode = .required,
+        .call_state = .{ .bytecode_execution_mode = .required, },
     };
     const constructor = try run(&machine, root, null);
     const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
@@ -15584,8 +15517,8 @@ test "vm: derived class field allocation failure restores the caller activation"
     var saved_pending_node: ast.Node = .undefined_lit;
     const saved_pending_fields = [_]*ast.Node{&saved_pending_node};
     const saved_pending_brands = [_][]const u8{"#saved"};
-    machine.pending_field_inits = &saved_pending_fields;
-    machine.pending_brand_names = &saved_pending_brands;
+    machine.call_state.pending_field_inits = &saved_pending_fields;
+    machine.call_state.pending_brand_names = &saved_pending_brands;
     var failures: usize = 0;
     var recovered = false;
     defer machine.arena = allocator;
@@ -15595,9 +15528,9 @@ test "vm: derived class field allocation failure restores the caller activation"
         machine.this_cell = &saved_this_cell;
         machine.new_target = saved_new_target;
         machine.strict = true;
-        machine.in_field_initializer = true;
-        machine.in_derived_ctor = true;
-        machine.in_default_ctor = true;
+        machine.call_state.in_field_initializer = true;
+        machine.call_state.in_derived_ctor = true;
+        machine.call_state.in_default_ctor = true;
         machine.active_function = active_function;
         var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
         machine.arena = failing.allocator();
@@ -15617,13 +15550,13 @@ test "vm: derived class field allocation failure restores the caller activation"
         try std.testing.expectEqual(&saved_this_cell, machine.this_cell.?);
         try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
         try std.testing.expect(machine.strict);
-        try std.testing.expect(machine.in_field_initializer);
-        try std.testing.expect(machine.in_derived_ctor);
-        try std.testing.expect(machine.in_default_ctor);
+        try std.testing.expect(machine.call_state.in_field_initializer);
+        try std.testing.expect(machine.call_state.in_derived_ctor);
+        try std.testing.expect(machine.call_state.in_default_ctor);
         try std.testing.expectEqual(active_function, machine.active_function.?);
-        try std.testing.expectEqual(@as(usize, 1), machine.pending_field_inits.len);
-        try std.testing.expectEqual(&saved_pending_node, machine.pending_field_inits[0]);
-        try std.testing.expectEqualSlices(u8, "#saved", machine.pending_brand_names[0]);
+        try std.testing.expectEqual(@as(usize, 1), machine.call_state.pending_field_inits.len);
+        try std.testing.expectEqual(&saved_pending_node, machine.call_state.pending_field_inits[0]);
+        try std.testing.expectEqualSlices(u8, "#saved", machine.call_state.pending_brand_names[0]);
         try std.testing.expectEqual(&env, machine.env);
         try std.testing.expect(machine.vm_activation_free != null);
         if (recovered) break;
@@ -15647,8 +15580,8 @@ test "vm: captured super references reject an uninitialized this binding" {
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .home_object = home,
         .this_initialized = false,
+        .call_state = .{ .home_object = home, },
     };
     const chunk = try allocator.create(Chunk);
     chunk.* = Chunk.init(allocator);
@@ -15694,9 +15627,9 @@ test "vm: captured super writes cache native rejection and preserve exact fallba
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .home_object = home,
         .this_value = Value.obj(receiver),
         .jit_owner = &owner,
+        .call_state = .{ .home_object = home, },
     };
     try machine.setMember(Value.obj(parent), "value", Value.num(0));
     const native_hits_before = optimizer_native_hits.load(.monotonic);
@@ -15746,9 +15679,9 @@ test "vm: super deletion caches native rejection and preserves exact fallback" {
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .home_object = home,
         .this_value = Value.obj(receiver),
         .jit_owner = &owner,
+        .call_state = .{ .home_object = home, },
     };
     const native_hits_before = optimizer_native_hits.load(.monotonic);
     const slots = try allocator.alloc(Value, compiled.local_count);
@@ -17784,7 +17717,7 @@ test "vm: native class OOM unwinds without replaying static effects" {
     try std.testing.expectEqual(@as(u32, 0), machine.depth);
     try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
     try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
-    try std.testing.expect(machine.current_private_map == null);
+    try std.testing.expect(machine.call_state.current_private_map == null);
     try std.testing.expect(inventory.runtimeOperationSnapshot().count(.eval_class) > 0);
 }
 
@@ -27366,10 +27299,10 @@ test "vm: optimizer activation reads preserve exact values initialization and st
             try std.testing.expectEqual(object.rawBits(), outcome.complete.rawBits());
             machine.this_cell = null;
         } else {
-            machine.in_field_initializer = true;
+            machine.call_state.in_field_initializer = true;
             const outcome = try tryRunManagedNative(&machine, &compiled, &.{}, null);
             try std.testing.expect(outcome == .complete and outcome.complete.isUndefined());
-            machine.in_field_initializer = false;
+            machine.call_state.in_field_initializer = false;
         }
     }
 }

@@ -3003,14 +3003,14 @@ fn traceExecRoots(exec: *vm.Exec, v: anytype) void {
     };
     for (exec.handlers.items) |handler|
         if (handler.environment) |environment| markManaged(v, environment);
-    v.mark(exec.saved_home_object);
-    v.mark(exec.saved_super_ctor);
+    v.mark(exec.saved_call_state.home_object);
+    v.mark(exec.saved_call_state.super_ctor);
     markValue(v, exec.saved_this);
     markValue(v, exec.saved_nt);
     v.mark(exec.saved_global);
-    v.mark(exec.saved_imo);
+    v.mark(exec.saved_call_state.import_meta_obj);
     v.mark(exec.saved_active_function);
-    if (exec.saved_ims) |slot| v.mark(slot.load());
+    if (exec.saved_call_state.import_meta_slot) |slot| v.mark(slot.load());
     if (exec.saved_this_cell) |cell| markValue(v, cell.value());
     for ([_]?*Environment{ exec.saved_env, exec.debug_environment }) |maybe_env| if (maybe_env) |env| {
         markManaged(v, env);
@@ -3091,16 +3091,16 @@ fn relocateExecRoots(exec: *vm.Exec, v: anytype) void {
     };
     for (exec.handlers.items) |*handler|
         gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
-    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
-    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_call_state.home_object);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_call_state.super_ctor);
     gc_relocation.rewriteValueSlot(v, &exec.saved_this);
     gc_relocation.rewriteValueSlot(v, &exec.saved_nt);
     gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_global);
-    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_imo);
+    gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_call_state.import_meta_obj);
     gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_active_function);
     gc_relocation.rewriteOptionalSlot(v, Environment, &exec.saved_env);
     gc_relocation.rewriteOptionalSlot(v, Environment, &exec.debug_environment);
-    if (exec.saved_ims) |slot| gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
+    if (exec.saved_call_state.import_meta_slot) |slot| gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
     if (exec.saved_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
     var frame = exec.frame;
     while (frame) |current| : (frame = current.parent) {
@@ -3261,9 +3261,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.global_object) |o| v.mark(o);
     var sym_it = machine.symbols.valueIterator();
     while (sym_it.next()) |sym| v.mark(sym.*);
-    if (machine.import_meta_slot) |slot| {
+    if (machine.call_state.import_meta_slot) |slot| {
         if (slot.load()) |o| v.mark(o);
-    } else if (machine.import_meta_obj) |o| v.mark(o);
+    } else if (machine.call_state.import_meta_obj) |o| v.mark(o);
     markValue(v, machine.ret_value);
     markValue(v, machine.this_value);
     markValue(v, machine.exception);
@@ -3298,8 +3298,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         markManaged(v, env);
         traceEnv(env, v);
     }
-    if (machine.home_object) |o| v.mark(o);
-    if (machine.super_ctor) |o| v.mark(o);
+    if (machine.call_state.home_object) |o| v.mark(o);
+    if (machine.call_state.super_ctor) |o| v.mark(o);
     for (machine.with_stack.items) |o| v.mark(o);
 }
 
@@ -3400,10 +3400,10 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     var symbol_it = machine.symbols.valueIterator();
     while (symbol_it.next()) |symbol|
         gc_relocation.rewriteRequiredSlot(v, Object, symbol);
-    if (machine.import_meta_slot) |slot| {
+    if (machine.call_state.import_meta_slot) |slot| {
         gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
     } else {
-        gc_relocation.rewriteOptionalSlot(v, Object, &machine.import_meta_obj);
+        gc_relocation.rewriteOptionalSlot(v, Object, &machine.call_state.import_meta_obj);
     }
     gc_relocation.rewriteValueSlot(v, &machine.ret_value);
     gc_relocation.rewriteValueSlot(v, &machine.this_value);
@@ -3432,8 +3432,8 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     }
     gc_relocation.rewriteOptionalSlot(v, Environment, &machine.debug_top_level_environment);
     if (machine.debug_top_level_environment) |environment| relocateEnv(environment, v);
-    gc_relocation.rewriteOptionalSlot(v, Object, &machine.home_object);
-    gc_relocation.rewriteOptionalSlot(v, Object, &machine.super_ctor);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.call_state.home_object);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.call_state.super_ctor);
     for (machine.with_stack.items) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
 }
@@ -3606,10 +3606,10 @@ test "realm root relocation rewrites active interpreter containers" {
     machine.global_object = &old_objects[5];
     machine.active_native = &old_objects[6];
     machine.active_function = &old_objects[7];
-    machine.home_object = &old_objects[8];
-    machine.super_ctor = &old_objects[9];
+    machine.call_state.home_object = &old_objects[8];
+    machine.call_state.super_ctor = &old_objects[9];
     var import_meta = interp.ImportMetaSlot.init(&old_objects[10]);
-    machine.import_meta_slot = &import_meta;
+    machine.call_state.import_meta_slot = &import_meta;
     try machine.gc_temp_roots.append(machine.arena, Value.obj(&old_objects[11]));
     try machine.gc_temp_promise_roots.append(machine.arena, &old_promise);
     try machine.gc_object_reserve.append(machine.arena, &old_objects[12]);
@@ -3638,14 +3638,16 @@ test "realm root relocation rewrites active interpreter containers" {
         .stack = .{ .items = &operand_stack, .capacity = operand_stack.len },
         .acc = Value.obj(&old_objects[18]),
         .frame = &frame,
-        .saved_home_object = &old_objects[25],
-        .saved_super_ctor = &old_objects[26],
+        .saved_call_state = .{
+            .home_object = &old_objects[25],
+            .super_ctor = &old_objects[26],
+            .import_meta_slot = &saved_import_meta,
+            .import_meta_obj = &old_objects[10],
+        },
         .saved_this = Value.obj(&old_objects[1]),
         .saved_nt = Value.obj(&old_objects[3]),
         .saved_env = &old_environment,
         .saved_global = &old_objects[5],
-        .saved_ims = &saved_import_meta,
-        .saved_imo = &old_objects[10],
         .saved_this_cell = &saved_this_cell,
         .saved_active_function = &old_objects[7],
         .debug_environment = &old_environment,
@@ -3762,8 +3764,8 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[5], machine.global_object.?);
     try std.testing.expectEqual(&new_objects[6], machine.active_native.?);
     try std.testing.expectEqual(&new_objects[7], machine.active_function.?);
-    try std.testing.expectEqual(&new_objects[8], machine.home_object.?);
-    try std.testing.expectEqual(&new_objects[9], machine.super_ctor.?);
+    try std.testing.expectEqual(&new_objects[8], machine.call_state.home_object.?);
+    try std.testing.expectEqual(&new_objects[9], machine.call_state.super_ctor.?);
     try std.testing.expectEqual(&new_objects[10], import_meta.load().?);
     try std.testing.expectEqual(&new_objects[11], machine.gc_temp_roots.items[0].asObj());
     try std.testing.expectEqual(&new_promise, machine.gc_temp_promise_roots.items[0]);
@@ -3781,14 +3783,14 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_environment, frame.closure_environment.?);
     try std.testing.expectEqual(&new_environment, frame.direct_eval_environment.load(.acquire).?);
     try std.testing.expectEqual(&new_environment, frame.direct_eval_parameter_environment.load(.acquire).?);
-    try std.testing.expectEqual(&new_objects[25], execution.saved_home_object.?);
-    try std.testing.expectEqual(&new_objects[26], execution.saved_super_ctor.?);
+    try std.testing.expectEqual(&new_objects[25], execution.saved_call_state.home_object.?);
+    try std.testing.expectEqual(&new_objects[26], execution.saved_call_state.super_ctor.?);
     try std.testing.expectEqual(&new_objects[1], execution.saved_this.asObj());
     try std.testing.expectEqual(&new_objects[3], execution.saved_nt.asObj());
     try std.testing.expectEqual(&new_environment, execution.saved_env.?);
     try std.testing.expectEqual(&new_objects[5], execution.saved_global.?);
     try std.testing.expectEqual(&new_objects[10], saved_import_meta.load().?);
-    try std.testing.expectEqual(&new_objects[10], execution.saved_imo.?);
+    try std.testing.expectEqual(&new_objects[10], execution.saved_call_state.import_meta_obj.?);
     try std.testing.expectEqual(&new_objects[1], saved_this_cell.value().asObj());
     try std.testing.expectEqual(&new_objects[7], execution.saved_active_function.?);
     try std.testing.expectEqual(&new_environment, execution.debug_environment.?);
