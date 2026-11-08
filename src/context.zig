@@ -48019,6 +48019,24 @@ test "a rejected deferred body runs on the tree-walker over its defining frame" 
     try std.testing.expectEqualStrings("[6,6,12,12]", result.asStr());
 }
 
+test "driver-owned calls keep baseline leaves on the direct native path" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    // `sumLeaf` is deferred until its only call, which therefore runs it
+    // under the activation driver. Its baseline-compiled `leaf` calls must
+    // still take the direct native call there instead of a heap activation
+    // apiece.
+    const before = vm.nativeDirectCallHitsForTesting();
+    const result = try ctx.evaluate(
+        \\function leaf(x) { return x; }
+        \\function sumLeaf(n) { var s = 0, i = 0; while (i < n) { s = s + leaf(i); i = i + 1; } return s; }
+        \\sumLeaf(2000)
+    );
+    try std.testing.expectEqual(@as(f64, 1999000), result.asNum());
+    try std.testing.expect(vm.nativeDirectCallHitsForTesting() - before >= 1900);
+}
+
 test "deferred function bodies compile on first call and keep their closures" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

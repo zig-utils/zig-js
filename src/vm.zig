@@ -8203,6 +8203,20 @@ fn directContinuationInputsAreReadOnly(vm: *Interpreter, native: *const jit.Comp
 /// and recycling a heap activation. Extra arguments stay rooted on the caller's
 /// operand stack; only formal parameters are copied, matching buildActivation.
 fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
+    return tryRunNativeDirectCallMode(vm, func, args, false);
+}
+
+/// Direct native call to a baseline artifact only. Baseline code is a
+/// numeric leaf that never calls back into JavaScript, so it cannot recurse
+/// on the host stack; a driver-owned call may take it instead of building a
+/// heap activation whose entry would run the same native code anyway.
+fn tryRunNativeLeafCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
+    const chunk = func.chunk orelse return null;
+    if (chunk.tier.loadCode() == null or chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null) return null;
+    return tryRunNativeDirectCallMode(vm, func, args, true);
+}
+
+fn tryRunNativeDirectCallMode(vm: *Interpreter, func: *Function, args: []const Value, comptime baseline_only: bool) EvalError!?Value {
     if (statementHooksRequireBytecode(vm)) return null;
     const owner = vm.jit_owner orelse return null;
     if (!nativeExecutionPermitted(vm, owner)) return null;
@@ -8261,7 +8275,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
         vm.strict = caller_strict;
     }
 
-    const optimizer_artifact = loadOrCompileOptimizer(
+    const optimizer_artifact: ?*const jit.CompiledCode = if (baseline_only) null else loadOrCompileOptimizer(
         vm,
         owner,
         chunk,
@@ -9976,6 +9990,16 @@ fn runChunk(
                 // free; every other JS-chunk call belongs to the trampoline.
                 if (vm.driver_active) {
                     if (jsChunkFn(callee)) |func| {
+                        // A baseline leaf cannot recurse on the host stack, so
+                        // it keeps the direct native call under the driver too:
+                        // its activation would only run the same native code.
+                        if (vm.jit_owner != null and !debug_execution) {
+                            if (try tryRunNativeLeafCall(vm, func, stack.items[base..])) |result| {
+                                stack.shrinkRetainingCapacity(base - 1);
+                                try stack.append(stack_alloc, result);
+                                continue;
+                            }
+                        }
                         const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
                         act.result_base = base - 1;
                         stack.shrinkRetainingCapacity(base - 1);
