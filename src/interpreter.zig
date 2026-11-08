@@ -14329,11 +14329,11 @@ pub const Interpreter = struct {
         }
     }
 
-    /// `stringSliceUtf16` for a receiver that may be a flat latin1 image, where a
-    /// code-unit range IS a byte range. Only the extracted range is re-encoded to
-    /// WTF-8, so slicing does not cost a pass over the whole receiver.
-    fn stringSliceUtf16A(self: *Interpreter, s: []const u8, start: usize, end: usize, flat: bool) EvalError![]const u8 {
-        if (!flat) return self.stringSliceUtf16(s, start, end);
+    /// ASCII WTF-8 and flat latin1 both have one byte per UTF-16 code unit.
+    /// Only the extracted range needs encoding; scanning an ASCII prefix for
+    /// every slice makes byte-at-a-time decoders repeatedly traverse that prefix.
+    fn stringSliceUtf16A(self: *Interpreter, s: []const u8, start: usize, end: usize, fixed_width: bool) EvalError![]const u8 {
+        if (!fixed_width) return self.stringSliceUtf16(s, start, end);
         const lo = @min(start, s.len);
         const hi = @min(end, s.len);
         if (lo >= hi) return "";
@@ -21956,7 +21956,7 @@ pub const Interpreter = struct {
             const len = stringLengthForAccess(s, s_ascii, s_cell);
             const start = try relIndex(self, arg0(args), len, 0);
             const end = try relIndex(self, arg(args, 1), len, @floatFromInt(len));
-            if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, end, s_flat));
+            if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, end, s_ascii));
             return Value.str("");
         }
         if (eq(name, "substring")) {
@@ -21968,7 +21968,7 @@ pub const Interpreter = struct {
                 a0 = b0;
                 b0 = t;
             }
-            return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, a0, b0, s_flat));
+            return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, a0, b0, s_ascii));
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
             if (eq(name, "toLocaleUpperCase")) {
@@ -22336,7 +22336,7 @@ pub const Interpreter = struct {
                 const lu: usize = @intFromFloat(@trunc(l));
                 break :blk @min(lu, remaining);
             } else remaining;
-            return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, start + len, s_flat));
+            return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, start + len, s_ascii));
         }
         if (eq(name, "trimLeft")) return if (s_ascii) try self.trimmedFixedWidthValue(s, s_cell, s_flat, true, false) else try Value.strAlloc(self.arena, jsTrim(s, true, false));
         if (eq(name, "trimRight")) return if (s_ascii) try self.trimmedFixedWidthValue(s, s_cell, s_flat, false, true) else try Value.strAlloc(self.arena, jsTrim(s, false, true));

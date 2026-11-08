@@ -26,6 +26,35 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "string slices preserve UTF-16 across fixed and variable width storage",
+        .source =
+        \\var rows = [
+        \\  ["a\0bcd", 1, 3, "\0b"],
+        \\  ["café", 2, 4, "fé"],
+        \\  ["a\u0100z", 1, 2, "\u0100"],
+        \\  ["a\ud83d\ude00z", 1, 2, "\ud83d"],
+        \\  ["a\ud83d\ude00z", 2, 3, "\ude00"],
+        \\  ["a\ud800z", 1, 2, "\ud800"]
+        \\];
+        \\var methods = ["slice", "substring", "substr"];
+        \\for (var m = 0; m < methods.length; m++) {
+        \\  for (var r = 0; r < rows.length; r++) {
+        \\    var row = rows[r];
+        \\    var end = methods[m] === "substr" ? row[2] - row[1] : row[2];
+        \\    if (row[0][methods[m]](row[1], end) !== row[3]) throw Error("code units");
+        \\  }
+        \\  var order = "";
+        \\  var receiver = { toString: function () { order += "s"; return "abcd"; } };
+        \\  var start = { valueOf: function () { order += "a"; return 1; } };
+        \\  var end = { valueOf: function () { order += "b"; return 2; } };
+        \\  var result = String.prototype[methods[m]].call(receiver, start, end);
+        \\  if (order !== "sab" || result !== (methods[m] === "substr" ? "bc" : "b")) throw Error("coercion order");
+        \\}
+        \\1
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "dynamic function bodies cannot escape their synthesized boundary",
         .source =
         \\var GeneratorFunction = Object.getPrototypeOf(function*(){}).constructor;
