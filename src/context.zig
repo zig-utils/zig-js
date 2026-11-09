@@ -1,4 +1,5 @@
 const std = @import("std");
+const ContextArena = @import("context_arena.zig").ContextArena;
 const runtime_threads = @import("runtime_threads.zig");
 const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
@@ -650,6 +651,11 @@ pub const BudgetAllocator = struct {
     pub fn setRecovery(self: *BudgetAllocator, ctx: *anyopaque, f: RecoveryFn) void {
         self.recover_ctx = ctx;
         self.recover_fn = f;
+    }
+
+    fn arenaRemaining(raw: *anyopaque) usize {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(raw));
+        return self.limit -| self.used.load(.acquire);
     }
 
     pub fn stats(self: *const BudgetAllocator) Context.HeapBudgetStats {
@@ -4291,7 +4297,7 @@ pub const Context = struct {
     /// Runaway-step ceiling handed to every interpreter this realm creates.
     /// See `TestingOptions.step_budget`.
     step_budget: u64 = interp.max_steps,
-    arena_state: *std.heap.ArenaAllocator,
+    arena_state: *ContextArena,
     /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
     /// allocation safe in the no-GIL default (#1). See `LockedArena`.
@@ -5701,8 +5707,11 @@ pub const Context = struct {
             runtime_attribution_profiler = profile;
             break :blk profile.allocator();
         } else limited_gpa;
-        const arena_state = try context_gpa.create(std.heap.ArenaAllocator);
-        arena_state.* = std.heap.ArenaAllocator.init(context_gpa);
+        const arena_state = try context_gpa.create(ContextArena);
+        arena_state.* = ContextArena.init(context_gpa, if (budget_allocator) |ba| .{
+            .context = ba,
+            .remaining = BudgetAllocator.arenaRemaining,
+        } else null);
         errdefer {
             arena_state.deinit();
             context_gpa.destroy(arena_state);
@@ -48052,4 +48061,99 @@ test "deferred function bodies compile on first call and keep their closures" {
         \\first() + "|" + second() + "|" + first()
     );
     try std.testing.expectEqualStrings("1,2,4:4|10,11,13:13|4,5,7:7", result.asStr());
+}
+
+test "Context quota arena: compile the minimized source and retain callable closures at 64 MiB" {
+    const source = try std.testing.allocator.alloc(u8, 64015);
+    defer std.testing.allocator.free(source);
+    @memcpy(source[0..10], "if(false){");
+    for (0..32000) |index| @memcpy(source[10 + index * 2 ..][0..2], "0;");
+    @memcpy(source[64010..], "}42;\n");
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluateProtected(source);
+    defer std.debug.assert(ctx.unprotectValue(result));
+    try std.testing.expectEqual(@as(f64, 42), result.get().asNum());
+    const callback = try ctx.evaluateProtected("(function(){ let total = 40; return function(step){ total += step; return total; }; })()");
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    const step = try ctx.createHostValue(.{ .number = 1 });
+    defer std.debug.assert(ctx.unprotectValue(step));
+    for (41..45) |expected| {
+        ctx.collectGarbage();
+        const next = try ctx.callProtected(callback, null, &.{step});
+        try std.testing.expectEqual(@as(f64, @floatFromInt(expected)), next.get().asNum());
+        try std.testing.expect(ctx.unprotectValue(next));
+    }
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expectEqual(@as(usize, 64 * 1024 * 1024), stats.limit_bytes);
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
+test "Context quota arena: genuine exhaustion preserves the hard cap and releases all storage" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    try std.testing.expectError(error.OutOfMemory, ctx.arena().alloc(u8, 64 * 1024 * 1024));
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("6 * 7")).asNum());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
+test "Context quota arena: sibling realms keep the primary arena alive" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 64 * 1024 * 1024 });
+    defer ctx.destroy();
+    const sibling = try Context.createSharedArenaRealm(ctx);
+    var destroyed = false;
+    defer if (!destroyed) sibling.destroySharedArenaRealm();
+    try std.testing.expectEqual(ctx.arena_state, sibling.arena_state);
+    try std.testing.expectEqual(@as(f64, 41), (try sibling.evaluate("globalThis.answer = 41; answer")).asNum());
+    try std.testing.expect((try ctx.evaluate("typeof answer === 'undefined'")).asBool());
+    sibling.destroySharedArenaRealm();
+    destroyed = true;
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("6 * 7")).asNum());
+    try std.testing.expect(ctx.heapBudgetStats().?.peak_bytes <= 64 * 1024 * 1024);
+}
+
+test "Context quota arena: LockedArena retains aligned local buffers across parallel allocation" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .heap_limit_bytes = 64 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const Worker = struct {
+        fn run(allocator: std.mem.Allocator, output: *[256][]u8, lane: u8, failed: *std.atomic.Value(bool)) void {
+            for (output) |*slice| {
+                const ptr = allocator.rawAlloc(513, .@"64", @returnAddress()) orelse {
+                    failed.store(true, .release);
+                    return;
+                };
+                slice.* = ptr[0..513];
+                @memset(slice.*, lane + 1);
+            }
+        }
+    };
+    var memory: [4][256][]u8 = undefined;
+    var failed: std.atomic.Value(bool) = .init(false);
+    var threads: [4]std.Thread = undefined;
+    var launched: usize = 0;
+    errdefer for (threads[0..launched]) |thread| thread.join();
+    for (&threads, 0..) |*thread, lane| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ ctx.arena(), &memory[lane], @as(u8, @intCast(lane)), &failed });
+        launched += 1;
+    }
+    for (threads) |thread| thread.join();
+    launched = 0;
+    try std.testing.expect(!failed.load(.acquire));
+    for (memory, 0..) |slices, lane| for (slices) |slice| {
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(slice.ptr) % 64);
+        try std.testing.expectEqual(@as(u8, @intCast(lane + 1)), slice[0]);
+        try std.testing.expectEqual(@as(u8, @intCast(lane + 1)), slice[slice.len - 1]);
+    };
+    try std.testing.expect(ctx.heapBudgetStats().?.peak_bytes <= 64 * 1024 * 1024);
 }

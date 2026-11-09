@@ -35,8 +35,8 @@
     },
     {
       "path": "advanced/memory-and-gc/index.html",
-      "bytes": 232092,
-      "sha256": "77b0aff191db9e626f3939260cff5d37747b027e11e7bda1f672deec7d889e24"
+      "bytes": 232515,
+      "sha256": "d7e3298175c16fe50d936e316080d782c2f3e87248b1f34269c9b07ab2af78f4"
     },
     {
       "path": "advanced/verification/index.html",
@@ -180,8 +180,8 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 275382,
-      "sha256": "bcf22c862de7acc20b652f21979a1baebecece56bc11f96911c282ad246aa118"
+      "bytes": 275785,
+      "sha256": "5527d96325721b8842181a14b02ef50b6f273a3f78cb5fc8beff8c9a9d4cfbe9"
     },
     {
       "path": "sitemap.xml",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "fe27cfbad5b76f6d98680cfee2d94ea8f6cae4af0a0c0186d55e0fcc6e325b46"
+  "tree_sha256": "5043d198258808fc02ba1aa331506ad8cb8409e242cc680d6019a8b072a92885"
 }

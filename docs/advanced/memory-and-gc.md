@@ -172,6 +172,13 @@ storage, thread records, and other allocations routed through the context
 allocator. **Arena-backed caps fail closed. GC-backed caps can collect and retry**
 at safe allocation-recovery points.
 
+The arena in a bounded context uses the remaining budget as a growth hint. If
+extra reserved capacity does not fit, it requests a smaller complete block for
+the requested bytes and alignment. Existing arena allocations keep their
+addresses. The backing allocator still enforces the cap and recovery rules.
+Genuine exhaustion returns `OutOfMemory`; contexts without a heap limit retain
+the standard arena.
+
 Inspect at runtime:
 
 ```zig
