@@ -528,8 +528,11 @@ test "RegExp program cache releases oversized result scratch after a live captur
     const allocator = std.testing.allocator;
     var cache = Cache.init(allocator);
     defer cache.deinit();
-    const owned = try compileOwned(allocator, "a(.+?)!");
-    var lease = cache.adopt("a(.+?)!", "", owned);
+    // A greedy capture with a backreference keeps real alternatives live.
+    // Lazy scans now recycle dead states instead of forcing an oversized arena.
+    const pattern = "a(.+)!(?:\\1)?";
+    const owned = try compileOwned(allocator, pattern);
+    var lease = cache.adopt(pattern, "", owned);
     defer lease.release();
     const input = try allocator.alloc(u8, 8192);
     defer allocator.free(input);
