@@ -13907,6 +13907,17 @@ pub const Interpreter = struct {
         return programs.adopt(raw_src, flags, owned);
     }
 
+    fn regexFindFrom(self: *Interpreter, program: *RegExpProgramCache.Lease, input: []const u8, start: usize) EvalError!?RegExpProgramCache.Lease.OwnedMatch {
+        return program.findFrom(input, start) catch |err| switch (err) {
+            // RegExpBuiltinExec may update lastIndex only after a completed
+            // match attempt. Resource exhaustion is an abrupt completion, not
+            // the failed match that would reset a global/sticky lastIndex.
+            error.Timeout => self.throwError("RangeError", "RegExp backtracking limit exceeded"),
+            error.OutOfMemory => error.OutOfMemory,
+            else => self.throwErrorFmt("InternalError", "RegExp matching failed: {s}", .{@errorName(err)}),
+        };
+    }
+
     /// Whether `o` is the `%RegExp.prototype%` intrinsic (which the source/flags
     /// accessors special-case: they return "(?:)" / "" / undefined rather than
     /// throwing).
@@ -13983,7 +13994,7 @@ pub const Interpreter = struct {
             var program = try self.compileRegex(o);
             defer program.release();
             const re = program.program();
-            const found = program.findFrom(search_input, start) catch null;
+            const found = try self.regexFindFrom(&program, search_input, start);
             if (found) |match| {
                 var owned_match = match;
                 defer owned_match.deinit();
@@ -14040,7 +14051,7 @@ pub const Interpreter = struct {
         const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
         var program = try self.compileRegex(o);
         defer program.release();
-        const found = program.findFrom(search_input, start) catch null;
+        const found = try self.regexFindFrom(&program, search_input, start);
         if (found) |match| {
             var owned_match = match;
             defer owned_match.deinit();
@@ -14832,7 +14843,7 @@ pub const Interpreter = struct {
         var program = try self.compileRegex(o);
         defer program.release();
         const re = program.program();
-        const found = program.findFrom(search_input, start) catch null;
+        const found = try self.regexFindFrom(&program, search_input, start);
         if (found) |match| {
             var owned_match = match;
             defer owned_match.deinit();
@@ -65212,4 +65223,68 @@ test "Function arguments snapshot allocation failures restore roots and realms" 
         }
         try std.testing.expect(failures > 0);
     }
+}
+
+test "RegExp budget exhaustion throws without resetting lastIndex" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape, .scratch_allocator = std.testing.allocator };
+    defer machine.deinit();
+    const input = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX";
+    const expression = (try machine.makeRegex("(?!.+X)", "gy")).asObj();
+    var compiled = try machine.compileRegex(expression);
+    const program = compiled.program();
+    try std.testing.expect(program.backtrack_engine != null);
+    program.backtrack_engine.?.max_steps = 25;
+    compiled.release();
+
+    for (0..3) |entry| {
+        try machine.setRegExpLastIndex(expression, 1);
+        machine.exception = Value.undef();
+        switch (entry) {
+            0 => try std.testing.expectError(error.Throw, machine.regexMethod(expression, "exec", &.{Value.str(input)})),
+            1 => try std.testing.expectError(error.Throw, machine.regexpTestBuiltin(expression, Value.str(input))),
+            else => {
+                var cursor = Interpreter.RxCursor{ .ascii = true };
+                var input_cursor = Interpreter.RxCursor{ .ascii = true };
+                try std.testing.expectError(error.Throw, machine.regexBuiltinExecWith(expression, input, Value.str(input), input, "gy", input.len, &cursor, &input_cursor));
+            },
+        }
+        try std.testing.expectEqualStrings("RangeError", (try machine.getProperty(machine.exception, "name")).asStr());
+        try std.testing.expectEqualStrings("RegExp backtracking limit exceeded", (try machine.getProperty(machine.exception, "message")).asStr());
+        try std.testing.expectEqual(@as(f64, 1), expression.getOwn("lastIndex").?.asNum());
+    }
+
+    try env.put("limitedRx", Value.obj(expression));
+    try env.put("limitInput", Value.str(input));
+    const tdz = try a.create(value.Object);
+    tdz.* = .{};
+    machine.tdz_marker = tdz;
+    const sources = .{
+        "(function(){try{limitedRx.exec(limitInput);return false;}catch(e){return e instanceof RangeError && e.message==='RegExp backtracking limit exceeded' && limitedRx.lastIndex===1;}})()",
+        "(function*(){try{limitedRx.test(limitInput);return false;}catch(e){return e instanceof RangeError && limitedRx.lastIndex===1;}})().next().value",
+        "(function*(){try{limitInput.match(limitedRx);return false;}catch(e){return e instanceof RangeError && limitedRx.lastIndex===0;}})().next().value",
+    };
+    inline for (sources) |source| {
+        try machine.setRegExpLastIndex(expression, 1);
+        machine.exception = Value.undef();
+        var parser = try Parser.init(a, source);
+        const script = try parser.parseProgram();
+        const result = try machine.eval(script);
+        try std.testing.expect(result.isBoolean() and result.asBool());
+    }
+
+    // An exhausted cached program remains reusable after the caller handles
+    // the exception; neither the lease nor its result arena stays poisoned.
+    program.backtrack_engine.?.max_steps = 10000;
+    machine.exception = Value.undef();
+    try machine.setRegExpLastIndex(expression, 1);
+    try std.testing.expect(!try machine.regexpTestBuiltin(expression, Value.str(input)));
+    try std.testing.expectEqual(@as(f64, 0), expression.getOwn("lastIndex").?.asNum());
+    try machine.setRegExpLastIndex(expression, input.len - 1);
+    try std.testing.expect(try machine.regexpTestBuiltin(expression, Value.str(input)));
 }
