@@ -7441,7 +7441,9 @@ pub const Interpreter = struct {
                     defer self.gc_env_roots.shrinkRetainingCapacity(iter_env_mark);
                     // EnumerateObjectProperties: own + inherited enumerable string
                     // keys with prototype-chain shadowing (see forInKeyList).
-                    for (try self.forInKeyList(self.tempRoot(receiver_root, receiver).asObj())) |k| {
+                    var key_snapshot = try self.forInKeyList(self.tempRoot(receiver_root, receiver).asObj());
+                    defer key_snapshot.deinit();
+                    for (key_snapshot.items) |k| {
                         // A property deleted (or made non-enumerable) before it is
                         // reached must not be visited: the key list is a snapshot,
                         // so re-check the property still exists on the chain.
@@ -7467,9 +7469,12 @@ pub const Interpreter = struct {
     /// suppresses any same-named property further up. Array dense element indices
     /// (skipping holes) are own enumerable keys outside the shape. Symbol/private
     /// keys are excluded.
-    pub fn forInKeyList(self: *Interpreter, start: *value.Object) EvalError![]const []const u8 {
+    pub fn forInKeyList(self: *Interpreter, start: *value.Object) EvalError!OwnKeySnapshot {
+        var snapshot = OwnKeySnapshot.init(self);
+        errdefer snapshot.deinit();
+        const result = snapshot.arena.allocator();
         var out: std.ArrayListUnmanaged([]const u8) = .empty;
-        const scratch = self.scratch_allocator orelse self.arena;
+        const scratch = self.scratch_allocator orelse result;
         var visited: SecureStringMembership = .{};
         defer visited.deinit(scratch);
         const roots = self.gc_temp_roots.items.len;
@@ -7483,9 +7488,9 @@ pub const Interpreter = struct {
                 const plen = utf16LenOfValue(p);
                 var i: usize = 0;
                 while (i < plen) : (i += 1) {
-                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    const key = try std.fmt.allocPrint(result, "{d}", .{i});
                     if (try visited.getOrPutSecure(self, scratch, key)) continue;
-                    try out.append(self.arena, key);
+                    try out.append(result, key);
                 }
             };
             const dense_len = o.elementsLen();
@@ -7493,11 +7498,11 @@ pub const Interpreter = struct {
                 var i: usize = 0;
                 while (i < dense_len) : (i += 1) {
                     if (!o.denseElementPresent(i)) continue;
-                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    const key = try std.fmt.allocPrint(result, "{d}", .{i});
                     // Accessor at this index comes from ownKeys below.
                     if (o.getAccessor(key) != null) continue;
                     if (try visited.getOrPutSecure(self, scratch, key)) continue;
-                    if (o.getAttr(key).enumerable) try out.append(self.arena, key);
+                    if (o.getAttr(key).enumerable) try out.append(result, key);
                 }
             }
             // A TypedArray's integer-indexed elements are own enumerable keys
@@ -7507,15 +7512,15 @@ pub const Interpreter = struct {
                 var i: usize = 0;
                 const len = ta.currentLength() orelse 0;
                 while (i < len) : (i += 1) {
-                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    const key = try std.fmt.allocPrint(result, "{d}", .{i});
                     if (try visited.getOrPutSecure(self, scratch, key)) continue;
-                    try out.append(self.arena, key);
+                    try out.append(result, key);
                 }
             }
             const own_keys = if (o.proxyHandler() != null or o.proxy_revoked or o.moduleNs() != null)
-                try self.objectOwnKeysList(o)
+                try self.objectOwnKeysInto(o, result)
             else
-                try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena);
+                try o.ownKeysWithScratch(result, self.scratch_allocator orelse result);
             o = self.tempRoot(current_root, current).asObj();
             for (own_keys) |k| {
                 o = self.tempRoot(current_root, current).asObj();
@@ -7524,13 +7529,14 @@ pub const Interpreter = struct {
                 // Exotic descriptors are observable and must run only when
                 // this candidate is reached, after preceding loop bodies.
                 if (o.proxyHandler() != null or o.proxy_revoked or moduleNsOf(o) != null or
-                    try self.propertyIsEnumerableResult(o, k)) try out.append(self.arena, k);
+                    try self.propertyIsEnumerableResult(o, k)) try out.append(result, k);
             }
             o = self.tempRoot(current_root, current).asObj();
             current = try self.getPrototypeOfObject(o);
             self.setTempRoot(current_root, current);
         }
-        return out.items;
+        snapshot.items = out.items;
+        return snapshot;
     }
 
     /// EnumerateObjectProperties uses [[GetOwnProperty]], never [[HasProperty]].
@@ -7560,14 +7566,17 @@ pub const Interpreter = struct {
     /// names from the object and its prototype chain, with first occurrence
     /// winning. Unlike language `for-in`, host `getPropertyNames` callback keys
     /// participate through the host-class own-key bridge.
-    pub fn cApiPropertyNameSnapshot(self: *Interpreter, start: *value.Object) EvalError![]const []const u8 {
+    pub fn cApiPropertyNameSnapshot(self: *Interpreter, start: *value.Object) EvalError!OwnKeySnapshot {
+        var snapshot = OwnKeySnapshot.init(self);
+        errdefer snapshot.deinit();
+        const result = snapshot.arena.allocator();
         var out: std.ArrayListUnmanaged([]const u8) = .empty;
-        const scratch = self.scratch_allocator orelse self.arena;
+        const scratch = self.scratch_allocator orelse result;
         var visited: SecureStringMembership = .{};
         defer visited.deinit(scratch);
         var cur: ?*value.Object = start;
         while (cur) |object| {
-            for (try self.objectOwnKeysList(object)) |key| {
+            for (try self.objectOwnKeysInto(object, result)) |key| {
                 if (value.isRealSymbolKey(key) or value.isHiddenInternalKey(key) or value.isPrivateKey(key)) continue;
                 if (try visited.getOrPutSecure(self, scratch, key)) continue;
                 const enumerable = if (moduleNsOf(object) != null) blk: {
@@ -7577,11 +7586,12 @@ pub const Interpreter = struct {
                     const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(object), try self.keyToValue(key) });
                     break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |entry| entry.toBoolean() else false;
                 } else try self.enumerableOwnPropertyResult(object, key);
-                if (enumerable) try out.append(self.arena, key);
+                if (enumerable) try out.append(result, try result.dupe(u8, key));
             }
             cur = object.protoAtomic();
         }
-        return out.items;
+        snapshot.items = out.items;
+        return snapshot;
     }
 
     pub const ForInPreparation = struct {
@@ -7603,7 +7613,9 @@ pub const Interpreter = struct {
         if (v.isUndefined() or v.isNull()) return .{ .target = v, .keys = self.tempRoot(keys_root, keys) };
         const target = Value.obj(try self.toObject(self.tempRoot(input_root, v)));
         const target_root = try self.pushTempRoot(target);
-        for (try self.forInKeyList(target.asObj())) |k| {
+        var key_snapshot = try self.forInKeyList(target.asObj());
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |k| {
             const key = try Value.strAlloc(self.arena, value.decodeStringKey(k));
             try self.tempRoot(keys_root, keys).asObj().appendElement(self.arena, key);
         }
@@ -12039,10 +12051,12 @@ pub const Interpreter = struct {
                 key: []const u8,
             };
             var entries: std.ArrayListUnmanaged(DeleteEntry) = .empty;
-            for (try self.objectOwnKeysList(o)) |k| {
+            var key_snapshot = try self.objectOwnKeysList(o);
+            defer key_snapshot.deinit();
+            for (key_snapshot.items) |k| {
                 if (arrayElementIndex(k)) |idx| {
                     if (idx >= requested_len and idx < old_len)
-                        try entries.append(self.arena, .{ .idx = idx, .key = k });
+                        try entries.append(key_snapshot.arena.allocator(), .{ .idx = idx, .key = k });
                 }
             }
             std.mem.sort(DeleteEntry, entries.items, {}, struct {
@@ -12118,14 +12132,16 @@ pub const Interpreter = struct {
     fn registerSymbol(self: *Interpreter, sym: *value.Object) []const u8 {
         self.cacheSymbol(sym.symbolKey(), sym) catch {};
         if (self.symbolIdentityRegistry()) |symbol_registry| {
-            const storage_key = self.symbolRegistryStorageKey(sym.symbolKey()) catch return sym.symbolKey();
+            var snapshot = OwnKeySnapshot.init(self);
+            defer snapshot.deinit();
+            const storage_key = self.symbolRegistryStorageKey(snapshot.arena.allocator(), sym.symbolKey()) catch return sym.symbolKey();
             symbol_registry.setOwn(self.arena, self.root_shape, storage_key, Value.obj(sym)) catch {};
         }
         return sym.symbolKey();
     }
 
-    fn symbolRegistryStorageKey(self: *Interpreter, key: []const u8) EvalError![]const u8 {
-        return std.fmt.allocPrint(self.arena, "\x00r{s}", .{key});
+    fn symbolRegistryStorageKey(_: *Interpreter, allocator: std.mem.Allocator, key: []const u8) EvalError![]const u8 {
+        return std.fmt.allocPrint(allocator, "\x00r{s}", .{key});
     }
 
     fn symbolIdentityRegistry(self: *Interpreter) ?*value.Object {
@@ -13299,7 +13315,9 @@ pub const Interpreter = struct {
             return self.throwError("TypeError", "import() 'with' attributes must be an object");
         var module_type: []const u8 = "";
         const attrs_obj = attrs.asObj();
-        const keys = try self.objectOwnKeysList(attrs_obj);
+        var keys_snapshot = try self.objectOwnKeysList(attrs_obj);
+        defer keys_snapshot.deinit();
+        const keys = keys_snapshot.items;
         for (keys) |k| {
             if (value.isSymbolKey(k)) continue;
             if (!try self.objectProtoPropertyIsEnumerable(attrs_obj, k)) continue;
@@ -13643,15 +13661,9 @@ pub const Interpreter = struct {
         switch (src.kind()) {
             .object => {
                 const source = src.asObj();
-                const proxy_source = source.proxyHandler() != null or source.proxy_revoked;
-                var keys = try self.objectOwnKeysList(source);
-                if (proxy_source) {
-                    // Proxy OwnPropertyKeys may return transient String cells.
-                    // Retain their canonical bytes through descriptor/get calls.
-                    const retained = try self.arena.alloc([]const u8, keys.len);
-                    for (keys, 0..) |key, index| retained[index] = try self.arena.dupe(u8, key);
-                    keys = retained;
-                }
+                var key_snapshot = try self.objectOwnKeysList(source);
+                defer key_snapshot.deinit();
+                const keys = key_snapshot.items;
                 for (keys) |key| {
                     if (value.isPrivateKey(key)) continue;
                     // CopyDataProperties checks each live own descriptor after
@@ -16550,8 +16562,7 @@ pub const Interpreter = struct {
         return trap;
     }
 
-    /// A property key as a JS value for passing to a trap. (String keys only for
-    /// now; symbol-keyed trap arguments aren't reconstructed yet.)
+    /// Reconstruct a property key for a trap without retaining borrowed bytes.
     pub fn keyToValue(self: *Interpreter, key: []const u8) EvalError!Value {
         // A symbol-encoded key recovers the original Symbol (registered in
         // `keyOf` when it was used as a property key); other keys are strings.
@@ -16561,10 +16572,12 @@ pub const Interpreter = struct {
             // Recover Symbols used by a previous call from a reflection-hidden
             // registry on the realm-rooted Symbol intrinsic.
             if (self.symbolIdentityRegistry()) |symbol_registry| {
-                const storage_key = try self.symbolRegistryStorageKey(key);
+                var snapshot = OwnKeySnapshot.init(self);
+                defer snapshot.deinit();
+                const storage_key = try self.symbolRegistryStorageKey(snapshot.arena.allocator(), key);
                 if (symbol_registry.getOwn(storage_key)) |registered| {
                     if (registered.isObject() and registered.asObj().is_symbol) {
-                        self.cacheSymbol(key, registered.asObj()) catch {};
+                        self.cacheSymbol(registered.asObj().symbolKey(), registered.asObj()) catch {};
                         return registered;
                     }
                 }
@@ -16574,11 +16587,13 @@ pub const Interpreter = struct {
             // canonical Symbol object on the global `Symbol` so identity holds
             // (e.g. getOwnPropertySymbols/Reflect.ownKeys surfacing @@toStringTag).
             if (self.env.get("Symbol")) |symv| if (symv.isObject()) {
-                const ks = symv.asObj().ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena) catch &.{};
+                var snapshot = OwnKeySnapshot.init(self);
+                defer snapshot.deinit();
+                const ks = symv.asObj().ownKeysWithScratch(snapshot.arena.allocator(), self.scratch_allocator orelse self.arena) catch &.{};
                 for (ks) |k| {
                     const v = symv.asObj().getOwn(k) orelse continue;
                     if (v.isObject() and v.asObj().is_symbol and std.mem.eql(u8, v.asObj().symbolKey(), key)) {
-                        self.cacheSymbol(key, v.asObj()) catch {};
+                        self.cacheSymbol(v.asObj().symbolKey(), v.asObj()) catch {};
                         return Value.obj(v.asObj());
                     }
                 }
@@ -16850,15 +16865,35 @@ pub const Interpreter = struct {
         indices.items.len = write;
     }
 
-    /// `ownKeys` trap → an array of keys (string values). Falls back to the
-    /// target's own string keys.
-    /// An object's [[OwnPropertyKeys]] as encoded key strings — proxy-aware, and
-    /// including an array's dense element indices and `length` (which live
-    /// outside the shape).
-    pub fn objectOwnKeysList(self: *Interpreter, target: *value.Object) EvalError![]const []const u8 {
+    /// Invocation-owned native key buffers. They contain no GC-cell pointers;
+    /// encoded key bytes remain stable across getters, traps and moving GC.
+    /// An escaping JS value or property name must acquire its own storage.
+    pub const OwnKeySnapshot = struct {
+        arena: std.heap.ArenaAllocator,
+        items: []const []const u8 = &.{},
+
+        pub fn init(self: *Interpreter) OwnKeySnapshot {
+            return .{ .arena = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena)) };
+        }
+
+        pub fn deinit(snapshot: *OwnKeySnapshot) void {
+            snapshot.arena.deinit();
+            snapshot.* = undefined;
+        }
+    };
+
+    /// [[OwnPropertyKeys]] including proxy/exotic keys and dense indices.
+    pub fn objectOwnKeysList(self: *Interpreter, target: *value.Object) EvalError!OwnKeySnapshot {
+        var snapshot = OwnKeySnapshot.init(self);
+        errdefer snapshot.deinit();
+        snapshot.items = try self.objectOwnKeysInto(target, snapshot.arena.allocator());
+        return snapshot;
+    }
+
+    fn objectOwnKeysInto(self: *Interpreter, target: *value.Object, result: std.mem.Allocator) EvalError![]const []const u8 {
         var t = target;
-        if (t.proxyHandler() != null or t.proxy_revoked) return self.proxyOwnKeys(t);
-        const scratch = self.scratch_allocator orelse self.arena;
+        if (t.proxyHandler() != null or t.proxy_revoked) return self.proxyOwnKeysInto(t, result);
+        const scratch = self.scratch_allocator orelse result;
         const appendReflectable = struct {
             fn f(arena: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), k: []const u8) !void {
                 if (value.isPrivateKey(k)) return;
@@ -16870,8 +16905,8 @@ pub const Interpreter = struct {
             try triggerDeferModule(self, ns); // `import defer`: [[OwnPropertyKeys]] evaluates first
             // Sorted string export names first, then the @@toStringTag symbol key.
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
-            try list.appendSlice(self.arena, ns.names);
-            try list.append(self.arena, ns.tag_key);
+            try list.appendSlice(result, ns.names);
+            try list.append(result, ns.tag_key);
             return list.items;
         }
         if (t.boxedPrimitive()) |p| {
@@ -16882,28 +16917,28 @@ pub const Interpreter = struct {
                 var indices: std.ArrayListUnmanaged([]const u8) = .empty;
                 const virtual_length = utf16LenOfValue(p);
                 for (0..virtual_length) |i| {
-                    try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                    try indices.append(result, try std.fmt.allocPrint(result, "{d}", .{i}));
                 }
-                for (try t.denseElementIndices(self.arena)) |dense_i| {
+                for (try t.denseElementIndices(result)) |dense_i| {
                     if (dense_i < virtual_length) continue;
-                    try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
+                    try indices.append(result, try std.fmt.allocPrint(result, "{d}", .{dense_i}));
                 }
                 var strings: std.ArrayListUnmanaged([]const u8) = .empty;
                 var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
-                for (try t.ownKeysWithScratch(self.arena, scratch)) |k| {
+                for (try t.ownKeysWithScratch(result, scratch)) |k| {
                     if (std.mem.eql(u8, k, "length") or value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                     if (value.isRealSymbolKey(k)) {
-                        try symbols.append(self.arena, k);
+                        try symbols.append(result, k);
                     } else if (value.canonicalIndex(k) != null) {
-                        try indices.append(self.arena, k);
-                    } else try strings.append(self.arena, k);
+                        try indices.append(result, k);
+                    } else try strings.append(result, k);
                 }
                 sortUniqueCanonicalIndexKeys(&indices);
                 var list: std.ArrayListUnmanaged([]const u8) = .empty;
-                try list.appendSlice(self.arena, indices.items);
-                try list.append(self.arena, "length");
-                try list.appendSlice(self.arena, strings.items);
-                try list.appendSlice(self.arena, symbols.items);
+                try list.appendSlice(result, indices.items);
+                try list.append(result, "length");
+                try list.appendSlice(result, strings.items);
+                try list.appendSlice(result, symbols.items);
                 return list.items;
             }
         }
@@ -16913,8 +16948,8 @@ pub const Interpreter = struct {
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             var i: usize = 0;
             const cur = ta.currentLength() orelse 0;
-            while (i < cur) : (i += 1) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-            for (try t.ownKeysWithScratch(self.arena, scratch)) |k| try appendReflectable(self.arena, &list, k);
+            while (i < cur) : (i += 1) try list.append(result, try std.fmt.allocPrint(result, "{d}", .{i}));
+            for (try t.ownKeysWithScratch(result, scratch)) |k| try appendReflectable(result, &list, k);
             return list.items;
         }
         if (t.is_array) {
@@ -16923,29 +16958,29 @@ pub const Interpreter = struct {
             // then string keys in creation order — "length" exists from
             // construction so it precedes any user-added string key — then symbols.
             var indices: std.ArrayListUnmanaged([]const u8) = .empty;
-            for (try t.denseElementIndices(self.arena)) |i| {
-                try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+            for (try t.denseElementIndices(result)) |i| {
+                try indices.append(result, try std.fmt.allocPrint(result, "{d}", .{i}));
             }
             var strings: std.ArrayListUnmanaged([]const u8) = .empty;
             var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
-            for (try t.ownKeysWithScratch(self.arena, scratch)) |k| {
+            for (try t.ownKeysWithScratch(result, scratch)) |k| {
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
-                    try symbols.append(self.arena, k);
+                    try symbols.append(result, k);
                 } else if (value.canonicalIndex(k) != null) {
-                    try indices.append(self.arena, k);
+                    try indices.append(result, k);
                 } else {
-                    try strings.append(self.arena, k);
+                    try strings.append(result, k);
                 }
             }
             sortUniqueCanonicalIndexKeys(&indices);
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
-            try list.appendSlice(self.arena, indices.items);
+            try list.appendSlice(result, indices.items);
             // Arguments use dense storage but OrdinaryOwnPropertyKeys (10.1.11.1):
             // their length is an ordinary named property, including deletion.
-            if (!t.is_arguments) try list.append(self.arena, "length");
-            try list.appendSlice(self.arena, strings.items);
-            try list.appendSlice(self.arena, symbols.items);
+            if (!t.is_arguments) try list.append(result, "length");
+            try list.appendSlice(result, strings.items);
+            try list.appendSlice(result, symbols.items);
             return list.items;
         }
         // A function's `.prototype` own property is materialized lazily; force it
@@ -16956,8 +16991,8 @@ pub const Interpreter = struct {
         const fn_has_proto = t.jsFunction() != null and Interpreter.jsFunctionHasOwnPrototypeSlot(t);
         if (fn_has_proto) try self.materializeFunctionPrototype(t);
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (try t.denseElementIndices(self.arena)) |dense_i| {
-            try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
+        for (try t.denseElementIndices(result)) |dense_i| {
+            try indices.append(result, try std.fmt.allocPrint(result, "{d}", .{dense_i}));
         }
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -16969,30 +17004,31 @@ pub const Interpreter = struct {
             const target_root = try self.pushTempRoot(Value.obj(t));
             defer self.restoreTempRoots(target_root);
             self.recordExecutionTier(.host_callbacks);
-            const host_keys = try own_keys(@ptrCast(self), t);
+            const host_keys = try own_keys(@ptrCast(self), t, result);
             t = self.tempRoot(target_root, Value.obj(target)).asObj();
-            for (host_keys) |k| {
+            for (host_keys) |borrowed| {
+                const k = try result.dupe(u8, borrowed);
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
-                    try symbols.append(self.arena, k);
+                    try symbols.append(result, k);
                 } else if (value.canonicalIndex(k) != null) {
-                    try indices.append(self.arena, k);
+                    try indices.append(result, k);
                 } else {
                     if (seen_strings == null) seen_strings = .{};
-                    if (!try seen_strings.?.getOrPutSecure(self, scratch, k)) try strings.append(self.arena, k);
+                    if (!try seen_strings.?.getOrPutSecure(self, scratch, k)) try strings.append(result, k);
                 }
             }
         };
-        for (try t.ownKeysWithScratch(self.arena, scratch)) |k| {
+        for (try t.ownKeysWithScratch(result, scratch)) |k| {
             if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
             if (value.isRealSymbolKey(k)) {
-                try symbols.append(self.arena, k);
+                try symbols.append(result, k);
             } else if (value.canonicalIndex(k) != null) {
-                try indices.append(self.arena, k);
+                try indices.append(result, k);
             } else {
                 if (seen_strings) |*membership| {
-                    if (!try membership.getOrPutSecure(self, scratch, k)) try strings.append(self.arena, k);
-                } else try strings.append(self.arena, k);
+                    if (!try membership.getOrPutSecure(self, scratch, k)) try strings.append(result, k);
+                } else try strings.append(result, k);
             }
         }
         sortUniqueCanonicalIndexKeys(&indices);
@@ -17003,19 +17039,19 @@ pub const Interpreter = struct {
             var placed = false;
             for (strings.items) |s| {
                 if (std.mem.eql(u8, s, "prototype")) continue;
-                try reordered.append(self.arena, s);
+                try reordered.append(result, s);
                 if (std.mem.eql(u8, s, "name")) {
-                    try reordered.append(self.arena, "prototype");
+                    try reordered.append(result, "prototype");
                     placed = true;
                 }
             }
-            if (!placed) try reordered.append(self.arena, "prototype");
+            if (!placed) try reordered.append(result, "prototype");
             strings = reordered;
         }
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
-        try list.appendSlice(self.arena, indices.items);
-        try list.appendSlice(self.arena, strings.items);
-        try list.appendSlice(self.arena, symbols.items);
+        try list.appendSlice(result, indices.items);
+        try list.appendSlice(result, strings.items);
+        try list.appendSlice(result, symbols.items);
         return list.items;
     }
 
@@ -17087,11 +17123,11 @@ pub const Interpreter = struct {
         }
     };
 
-    pub fn proxyOwnKeys(self: *Interpreter, o: *value.Object) EvalError![]const []const u8 {
+    fn proxyOwnKeysInto(self: *Interpreter, o: *value.Object, result: std.mem.Allocator) EvalError![]const []const u8 {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const scratch = self.scratch_allocator orelse self.arena;
+        const scratch = self.scratch_allocator orelse result;
         const target = o.proxyTarget() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Proxy has already been revoked. No more operations are allowed to be performed on it");
         const target_root = try self.pushTempRoot(Value.obj(target));
@@ -17100,7 +17136,7 @@ pub const Interpreter = struct {
         // ECMA-262 10.5.11 retains the validated target and handler through
         // GetMethod, including revocation and relocation from the trap getter.
         const trap = (try self.proxyTrapFromHandler(Value.obj(handler), "ownKeys")) orelse
-            return self.objectOwnKeysList(self.tempRoot(target_root, Value.obj(target)).asObj());
+            return self.objectOwnKeysInto(self.tempRoot(target_root, Value.obj(target)).asObj(), result);
         const res = try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)));
         if (!builtins.isRealObject(res)) return self.throwError("TypeError", "Proxy handler's 'ownKeys' method must return an object");
         const result_root = try self.pushTempRoot(res);
@@ -17108,12 +17144,16 @@ pub const Interpreter = struct {
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const k = try self.getProperty(self.tempRoot(result_root, res), try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+            const k = try self.getProperty(self.tempRoot(result_root, res), try std.fmt.allocPrint(result, "{d}", .{i}));
             if (!k.isString() and !(k.isObject() and k.asObj().is_symbol))
                 return self.throwError("TypeError", "Proxy handler's 'ownKeys' method must return an array-like object containing only Strings and Symbols");
             // CreateListFromArrayLike owns each key beyond subsequent getters;
             // borrowed String-cell bytes cannot outlive their current address.
-            try list.append(self.arena, try self.arena.dupe(u8, try self.keyOf(k)));
+            const encoded = if (k.isString())
+                try value.encodeStringKey(result, try k.asWtf8(result))
+            else
+                self.registerSymbol(k.asObj());
+            try list.append(result, try result.dupe(u8, encoded));
         }
         var seen: SecureStringMembership = .{};
         defer seen.deinit(scratch);
@@ -17122,7 +17162,7 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Proxy handler's 'ownKeys' trap result must not contain any duplicate names");
         }
         const extensible = try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj());
-        const tkeys = try self.objectOwnKeysList(self.tempRoot(target_root, Value.obj(target)).asObj());
+        const tkeys = try self.objectOwnKeysInto(self.tempRoot(target_root, Value.obj(target)).asObj(), result);
         const nonconfigurable = try scratch.alloc(bool, tkeys.len);
         defer scratch.free(nonconfigurable);
         var has_nonconfig = false;
@@ -17732,11 +17772,9 @@ pub const Interpreter = struct {
             // [[OwnPropertyKeys]] order. That includes dense array indexes and
             // symbol keys, not just named shape slots.
             const vo = val.asObj();
-            const borrowed_keys = try self.objectOwnKeysList(vo);
-            const keys = try self.arena.alloc([]const u8, borrowed_keys.len);
-            // A proxy's list can contain transient string cells. Snapshot the
-            // encoded keys before descriptor/getter calls can retire that list.
-            for (borrowed_keys, 0..) |key, i| keys[i] = try self.arena.dupe(u8, key);
+            var key_snapshot = try self.objectOwnKeysList(vo);
+            defer key_snapshot.deinit();
+            const keys = key_snapshot.items;
             outer: for (keys) |k| {
                 if (value.isPrivateKey(k)) continue;
                 for (excluded) |excluded_key| {
@@ -20128,12 +20166,12 @@ pub const Interpreter = struct {
     /// returned in ascending order. These are indices stored as named
     /// properties (past the dense `elements` store, e.g. `a[2**31]=x`), so the
     /// search methods can visit them without walking the whole logical length.
-    fn arrSparseIndices(self: *Interpreter, o: *value.Object, lo: usize, hi: usize) EvalError![]usize {
+    fn arrSparseIndices(self: *Interpreter, o: *value.Object, lo: usize, hi: usize, result: std.mem.Allocator) EvalError![]usize {
         var list: std.ArrayListUnmanaged(usize) = .empty;
-        const keys = try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena);
+        const keys = try o.ownKeysWithScratch(result, self.scratch_allocator orelse result);
         for (keys) |k| {
             if (arrayIndex(k)) |idx| {
-                if (idx >= lo and idx < hi) try list.append(self.arena, idx);
+                if (idx >= lo and idx < hi) try list.append(result, idx);
             }
         }
         std.mem.sort(usize, list.items, {}, std.sort.asc(usize));
@@ -20512,7 +20550,9 @@ pub const Interpreter = struct {
             }
             // Sparse scan: named integer-index properties in ascending order, so
             // the first (lowest) match wins — without touching the hole tail.
-            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), @max(k, dense_hi), ilen);
+            var sparse_snapshot = OwnKeySnapshot.init(self);
+            defer sparse_snapshot.deinit();
+            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), @max(k, dense_hi), ilen, sparse_snapshot.arena.allocator());
             for (sparse) |idx| {
                 if (value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), idx), self.arrayMethodArgument(roots, args, 0)))
                     return Value.num(@floatFromInt(idx));
@@ -20543,7 +20583,9 @@ pub const Interpreter = struct {
             // undefined, so a `target` of undefined matches if any such hole
             // exists (rather than iterating billions of them).
             const tail_lo = @max(k, dense_hi);
-            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), tail_lo, ilen);
+            var sparse_snapshot = OwnKeySnapshot.init(self);
+            defer sparse_snapshot.deinit();
+            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), tail_lo, ilen, sparse_snapshot.arena.allocator());
             for (sparse) |idx| {
                 if (value.sameValueZero(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), idx), self.arrayMethodArgument(roots, args, 0))) return Value.boolVal(true);
             }
@@ -20828,7 +20870,9 @@ pub const Interpreter = struct {
             const result = try self.arraySpeciesCreate(self.arrayMethodOperand(callback_roots, 0, receiver), 0);
             const result_root = try self.pushTempRoot(result);
             if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
+                var sparse_snapshot = OwnKeySnapshot.init(self);
+                defer sparse_snapshot.deinit();
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen, sparse_snapshot.arena.allocator());
                 var ridx: usize = 0;
                 for (sparse) |idx| {
                     if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
@@ -20867,7 +20911,9 @@ pub const Interpreter = struct {
         if (eq(name, "forEach")) {
             const cb = callback;
             if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
+                var sparse_snapshot = OwnKeySnapshot.init(self);
+                defer sparse_snapshot.deinit();
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen, sparse_snapshot.arena.allocator());
                 for (sparse) |idx| {
                     if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
                     const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx);
@@ -20944,7 +20990,9 @@ pub const Interpreter = struct {
             const acc_root = try self.pushTempRoot(initial);
             var i: usize = 0;
             if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
+                var sparse_snapshot = OwnKeySnapshot.init(self);
+                defer sparse_snapshot.deinit();
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen, sparse_snapshot.arena.allocator());
                 var seeded = args.len >= 2;
                 for (sparse) |idx| {
                     if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
@@ -20989,7 +21037,9 @@ pub const Interpreter = struct {
             var acc = initial;
             const acc_root = try self.pushTempRoot(initial);
             if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
+                var sparse_snapshot = OwnKeySnapshot.init(self);
+                defer sparse_snapshot.deinit();
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen, sparse_snapshot.arena.allocator());
                 var seeded = args.len >= 2;
                 var si = sparse.len;
                 while (si > 0) {
@@ -21075,7 +21125,9 @@ pub const Interpreter = struct {
             const dense_hi = self.tempRoot(roots, receiver).asObj().denseElementLimit(ilen);
             // Sparse indices (above the dense store) are the highest, so search
             // them first, descending — the first match is the answer.
-            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), dense_hi, start + 1);
+            var sparse_snapshot = OwnKeySnapshot.init(self);
+            defer sparse_snapshot.deinit();
+            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), dense_hi, start + 1, sparse_snapshot.arena.allocator());
             var si = sparse.len;
             while (si > 0) {
                 si -= 1;
@@ -21168,7 +21220,9 @@ pub const Interpreter = struct {
                 sorted_receiver.packedDenseElementsCoverLength();
             if (dense_plain_array) {
                 // Drop any sparse named-index props (their values are rooted).
-                for (try sorted_receiver.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |key| if (value.canonicalIndex(key) != null) {
+                var key_snapshot = OwnKeySnapshot.init(self);
+                defer key_snapshot.deinit();
+                for (try sorted_receiver.ownKeysWithScratch(key_snapshot.arena.allocator(), self.scratch_allocator orelse self.arena)) |key| if (value.canonicalIndex(key) != null) {
                     _ = try self.deleteOwn(self.tempRoot(roots, receiver).asObj(), key);
                 };
                 const sorted = try self.arena.alloc(Value, order.len);
@@ -25135,7 +25189,9 @@ fn setupKeyedCombinator(self: *Interpreter, this: Value, promises: Value, kind: 
         return cap.promise;
     }
     const source = promises.asObj();
-    const all_keys = self.objectOwnKeysList(source) catch |err| return rejectAbrupt(self, cap, err);
+    var key_snapshot = self.objectOwnKeysList(source) catch |err| return rejectAbrupt(self, cap, err);
+    defer key_snapshot.deinit();
+    const all_keys = key_snapshot.items;
     var kept_keys: std.ArrayListUnmanaged([]const u8) = .empty;
     const values = (try self.newArray()).asObj();
     const combine = try self.arena.create(promise.Combine);
@@ -25145,7 +25201,7 @@ fn setupKeyedCombinator(self: *Interpreter, this: Value, promises: Value, kind: 
         if (desc.isUndefined()) continue;
         const enumerable = self.getProperty(desc, "enumerable") catch |err| return rejectAbrupt(self, cap, err);
         if (!enumerable.toBoolean()) continue;
-        try kept_keys.append(self.arena, key);
+        try kept_keys.append(self.arena, try self.arena.dupe(u8, key));
         const next_value = self.getProperty(promises, key) catch |err| return rejectAbrupt(self, cap, err);
         if (!try addCombineElement(self, cap, combine, promise_resolve, this, next_value, kept_keys.items.len - 1))
             return cap.promise;
@@ -26016,7 +26072,9 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const target = if (args.len > 0) args[0] else Value.undef();
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys requires the first argument be an object");
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
-    const keys = try self.objectOwnKeysList(target.asObj());
+    var keys_snapshot = try self.objectOwnKeysList(target.asObj());
+    defer keys_snapshot.deinit();
+    const keys = keys_snapshot.items;
     const arr = try self.newArray();
     for (keys) |k| try arr.asObj().appendElement(self.arena, try self.keyToValue(k));
     return arr;
@@ -28104,7 +28162,9 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // [[OwnPropertyKeys]] snapshot, then per key: [[GetOwnProperty]] (enumerable
     // check), [[Get]] (value), GetIteratorFlattenable. Both string and symbol
     // keys participate. An abrupt completion closes opened inputs (reverse).
-    const all_keys = try self.objectOwnKeysList(iterables.asObj());
+    var all_keys_snapshot = try self.objectOwnKeysList(iterables.asObj());
+    defer all_keys_snapshot.deinit();
+    const all_keys = all_keys_snapshot.items;
     for (all_keys) |key| {
         const en = self.objectProtoPropertyIsEnumerable(iterables.asObj(), key) catch {
             self.closeListKeepingThrow(iters.elementsItems());
@@ -53744,7 +53804,9 @@ fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
             try uspPush(self, pairs, value.decodeStringKey(k), v);
         }
     } else if (init.isObject() and !init.asObj().is_symbol) {
-        for (try self.objectOwnKeysList(init.asObj())) |k| {
+        var key_snapshot = try self.objectOwnKeysList(init.asObj());
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |k| {
             if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
             if (!objectHasOwn(init.asObj(), k) or !init.asObj().getAttr(k).enumerable) continue;
             const v = try self.toStringWtf8(try self.getProperty(init, k));
@@ -54178,7 +54240,9 @@ pub fn fetchHeadersFill(self: *Interpreter, this: Value, init: Value) EvalError!
     }
     if (init.isObject()) {
         // Record<string, string>: own enumerable string keys in order.
-        for (try self.objectOwnKeysList(init.asObj())) |k| {
+        var key_snapshot = try self.objectOwnKeysList(init.asObj());
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |k| {
             try headersAppendRaw(self, this, try Value.strAlloc(self.arena, value.decodeStringKey(k)), try self.getProperty(init, k));
         }
         return;
@@ -56957,6 +57021,49 @@ test "Interpreter Symbol index disperses predictable encoded-key collisions exac
     try std.testing.expect(index.getContext("\x00s1\x00missing", keyed_context) == null);
 }
 
+test "own-key snapshots: every allocation failure reclaims native buffers" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            const context = try @import("context.zig").Context.create(std.testing.allocator);
+            defer context.destroy();
+            const object = try context.evaluate(
+                "(function(){const a=[];a[5]=1;a[2]=2;Object.defineProperty(a,'named',{get(){return 3;},enumerable:true});a[Symbol('s')]=4;return a;})()",
+            );
+            var machine = context.interpreter();
+            machine.scratch_allocator = backing;
+            var snapshot = try machine.objectOwnKeysList(object.asObj());
+            defer snapshot.deinit();
+            try std.testing.expectEqual(@as(usize, 5), snapshot.items.len);
+            try std.testing.expectEqualStrings("2", snapshot.items[0]);
+            try std.testing.expectEqualStrings("5", snapshot.items[1]);
+            try std.testing.expectEqualStrings("length", snapshot.items[2]);
+            try std.testing.expectEqualStrings("named", snapshot.items[3]);
+            try std.testing.expect(value.isRealSymbolKey(snapshot.items[4]));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "own-key snapshots: symbol recovery caches the symbol-owned spelling" {
+    const context = try @import("context.zig").Context.create(std.testing.allocator);
+    defer context.destroy();
+    const object = try context.evaluate("(function(){const symbol=Symbol('snapshot'); return {[symbol]:1};})()");
+    var machine = context.interpreter();
+    var snapshot = try machine.objectOwnKeysList(object.asObj());
+    defer snapshot.deinit();
+    try std.testing.expectEqual(@as(usize, 1), snapshot.items.len);
+    const stable_key = snapshot.items[0];
+    const borrowed_key = try std.testing.allocator.dupe(u8, stable_key);
+    defer std.testing.allocator.free(borrowed_key);
+    const symbol = try machine.keyToValue(borrowed_key);
+    try std.testing.expect(symbol.isObject() and symbol.asObj().is_symbol);
+    // Simulate reuse of a released key buffer without reading freed memory.
+    // The cache must index the Symbol's stable bytes, not this borrowed input.
+    @memset(borrowed_key, 'x');
+    try std.testing.expect(machine.cachedSymbol(stable_key) != null);
+    try std.testing.expectEqual(symbol.asObj(), machine.cachedSymbol(stable_key).?);
+}
+
 test "Interpreter Symbol index first publication is lazy and failure atomic" {
     var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer shape_arena.deinit();
@@ -58723,7 +58830,9 @@ test "Proxy metadata roots unwind on every allocation failure" {
                 const result = try builtins.objectGetOwnPropertyDescriptor(&machine, Value.undef(), &.{ proxy, Value.str("x") });
                 try std.testing.expectEqual(@as(f64, 37), result.asObj().getOwn("value").?.asObj().getOwn("marker").?.asNum());
             } else {
-                const keys = try machine.proxyOwnKeys(proxy.asObj());
+                var keys_snapshot = try machine.objectOwnKeysList(proxy.asObj());
+                defer keys_snapshot.deinit();
+                const keys = keys_snapshot.items;
                 try std.testing.expectEqual(@as(usize, 1), keys.len);
                 try std.testing.expectEqualStrings("x", keys[0]);
             }
@@ -58839,9 +58948,19 @@ test "Object reflection roots unwind on every allocation failure" {
     };
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{Operation.assign});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{Operation.define_properties});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{Operation.descriptors});
+    inline for (std.meta.tags(Operation)) |operation| {
+        // Exercise the ordinary resizing allocator as well as the fault sweep.
+        try Probe.run(std.testing.allocator, operation);
+        // SafeAllocator bucket position changes between sweep iterations when
+        // Context allocations interleave with these native arena buffers. Its
+        // last-allocation resize policy can replace an allocation with a resize,
+        // invalidating checkAllAllocationFailures' fixed allocation count.
+        // An independent DebugAllocator preserves leak checking while making
+        // this injected backing independent of the Context's allocator history.
+        var fault_backing: std.heap.DebugAllocator(.{}) = .init;
+        defer std.debug.assert(fault_backing.deinit() == .ok);
+        try std.testing.checkAllAllocationFailures(fault_backing.allocator(), Probe.run, .{operation});
+    }
 }
 
 test "numeric updates unwind temporary roots on every allocation failure" {

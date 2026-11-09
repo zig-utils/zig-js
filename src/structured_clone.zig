@@ -622,7 +622,9 @@ const Serializer = struct {
     /// in creation order. For arrays, index-shaped keys are skipped (the
     /// elements were serialized densely already).
     fn serNamedProps(s: *Serializer, o: *value.Object, skip_indices: bool, depth: u16) HostError!void {
-        const keys = try builtins.ownEnumerableKeys(s.self, o);
+        var keys_snapshot = try builtins.ownEnumerableKeys(s.self, o);
+        defer keys_snapshot.deinit();
+        const keys = keys_snapshot.items;
         var count: u32 = 0;
         for (keys) |k| {
             if (skip_indices and isIndexKey(k)) continue;

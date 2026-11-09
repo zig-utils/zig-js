@@ -3173,6 +3173,7 @@ fn staticValueAttributes(
 fn classOwnKeys(
     raw_machine: *anyopaque,
     object: *Object,
+    result_allocator: std.mem.Allocator,
 ) value.HostError![]const []const u8 {
     const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
     const target = try classCallbackTarget(machine, object);
@@ -3190,9 +3191,9 @@ fn classOwnKeys(
             if (accumulator.failed) return error.OutOfMemory;
         }
     }
-    const result = try machine.arena.alloc([]const u8, accumulator.names.items.len);
+    const result = try result_allocator.alloc([]const u8, accumulator.names.items.len);
     for (accumulator.names.items, result) |name, *slot|
-        slot.* = try machine.arena.dupe(u8, name.bytes);
+        slot.* = try result_allocator.dupe(u8, name.bytes);
     return result;
 }
 
@@ -6126,7 +6127,9 @@ const PrivateDiagnosticInspector = struct {
         }
         if (!try self.beginCircular(object)) return;
         defer self.endCircular(object);
-        const keys = try self.machine.objectOwnKeysList(object);
+        var keys_snapshot = try self.machine.objectOwnKeysList(object);
+        defer keys_snapshot.deinit();
+        const keys = keys_snapshot.items;
         var visible: usize = 0;
         for (keys) |key| {
             if (value.isPrivateKey(key) or (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) or
@@ -8792,7 +8795,10 @@ fn privatePropertyIteratorKeys(
     start: *Object,
     own_properties_only: bool,
     only_non_index_properties: bool,
-) interp.EvalError![]const []const u8 {
+) interp.EvalError!interp.Interpreter.OwnKeySnapshot {
+    var snapshot = interp.Interpreter.OwnKeySnapshot.init(machine);
+    errdefer snapshot.deinit();
+    const scratch = snapshot.arena.allocator();
     var result: std.ArrayListUnmanaged([]const u8) = .empty;
     var seen: CPropertyNameMembership = .{};
     var current: ?*Object = start;
@@ -8802,12 +8808,15 @@ fn privatePropertyIteratorKeys(
         // JSC's PropertyNameArrayBuilder de-duplicates names that were actually
         // added. A non-enumerable own name therefore does not hide an enumerable
         // name on a prototype for this private API (unlike language `for-in`).
-        for (try builtins.ownEnumerablePropertyKeys(machine, object, true)) |key| {
+        var key_snapshot = try builtins.ownEnumerablePropertyKeys(machine, object, true);
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |key| {
             if (value.isPrivateKey(key)) continue;
             if (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) continue;
             if (own_properties_only and only_non_index_properties and value.canonicalIndex(key) != null) continue;
-            if ((try seen.getOrPutSecure(machine.arena, key)).found_existing) continue;
-            try result.append(machine.arena, key);
+            const owned_key = try scratch.dupe(u8, key);
+            if ((try seen.getOrPutSecure(scratch, owned_key)).found_existing) continue;
+            try result.append(scratch, owned_key);
         }
         if (own_properties_only) break;
 
@@ -8820,7 +8829,8 @@ fn privatePropertyIteratorKeys(
             return machine.throwError("TypeError", "Object prototype is neither an object nor null");
         current = prototype.asObj();
     }
-    return result.items;
+    snapshot.items = result.items;
+    return snapshot;
 }
 
 fn privateCreatePropertyIteratorRecord(
@@ -8943,7 +8953,7 @@ export fn Bun__JSPropertyIterator__create(
         privateSetPendingAbrupt(context, &machine, abrupt);
         return null;
     }
-    const keys = privatePropertyIteratorKeys(
+    var key_snapshot = privatePropertyIteratorKeys(
         &machine,
         target.asObj(),
         own_properties_only,
@@ -8952,6 +8962,8 @@ export fn Bun__JSPropertyIterator__create(
         privateSetPendingAbrupt(context, &machine, err);
         return null;
     };
+    defer key_snapshot.deinit();
+    const keys = key_snapshot.items;
     if (keys.len == 0) return null;
     const iterator = privateCreatePropertyIteratorRecord(group, &machine, keys) catch |err| {
         switch (err) {
@@ -9247,10 +9259,12 @@ export fn JSC__JSValue__forEachPropertyNonIndexed(
         if (target_protected) _ = valueUnprotect(global, target_ref);
     }
 
-    const keys = machine.objectOwnKeysList(target.asObj()) catch |err| {
+    var key_snapshot = machine.objectOwnKeysList(target.asObj()) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return;
     };
+    defer key_snapshot.deinit();
+    const keys = key_snapshot.items;
     const to_string_tag = interp.objectToStringTagKey(&machine);
     // `objectOwnKeysList` has already enforced the OrdinaryOwnPropertyKeys/Proxy
     // uniqueness invariant across ordinary and host keys. Re-deduplicating this
@@ -11172,19 +11186,23 @@ fn privateDeepCompareEnumerable(
     symbols_only: bool,
     skip_error_stack: bool,
 ) interp.EvalError!bool {
-    const left_all = try builtins.ownEnumerablePropertyKeys(machine, left, true);
-    const right_all = try builtins.ownEnumerablePropertyKeys(machine, right, true);
+    var left_all_snapshot = try builtins.ownEnumerablePropertyKeys(machine, left, true);
+    defer left_all_snapshot.deinit();
+    const left_all = left_all_snapshot.items;
+    var right_all_snapshot = try builtins.ownEnumerablePropertyKeys(machine, right, true);
+    defer right_all_snapshot.deinit();
+    const right_all = right_all_snapshot.items;
     var left_keys: std.ArrayListUnmanaged([]const u8) = .empty;
     var right_keys: std.ArrayListUnmanaged([]const u8) = .empty;
     for (left_all) |key| {
         if (symbols_only and !value.isRealSymbolKey(key)) continue;
         if (skip_error_stack and std.mem.eql(u8, key, "stack")) continue;
-        try left_keys.append(machine.arena, key);
+        try left_keys.append(left_all_snapshot.arena.allocator(), key);
     }
     for (right_all) |key| {
         if (symbols_only and !value.isRealSymbolKey(key)) continue;
         if (skip_error_stack and std.mem.eql(u8, key, "stack")) continue;
-        try right_keys.append(machine.arena, key);
+        try right_keys.append(right_all_snapshot.arena.allocator(), key);
     }
     if (strict and left_keys.items.len != right_keys.items.len) return false;
 
@@ -11699,14 +11717,18 @@ fn privateDeepMatch(
     defer machine.depth -= 1;
     if (object == subset) return true;
 
-    const subset_keys = try builtins.ownEnumerablePropertyKeys(machine, subset, true);
+    var subset_keys_snapshot = try builtins.ownEnumerablePropertyKeys(machine, subset, true);
+    defer subset_keys_snapshot.deinit();
+    const subset_keys = subset_keys_snapshot.items;
     const object_value = Value.obj(object);
     const subset_value = Value.obj(subset);
     const object_is_array = try builtins.isArrayValue(machine, object_value);
     const subset_is_array = try builtins.isArrayValue(machine, subset_value);
     if (object_is_array and subset_is_array) {
         if (object.arrayLength() != subset.arrayLength()) return false;
-        const object_keys = try builtins.ownEnumerablePropertyKeys(machine, object, true);
+        var object_keys_snapshot = try builtins.ownEnumerablePropertyKeys(machine, object, true);
+        defer object_keys_snapshot.deinit();
+        const object_keys = object_keys_snapshot.items;
         if (object_keys.len != subset_keys.len) return false;
     }
 
@@ -23124,7 +23146,9 @@ export fn JSObjectCopyPropertyNames(ctx: JSContextRef, object: JSObjectRef) call
     var machine = c.interpreter();
     c.pushActiveInterpreter(&machine) catch return null;
     defer c.popActiveInterpreter(&machine);
-    const keys = machine.cApiPropertyNameSnapshot(obj) catch return null;
+    var key_snapshot = machine.cApiPropertyNameSnapshot(obj) catch return null;
+    defer key_snapshot.deinit();
+    const keys = key_snapshot.items;
     const array = gpa.create(PropertyNameArray) catch return null;
     errdefer gpa.destroy(array);
     const names = gpa.alloc(*JsString, keys.len) catch return null;

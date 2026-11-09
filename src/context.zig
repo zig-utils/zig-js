@@ -20109,6 +20109,33 @@ test "Proxy ownKeys preserves exact seeded trap membership" {
     )).asBool());
 }
 
+test "own-key snapshots: retained callbacks reclaim enumeration buffers" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const object = {first: 1, second: 2, third: 3, fourth: 4};
+        \\  return function () {
+        \\    const keys = Object.keys(object);
+        \\    if (keys.length !== 4 || keys[0] !== "first" || keys[3] !== "fourth")
+        \\      throw new Error("own-key snapshot changed");
+        \\    return keys.length;
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    // No explicit collection: public retained calls must reclaim their native
+    // enumeration snapshots independently of the JS-cell collection schedule.
+    for (0..10000) |_| {
+        const result = try ctx.callProtected(callback, null, &.{});
+        defer std.debug.assert(ctx.unprotectValue(result));
+        try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
+    }
+}
+
 test "C-API property-name snapshot preserves exact secure membership" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
@@ -20126,7 +20153,9 @@ test "C-API property-name snapshot preserves exact secure membership" {
         \\})()
     );
     var machine = ctx.interpreter();
-    const keys = try machine.cApiPropertyNameSnapshot(object.asObj());
+    var keys_snapshot = try machine.cApiPropertyNameSnapshot(object.asObj());
+    defer keys_snapshot.deinit();
+    const keys = keys_snapshot.items;
     try std.testing.expectEqual(@as(usize, 3), keys.len);
     try std.testing.expectEqualStrings("own", value.decodeStringKey(keys[0]));
     try std.testing.expectEqual(@as(usize, 4096), value.decodeStringKey(keys[1]).len);
@@ -20134,11 +20163,10 @@ test "C-API property-name snapshot preserves exact secure membership" {
 
     const Host = struct {
         fn finish(_: *value.CApiObjectOwner) void {}
-        fn ownKeys(raw_machine: *anyopaque, _: *value.Object) value.HostError![]const []const u8 {
-            const host_machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
-            const wide = try host_machine.arena.alloc(u8, 4096);
+        fn ownKeys(_: *anyopaque, _: *value.Object, result_allocator: std.mem.Allocator) value.HostError![]const []const u8 {
+            const wide = try result_allocator.alloc(u8, 4096);
             @memset(wide, 'h');
-            const names = try host_machine.arena.alloc([]const u8, 4);
+            const names = try result_allocator.alloc([]const u8, 4);
             names[0] = "overlap";
             names[1] = wide;
             names[2] = "\x00\x00\x00host";
@@ -20155,7 +20183,9 @@ test "C-API property-name snapshot preserves exact secure membership" {
     try host_object.setOwn(machine.arena, machine.root_shape, "ordinary", Value.num(2));
     const host_owner = try ctx.createCApiObjectOwner(@ptrCast(ctx), Host.finish);
     try host_object.setCApiObjectClass(ctx.arena(), host_owner, &Host.hooks);
-    const host_keys = try machine.cApiPropertyNameSnapshot(host_object);
+    var host_keys_snapshot = try machine.cApiPropertyNameSnapshot(host_object);
+    defer host_keys_snapshot.deinit();
+    const host_keys = host_keys_snapshot.items;
     try std.testing.expectEqual(@as(usize, 4), host_keys.len);
     try std.testing.expectEqualStrings("overlap", value.decodeStringKey(host_keys[0]));
     try std.testing.expectEqual(@as(usize, 4096), value.decodeStringKey(host_keys[1]).len);

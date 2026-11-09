@@ -794,7 +794,7 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 /// [[OwnPropertyKeys]] path so exotic own keys (String and TypedArray indices,
 /// module namespace exports, Proxy traps, array dense elements) are included,
 /// then filter through [[GetOwnProperty]] for the live enumerable bit.
-pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError!Interpreter.OwnKeySnapshot {
     return ownEnumerablePropertyKeys(self, o, false);
 }
 
@@ -806,20 +806,26 @@ pub fn ownEnumerablePropertyKeys(
     self: *Interpreter,
     object: *value.Object,
     include_symbols: bool,
-) HostError![]const []const u8 {
+) HostError!Interpreter.OwnKeySnapshot {
     try self.checkRestricted(object);
     const object_value = Value.obj(object);
     const object_root = try self.pushTempRoot(object_value);
     defer self.restoreTempRoots(object_root);
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (try self.objectOwnKeysList(object)) |k| {
+    var snapshot = try self.objectOwnKeysList(object);
+    errdefer snapshot.deinit();
+    const keys = @constCast(snapshot.items);
+    var count: usize = 0;
+    for (snapshot.items) |k| {
         if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
         if (value.isRealSymbolKey(k) and !include_symbols) continue;
         const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ self.tempRoot(object_root, object_value), try self.keyToValue(k) });
-        if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())
-            try list.append(self.arena, k);
+        if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean()) {
+            keys[count] = k;
+            count += 1;
+        }
     }
-    return list.items;
+    snapshot.items = keys[0..count];
+    return snapshot;
 }
 
 /// Own value of `key` on `o`, resolving an array index to its dense element.
@@ -830,20 +836,6 @@ fn ownValueOf(o: *value.Object, key: []const u8) Value {
         }
     }
     return o.getOwn(key) orelse Value.undef();
-}
-
-/// All own *string* keys of `o` in [[OwnPropertyKeys]] order (integer indices
-/// ascending, then strings in insertion order) WITHOUT filtering on enumerable —
-/// the EnumerableOwnPropertyNames snapshot, before the per-key live recheck.
-fn ownStringKeysOrdered(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
-    // [[OwnPropertyKeys]] (array indices / String chars / "length" / symbols, in
-    // spec order), keeping only the string keys.
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (try self.objectOwnKeysList(o)) |k| {
-        if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
-        try list.append(self.arena, k);
-    }
-    return list.items;
 }
 
 const EnumKind = enum { key, value, key_value };
@@ -860,7 +852,10 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
     const result_root = try self.pushTempRoot(result);
     const is_proxy = o.proxyHandler() != null or o.proxy_revoked;
     const is_module_ns = interpreter.isModuleNs(o);
-    for (try ownStringKeysOrdered(self, o)) |k| {
+    var key_snapshot = try self.objectOwnKeysList(o);
+    defer key_snapshot.deinit();
+    for (key_snapshot.items) |k| {
+        if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
         o = self.tempRoot(object_root, ov).asObj();
         // [[GetOwnProperty]] enumerable check, read live so an earlier getter's
         // mutation is observed; a key deleted in the meantime drops out.
@@ -956,7 +951,9 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
         // Every enumerable own key — string AND symbol (private excluded) — is
         // copied, in [[OwnPropertyKeys]] order (array indices / String chars /
         // "length" / symbols all included).
-        for (try self.objectOwnKeysList(from)) |k| {
+        var key_snapshot = try self.objectOwnKeysList(from);
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |k| {
             from = self.tempRoot(source_root, src_v).asObj();
             if (value.isPrivateKey(k)) continue;
             // [[GetOwnProperty]] for the enumerable bit (proxy-aware, and a key
@@ -2208,7 +2205,9 @@ fn applyProperties(self: *Interpreter, target_input: *value.Object, props: Value
         for (pending.items) |entry| scratch.free(entry.key);
         pending.deinit(scratch);
     }
-    for (try self.objectOwnKeysList(props_obj)) |key| {
+    var key_snapshot = try self.objectOwnKeysList(props_obj);
+    defer key_snapshot.deinit();
+    for (key_snapshot.items) |key| {
         const prop_desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ self.tempRoot(props_root, props_value), try self.keyToValue(key) });
         if (!prop_desc.isObject() or !completedDescAttr(prop_desc.asObj()).enumerable) continue;
         const raw = try self.getProperty(self.tempRoot(props_root, props_value), key);
@@ -2325,7 +2324,9 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, object: *value.Object,
         } else {
             o.setExtensible(false);
         }
-        for (try self.objectOwnKeysList(o)) |k| {
+        var key_snapshot = try self.objectOwnKeysList(o);
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |k| {
             // SetIntegrityLevel only reads descriptors for the frozen branch;
             // sealing defines [[Configurable]] directly for every captured key.
             const is_accessor = if (freeze) blk: {
@@ -2351,7 +2352,9 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, object: *value.Object,
 /// Make every own property non-configurable (and, when `freeze`, every data
 /// property non-writable). Backs `seal`/`freeze`.
 fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
-    for (try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |k| {
+    var key_snapshot = Interpreter.OwnKeySnapshot.init(self);
+    defer key_snapshot.deinit();
+    for (try o.ownKeysWithScratch(key_snapshot.arena.allocator(), self.scratch_allocator orelse self.arena)) |k| {
         if (value.isPrivateKey(k)) continue;
         var a = o.getAttr(k);
         a.configurable = false;
@@ -2362,7 +2365,7 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
     // freezing/sealing the same shared object under `parallel_js` may grow that
     // `StringHashMap` mid-iteration (the "grow vs lookup" panic). See
     // `Object.accessorKeysSnapshot`.
-    for (try o.accessorKeysSnapshot(self.arena)) |k| {
+    for (try o.accessorKeysSnapshot(key_snapshot.arena.allocator())) |k| {
         if (value.isPrivateKey(k)) continue;
         var a = o.getAttr(k);
         a.configurable = false;
@@ -2411,7 +2414,9 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
             if (try self.proxyIsExtensible(o)) return false;
             o = self.tempRoot(object_root, ov).asObj();
         } else if (o.isExtensible()) return false;
-        for (try self.objectOwnKeysList(o)) |k| {
+        var key_snapshot = try self.objectOwnKeysList(o);
+        defer key_snapshot.deinit();
+        for (key_snapshot.items) |k| {
             const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ self.tempRoot(object_root, ov), try self.keyToValue(k) });
             if (!desc.isObject()) continue;
             const configurable = try self.getProperty(desc, "configurable");
@@ -2442,7 +2447,9 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     if (o.is_array) {
         if (frozen and o.getAttr("length").writable) return false;
     }
-    for (try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |key| {
+    var key_snapshot = Interpreter.OwnKeySnapshot.init(self);
+    defer key_snapshot.deinit();
+    for (try o.ownKeysWithScratch(key_snapshot.arena.allocator(), self.scratch_allocator orelse self.arena)) |key| {
         if (value.isPrivateKey(key)) continue;
         const attr = o.getAttr(key);
         if (attr.configurable) return false;
@@ -2495,7 +2502,9 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const V
     _ = this;
     const self = interp(ctx);
     const o = try self.toObject(arg(args, 0));
-    const keys = try self.objectOwnKeysList(o);
+    var keys_snapshot = try self.objectOwnKeysList(o);
+    defer keys_snapshot.deinit();
+    const keys = keys_snapshot.items;
     const result = try self.newArray();
     const result_root = try self.pushTempRoot(result);
     defer self.restoreTempRoots(result_root);
@@ -2517,7 +2526,9 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
     const object_root = try self.pushTempRoot(ov);
     defer self.restoreTempRoots(object_root);
     // [[OwnPropertyKeys]] order (array indices / String chars / "length" aware).
-    const keys = try self.objectOwnKeysList(self.tempRoot(object_root, ov).asObj());
+    var keys_snapshot = try self.objectOwnKeysList(self.tempRoot(object_root, ov).asObj());
+    defer keys_snapshot.deinit();
+    const keys = keys_snapshot.items;
     const result = try self.newObject();
     const result_root = try self.pushTempRoot(result);
     for (keys) |k| {
@@ -2766,7 +2777,9 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     // ToObject(arg): null/undefined throw; a primitive boxes (a String exposes
     // its character indices + "length").
     const o = try self.toObject(arg(args, 0));
-    const keys = try self.objectOwnKeysList(o);
+    var keys_snapshot = try self.objectOwnKeysList(o);
+    defer keys_snapshot.deinit();
+    const keys = keys_snapshot.items;
     const result = try self.newArray();
     const result_root = try self.pushTempRoot(result);
     defer self.restoreTempRoots(result_root);
@@ -3926,7 +3939,11 @@ const Stringifier = struct {
             }
             return enumerable[0..enumerable_len];
         }
-        return ownEnumerableKeys(st.self, object);
+        var snapshot = try ownEnumerableKeys(st.self, object);
+        defer snapshot.deinit();
+        const keys = try snapshot_allocator.alloc([]const u8, snapshot.items.len);
+        for (snapshot.items, keys) |key, *owned| owned.* = try snapshot_allocator.dupe(u8, key);
+        return keys;
     }
 
     fn jsonDirectOrdinaryObject(object: *value.Object, shape: *value.Object) bool {
@@ -4320,7 +4337,9 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
                 try internalizeStore(self, self.tempRoot(val_root, val), k, self.tempRoot(nv_root, nv));
             }
         } else {
-            for (try ownEnumerableKeys(self, self.tempRoot(val_root, val).asObj())) |k| {
+            var key_snapshot = try ownEnumerableKeys(self, self.tempRoot(val_root, val).asObj());
+            defer key_snapshot.deinit();
+            for (key_snapshot.items) |k| {
                 const child_record = if (record) |matched| switch (matched.children) {
                     .entries => |entries| entries.get(k),
                     else => null,

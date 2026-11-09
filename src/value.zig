@@ -160,7 +160,8 @@ pub const HostClassHooks = struct {
     has: ?*const fn (*anyopaque, *Object, []const u8) HostError!bool = null,
     delete: ?*const fn (*anyopaque, *Object, []const u8) HostError!HostClassDeleteResult = null,
     attributes: ?*const fn (*anyopaque, *Object, []const u8) HostError!?PropAttr = null,
-    own_keys: ?*const fn (*anyopaque, *Object) HostError![]const []const u8 = null,
+    /// Use the supplied operation allocator for returned key buffers.
+    own_keys: ?*const fn (*anyopaque, *Object, std.mem.Allocator) HostError![]const []const u8 = null,
     is_callable: ?*const fn (*const Object) bool = null,
     is_constructor: ?*const fn (*const Object) bool = null,
     call: ?*const fn (*anyopaque, *Object, Value, []const Value) HostError!Value = null,
