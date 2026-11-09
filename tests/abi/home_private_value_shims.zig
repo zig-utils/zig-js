@@ -6387,6 +6387,27 @@ pub fn main() void {
         promise_then_fixture.contexts[0] != EncodedValue.fromInt32(2531))
         fail("private fulfilled Promise reaction mismatch");
 
+    // Undefined is a present context argument. The callback's CallFrame arity
+    // check must still see both ordinary arguments on either settlement path.
+    for ([_]bool{ true, false }) |fulfilled| {
+        promise_then_fixture = .{
+            .expected_global = context,
+            .expected_value = if (fulfilled) direct_value else EncodedValue.fromInt32(321),
+        };
+        JSC__JSValue___then(
+            if (fulfilled) resolved_value_promise else rejected_promise,
+            context,
+            .undefined,
+            promiseThenResolve,
+            promiseThenReject,
+        );
+        if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+            promise_then_fixture.fulfilled != @as(usize, if (fulfilled) 1 else 0) or
+            promise_then_fixture.rejected != @as(usize, if (fulfilled) 0 else 1) or
+            !JSC__JSValue__isStrictEqual(promise_then_fixture.contexts[0], .undefined, context))
+            fail("private Promise undefined context argument mismatch");
+    }
+
     promise_then_fixture = .{
         .expected_global = sibling_context,
         .expected_value = direct_value,

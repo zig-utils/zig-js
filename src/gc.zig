@@ -2229,7 +2229,7 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
 inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     markValueOpt(v, r.handler);
     markValue(v, r.async_context);
-    markValueOpt(v, r.extra_argument);
+    markValueOpt(v, r.extraArgument());
     if (r.retained_async_activation) |activation|
         v.mark(@as(*vm.Generator, @ptrCast(@alignCast(activation))));
     if (r.detached) return;
@@ -2244,7 +2244,7 @@ inline fn traceReaction(r: promise.Reaction, v: anytype) void {
 inline fn relocateReaction(r: *promise.Reaction, v: anytype) void {
     gc_relocation.rewriteOptionalValueSlot(v, &r.handler);
     gc_relocation.rewriteValueSlot(v, &r.async_context);
-    gc_relocation.rewriteOptionalValueSlot(v, &r.extra_argument);
+    if (r.extraArgumentSlot()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     gc_relocation.rewriteOptionalSlot(v, anyopaque, &r.retained_async_activation);
     if (r.detached) return;
     if (r.result) |_| {
@@ -2295,19 +2295,17 @@ test "Promise relocation rewrites inline and overflow reaction graphs" {
     var old_generators: [5]vm.Generator = undefined;
     var new_generators: [5]vm.Generator = undefined;
     var overflow = [_]promise.ReactionPair{.{
-        .fulfill = .{
+        .fulfill = (promise.Reaction{
             .handler = Value.obj(&old_objects[8]),
-            .extra_argument = Value.obj(&old_objects[9]),
             .retained_async_activation = &old_generators[3],
             .result = &old_promises[2],
-        },
-        .reject = .{
+        }).withExtraArgument(Value.obj(&old_objects[9])),
+        .reject = (promise.Reaction{
             .handler = Value.obj(&old_objects[10]),
-            .extra_argument = Value.obj(&old_objects[11]),
             .retained_async_activation = &old_generators[4],
             .resolve = Value.obj(&old_objects[12]),
             .reject = Value.obj(&old_objects[13]),
-        },
+        }).withExtraArgument(Value.obj(&old_objects[11])),
     }};
     var state = promise.Promise{
         .value = Value.obj(&old_objects[0]),
@@ -2315,19 +2313,17 @@ test "Promise relocation rewrites inline and overflow reaction graphs" {
         .awaiting_activation_or_rejection_link = .{ .awaiting_async_activation = &old_generators[0] },
         .async_forward_to = &old_promises[0],
         .reactions_inline = .{
-            .fulfill = .{
+            .fulfill = (promise.Reaction{
                 .handler = Value.obj(&old_objects[2]),
-                .extra_argument = Value.obj(&old_objects[3]),
                 .retained_async_activation = &old_generators[1],
                 .result = &old_promises[1],
-            },
-            .reject = .{
+            }).withExtraArgument(Value.obj(&old_objects[3])),
+            .reject = (promise.Reaction{
                 .handler = Value.obj(&old_objects[4]),
-                .extra_argument = Value.obj(&old_objects[5]),
                 .retained_async_activation = &old_generators[2],
                 .resolve = Value.obj(&old_objects[6]),
                 .reject = Value.obj(&old_objects[7]),
-            },
+            }).withExtraArgument(Value.obj(&old_objects[5])),
         },
         .reactions = .fromOwnedSlice(&overflow),
     };
@@ -2372,21 +2368,21 @@ test "Promise relocation rewrites inline and overflow reaction graphs" {
     try std.testing.expectEqual(&new_promises[0], state.async_forward_to.?);
     const fulfill_inline = state.reactions_inline.?.fulfill;
     try std.testing.expectEqual(&new_objects[2], fulfill_inline.handler.?.asObj());
-    try std.testing.expectEqual(&new_objects[3], fulfill_inline.extra_argument.?.asObj());
+    try std.testing.expectEqual(&new_objects[3], fulfill_inline.extraArgument().?.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[1])), fulfill_inline.retained_async_activation.?);
     try std.testing.expectEqual(&new_promises[1], fulfill_inline.result.?);
     const reject_inline = state.reactions_inline.?.reject;
     try std.testing.expectEqual(&new_objects[4], reject_inline.handler.?.asObj());
-    try std.testing.expectEqual(&new_objects[5], reject_inline.extra_argument.?.asObj());
+    try std.testing.expectEqual(&new_objects[5], reject_inline.extraArgument().?.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[2])), reject_inline.retained_async_activation.?);
     try std.testing.expectEqual(&new_objects[6], reject_inline.resolve.asObj());
     try std.testing.expectEqual(&new_objects[7], reject_inline.reject.asObj());
     try std.testing.expectEqual(&new_objects[8], overflow[0].fulfill.handler.?.asObj());
-    try std.testing.expectEqual(&new_objects[9], overflow[0].fulfill.extra_argument.?.asObj());
+    try std.testing.expectEqual(&new_objects[9], overflow[0].fulfill.extraArgument().?.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[3])), overflow[0].fulfill.retained_async_activation.?);
     try std.testing.expectEqual(&new_promises[2], overflow[0].fulfill.result.?);
     try std.testing.expectEqual(&new_objects[10], overflow[0].reject.handler.?.asObj());
-    try std.testing.expectEqual(&new_objects[11], overflow[0].reject.extra_argument.?.asObj());
+    try std.testing.expectEqual(&new_objects[11], overflow[0].reject.extraArgument().?.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[4])), overflow[0].reject.retained_async_activation.?);
     try std.testing.expectEqual(&new_objects[12], overflow[0].reject.resolve.asObj());
     try std.testing.expectEqual(&new_objects[13], overflow[0].reject.reject.asObj());

@@ -1448,7 +1448,7 @@ test "Thread asyncJoin commits exact OOM for every pending capability before set
         for (0..count) |i| {
             const job = ctx.microtasks.pop().?;
             try std.testing.expect(!job.fulfilled);
-            try std.testing.expectEqual(@as(f64, @floatFromInt(i)), job.reaction.extra_argument.?.asNum());
+            try std.testing.expectEqual(@as(f64, @floatFromInt(i)), job.reaction.extraArgument().?.asNum());
             try std.testing.expectEqual(reason.asObj(), job.argument.asObj());
         }
         try std.testing.expect(ctx.microtasks.isEmpty());

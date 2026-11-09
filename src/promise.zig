@@ -38,7 +38,10 @@ pub const Reaction = struct {
     /// Optional second argument supplied after the settlement value. Private
     /// Home/Bun Promise bridges use this to retain and deliver their opaque
     /// context JSValue without allocating a closure per registration.
-    extra_argument: ?Value = null,
+    // Keep presence separate from the full Value: an explicitly supplied
+    // undefined argument still contributes to the native callback's arity.
+    extra_argument_value: Value = Value.undef(),
+    has_extra_argument: bool = false,
     /// Host-only reactions have no result capability. Their callback result is
     /// discarded; an abrupt callback still escapes the microtask checkpoint.
     detached: bool = false,
@@ -57,6 +60,27 @@ pub const Reaction = struct {
     /// (`SpeciesConstructor`) they are the functions that constructor handed out.
     resolve: Value = Value.undef(),
     reject: Value = Value.undef(),
+
+    pub fn extraArgument(self: Reaction) ?Value {
+        return if (self.has_extra_argument) self.extra_argument_value else null;
+    }
+
+    /// Initialize before publication, or while holding the owning state lock.
+    pub fn setExtraArgument(self: *Reaction, extra: ?Value) void {
+        self.extra_argument_value = extra orelse Value.undef();
+        self.has_extra_argument = extra != null;
+    }
+
+    pub fn withExtraArgument(self: Reaction, extra: Value) Reaction {
+        var result = self;
+        result.setExtraArgument(extra);
+        return result;
+    }
+
+    /// Relocation must rewrite the stored slot rather than an optional copy.
+    pub fn extraArgumentSlot(self: *Reaction) ?*Value {
+        return if (self.has_extra_argument) &self.extra_argument_value else null;
+    }
 };
 
 /// Fulfill/reject reactions are registered and consumed as one specification
@@ -1144,6 +1168,7 @@ fn barrierReactionFrom(p: *Promise, r: Reaction) void {
     // promise cell (which may already be marked black). Shade them.
     if (r.handler) |h| gc_mod.barrierValueFrom(p, h);
     gc_mod.barrierValueFrom(p, r.async_context);
+    if (r.extraArgument()) |extra| gc_mod.barrierValueFrom(p, extra);
     if (r.result) |result| {
         gc_mod.barrierCellFrom(p, @ptrCast(result));
     } else {
@@ -1693,9 +1718,186 @@ pub fn thenRetainingAsyncActivation(
 /// receive `(settlement_value, context)` in their CallFrame, matching Bun's
 /// private `JSC__JSValue___then` bridge.
 pub fn performThenDetached(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, context: Value) EvalError!void {
-    const react_f = Reaction{ .handler = on_f, .extra_argument = context, .detached = true };
-    const react_r = Reaction{ .handler = on_r, .extra_argument = context, .detached = true };
+    const react_f = (Reaction{ .handler = on_f, .detached = true }).withExtraArgument(context);
+    const react_r = (Reaction{ .handler = on_r, .detached = true }).withExtraArgument(context);
     try performThenReactions(self, p, react_f, react_r);
+}
+
+test "Promise compact reactions preserve native argument presence" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const Calls = struct {
+        count: usize = 0,
+        arity: usize = 0,
+        second: Value = Value.undef(),
+        fn record(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const current: *Interpreter = @ptrCast(@alignCast(raw));
+            const calls: *@This() = @ptrCast(@alignCast(current.active_native.?.private_data.?));
+            calls.count += 1;
+            calls.arity = args.len;
+            calls.second = if (args.len > 1) args[1] else Value.undef();
+            return Value.undef();
+        }
+    };
+    var calls = Calls{};
+    const handler = try gc_mod.allocObj(ctx.arena());
+    handler.* = .{ .native = Calls.record, .private_data = &calls };
+    for (0..4) |mode| {
+        const source = promiseOf(Value.obj(try newPromise(&machine))).?;
+        if (mode == 0) {
+            _ = try then(&machine, source, Value.obj(handler), Value.undef());
+        } else if (mode < 3) {
+            try performThenDetached(&machine, source, Value.obj(handler), Value.obj(handler), if (mode == 1) Value.undef() else Value.nul());
+        } else {
+            // Clearing a previously present argument must restore one-argument delivery.
+            var reaction = (Reaction{ .handler = Value.obj(handler), .detached = true }).withExtraArgument(Value.num(9));
+            reaction.setExtraArgument(null);
+            try performThenReactions(&machine, source, reaction, reaction);
+        }
+        try resolve(&machine, source, Value.num(42));
+        try machine.drainMicrotasks();
+        try std.testing.expectEqual(mode + 1, calls.count);
+        try std.testing.expectEqual(@as(usize, if (mode == 1 or mode == 2) 2 else 1), calls.arity);
+        if (mode == 1) try std.testing.expect(calls.second.isUndefined());
+        if (mode == 2) try std.testing.expect(calls.second.isNull());
+    }
+    // Detached registrations accept arbitrary present handlers, including
+    // undefined. They must still attempt Call rather than becoming pass-through.
+    const source = promiseOf(Value.obj(try newPromise(&machine))).?;
+    try performThenDetached(&machine, source, Value.undef(), Value.undef(), Value.undef());
+    try resolve(&machine, source, Value.num(42));
+    try std.testing.expectError(error.Throw, machine.drainMicrotasks());
+}
+
+test "Promise compact reactions retain host arguments and async snapshots through compaction" {
+    const Context = @import("context.zig").Context;
+    const Calls = struct {
+        throwing: bool,
+        count: usize = 0,
+        valid: bool = true,
+        fn record(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const current: *Interpreter = @ptrCast(@alignCast(raw));
+            const calls: *@This() = @ptrCast(@alignCast(current.active_native.?.private_data.?));
+            calls.count += 1;
+            calls.valid = calls.valid and args.len == 2 and args[0].asNum() == 42 and
+                args[1].asObj().getOwn("marker").?.asNum() == 123 and
+                current.getAsyncContext().asObj().getOwn("marker").?.asNum() == 22;
+            current.setAsyncContext(Value.num(99));
+            if (calls.throwing) {
+                current.exception = Value.str("expected detached failure");
+                return error.Throw;
+            }
+            return Value.undef();
+        }
+    };
+    const Mode = struct { throwing: bool, queued: bool };
+    for ([_]Mode{
+        .{ .throwing = false, .queued = false },
+        .{ .throwing = false, .queued = true },
+        .{ .throwing = true, .queued = false },
+        .{ .throwing = true, .queued = true },
+    }) |mode| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+        defer ctx.destroy();
+        const saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved);
+        ctx.gc_scan_native_stack = false;
+        var calls = Calls{ .throwing = mode.throwing };
+        _ = try ctx.evaluate(
+            \\globalThis.compactDiscard = [];
+            \\for (var i = 0; i < 4096; ++i) compactDiscard.push({ dead: i });
+            \\globalThis.compactSource = new Promise(function () {});
+            \\globalThis.compactExtra = { marker: 123 };
+            \\globalThis.compactSnapshot = { marker: 22 };
+        );
+        {
+            var machine = ctx.interpreter();
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const scope = machine.enterAsyncContextScope();
+            defer scope.leave();
+            const handler = try gc_mod.allocObj(ctx.arena());
+            handler.* = .{ .native = Calls.record, .private_data = &calls };
+            machine.setAsyncContext(ctx.global_object.getOwn("compactSnapshot").?);
+            const source = promiseOf(ctx.global_object.getOwn("compactSource").?).?;
+            // Exercise both inline and overflow reaction storage.
+            for (0..2) |_| try performThenDetached(&machine, source, Value.obj(handler), Value.obj(handler), ctx.global_object.getOwn("compactExtra").?);
+            machine.setAsyncContext(Value.undef());
+            if (mode.queued) try resolve(&machine, source, Value.num(42));
+        }
+        // Leave the only references in the pending Promise or undelivered
+        // queue, without entering evaluate (which would drain the queue).
+        for ([_][]const u8{ "compactDiscard", "compactExtra", "compactSnapshot" }) |name|
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, name, Value.undef());
+        if (mode.queued) try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "compactSource", Value.undef());
+        ctx.collectGarbage();
+        const compacted = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        if (!mode.queued) {
+            var machine = ctx.interpreter();
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const scope = machine.enterAsyncContextScope();
+            defer scope.leave();
+            try resolve(&machine, promiseOf(ctx.global_object.getOwn("compactSource").?).?, Value.num(42));
+        }
+        {
+            var machine = ctx.interpreter();
+            try ctx.pushActiveInterpreter(&machine);
+            defer ctx.popActiveInterpreter(&machine);
+            const scope = machine.enterAsyncContextScope();
+            defer scope.leave();
+            machine.setAsyncContext(Value.num(11));
+            if (mode.throwing) {
+                for (0..2) |_| {
+                    try std.testing.expectError(error.Throw, machine.drainMicrotasks());
+                    try std.testing.expectEqual(@as(f64, 11), machine.getAsyncContext().asNum());
+                    machine.exception = Value.undef();
+                }
+            } else try machine.drainMicrotasks();
+            try std.testing.expectEqual(@as(f64, 11), machine.getAsyncContext().asNum());
+        }
+        try std.testing.expectEqual(@as(usize, 2), calls.count);
+        try std.testing.expect(calls.valid);
+        try std.testing.expect(ctx.microtasks.isEmpty());
+    }
+}
+
+test "Promise compact reactions shade a host argument published after the root scan" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    ctx.gc_scan_native_stack = false;
+    _ = try ctx.evaluate("globalThis.barrierSource = new Promise(function () {});");
+    ctx.collectGarbage();
+    var machine = ctx.interpreter();
+    const source = promiseOf(ctx.global_object.getOwn("barrierSource").?).?;
+    const handler = try gc_mod.allocObj(ctx.arena());
+    handler.* = .{};
+    const extra = try gc_mod.allocObj(ctx.arena());
+    extra.* = .{};
+    try extra.setOwn(ctx.arena(), ctx.root_shape, "marker", Value.num(777));
+    const heap = ctx.gc.?;
+    heap.startMarking();
+    _ = heap.markStep(0);
+    var visitor = gc_mod.Heap.Visitor{ .heap = heap };
+    try std.testing.expect(visitor.isMarked(source));
+    try std.testing.expect(!visitor.isMarked(handler));
+    try std.testing.expect(!visitor.isMarked(extra));
+    try performThenDetached(&machine, source, Value.obj(handler), Value.obj(handler), Value.obj(extra));
+    // Positive control: the existing handler edge must shade in this phase.
+    try std.testing.expect(visitor.isMarked(handler));
+    // The argument is reachable only from a black Promise now. A finish-time
+    // root rescan does not retrace that Promise, so registration must shade it.
+    try std.testing.expect(visitor.isMarked(extra));
+    heap.finishMarking();
+    try std.testing.expect(heap.cellMetadata(extra) != null);
+    try std.testing.expectEqual(@as(f64, 777), source.reactions_inline.?.fulfill.extraArgument().?.asObj().getOwn("marker").?.asNum());
 }
 
 pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError!Value {
@@ -1830,12 +2032,12 @@ test "settlement reserves the complete reaction batch before state commit" {
         .microtasks = &queue,
     };
     const first = ReactionPair{
-        .fulfill = .{ .handler = null, .extra_argument = Value.num(1), .detached = true },
-        .reject = .{ .handler = null, .extra_argument = Value.num(-1), .detached = true },
+        .fulfill = (Reaction{ .handler = null, .detached = true }).withExtraArgument(Value.num(1)),
+        .reject = (Reaction{ .handler = null, .detached = true }).withExtraArgument(Value.num(-1)),
     };
     const second = ReactionPair{
-        .fulfill = .{ .handler = null, .extra_argument = Value.num(2), .detached = true },
-        .reject = .{ .handler = null, .extra_argument = Value.num(-2), .detached = true },
+        .fulfill = (Reaction{ .handler = null, .detached = true }).withExtraArgument(Value.num(2)),
+        .reject = (Reaction{ .handler = null, .detached = true }).withExtraArgument(Value.num(-2)),
     };
     var overflow = [_]ReactionPair{second};
     var p = Promise{ .reactions_inline = first, .reactions = .fromOwnedSlice(&overflow) };
@@ -1853,8 +2055,8 @@ test "settlement reserves the complete reaction batch before state commit" {
     try std.testing.expectEqual(.settlement_batch, queue.pendingItems()[0].kind);
     try materializeSettlementBatches(&machine, &queue);
     try std.testing.expectEqual(@as(usize, 2), queue.pendingLen());
-    try std.testing.expectEqual(@as(f64, 1), queue.pendingItems()[0].reaction.extra_argument.?.asNum());
-    try std.testing.expectEqual(@as(f64, 2), queue.pendingItems()[1].reaction.extra_argument.?.asNum());
+    try std.testing.expectEqual(@as(f64, 1), queue.pendingItems()[0].reaction.extraArgument().?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), queue.pendingItems()[1].reaction.extraArgument().?.asNum());
 }
 
 test "settlement batch expansion is OOM-atomic between sibling jobs" {
@@ -2235,7 +2437,7 @@ pub fn runJob(self: *Interpreter, task: *Microtask, publication: *PreparedSettle
     }
     promise_profile.recordMicrotaskRun(false);
     if (task.reaction.handler) |handler| {
-        const result = if (task.reaction.extra_argument) |extra|
+        const result = if (task.reaction.extraArgument()) |extra|
             self.callValueWithThis(handler, &.{ task.argument, extra }, Value.undef())
         else
             self.callValueWithThis(handler, &.{task.argument}, Value.undef());
