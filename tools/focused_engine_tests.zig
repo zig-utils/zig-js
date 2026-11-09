@@ -26,6 +26,25 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "literal RegExp prefixes preserve sparse search and scoped flags",
+        .source =
+        \\(function*(){
+        \\var prefix='x'.repeat(2300000), input=prefix+'==yes==\n';
+        \\var re=/==(.+?)==/gd, m=re.exec(input);
+        \\if (!m || m.index!==2300000 || m[1]!=='yes' || m.indices[1][0]!==2300002) throw Error('sparse capture');
+        \\if (re.exec(input)!==null || re.lastIndex!==0) throw Error('global search end');
+        \\if (input.search(/==(.+?)==/)!==2300000) throw Error('sparse search');
+        \\if (input.replace(/==(.+?)==/g,'<$1>')!==prefix+'<yes>\n') throw Error('sparse replace');
+        \\m=/==(.+?)==/.exec('==yes=='+prefix);
+        \\if (!m || m[0]!=='==yes==' || m[1]!=='yes') throw Error('lazy tail');
+        \\var controls=[[/ab(.+?)!/i,'xxABok!','ok'],[/(?i:ab)(.+?)!/,'xxABok!','ok'],[/ab(?i:cd)(.+?)!/,'xxabCDok!','ok'],[/(?<=x)ab(.+?)!/,'yabno!xabok!','ok'],[/ab(a|aa){2}\1/,'xxabaaaa','a']];
+        \\for (var i=0;i<controls.length;i++){m=controls[i][0].exec(controls[i][1]);if(!m || m[1]!==controls[i][2])throw Error('prefix control '+i);}
+        \\return 1;
+        \\})().next().value;
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "backreference RegExp repeats preserve capture continuations",
         .source =
         \\(function*(){
