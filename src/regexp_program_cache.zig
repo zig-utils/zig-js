@@ -19,6 +19,11 @@ pub const Cache = struct {
     /// misses on every lookup. A compiled program is a few KB.
     pub const capacity = 256;
 
+    // Retired results must not make every cache entry retain its largest
+    // search. Keep small hot-match storage, while releasing one-off peaks.
+    // Live results and persistent matcher scratch have separate lifetimes.
+    const max_retained_result_bytes: usize = 64 * 1024;
+
     /// Compilation performs many small allocations whose lifetimes are exactly
     /// the program lifetime. Keep those in a per-program arena so eviction is
     /// one batch release. Separate retained-capacity arenas keep matcher scratch
@@ -29,6 +34,10 @@ pub const Cache = struct {
         result_arena: std.heap.ArenaAllocator,
         backing_allocator: std.mem.Allocator,
         regex: ?*Regex = null,
+        // A result may outlive its lease or another search on that lease.
+        // Reclaim its storage and permit eviction only after the last retires.
+        live_results: usize = 0,
+        released_transient: bool = false,
 
         pub fn create(backing: std.mem.Allocator) !*OwnedProgram {
             const owned = try backing.create(OwnedProgram);
@@ -63,14 +72,28 @@ pub const Cache = struct {
         }
 
         fn finishMatchAttempt(self: *OwnedProgram, matched: bool) void {
-            if (!matched) _ = self.result_arena.reset(.retain_capacity);
+            if (matched) {
+                self.live_results += 1;
+            } else if (self.live_results == 0) self.resetResults();
+        }
+
+        fn retireResult(self: *OwnedProgram) void {
+            std.debug.assert(self.live_results > 0);
+            self.live_results -= 1;
+            if (self.live_results != 0) return;
+            if (self.released_transient) self.deinit() else self.resetResults();
+        }
+
+        fn resetResults(self: *OwnedProgram) void {
+            _ = self.result_arena.reset(.{ .retain_with_limit = max_retained_result_bytes });
         }
 
         fn reset(self: *OwnedProgram) void {
             std.debug.assert(self.regex != null);
+            std.debug.assert(self.live_results == 0);
             _ = self.compile_arena.reset(.retain_capacity);
             _ = self.matcher_arena.reset(.retain_capacity);
-            _ = self.result_arena.reset(.retain_capacity);
+            self.resetResults();
             self.regex = null;
         }
 
@@ -122,7 +145,7 @@ pub const Cache = struct {
 
             pub fn deinit(self: *OwnedMatch) void {
                 self.value.deinit(self.allocator);
-                _ = self.owner.result_arena.reset(.retain_capacity);
+                self.owner.retireResult();
             }
         };
 
@@ -196,7 +219,8 @@ pub const Cache = struct {
                 },
                 .transient => |*transient| {
                     if (transient.matcher) |*scratch| scratch.deinit();
-                    transient.owned.deinit();
+                    transient.owned.released_transient = true;
+                    if (transient.owned.live_results == 0) transient.owned.deinit();
                 },
                 .released => return,
             }
@@ -235,6 +259,10 @@ pub const Cache = struct {
         return entry.hash == hash and std.mem.eql(u8, entry.flags, flags) and std.mem.eql(u8, entry.source, source);
     }
 
+    fn inUse(entry: *const Entry) bool {
+        return entry.pins != 0 or entry.owned.live_results != 0;
+    }
+
     pub fn acquire(self: *Cache, source: []const u8, flags: []const u8) ?Lease {
         const hash = keyHash(source, flags);
         for (&self.entries, self.occupied, 0..) |*entry, occupied, index| {
@@ -244,7 +272,7 @@ pub const Cache = struct {
             // operation still owns matcher state. Skip pinned matches so the
             // recursive operation gets an independent cached or transient
             // program/matcher pair instead of corrupting the outer search.
-            if (entry.pins != 0) continue;
+            if (inUse(entry)) continue;
             entry.pins = 1;
             return .{ .owner = .{ .cached = .{ .cache = self, .index = index } } };
         }
@@ -260,7 +288,7 @@ pub const Cache = struct {
             const candidate = (self.next + offset) % capacity;
             if (!self.occupied[candidate]) continue;
             const entry = &self.entries[candidate];
-            if (entry.pins != 0) continue;
+            if (inUse(entry)) continue;
             if (entry.matcher) |*matcher| matcher.deinit();
             const owned = entry.owned;
             owned.reset();
@@ -286,7 +314,7 @@ pub const Cache = struct {
         } else {
             for (0..capacity) |offset| {
                 const candidate = (self.next + offset) % capacity;
-                if (self.entries[candidate].pins != 0) continue;
+                if (inUse(&self.entries[candidate])) continue;
                 destroyEntry(&self.entries[candidate]);
                 self.occupied[candidate] = false;
                 self.len -= 1;
@@ -464,6 +492,78 @@ test "RegExp program cache uses a transient lease when every slot is pinned" {
         .transient => {},
         else => return error.TestUnexpectedResult,
     }
+    var live = (try transient.find("b")).?;
     transient.release();
+    try std.testing.expectEqualStrings("b", live.value.slice);
+    live.deinit();
     for (&leases) |*lease| lease.release();
+}
+
+test "RegExp program cache keeps released leases with live results out of eviction" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator);
+    defer cache.deinit();
+    var lease = cache.adopt("(a+?)!", "", try compileOwned(allocator, "(a+?)!"));
+    var live = (try lease.find("aaa!")).?;
+    lease.release();
+    try std.testing.expect(cache.acquire("(a+?)!", "") == null);
+    var keys: [Cache.capacity][4]u8 = undefined;
+    for (&keys, 0..) |*key, i| {
+        std.mem.writeInt(u32, key, @intCast(i), .little);
+        var other = cache.adopt(key, "", try compileOwned(allocator, "b"));
+        other.release();
+    }
+    const recycled = try cache.ownerForMiss();
+    recycled.deinit();
+    try std.testing.expectEqualStrings("aaa", live.value.captures[0]);
+    live.deinit();
+    var reused = cache.acquire("(a+?)!", "").?;
+    defer reused.release();
+    var found = (try reused.find("a!")).?;
+    defer found.deinit();
+    try std.testing.expectEqualStrings("a", found.value.captures[0]);
+}
+
+test "RegExp program cache releases oversized result scratch after a live capture retires" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator);
+    defer cache.deinit();
+    const owned = try compileOwned(allocator, "a(.+?)!");
+    var lease = cache.adopt("a(.+?)!", "", owned);
+    defer lease.release();
+    const input = try allocator.alloc(u8, 8192);
+    defer allocator.free(input);
+    @memset(input, 'x');
+    input[0] = 'a';
+    input[input.len - 1] = '!';
+    var found = (try lease.find(input)).?;
+    try std.testing.expectEqualStrings(input[1 .. input.len - 1], found.value.captures[0]);
+    try std.testing.expect(owned.result_arena.queryCapacity() > 64 * 1024);
+    found.deinit();
+    try std.testing.expect(owned.result_arena.queryCapacity() <= 64 * 1024);
+    var again = (try lease.find("aok!")).?;
+    defer again.deinit();
+    try std.testing.expectEqualStrings("ok", again.value.captures[0]);
+}
+
+test "RegExp program cache releases oversized result scratch after misses and errors" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator);
+    defer cache.deinit();
+    const owned = try compileOwned(allocator, "a(.+?)!");
+    var lease = cache.adopt("a(.+?)!", "", owned);
+    defer lease.release();
+    const input = try allocator.alloc(u8, 8192);
+    defer allocator.free(input);
+    @memset(input, 'x');
+    input[0] = 'a';
+    try std.testing.expect((try lease.find(input)) == null);
+    try std.testing.expect(owned.result_arena.queryCapacity() <= 64 * 1024);
+    lease.program().backtrack_engine.?.max_steps = 10000;
+    try std.testing.expectError(error.Timeout, lease.find(input));
+    try std.testing.expect(owned.result_arena.queryCapacity() <= 64 * 1024);
+    lease.program().backtrack_engine.?.max_steps = 10000000;
+    var recovered = (try lease.find("aok!")).?;
+    defer recovered.deinit();
+    try std.testing.expectEqualStrings("ok", recovered.value.captures[0]);
 }
