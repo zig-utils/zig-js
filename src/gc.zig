@@ -1861,7 +1861,7 @@ fn traceChunk(chunk: *const bytecode.Chunk, v: anytype) void {
     if (epoch == 0) {
         for (chunk.consts.items) |constant| markValue(v, constant);
         for (chunk.fns.items) |template|
-            if (template.chunk) |nested| traceChunk(nested, v);
+            if (@import("compiler.zig").templateSnapshot(template).chunk) |nested| traceChunk(nested, v);
         return;
     }
     if (minorTraceStamp(stamp, epoch)) |young| {
@@ -1874,7 +1874,7 @@ fn traceChunk(chunk: *const bytecode.Chunk, v: anytype) void {
     setVisitorYoungEdge(v, false);
     for (chunk.consts.items) |constant| markValue(v, constant);
     for (chunk.fns.items) |template|
-        if (template.chunk) |nested| traceChunk(nested, v);
+        if (@import("compiler.zig").templateSnapshot(template).chunk) |nested| traceChunk(nested, v);
     const young = visitorYoungEdge(v);
     storeMinorTraceStamp(stamp, epoch, young);
     setVisitorYoungEdge(v, outer_young or young);
@@ -1884,11 +1884,11 @@ fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
     for (chunk.consts.items) |*constant|
         gc_relocation.rewriteValueSlot(v, constant);
     for (chunk.fns.items) |template|
-        if (template.chunk) |nested| relocateChunk(nested, v);
+        if (@import("compiler.zig").templateSnapshot(template).chunk) |nested| relocateChunk(nested, v);
 }
 
 /// A VM closure keeps its lexical bindings in the defining activation's
-/// arena-owned `Frame`, not in the managed Function cell itself. The frame may
+/// address-pinned `Frame`, not in the Function cell itself. The frame may
 /// outlive that activation and can be shared by several closures, so its slots
 /// are a precise Function edge and concurrent tracing must serialize with
 /// `load_upval` / `store_upval` through the frame slot lock.
@@ -2047,6 +2047,7 @@ fn relocateFrameMappedParameters(frame: *vm.Frame, v: anytype) void {
 
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markManaged(v, f.closure);
+    if (f.fallback_closure.load(.acquire)) |fallback| markManaged(v, fallback);
     v.mark(f.realm_global);
     v.mark(f.home_object);
     v.mark(f.super_ctor);
@@ -2058,7 +2059,7 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
     if (f.this_cell) |cell| markValue(v, cell.value());
     for (f.with_stack) |object| v.mark(object);
     traceCapturedFrame(f.frame, v);
-    if (f.chunk) |chunk| traceChunk(chunk, v);
+    if (f.compiledChunk()) |chunk| traceChunk(chunk, v);
     if (f.gen_chunk) |chunk| traceChunk(chunk, v);
     if (f.async_chunk) |chunk| traceChunk(chunk, v);
     // `params`/`body`/`source` and the chunk containers are arena/AST-owned;
@@ -2070,6 +2071,7 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
 /// with-stack storage are arena-owned containers with managed payloads.
 pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     gc_relocation.rewriteRequiredSlot(v, Environment, &f.closure);
+    gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &f.fallback_closure);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.realm_global);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.home_object);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.super_ctor);
@@ -2083,7 +2085,7 @@ pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     for (f.with_stack) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
     relocateCapturedFrame(f.frame, v);
-    if (f.chunk) |chunk| relocateChunk(chunk, v);
+    if (f.compiledChunk()) |chunk| relocateChunk(chunk, v);
     if (f.gen_chunk) |chunk| relocateChunk(chunk, v);
     if (f.async_chunk) |chunk| relocateChunk(chunk, v);
 }

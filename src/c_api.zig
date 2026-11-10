@@ -1128,7 +1128,7 @@ const ReachabilityVisitor = struct {
             switch (cell.kind) {
                 .function => {
                     const function: *interp.Function = @ptrCast(@alignCast(cell.pointer));
-                    self.markInternal("[[Environment]]", function.closure);
+                    self.markInternal("[[Environment]]", function.closureEnvironment());
                     self.markInternal("[[RealmGlobal]]", function.realm_global);
                     gc_mod.traceFunction(function, self);
                 },
@@ -1140,7 +1140,7 @@ const ReachabilityVisitor = struct {
                     const object: *Object = @ptrCast(@alignCast(cell.pointer));
                     if (object.jsFunction()) |erased| {
                         const function: *interp.Function = @ptrCast(@alignCast(erased));
-                        self.markInternal("[[Environment]]", function.closure);
+                        self.markInternal("[[Environment]]", function.closureEnvironment());
                         self.markInternal("[[RealmGlobal]]", function.realm_global);
                     }
                     gc_mod.Binding.trace(cell.pointer, cell.kind, self);
@@ -1790,8 +1790,7 @@ fn privateHeapSnapshotFallbackSize(cell: ReachabilityCell) !PrivateHeapSnapshotS
         .module_ns => .{ .shallow = @sizeOf(interp.ModuleNs) },
         .frame => blk: {
             const frame: *vm.Frame = @ptrCast(@alignCast(cell.pointer));
-            break :blk .{ .shallow = try std.math.add(usize, @sizeOf(vm.Frame),
-                try std.math.mul(usize, frame.slot_capacity, @sizeOf(Value))) };
+            break :blk .{ .shallow = try std.math.add(usize, @sizeOf(vm.Frame), try std.math.mul(usize, frame.slot_capacity, @sizeOf(Value))) };
         },
     };
 }
@@ -1802,7 +1801,7 @@ fn privateHeapSnapshotCellIdUsing(
     context_provider: CPrivateIdentityContextProvider,
 ) !u64 {
     if (group.primary.gc) |heap| if (heap.cellMetadata(pointer)) |metadata| {
-        const raw = @intFromEnum(metadata.id);
+        const raw = @backingInt(metadata.id);
         if (raw > (std.math.maxInt(u64) - 1) / 2) return error.StableIdExhausted;
         return raw * 2 + 1;
     };
@@ -1841,7 +1840,7 @@ fn privateBuildHeapSnapshotGraph(group: *CContextGroup, allocator: std.mem.Alloc
         fn lessThan(_: void, left: ReachabilityEdge, right: ReachabilityEdge) bool {
             if (left.from_index != right.from_index) return left.from_index < right.from_index;
             if (left.to_index != right.to_index) return left.to_index < right.to_index;
-            return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+            return @backingInt(left.kind) < @backingInt(right.kind);
         }
     }.lessThan);
     return visitor;
@@ -2382,7 +2381,7 @@ const InspectorAsyncCallKey = struct {
     callback_id: u64,
 
     fn eql(a: InspectorAsyncCallKey, b: InspectorAsyncCallKey) bool {
-        return @intFromEnum(a.call_type) == @intFromEnum(b.call_type) and
+        return @backingInt(a.call_type) == @backingInt(b.call_type) and
             a.callback_id == b.callback_id;
     }
 };
@@ -6574,7 +6573,7 @@ fn privateGenerateCachedBytecode(
 
     @memcpy(artifact[0..8], private_cached_bytecode_artifact_magic);
     privateCachedBytecodeWriteU16(artifact[8..10], 1);
-    artifact[10] = @intFromEnum(kind);
+    artifact[10] = @backingInt(kind);
     artifact[11] = 0;
     privateCachedBytecodeWriteU64(artifact[12..20], @intCast(url_units.len));
     privateCachedBytecodeWriteU64(artifact[20..28], @intCast(source.len));
@@ -7025,7 +7024,7 @@ export fn Bun__writeHTTPDate(buffer: *[32]u8, length: usize, timestamp_ms: u64) 
     const rendered = std.fmt.bufPrint(&rendered_storage, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
         weekday_names[weekday],
         month_day.day_index + 1,
-        month_names[@intFromEnum(month_day.month) - 1],
+        month_names[@backingInt(month_day.month) - 1],
         @as(u32, year_day.year) % 9999,
         day_seconds.getHoursIntoDay(),
         day_seconds.getMinutesIntoHour(),
@@ -9582,7 +9581,7 @@ export fn Bun__CommonStringsForZig__toJS(kind: PrivateCommonString, global: JSCo
     const context = ctxForHandleInspection(global) orelse return .empty;
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    const index = @intFromEnum(kind);
+    const index = @backingInt(kind);
     if (index >= group.common_strings.len) return .empty;
     const slot = &group.common_strings[index];
     if (slot.*) |boxed| return privateEncodedFromRef(@ptrCast(boxed));
@@ -9629,13 +9628,24 @@ export fn JSC__JSFunction__getSourceCode(
 export fn JSC__JSFunction__optimizeSoon(encoded: EncodedValue) callconv(.c) void {
     const boxed = privateBoxedFrom(encoded) orelse return;
     if (boxed.private_kind != .value) return;
+    _ = interp.Interpreter.funcOf(boxed.value) orelse return;
+    const context = boxed.owner;
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
+    const arena_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(arena_saved);
+    var machine = context.interpreter();
+    machine.gc_root_allocator = context.gpa;
+    context.pushActiveInterpreter(&machine) catch return;
+    defer context.popActiveInterpreter(&machine);
     const function = interp.Interpreter.funcOf(boxed.value) orelse return;
-    // A body deferred to its first call compiles now, so the request applies.
-    const chunk = (vm.compileDeferredForHost(function) catch return) orelse return;
+    // Compile through the same rooted publication boundary while leaving the
+    // private pending-exception slot untouched by this scheduling request.
+    const chunk = (vm.compileDeferredForHost(&machine, function) catch return) orelse return;
     if (chunk.tier.loadState() != .cold) return;
     // `observeEntry` increments before checking its threshold. A saturated
     // pre-threshold count therefore makes the next invocation claim compilation
-    // while leaving this scheduling request itself allocation- and codegen-free.
+    // without generating native code during this scheduling request.
     chunk.tier.entries.store(std.math.maxInt(u32) - 1, .release);
 }
 
@@ -10391,7 +10401,7 @@ fn privateNoSideEffectStaticString(
     group: *CContextGroup,
     kind: PrivateNoSideEffectString,
 ) EncodedValue {
-    const slot = &group.no_side_effect_strings[@intFromEnum(kind)];
+    const slot = &group.no_side_effect_strings[@backingInt(kind)];
     if (slot.*) |existing| return privateEncodedFromRef(@ptrCast(existing));
     const projected = switch (kind) {
         .symbol => Value.str("Symbol"),
@@ -10732,7 +10742,7 @@ fn privateSignalName(signal_number: i32) ?[]const u8 {
         .{ "SYS", "SIGSYS" },
     }) |entry| {
         if (@hasField(Signal, entry[0]) and
-            signal_number == @as(i32, @intCast(@intFromEnum(@field(Signal, entry[0])))))
+            signal_number == @as(i32, @intCast(@backingInt(@field(Signal, entry[0])))))
             return entry[1];
     }
     return null;
@@ -16496,7 +16506,7 @@ fn privatePopulateRetainedStack(input: Value, output: *PrivateZigStackTrace) voi
                 .column = source.column_zero_based,
                 .line_start_byte = source.line_start_byte,
             },
-            .code_type = @enumFromInt(@intFromEnum(source.code_type)),
+            .code_type = @fromBackingInt(@intCast(@backingInt(source.code_type))),
             .is_async = source.is_async,
             .remapped = false,
             .jsc_stack_frame_index = source.jsc_stack_frame_index,
@@ -17108,13 +17118,13 @@ export fn WebCore__AbortSignal__reasonIfAborted(
     out_reason: ?*u8,
 ) callconv(.c) EncodedValue {
     const output = out_reason orelse return .empty;
-    output.* = @intFromEnum(PrivateCommonAbortReason.none);
+    output.* = @backingInt(PrivateCommonAbortReason.none);
     const signal = privateAbortValid(signal_) orelse return .empty;
     const context = ctxForHandleInspection(global) orelse return .empty;
     if (context.c_api_group != @as(?*anyopaque, @ptrCast(signal.group))) return .empty;
     if (!interp.abortSignalAborted(signal.object)) return .empty;
     if (signal.common_reason != .none) {
-        output.* = @intFromEnum(signal.common_reason);
+        output.* = @backingInt(signal.common_reason);
         return .undefined;
     }
     return privateEncodedFromValue(context, interp.abortSignalReason(signal.object));
@@ -18531,7 +18541,7 @@ export fn Bun__HTTPServerAgent__notifyRequestWillBeSent(
 ) callconv(.c) void {
     const session = privateHTTPServerEventSession(agent_ref) orelse return;
     defer releasePrivateInspectorBroadcastRef(session);
-    if (@intFromEnum(method) > @intFromEnum(PrivateHTTPMethod.unsubscribe) or !std.math.isFinite(timestamp)) return;
+    if (@backingInt(method) > @backingInt(PrivateHTTPMethod.unsubscribe) or !std.math.isFinite(timestamp)) return;
 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -18549,7 +18559,7 @@ export fn Bun__HTTPServerAgent__notifyRequestWillBeSent(
                 .routeId = route_id,
                 .url = url,
                 .fullUrl = full_url,
-                .method = @intFromEnum(method),
+                .method = @backingInt(method),
                 .headers = headers,
                 .params = values,
                 .hasBody = has_body,
@@ -18565,7 +18575,7 @@ export fn Bun__HTTPServerAgent__notifyRequestWillBeSent(
                 .routeId = route_id,
                 .url = url,
                 .fullUrl = full_url,
-                .method = @intFromEnum(method),
+                .method = @backingInt(method),
                 .headers = headers,
                 .hasBody = has_body,
                 .timestamp = timestamp,
@@ -21298,7 +21308,7 @@ fn makeBuiltinObject(
     defer c.popActiveInterpreter(&machine);
     machine.debug_dynamic_url_override = debug_source_url;
     machine.debug_dynamic_start_line = debug_start_line;
-    const constructor = c.c_api_builtin_constructors[@intFromEnum(constructor_kind)];
+    const constructor = c.c_api_builtin_constructors[@backingInt(constructor_kind)];
     const result = machine.construct(constructor, args) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
@@ -26161,7 +26171,7 @@ test "C-API: debugger disables ordinary bytecode and native tier entry" {
     const function_value = valueFromContext(context, function_ref) orelse return error.InvalidValue;
     const erased = function_value.asObj().jsFunction() orelse return error.NotFunction;
     const function: *interp.Function = @ptrCast(@alignCast(erased));
-    try std.testing.expect(function.chunk == null);
+    try std.testing.expect(function.compiledChunk() == null);
 }
 
 test "C-API: debugger preserves script history across late attach and reattach" {
@@ -26263,7 +26273,7 @@ test "C-API: debugger enters warmed functions compiled before attachment" {
     const function_value = valueFromContext(context, function_ref) orelse return error.InvalidValue;
     const erased = function_value.asObj().jsFunction() orelse return error.NotFunction;
     const function: *interp.Function = @ptrCast(@alignCast(erased));
-    const historical_chunk = function.chunk orelse return error.ExpectedBytecode;
+    const historical_chunk = function.compiledChunk() orelse return error.ExpectedBytecode;
     try std.testing.expect(historical_chunk.debug_nodes.len != 0);
 
     JSGlobalContextSetInspectable(ctx, true);
@@ -31535,7 +31545,7 @@ test "private generic no-copy buffers preserve every typed tag trailing bytes an
     for (cases) |case| {
         const pointer = std.c.malloc(17) orelse return error.OutOfMemory;
         const bytes = @as([*]u8, @ptrCast(pointer))[0..17];
-        @memset(bytes, @intFromEnum(case[0]));
+        @memset(bytes, @backingInt(case[0]));
         const encoded = Bun__makeTypedArrayWithBytesNoCopy(
             context,
             case[0],
@@ -33477,7 +33487,7 @@ test "private process signal dispatch preserves names arguments realms and excep
     defer JSGlobalContextRelease(sibling);
     const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
     const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
-    const signal_number: i32 = @intCast(@intFromEnum(std.c.SIG.INT));
+    const signal_number: i32 = @intCast(@backingInt(std.c.SIG.INT));
 
     _ = try internal.evaluate(
         \\globalThis.__signals_400 = [];
@@ -35647,7 +35657,7 @@ test "private cached bytecode artifacts are deterministic typed and owned" {
     defer CachedBytecode__deref(module_owner);
     const module_artifact = module_bytes.?[0..module_len];
     try std.testing.expectEqualStrings(private_cached_bytecode_artifact_magic, module_artifact[0..8]);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(PrivateCachedBytecodeKind.module)), module_artifact[10]);
+    try std.testing.expectEqual(@as(u8, @backingInt(PrivateCachedBytecodeKind.module)), module_artifact[10]);
     try std.testing.expectEqualSlices(u8, source, module_artifact[module_artifact.len - source.len ..]);
 
     var repeat_bytes: ?[*]u8 = null;
@@ -35676,7 +35686,7 @@ test "private cached bytecode artifacts are deterministic typed and owned" {
         &cjs_owner,
     ));
     defer CachedBytecode__deref(cjs_owner);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(PrivateCachedBytecodeKind.common_js)), cjs_bytes.?[10]);
+    try std.testing.expectEqual(@as(u8, @backingInt(PrivateCachedBytecodeKind.common_js)), cjs_bytes.?[10]);
     try std.testing.expect(!std.mem.eql(u8, module_artifact, cjs_bytes.?[0..cjs_len]));
 }
 
@@ -35754,7 +35764,7 @@ test "private cached bytecode generation is concurrent and isolated" {
                 var len: usize = 0;
                 var owner: ?*PrivateCachedBytecode = null;
                 if (!generateCachedModuleByteCodeFromSourceCode(null, source.ptr, source.len, &bytes, &len, &owner) or
-                    len <= source.len or bytes.?[10] != @intFromEnum(PrivateCachedBytecodeKind.module))
+                    len <= source.len or bytes.?[10] != @backingInt(PrivateCachedBytecodeKind.module))
                 {
                     task.failed = true;
                     return;

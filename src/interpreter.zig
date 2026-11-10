@@ -3100,11 +3100,7 @@ pub fn functionRealmGlobal(env: *Environment, fallback: ?*value.Object) ?*value.
 }
 
 pub fn vmChunkAllowsInlineCalls(chunk: *const bc.Chunk) bool {
-    for (chunk.code.items) |inst| switch (inst.op) {
-        .tail_call, .tail_call_eval, .tail_call_eval_with_this, .tail_call_method, .tail_call_with_this, .tail_call_spread, .tail_call_with_this_spread => return false,
-        else => {},
-    };
-    return true;
+    return chunk.allowsInlineCalls();
 }
 
 test "VM spread tail calls retain trampoline-owned activation replacement" {
@@ -3457,6 +3453,10 @@ pub const Function = struct {
     /// plan and stays causally barred for incomplete environment contexts.
     uses_direct_eval: bool = false,
     closure: *Environment,
+    /// A rejected deferred body projects its captured Frame into live lexical
+    /// views. Contenders build from `closure` and publish one winning graph;
+    /// the original definition environment stays immutable.
+    fallback_closure: std.atomic.Value(?*Environment) = .init(null),
     /// The function's [[Realm]] global object, captured when the function is
     /// created. Sloppy `this` substitution and realm-sensitive operations must
     /// use this stable identity rather than repeatedly resolving the writable
@@ -3489,16 +3489,9 @@ pub const Function = struct {
     /// (`compiler.LazyFunction`): `chunk` is null until `vm.lazyChunk`
     /// compiles it or moves this closure to the tree-walker.
     lazy_template: ?*bc.FnTemplate = null,
-    /// True when a plain VM chunk can execute through the bounded native-stack
-    /// call fast path. Chunks containing a tail-call opcode must stay entirely
-    /// under the heap activation driver because those opcodes yield a pending
-    /// activation directly to that driver.
-    vm_inline_calls_safe: bool = false,
-    /// VM closure capture: the defining function's frame (type-erased `*vm.Frame`),
-    /// for resolving upvalues. Null at the top level. The slot count to allocate
-    /// for this function's own frame.
+    /// VM closure capture: the defining function's address-stable frame
+    /// (type-erased `*vm.Frame`), used to resolve upvalues. Null at top level.
     frame: ?*anyopaque = null,
-    local_count: u32 = 0,
     /// Class method support: the object on which this method/constructor lives
     /// (its [[HomeObject]]); `super.x` resolves on `home_object.protoAtomic()`.
     home_object: ?*value.Object = null,
@@ -3604,6 +3597,25 @@ pub const Function = struct {
     /// see the caller's `with` object — only the ones lexically enclosing its own
     /// definition — so the call restores this snapshot for the duration.
     with_stack: []*value.Object = &.{},
+
+    /// A lazily compiled body is release-published once its Chunk is complete.
+    /// Every shared reader acquires the same immutable layout and code.
+    pub fn compiledChunk(self: *const Function) ?*bc.Chunk {
+        return @atomicLoad(?*bc.Chunk, &self.chunk, .acquire);
+    }
+
+    pub fn closureEnvironment(self: *const Function) *Environment {
+        return self.fallback_closure.load(.acquire) orelse self.closure;
+    }
+
+    pub fn admissionReason(self: *const Function) BytecodeAdmissionReason {
+        if (self.lazy_template) |template| switch (@import("compiler.zig").templateSnapshot(template).admission) {
+            .plain_parameter_prologue => return .template_plain_rejected_parameter_prologue,
+            .plain_unsupported_lowering => return .template_plain_rejected_unsupported_lowering,
+            else => {},
+        };
+        return @atomicLoad(BytecodeAdmissionReason, &self.bytecode_admission_reason, .acquire);
+    }
 };
 
 pub const LegacyCallFrame = struct {
@@ -5964,7 +5976,7 @@ pub const Interpreter = struct {
             env.arena = self.arena;
             env.bindings_allocator = self.gc_side_storage;
             env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
-            env.parent = func.closure;
+            env.parent = func.closureEnvironment();
             // Reuse changes graph edges and activation state, never the cell's
             // allocation-time ownership ruling. Keep this a read-only invariant
             // for concurrent parent-edge tracing.
@@ -5973,13 +5985,13 @@ pub const Interpreter = struct {
             env.private_activation.store(true, .monotonic);
             // A cached activation can be tenured while its new closure parent
             // is young. Publish that managed edge exactly before execution.
-            if (env.gc_managed and func.closure.gc_managed)
-                if (!gc_mod.barrierExactManagedCellFrom(env, func.closure))
-                    gc_mod.barrierCellFrom(env, func.closure);
+            if (env.gc_managed and func.closureEnvironment().gc_managed)
+                if (!gc_mod.barrierExactManagedCellFrom(env, func.closureEnvironment()))
+                    gc_mod.barrierCellFrom(env, func.closureEnvironment());
             return env;
         }
         const env = try gc_mod.allocEnv(self.arena);
-        self.initEnvironment(env, func.closure, true);
+        self.initEnvironment(env, func.closureEnvironment(), true);
         env.private_activation.store(true, .monotonic);
         return env;
     }
@@ -6318,7 +6330,7 @@ pub const Interpreter = struct {
         const message = try std.fmt.allocPrint(self.arena, "required bytecode {s} function '{s}' has no compiled chunk ({s})", .{
             kind,
             function_name,
-            @tagName(func.bytecode_admission_reason),
+            @tagName(func.admissionReason()),
         });
         return self.throwError("InternalError", message);
     }
@@ -8736,7 +8748,7 @@ pub const Interpreter = struct {
         } else {
             admission_reason = try self.installPlainFunctionBytecode(func, fnode);
         }
-        func.bytecode_admission_reason = admission_reason;
+        @atomicStore(BytecodeAdmissionReason, &func.bytecode_admission_reason, admission_reason, .release);
         if (!admission_deferred) self.recordBytecodeAdmission(admission_reason);
         // A function object's [[Prototype]] is the kind-specific function
         // prototype intrinsic: %GeneratorFunction.prototype% for `function*`,
@@ -8788,9 +8800,7 @@ pub const Interpreter = struct {
             if (plainFunctionPolicyRejection(fnode)) |reason| return reason;
         return switch (Compiler.admitPlainFunction(self.arena, fnode) catch |err| return self.compileAdmissionFailed(err)) {
             .compiled => |code| blk: {
-                func.chunk = code.chunk;
-                func.local_count = code.local_count;
-                func.vm_inline_calls_safe = vmChunkAllowsInlineCalls(code.chunk);
+                @atomicStore(?*bc.Chunk, &func.chunk, code.chunk, .release);
                 break :blk .plain_compiled;
             },
             .rejected => |reason| plainRejectionAdmission(reason),
@@ -9980,7 +9990,7 @@ pub const Interpreter = struct {
             // Computed names ran first and may have tenured the constructor;
             // its new chunk's constants arrive after any promotion trace.
             gc_mod.rememberFunction(cf);
-            cf.bytecode_admission_reason = reason;
+            @atomicStore(BytecodeAdmissionReason, &cf.bytecode_admission_reason, reason, .release);
             self.recordBytecodeAdmission(reason);
         };
 
@@ -10533,7 +10543,7 @@ pub const Interpreter = struct {
         if (!self.lock_microtasks and !obj.proxy_revoked and obj.native == null) if (obj.coldState()) |cold| if (cold.hasRare(.js_function)) {
             const func: *Function = @ptrCast(@alignCast(cold.rare.js_function.ptr));
             if (!func.is_generator and !func.is_async and !func.is_class_constructor and obj.hostClassHooks() == null) {
-                if (func.chunk orelse try vm.lazyChunk(self, func)) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, Value.undef());
+                if (func.compiledChunk()) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, Value.undef());
             }
         };
         if (obj.proxyHandler() != null or obj.proxy_revoked)
@@ -10960,17 +10970,12 @@ pub const Interpreter = struct {
         // thread the same activation frame and explicit `new.target`.
         if (new_target.isUndefined() and func.is_class_constructor)
             return throwClassConstructorCallError(self, func);
-        if (!func.is_generator and !func.is_async) {
-            if (func.chunk orelse try vm.lazyChunk(self, func)) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
-            if (func.bytecode_execution_mode == .required)
-                return self.throwMissingRequiredChunk(func, "plain");
-        }
         var cur_func = func;
         var cur_args = args;
         var cur_this = this_val;
         var cur_new_target = new_target;
         while (true) {
-            const rv = try self.callPlain(cur_func, cur_args, cur_this, cur_new_target);
+            const rv = try self.callPlainOrBytecode(cur_func, cur_args, cur_this, cur_new_target);
             const tail = self.tree_tail_call orelse return rv;
             self.tree_tail_call = null;
             if (tail.resolved_method_name) |name| {
@@ -10985,14 +10990,45 @@ pub const Interpreter = struct {
             const next_func: *Function = @ptrCast(@alignCast(erased));
             if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
                 return self.callValueWithThisAtSite(tail.callee, tail.args, tail.this_value, tail.site);
-            if (next_func.chunk orelse try vm.lazyChunk(self, next_func)) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, tail.this_value, Value.undef());
-            if (next_func.bytecode_execution_mode == .required)
-                return self.throwMissingRequiredChunk(next_func, "plain");
             cur_func = next_func;
             cur_args = tail.args;
             cur_this = tail.this_value;
             cur_new_target = Value.undef();
         }
+    }
+
+    /// Resolve a cold body with all call inputs rooted, then refresh them
+    /// before binding. Keeping this scope around the actual invocation lets the
+    /// existing tail-call loop retire it before consuming its next pending call.
+    fn callPlainOrBytecode(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+        if (func.is_generator or func.is_async) return self.callPlain(func, args, this_val, new_target);
+        if (func.compiledChunk()) |chunk| return vm.runFunction(self, func, chunk, args, this_val, new_target);
+        if (func.lazy_template == null) {
+            if (func.bytecode_execution_mode == .required) return self.throwMissingRequiredChunk(func, "plain");
+            return self.callPlain(func, args, this_val, new_target);
+        }
+        const object = func.obj orelse return self.throwError("InternalError", "deferred function has no function object");
+        const mark = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(mark);
+        const callee_root = try self.pushTempRoot(Value.obj(object));
+        const receiver_root = try self.pushTempRoot(this_val);
+        const target_root = try self.pushTempRoot(new_target);
+        const arguments_root = try self.pushTempRootSlice(args);
+        const rooted_function = Interpreter.funcOf(self.tempRoot(callee_root, Value.obj(object))).?;
+        const resolved = try vm.resolvePlainFunction(self, rooted_function);
+        const scratch = self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena);
+        const forwarded = try scratch.alloc(Value, args.len);
+        defer scratch.free(forwarded);
+        for (args, forwarded, 0..) |argument, *output, index|
+            output.* = self.tempRoot(arguments_root + index, argument);
+        // Scratch admission can itself collect. The wrapping object root owns
+        // the exact Function pointer consumed by either execution tier.
+        const current = Interpreter.funcOf(self.tempRoot(callee_root, Value.obj(object))).?;
+        const receiver = self.tempRoot(receiver_root, this_val);
+        const target = self.tempRoot(target_root, new_target);
+        if (resolved.chunk) |chunk| return vm.runFunction(self, current, chunk, forwarded, receiver, target);
+        if (current.bytecode_execution_mode == .required) return self.throwMissingRequiredChunk(current, "plain");
+        return self.callPlain(current, forwarded, receiver, target);
     }
 
     /// The body of a plain (sync) function call: scope setup, param binding, and
@@ -12255,7 +12291,7 @@ pub const Interpreter = struct {
             if (current.nativeRealm()) |realm| return @ptrCast(@alignCast(realm));
             if (current.jsFunction()) |jf| {
                 const function: *Function = @ptrCast(@alignCast(jf));
-                return rootEnv(function.closure);
+                return rootEnv(function.closureEnvironment());
             }
             if (current.boundFunction()) |erased| {
                 const bound: *BoundFn = @ptrCast(@alignCast(erased));
@@ -25354,7 +25390,7 @@ fn numberOfDFGCompilesFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (args.len == 0 or !args[0].isObject()) return Value.num(0);
     const raw = args[0].asObj().jsFunction() orelse return Value.num(0);
     const func: *Function = @ptrCast(@alignCast(raw));
-    const chunk = func.chunk orelse return Value.num(0);
+    const chunk = func.compiledChunk() orelse return Value.num(0);
     return Value.num(@floatFromInt(chunk.optimizer_tier.compileCount()));
 }
 
@@ -26448,16 +26484,16 @@ pub fn throwClassConstructorCallError(self: *Interpreter, func: *Function) EvalE
     // JSC names the class: "Cannot call a class constructor C without |new|".
     if (func.name.len != 0) {
         if (std.fmt.allocPrint(self.arena, "Cannot call a class constructor {s} without |new|", .{func.name})) |named|
-            return throwErrorInRealm(self, func.closure, "TypeError", named)
+            return throwErrorInRealm(self, func.closureEnvironment(), "TypeError", named)
         else |_| {}
     }
-    return throwErrorInRealm(self, func.closure, "TypeError", "Cannot call a class constructor without |new|");
+    return throwErrorInRealm(self, func.closureEnvironment(), "TypeError", "Cannot call a class constructor without |new|");
 }
 
 fn objectFunctionRealm(o: *value.Object) ?*Environment {
     if (o.jsFunction()) |erased| {
         const func: *Function = @ptrCast(@alignCast(erased));
-        return func.closure;
+        return func.closureEnvironment();
     }
     return null;
 }

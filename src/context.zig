@@ -13251,6 +13251,317 @@ test "generic Array borrowed index keys survive collection and moving GC" {
     )).asBool());
 }
 
+test "parallel_js: cold shared functions publish initialized lazy metadata" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function coldPublishTarget(first, second) {
+        \\  const computed = first + second;
+        \\  const compiledLocal0 = computed + 0;
+        \\  const compiledLocal1 = compiledLocal0 + 1;
+        \\  const compiledLocal2 = compiledLocal1 + 1;
+        \\  const compiledLocal3 = compiledLocal2 + 1;
+        \\  const compiledLocal4 = compiledLocal3 + 1;
+        \\  const compiledLocal5 = compiledLocal4 + 1;
+        \\  const compiledLocal6 = compiledLocal5 + 1;
+        \\  const compiledLocal7 = compiledLocal6 + 1;
+        \\  const compiledLocal8 = compiledLocal7 + 1;
+        \\  const compiledLocal9 = compiledLocal8 + 1;
+        \\  const compiledLocal10 = compiledLocal9 + 1;
+        \\  const compiledLocal11 = compiledLocal10 + 1;
+        \\  const compiledLocal12 = compiledLocal11 + 1;
+        \\  const compiledLocal13 = compiledLocal12 + 1;
+        \\  const compiledLocal14 = compiledLocal13 + 1;
+        \\  const compiledLocal15 = compiledLocal14 + 1;
+        \\  const compiledLocal16 = compiledLocal15 + 1;
+        \\  const compiledLocal17 = compiledLocal16 + 1;
+        \\  const compiledLocal18 = compiledLocal17 + 1;
+        \\  const compiledLocal19 = compiledLocal18 + 1;
+        \\  const compiledLocal20 = compiledLocal19 + 1;
+        \\  const compiledLocal21 = compiledLocal20 + 1;
+        \\  const compiledLocal22 = compiledLocal21 + 1;
+        \\  const compiledLocal23 = compiledLocal22 + 1;
+        \\  const compiledLocal24 = compiledLocal23 + 1;
+        \\  const compiledLocal25 = compiledLocal24 + 1;
+        \\  const compiledLocal26 = compiledLocal25 + 1;
+        \\  const compiledLocal27 = compiledLocal26 + 1;
+        \\  const compiledLocal28 = compiledLocal27 + 1;
+        \\  const compiledLocal29 = compiledLocal28 + 1;
+        \\  const compiledLocal30 = compiledLocal29 + 1;
+        \\  const compiledLocal31 = compiledLocal30 + 1;
+        \\  const compiledLocal32 = compiledLocal31 + 1;
+        \\  const compiledLocal33 = compiledLocal32 + 1;
+        \\  const compiledLocal34 = compiledLocal33 + 1;
+        \\  const compiledLocal35 = compiledLocal34 + 1;
+        \\  const compiledLocal36 = compiledLocal35 + 1;
+        \\  const compiledLocal37 = compiledLocal36 + 1;
+        \\  const compiledLocal38 = compiledLocal37 + 1;
+        \\  const compiledLocal39 = compiledLocal38 + 1;
+        \\  const compiledLocal40 = compiledLocal39 + 1;
+        \\  const compiledLocal41 = compiledLocal40 + 1;
+        \\  const compiledLocal42 = compiledLocal41 + 1;
+        \\  const compiledLocal43 = compiledLocal42 + 1;
+        \\  const compiledLocal44 = compiledLocal43 + 1;
+        \\  const compiledLocal45 = compiledLocal44 + 1;
+        \\  const compiledLocal46 = compiledLocal45 + 1;
+        \\  const compiledLocal47 = compiledLocal46 + 1;
+        \\  const compiledLocal48 = compiledLocal47 + 1;
+        \\  const compiledLocal49 = compiledLocal48 + 1;
+        \\  const compiledLocal50 = compiledLocal49 + 1;
+        \\  const compiledLocal51 = compiledLocal50 + 1;
+        \\  const compiledLocal52 = compiledLocal51 + 1;
+        \\  const compiledLocal53 = compiledLocal52 + 1;
+        \\  const compiledLocal54 = compiledLocal53 + 1;
+        \\  const compiledLocal55 = compiledLocal54 + 1;
+        \\  const compiledLocal56 = compiledLocal55 + 1;
+        \\  const compiledLocal57 = compiledLocal56 + 1;
+        \\  const compiledLocal58 = compiledLocal57 + 1;
+        \\  const compiledLocal59 = compiledLocal58 + 1;
+        \\  const compiledLocal60 = compiledLocal59 + 1;
+        \\  const compiledLocal61 = compiledLocal60 + 1;
+        \\  const compiledLocal62 = compiledLocal61 + 1;
+        \\  const compiledLocal63 = compiledLocal62 + 1;
+        \\  const compiledLocal64 = compiledLocal63 + 1;
+        \\  const compiledLocal65 = compiledLocal64 + 1;
+        \\  const compiledLocal66 = compiledLocal65 + 1;
+        \\  const compiledLocal67 = compiledLocal66 + 1;
+        \\  const compiledLocal68 = compiledLocal67 + 1;
+        \\  const compiledLocal69 = compiledLocal68 + 1;
+        \\  const compiledLocal70 = compiledLocal69 + 1;
+        \\  const compiledLocal71 = compiledLocal70 + 1;
+        \\  const compiledLocal72 = compiledLocal71 + 1;
+        \\  const compiledLocal73 = compiledLocal72 + 1;
+        \\  const compiledLocal74 = compiledLocal73 + 1;
+        \\  const compiledLocal75 = compiledLocal74 + 1;
+        \\  const compiledLocal76 = compiledLocal75 + 1;
+        \\  const compiledLocal77 = compiledLocal76 + 1;
+        \\  const compiledLocal78 = compiledLocal77 + 1;
+        \\  const compiledLocal79 = compiledLocal78 + 1;
+        \\  const compiledLocal80 = compiledLocal79 + 1;
+        \\  const compiledLocal81 = compiledLocal80 + 1;
+        \\  const compiledLocal82 = compiledLocal81 + 1;
+        \\  const compiledLocal83 = compiledLocal82 + 1;
+        \\  const compiledLocal84 = compiledLocal83 + 1;
+        \\  const compiledLocal85 = compiledLocal84 + 1;
+        \\  const compiledLocal86 = compiledLocal85 + 1;
+        \\  const compiledLocal87 = compiledLocal86 + 1;
+        \\  const compiledLocal88 = compiledLocal87 + 1;
+        \\  const compiledLocal89 = compiledLocal88 + 1;
+        \\  const compiledLocal90 = compiledLocal89 + 1;
+        \\  const compiledLocal91 = compiledLocal90 + 1;
+        \\  const compiledLocal92 = compiledLocal91 + 1;
+        \\  const compiledLocal93 = compiledLocal92 + 1;
+        \\  const compiledLocal94 = compiledLocal93 + 1;
+        \\  const compiledLocal95 = compiledLocal94 + 1;
+        \\  const compiledLocal96 = compiledLocal95 + 1;
+        \\  const compiledLocal97 = compiledLocal96 + 1;
+        \\  const compiledLocal98 = compiledLocal97 + 1;
+        \\  const compiledLocal99 = compiledLocal98 + 1;
+        \\  const compiledLocal100 = compiledLocal99 + 1;
+        \\  const compiledLocal101 = compiledLocal100 + 1;
+        \\  const compiledLocal102 = compiledLocal101 + 1;
+        \\  const compiledLocal103 = compiledLocal102 + 1;
+        \\  const compiledLocal104 = compiledLocal103 + 1;
+        \\  const compiledLocal105 = compiledLocal104 + 1;
+        \\  const compiledLocal106 = compiledLocal105 + 1;
+        \\  const compiledLocal107 = compiledLocal106 + 1;
+        \\  const compiledLocal108 = compiledLocal107 + 1;
+        \\  const compiledLocal109 = compiledLocal108 + 1;
+        \\  const compiledLocal110 = compiledLocal109 + 1;
+        \\  const compiledLocal111 = compiledLocal110 + 1;
+        \\  const compiledLocal112 = compiledLocal111 + 1;
+        \\  const compiledLocal113 = compiledLocal112 + 1;
+        \\  const compiledLocal114 = compiledLocal113 + 1;
+        \\  const compiledLocal115 = compiledLocal114 + 1;
+        \\  const compiledLocal116 = compiledLocal115 + 1;
+        \\  const compiledLocal117 = compiledLocal116 + 1;
+        \\  const compiledLocal118 = compiledLocal117 + 1;
+        \\  const compiledLocal119 = compiledLocal118 + 1;
+        \\  const compiledLocal120 = compiledLocal119 + 1;
+        \\  const compiledLocal121 = compiledLocal120 + 1;
+        \\  const compiledLocal122 = compiledLocal121 + 1;
+        \\  const compiledLocal123 = compiledLocal122 + 1;
+        \\  const compiledLocal124 = compiledLocal123 + 1;
+        \\  const compiledLocal125 = compiledLocal124 + 1;
+        \\  const compiledLocal126 = compiledLocal125 + 1;
+        \\  const compiledLocal127 = compiledLocal126 + 1;
+        \\  const compiledLocal128 = compiledLocal127 + 1;
+        \\  const compiledLocal129 = compiledLocal128 + 1;
+        \\  const compiledLocal130 = compiledLocal129 + 1;
+        \\  const compiledLocal131 = compiledLocal130 + 1;
+        \\  const compiledLocal132 = compiledLocal131 + 1;
+        \\  const compiledLocal133 = compiledLocal132 + 1;
+        \\  const compiledLocal134 = compiledLocal133 + 1;
+        \\  const compiledLocal135 = compiledLocal134 + 1;
+        \\  const compiledLocal136 = compiledLocal135 + 1;
+        \\  const compiledLocal137 = compiledLocal136 + 1;
+        \\  const compiledLocal138 = compiledLocal137 + 1;
+        \\  const compiledLocal139 = compiledLocal138 + 1;
+        \\  const compiledLocal140 = compiledLocal139 + 1;
+        \\  const compiledLocal141 = compiledLocal140 + 1;
+        \\  const compiledLocal142 = compiledLocal141 + 1;
+        \\  const compiledLocal143 = compiledLocal142 + 1;
+        \\  const compiledLocal144 = compiledLocal143 + 1;
+        \\  const compiledLocal145 = compiledLocal144 + 1;
+        \\  const compiledLocal146 = compiledLocal145 + 1;
+        \\  const compiledLocal147 = compiledLocal146 + 1;
+        \\  const compiledLocal148 = compiledLocal147 + 1;
+        \\  const compiledLocal149 = compiledLocal148 + 1;
+        \\  const compiledLocal150 = compiledLocal149 + 1;
+        \\  const compiledLocal151 = compiledLocal150 + 1;
+        \\  const compiledLocal152 = compiledLocal151 + 1;
+        \\  const compiledLocal153 = compiledLocal152 + 1;
+        \\  const compiledLocal154 = compiledLocal153 + 1;
+        \\  const compiledLocal155 = compiledLocal154 + 1;
+        \\  const compiledLocal156 = compiledLocal155 + 1;
+        \\  const compiledLocal157 = compiledLocal156 + 1;
+        \\  const compiledLocal158 = compiledLocal157 + 1;
+        \\  const compiledLocal159 = compiledLocal158 + 1;
+        \\  const compiledLocal160 = compiledLocal159 + 1;
+        \\  const compiledLocal161 = compiledLocal160 + 1;
+        \\  const compiledLocal162 = compiledLocal161 + 1;
+        \\  const compiledLocal163 = compiledLocal162 + 1;
+        \\  const compiledLocal164 = compiledLocal163 + 1;
+        \\  const compiledLocal165 = compiledLocal164 + 1;
+        \\  const compiledLocal166 = compiledLocal165 + 1;
+        \\  const compiledLocal167 = compiledLocal166 + 1;
+        \\  const compiledLocal168 = compiledLocal167 + 1;
+        \\  const compiledLocal169 = compiledLocal168 + 1;
+        \\  const compiledLocal170 = compiledLocal169 + 1;
+        \\  const compiledLocal171 = compiledLocal170 + 1;
+        \\  const compiledLocal172 = compiledLocal171 + 1;
+        \\  const compiledLocal173 = compiledLocal172 + 1;
+        \\  const compiledLocal174 = compiledLocal173 + 1;
+        \\  const compiledLocal175 = compiledLocal174 + 1;
+        \\  const compiledLocal176 = compiledLocal175 + 1;
+        \\  const compiledLocal177 = compiledLocal176 + 1;
+        \\  const compiledLocal178 = compiledLocal177 + 1;
+        \\  const compiledLocal179 = compiledLocal178 + 1;
+        \\  const compiledLocal180 = compiledLocal179 + 1;
+        \\  const compiledLocal181 = compiledLocal180 + 1;
+        \\  const compiledLocal182 = compiledLocal181 + 1;
+        \\  const compiledLocal183 = compiledLocal182 + 1;
+        \\  const compiledLocal184 = compiledLocal183 + 1;
+        \\  const compiledLocal185 = compiledLocal184 + 1;
+        \\  const compiledLocal186 = compiledLocal185 + 1;
+        \\  const compiledLocal187 = compiledLocal186 + 1;
+        \\  const compiledLocal188 = compiledLocal187 + 1;
+        \\  const compiledLocal189 = compiledLocal188 + 1;
+        \\  const compiledLocal190 = compiledLocal189 + 1;
+        \\  const compiledLocal191 = compiledLocal190 + 1;
+        \\  const compiledLocal192 = compiledLocal191 + 1;
+        \\  const compiledLocal193 = compiledLocal192 + 1;
+        \\  const compiledLocal194 = compiledLocal193 + 1;
+        \\  const compiledLocal195 = compiledLocal194 + 1;
+        \\  const compiledLocal196 = compiledLocal195 + 1;
+        \\  const compiledLocal197 = compiledLocal196 + 1;
+        \\  const compiledLocal198 = compiledLocal197 + 1;
+        \\  const compiledLocal199 = compiledLocal198 + 1;
+        \\  const compiledLocal200 = compiledLocal199 + 1;
+        \\  const compiledLocal201 = compiledLocal200 + 1;
+        \\  const compiledLocal202 = compiledLocal201 + 1;
+        \\  const compiledLocal203 = compiledLocal202 + 1;
+        \\  const compiledLocal204 = compiledLocal203 + 1;
+        \\  const compiledLocal205 = compiledLocal204 + 1;
+        \\  const compiledLocal206 = compiledLocal205 + 1;
+        \\  const compiledLocal207 = compiledLocal206 + 1;
+        \\  const compiledLocal208 = compiledLocal207 + 1;
+        \\  const compiledLocal209 = compiledLocal208 + 1;
+        \\  const compiledLocal210 = compiledLocal209 + 1;
+        \\  const compiledLocal211 = compiledLocal210 + 1;
+        \\  const compiledLocal212 = compiledLocal211 + 1;
+        \\  const compiledLocal213 = compiledLocal212 + 1;
+        \\  const compiledLocal214 = compiledLocal213 + 1;
+        \\  const compiledLocal215 = compiledLocal214 + 1;
+        \\  const compiledLocal216 = compiledLocal215 + 1;
+        \\  const compiledLocal217 = compiledLocal216 + 1;
+        \\  const compiledLocal218 = compiledLocal217 + 1;
+        \\  const compiledLocal219 = compiledLocal218 + 1;
+        \\  const compiledLocal220 = compiledLocal219 + 1;
+        \\  const compiledLocal221 = compiledLocal220 + 1;
+        \\  const compiledLocal222 = compiledLocal221 + 1;
+        \\  const compiledLocal223 = compiledLocal222 + 1;
+        \\  const compiledLocal224 = compiledLocal223 + 1;
+        \\  const compiledLocal225 = compiledLocal224 + 1;
+        \\  const compiledLocal226 = compiledLocal225 + 1;
+        \\  const compiledLocal227 = compiledLocal226 + 1;
+        \\  const compiledLocal228 = compiledLocal227 + 1;
+        \\  const compiledLocal229 = compiledLocal228 + 1;
+        \\  const compiledLocal230 = compiledLocal229 + 1;
+        \\  const compiledLocal231 = compiledLocal230 + 1;
+        \\  const compiledLocal232 = compiledLocal231 + 1;
+        \\  const compiledLocal233 = compiledLocal232 + 1;
+        \\  const compiledLocal234 = compiledLocal233 + 1;
+        \\  const compiledLocal235 = compiledLocal234 + 1;
+        \\  const compiledLocal236 = compiledLocal235 + 1;
+        \\  const compiledLocal237 = compiledLocal236 + 1;
+        \\  const compiledLocal238 = compiledLocal237 + 1;
+        \\  const compiledLocal239 = compiledLocal238 + 1;
+        \\  const compiledLocal240 = compiledLocal239 + 1;
+        \\  const compiledLocal241 = compiledLocal240 + 1;
+        \\  const compiledLocal242 = compiledLocal241 + 1;
+        \\  const compiledLocal243 = compiledLocal242 + 1;
+        \\  const compiledLocal244 = compiledLocal243 + 1;
+        \\  const compiledLocal245 = compiledLocal244 + 1;
+        \\  const compiledLocal246 = compiledLocal245 + 1;
+        \\  const compiledLocal247 = compiledLocal246 + 1;
+        \\  const compiledLocal248 = compiledLocal247 + 1;
+        \\  const compiledLocal249 = compiledLocal248 + 1;
+        \\  const compiledLocal250 = compiledLocal249 + 1;
+        \\  const compiledLocal251 = compiledLocal250 + 1;
+        \\  const compiledLocal252 = compiledLocal251 + 1;
+        \\  const compiledLocal253 = compiledLocal252 + 1;
+        \\  const compiledLocal254 = compiledLocal253 + 1;
+        \\  const compiledLocal255 = compiledLocal254 + 1;
+        \\  return function () { return compiledLocal255 - 255; };
+        \\}
+        \\function coldPublishLane(gate, target, lane, warmup) {
+        \\  if (warmup) return 0;
+        \\  Atomics.add(gate, 'ready', 1);
+        \\  Atomics.notify(gate, 'ready');
+        \\  while (Atomics.load(gate, 'open') === 0) Atomics.wait(gate, 'open', 0);
+        \\  let previous;
+        \\  let total = 0;
+        \\  for (let round = 0; round < 8; round++) {
+        \\    const captured = target(40, lane + round);
+        \\    if (captured() !== 40 + lane + round)
+        \\      throw new Error('cold shared function computed the wrong value');
+        \\    if (previous && (previous === captured || previous() !== 39 + lane + round))
+        \\      throw new Error('cold shared function reused a closure or its binding');
+        \\    previous = captured;
+        \\    total += captured();
+        \\  }
+        \\  return total;
+        \\}
+        \\coldPublishLane(null, null, 0, true);
+    );
+    const cold = interp.Interpreter.funcOf(ctx.global_object.getOwn("coldPublishTarget").?) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(cold.compiledChunk() == null);
+    try std.testing.expect(cold.lazy_template != null);
+    const result = try ctx.evaluate(
+        \\var coldPublishGate = {ready: 0, open: 0};
+        \\var coldPublishThreads = [];
+        \\for (var lane = 0; lane < 4; lane++)
+        \\  coldPublishThreads.push(new Thread(coldPublishLane, coldPublishGate, coldPublishTarget, lane));
+        \\while (Atomics.load(coldPublishGate, 'ready') !== 4) {
+        \\  var ready = Atomics.load(coldPublishGate, 'ready');
+        \\  if (ready !== 4) Atomics.wait(coldPublishGate, 'ready', ready);
+        \\}
+        \\Atomics.store(coldPublishGate, 'open', 1);
+        \\Atomics.notify(coldPublishGate, 'open');
+        \\var coldPublishTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) coldPublishTotal += coldPublishThreads[lane].join();
+        \\coldPublishTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 1440), result.asNum());
+    const published = interp.Interpreter.funcOf(ctx.global_object.getOwn("coldPublishTarget").?) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(published.compiledChunk() != null);
+    try std.testing.expect(published.compiledChunk().?.local_count >= 259);
+}
+
 test "parallel_js generic Array index keys remain invocation local" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -25291,7 +25602,7 @@ fn testFunctionChunk(ctx: *Context, name: []const u8) !*bc.Chunk {
     const function_value = ctx.global_object.getOwn(name) orelse return error.TestUnexpectedResult;
     const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const function: *interp.Function = @ptrCast(@alignCast(raw_function));
-    return function.chunk orelse error.TestUnexpectedResult;
+    return function.compiledChunk() orelse error.TestUnexpectedResult;
 }
 
 test "JIT profitability gate keeps object-heavy chunks in bytecode and tiers numeric ones" {
@@ -25349,7 +25660,7 @@ test "Context native observability captures published function identity" {
     const function_value = ctx.global_object.getOwn("observedNative") orelse return error.TestUnexpectedResult;
     const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const function: *interp.Function = @ptrCast(@alignCast(raw_function));
-    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const code = chunk.tier.loadCode() orelse
         chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
@@ -27301,7 +27612,7 @@ fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions, activ
 
     const function_object = ctx.global_object.getOwn("optimizerCompactKeep").?.asObj();
     const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
-    const chunk = function.chunk.?;
+    const chunk = function.compiledChunk().?;
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
@@ -27577,7 +27888,7 @@ test "parallel_js: delete and descriptor changes retire only affected artifacts"
             const raw = context.global_object.getOwn(name).?.asObj().jsFunction() orelse
                 return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             return .{
                 .chunk = chunk,
                 .artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
@@ -27815,7 +28126,7 @@ fn verifySeededOptimizerDifferential(options: Context.TestingOptions, seed_count
 
         const function_object = native_ctx.global_object.getOwn("optimizerSeeded").?.asObj();
         const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
-        const chunk = function.chunk orelse return error.TestUnexpectedResult;
+        const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(jit.OptimizerTierState.ready, chunk.optimizer_tier.state.load(.acquire));
         try std.testing.expectEqual(@as(u64, 1), chunk.optimizer_tier.compileCount());
         try std.testing.expectEqual(jit.CodeKind.optimizer, chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?.kind);
@@ -27932,7 +28243,7 @@ test "optimizer packed index and property regions match bytecode and survive a m
     _ = try bytecode_ctx.evaluate(source);
     const function_object = native_ctx.global_object.getOwn("optimizerPropertyMove").?.asObj();
     const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
-    const chunk = function.chunk.?;
+    const chunk = function.compiledChunk().?;
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
@@ -28190,7 +28501,7 @@ test "optimizer stable native builtin calls survive a moving GC checkpoint" {
     _ = try bytecode_ctx.evaluate(source);
     const function_object = native_ctx.global_object.getOwn("optimizerJsonMoving").?.asObj();
     const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
-    const chunk = function.chunk.?;
+    const chunk = function.compiledChunk().?;
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
@@ -28673,7 +28984,7 @@ test "enable_gc: persistent bytecode string constants survive collection" {
         return error.TestUnexpectedResult;
     // The first call compiles the deferred body and attaches its chunk.
     try std.testing.expectEqualStrings("en-US", (try ctx.evaluate("persistentBytecodeLiteral(0)")).asStr());
-    try std.testing.expect(function.chunk != null);
+    try std.testing.expect(function.compiledChunk() != null);
 
     // The Function is globally reachable while its compiled string literal is
     // reachable only through the arena-owned Chunk. Reclaim first, then churn
@@ -29712,7 +30023,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
         const function_value = ctx.global_object.getOwn(entry.name) orelse return error.TestUnexpectedResult;
         const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
         const function: *interp.Function = @ptrCast(@alignCast(raw));
-        try std.testing.expectEqual(entry.reason, function.bytecode_admission_reason);
+        try std.testing.expectEqual(entry.reason, function.admissionReason());
     }
     const template_expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
         .{ .name = "templateDefault", .reason = .template_plain_compiled },
@@ -29722,7 +30033,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
         const function_value = ctx.global_object.getOwn(entry.name) orelse return error.TestUnexpectedResult;
         const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
         const function: *interp.Function = @ptrCast(@alignCast(raw));
-        try std.testing.expectEqual(entry.reason, function.bytecode_admission_reason);
+        try std.testing.expectEqual(entry.reason, function.admissionReason());
     }
 
     const after = ctx.bytecodeAdmissionSnapshot();
@@ -33473,8 +33784,8 @@ test "forced tree-walker and required bytecode preserve named rest parameters" {
             const function_value = try ctx.evaluate("restCollect");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(interp.BytecodeAdmissionReason.template_plain_compiled, function.bytecode_admission_reason);
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(interp.BytecodeAdmissionReason.template_plain_compiled, function.admissionReason());
             try std.testing.expectEqual(@as(?u32, 1), chunk.rest_parameter_index);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(u32, 1), chunk.parameter_slots[1]);
@@ -33529,7 +33840,7 @@ test "parallel_js: shared named-rest chunk binds lane-local arrays" {
     );
     const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const function: *interp.Function = @ptrCast(@alignCast(raw_function));
-    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(?u32, 1), chunk.rest_parameter_index);
 
     const lane_count = 4;
@@ -33692,7 +34003,7 @@ test "forced tree-walker and required bytecode preserve initializer-free destruc
             const function_value = try ctx.evaluate("pick");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.destructuring_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(?u32, null), chunk.rest_parameter_index);
@@ -33808,7 +34119,7 @@ test "forced tree-walker and required bytecode preserve closed primitive default
             const function_value = try ctx.evaluate("literalDefaults");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5 }, chunk.default_parameter_indices);
             try std.testing.expectEqualSlices(u32, &.{5}, chunk.destructuring_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
@@ -33907,7 +34218,7 @@ test "forced tree-walker and required bytecode preserve invocation-context defau
             const function_value = try ctx.evaluate("sloppyLeaf");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.default_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expect(chunk.arguments_slot != null);
@@ -34008,7 +34319,7 @@ test "forced tree-walker and required bytecode preserve earlier parameter defaul
             const function_value = try ctx.evaluate("patterns");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 1, 3 }, chunk.default_parameter_indices);
             try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, chunk.destructuring_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
@@ -36394,7 +36705,7 @@ test "forced tree-walker and required bytecode preserve parameter-safe default e
             const function_value = try ctx.evaluate("parameterExpressionHolder.method");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, chunk.default_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expect(chunk.arguments_slot != null);
@@ -36503,7 +36814,7 @@ test "forced tree-walker and required bytecode preserve parameter-local property
             const function_value = try ctx.evaluate("parameterReads");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 2, 3, 4 }, chunk.default_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
@@ -36606,7 +36917,7 @@ test "forced tree-walker and required bytecode preserve parameter-local call def
             const function_value = try ctx.evaluate("parameterCalls");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5, 6, 7 }, chunk.default_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
@@ -36713,7 +37024,7 @@ test "forced tree-walker and required bytecode preserve parameter-local construc
             const function_value = try ctx.evaluate("parameterConstructions");
             const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5, 6, 7 }, chunk.default_parameter_indices);
             try std.testing.expect(chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
@@ -36780,7 +37091,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const function_value = try ctx.evaluate("sharedPattern");
     const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const function: *interp.Function = @ptrCast(@alignCast(raw_function));
-    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.destructuring_parameter_indices);
     try std.testing.expectEqualSlices(u32, &.{2}, chunk.default_parameter_indices);
     const invocation_value = try ctx.evaluate("sharedInvocation");
@@ -37189,8 +37500,8 @@ test "forced tree-walker and required bytecode preserve base class instance init
             const constructor = try ctx.evaluate("BaseFieldActivation");
             const raw = constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, function.bytecode_admission_reason);
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, function.admissionReason());
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             var entered: ?usize = null;
             var public_fields: usize = 0;
             var private_fields: usize = 0;
@@ -37350,8 +37661,8 @@ test "forced tree-walker and required bytecode preserve derived constructor acti
             const constructor = try ctx.evaluate("DerivedActivation");
             const raw = constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
             const function: *interp.Function = @ptrCast(@alignCast(raw));
-            try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, function.bytecode_admission_reason);
-            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, function.admissionReason());
+            const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expect(chunk.is_derived_constructor);
             const inventory = ctx.bytecodeAdmissionSnapshot();
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_class_constructor_semantics));
@@ -37382,7 +37693,7 @@ test "forced tree-walker and required bytecode preserve derived constructor acti
     const eval_constructor = try automatic.evaluate("EvalDerived");
     const eval_raw = eval_constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const eval_function: *interp.Function = @ptrCast(@alignCast(eval_raw));
-    try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, eval_function.bytecode_admission_reason);
+    try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, eval_function.admissionReason());
     try std.testing.expect(eval_function.chunk != null);
     const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_class_constructor_semantics));
@@ -48290,6 +48601,75 @@ test "driver-owned calls keep baseline leaves on the direct native path" {
     );
     try std.testing.expectEqual(@as(f64, 1999000), result.asNum());
     try std.testing.expect(vm.nativeDirectCallHitsForTesting() - before >= 1900);
+}
+
+test "parallel_js: rejected deferred closures publish one rooted defining view" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const compiler_mod = @import("compiler.zig");
+    compiler_mod.LazyFunction.testing_reject_nested = true;
+    defer compiler_mod.LazyFunction.testing_reject_nested = false;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function rejectedFactory(seed) {
+        \\  let count = seed;
+        \\  { let step = 2;
+        \\    return function named(value) {
+        \\      if (value === -1) return named(0);
+        \\      return function () { return count + step + value; };
+        \\    };
+        \\  }
+        \\}
+        \\var rejectedTarget = rejectedFactory(40);
+        \\function rejectedLane(gate, target, lane, warmup) {
+        \\  if (warmup) return 0;
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  Atomics.add(gate, 'ready', 1);
+        \\  Atomics.notify(gate, 'ready');
+        \\  while (Atomics.load(gate, 'open') === 0) Atomics.wait(gate, 'open', 0);
+        \\  let previous, total = 0;
+        \\  for (let round = 0; round < 8; round++) {
+        \\    const captured = target(lane + round);
+        \\    if (captured() !== 42 + lane + round) throw new Error('captured values differ');
+        \\    if (previous && (previous === captured || previous() !== 41 + lane + round))
+        \\      throw new Error('prior capture identity or values differ');
+        \\    previous = captured;
+        \\    total += captured();
+        \\  }
+        \\  return total;
+        \\}
+        \\rejectedLane(null, null, 0, true);
+    );
+    const cold = interp.Interpreter.funcOf(ctx.global_object.getOwn("rejectedTarget").?).?;
+    try std.testing.expect(cold.compiledChunk() == null);
+    try std.testing.expect(cold.fallback_closure.load(.acquire) == null);
+    try std.testing.expectEqual(@as(f64, 1504), (try ctx.evaluate(
+        \\var rejectedGate = {ready: 0, open: 0}, rejectedThreads = [];
+        \\for (var lane = 0; lane < 4; lane++)
+        \\  rejectedThreads.push(new Thread(rejectedLane, rejectedGate, rejectedTarget, lane));
+        \\while (Atomics.load(rejectedGate, 'ready') !== 4) {
+        \\  var ready = Atomics.load(rejectedGate, 'ready');
+        \\  if (ready !== 4) Atomics.wait(rejectedGate, 'ready', ready);
+        \\}
+        \\Atomics.store(rejectedGate, 'open', 1);
+        \\Atomics.notify(rejectedGate, 'open');
+        \\var rejectedTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) rejectedTotal += rejectedThreads[lane].join();
+        \\if (rejectedTarget(-1)() !== 42) throw new Error('self-name binding differs');
+        \\rejectedTotal;
+    )).asNum());
+    const published = interp.Interpreter.funcOf(ctx.global_object.getOwn("rejectedTarget").?).?;
+    try std.testing.expect(published.compiledChunk() == null);
+    try std.testing.expect(published.fallback_closure.load(.acquire) != null);
+    ctx.collectGarbage();
+    const compacted = ctx.compactGarbage();
+    try std.testing.expect(compacted.status == .compacted or compacted.status == .no_candidates);
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("rejectedTarget(-1)()")).asNum());
 }
 
 test "deferred function bodies compile on first call and keep their closures" {

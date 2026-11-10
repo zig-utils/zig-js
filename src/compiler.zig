@@ -826,6 +826,23 @@ pub const LazyFunction = struct {
     }
 };
 
+/// Observe a template's compiler-owned fields only after its terminal
+/// publication. Pending templates must not expose partially initialized chunks
+/// or an admission value concurrently replaced by rejection.
+pub const TemplateSnapshot = struct {
+    chunk: ?*Chunk,
+    local_count: u32,
+    admission: bc.FnTemplateAdmission,
+};
+
+pub fn templateSnapshot(template: *const bc.FnTemplate) TemplateSnapshot {
+    if (LazyFunction.of(template)) |lazy| switch (lazy.state.load(.acquire)) {
+        .pending => return .{ .chunk = null, .local_count = 0, .admission = .plain_compiled },
+        .compiled, .rejected => {},
+    };
+    return .{ .chunk = template.chunk, .local_count = template.local_count, .admission = template.admission };
+}
+
 fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const FnScope) CompileError!void {
     chunk.debug_local_names = try arena.dupe([]const u8, scope.slot_names.items);
 }
@@ -1576,7 +1593,6 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
 /// negative. It deliberately ignores shadowing and treats deferred class bodies
 /// as closures: over-matching selects the correct-but-slower lowering, never a
 /// wrong one.
-
 fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
     return if (comptime @TypeOf(query) == CapturedBindingReferences)
         query.names.contains(identifier)

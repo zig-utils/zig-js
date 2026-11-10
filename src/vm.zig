@@ -308,9 +308,9 @@ pub const Exec = struct {
     /// The activation frame this Exec is running (null for env-mode bodies:
     /// program/generator/async). Recorded so a mid-script collection can trace
     /// the frame's `slots` (and its captured-frame parent chain) as precise GC
-    /// roots — like `stack`/`acc`, the slots are arena-backed and invisible to
-    /// both the precise object graph and the conservative native-stack scan, so
-    /// an object live only through a VM local would otherwise be swept.
+    /// roots. The Frame cell is pinned; live local/native stores are traced
+    /// directly through this publication while private cell payload tracing is
+    /// deferred to its owner roots during concurrent marking.
     frame: ?*Frame = null,
     /// Managed caller state saved by a heap activation. The registered Exec
     /// owns the only restoration copies, so a nested moving safepoint rewrites
@@ -4448,7 +4448,7 @@ test "vm body direct eval shadows an outer default parameter binding" {
     };
     const function_value = try run(&machine, root_chunk, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), function_chunk.direct_eval_plans.items.len);
     try std.testing.expectEqual(@as(usize, 2), function_chunk.direct_eval_plans.items[0].scopes.len);
 
@@ -4543,7 +4543,7 @@ test "vm parameter direct-eval entry allocation failure restores the caller acti
     };
     const function_value = try run(&machine, root_chunk, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expect(function_chunk.parameter_direct_eval_plan != null);
 
     const warm = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
@@ -4599,7 +4599,7 @@ fn constructSpreadValueAtSite(vm: *Interpreter, callee: Value, args_array: Value
 fn tailCallValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: interp.CallSite) EvalError!Value {
     if (vm.driver_active) {
         if (jsChunkFn(callee)) |func| {
-            vm.pending_activation = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+            vm.pending_activation = try buildActivation(vm, func, func.compiledChunk().?, args, this_val, Value.undef());
             vm.pending_tail_call = true;
             return Value.undef();
         }
@@ -4700,7 +4700,7 @@ const OptimizerCallTarget = struct {
 };
 
 fn optimizerCallTarget(function: *Function) ?OptimizerCallTarget {
-    const chunk = function.chunk orelse return null;
+    const chunk = function.compiledChunk() orelse return null;
     const generation = chunk.optimizer_tier.generation.load(.acquire);
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return null;
     if (chunk.optimizer_tier.generation.load(.acquire) != generation) return null;
@@ -4847,7 +4847,7 @@ fn chunkDirectlyObservesLegacyFrame(chunk: *const Chunk) bool {
 
 fn nativeDirectCalleeIsLegacySafe(callee: Value, args: []const Value) bool {
     const function = jsChunkFn(callee) orelse return false;
-    const chunk = function.chunk orelse return false;
+    const chunk = function.compiledChunk() orelse return false;
     if (function.uses_arguments or chunkDirectlyObservesLegacyFrame(chunk)) return false;
     const plan = switch (compileQuickLeafPlan(chunk)) {
         .numeric => |plan| plan,
@@ -6956,7 +6956,7 @@ test "vm: native for-in termination preserves the checkpoint boundary" {
     try std.testing.expect(target.isObject());
     const function = Interpreter.funcOf(env.get("count") orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
 
     for (0..12) |_| {
         try std.testing.expectEqual(@as(f64, 2048), (try runFunction(&machine, function, function_chunk, &.{target}, Value.undef(), Value.undef())).asNum());
@@ -8159,8 +8159,8 @@ fn nativeCodeOriginForFunction(vm: *Interpreter, func: *const Function, owner: *
         .source_line = source.location.line,
         .source_column = source.location.column,
         .source_resolver_context = vm,
-        .bytecode_context = func.chunk,
-        .resolve_source = if (func.chunk != null) resolveNativeBytecodeSource else null,
+        .bytecode_context = func.compiledChunk(),
+        .resolve_source = if (func.compiledChunk() != null) resolveNativeBytecodeSource else null,
     };
     return .{
         .function_name = func.name,
@@ -8254,7 +8254,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// on the host stack; a driver-owned call may take it instead of building a
 /// heap activation whose entry would run the same native code anyway.
 fn tryRunNativeLeafCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
-    const chunk = func.chunk orelse return null;
+    const chunk = func.compiledChunk() orelse return null;
     if (chunk.tier.loadCode() == null or chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null) return null;
     return tryRunNativeDirectCallMode(vm, func, args, true);
 }
@@ -8266,7 +8266,7 @@ fn tryRunNativeDirectCallMode(vm: *Interpreter, func: *Function, args: []const V
     // Native code counts (and on deoptimization restores) steps itself.
     defer vm.step_limit = 0;
     if (func.is_class_constructor or func.uses_arguments) return null;
-    const chunk = func.chunk orelse return null;
+    const chunk = func.compiledChunk() orelse return null;
     // Direct native calls copy argument i into slot i and skip buildActivation.
     // Rest/destructuring/default entry metadata requires allocation or a
     // bytecode prologue, so only a simple formal list has that identity layout.
@@ -8275,7 +8275,7 @@ fn tryRunNativeDirectCallMode(vm: *Interpreter, func: *Function, args: []const V
     // operations; the direct native leaf path cannot elide them.
     if (chunk.lexical_slots.len != 0) return null;
     const slot_count: usize = @intCast(chunk.local_count);
-    if (slot_count != func.local_count or slot_count > 64) return null;
+    if (slot_count > 64) return null;
     // With no published tier the direct path can only fall back after
     // copying the arguments and switching scopes. Let the ordinary call path
     // run the chunk; its entry still profiles and compiles.
@@ -10043,7 +10043,7 @@ fn runChunk(
                                 continue;
                             }
                         }
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, stack.items[base..], Value.undef(), Value.undef());
                         act.result_base = base - 1;
                         stack.shrinkRetainingCapacity(base - 1);
                         exec.acc = acc;
@@ -10059,9 +10059,9 @@ fn runChunk(
                             try stack.append(stack_alloc, result);
                             continue;
                         }
-                        if (!parallel_sync and func.vm_inline_calls_safe and !vm.vm_inline_calls_disabled) {
+                        if (!parallel_sync and func.compiledChunk().?.inline_calls_safe and !vm.vm_inline_calls_disabled) {
                             const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
-                                try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
+                                try runInlineFunction(vm, func, func.compiledChunk().?, stack.items[base..], Value.undef(), Value.undef())
                             else
                                 try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef(), vmCallSite(chunk, ip));
                             stack.shrinkRetainingCapacity(base - 1);
@@ -10080,7 +10080,7 @@ fn runChunk(
                 const callee = stack.items[base - 1];
                 if (vm.driver_active) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, stack.items[base..], Value.undef(), Value.undef());
                         stack.shrinkRetainingCapacity(base - 1);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10097,7 +10097,7 @@ fn runChunk(
                 const callee = stack.items[base - 1];
                 if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, stack.items[base..], Value.undef(), Value.undef());
                         stack.shrinkRetainingCapacity(base - 1);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10115,7 +10115,7 @@ fn runChunk(
                 const callee = stack.items[base - 2];
                 if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], this_val, Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, stack.items[base..], this_val, Value.undef());
                         stack.shrinkRetainingCapacity(base - 2);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10132,7 +10132,7 @@ fn runChunk(
                 const callee = stack.items[base - 1];
                 if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, stack.items[base..], Value.undef(), Value.undef());
                         stack.shrinkRetainingCapacity(base - 1);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10150,7 +10150,7 @@ fn runChunk(
                 const callee = stack.items[base - 2];
                 if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], this_val, Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, stack.items[base..], this_val, Value.undef());
                         stack.shrinkRetainingCapacity(base - 2);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10222,7 +10222,7 @@ fn runChunk(
                 const method = try vm.getProperty(recv, name);
                 if (vm.driver_active) {
                     if (jsChunkFn(method)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, args, recv, Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, args, recv, Value.undef());
                         stack.shrinkRetainingCapacity(base - 1);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10330,7 +10330,7 @@ fn runChunk(
                 const args = try spreadArguments(vm, args_arr);
                 if (vm.driver_active) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, args, Value.undef(), Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, args, Value.undef(), Value.undef());
                         stack.shrinkRetainingCapacity(stack.items.len - 2);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10348,7 +10348,7 @@ fn runChunk(
                 const args = try spreadArguments(vm, args_arr);
                 if (vm.driver_active) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, args, this_val, Value.undef());
                         stack.shrinkRetainingCapacity(stack.items.len - 3);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10365,7 +10365,7 @@ fn runChunk(
                 const args = try spreadArguments(vm, args_arr);
                 if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, args, Value.undef(), Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, args, Value.undef(), Value.undef());
                         stack.shrinkRetainingCapacity(stack.items.len - 2);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10383,7 +10383,7 @@ fn runChunk(
                 const args = try spreadArguments(vm, args_arr);
                 if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, args, this_val, Value.undef());
                         stack.shrinkRetainingCapacity(stack.items.len - 3);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -10501,7 +10501,7 @@ fn runChunk(
                 const callee = stack.items[base - 2];
                 if (vm.driver_active) {
                     if (jsChunkFn(callee)) |func| {
-                        const act = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+                        const act = try buildActivation(vm, func, func.compiledChunk().?, args, this_val, Value.undef());
                         stack.shrinkRetainingCapacity(base - 2);
                         exec.acc = acc;
                         exec.ip = ip;
@@ -12807,7 +12807,7 @@ test "class private environment preparation is allocation-failure atomic" {
     );
     const function_value = context.global_object.getOwn("buildPrivateClass") orelse return error.TestUnexpectedResult;
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const saved_context = gc_mod.setActiveContext(context);
     defer gc_mod.restoreActiveContext(saved_context);
 
@@ -12973,7 +12973,7 @@ test "class call guards restore direct VM entry state through allocation failure
             } });
             const class = try run(&machine, chunk, null);
             const function = Interpreter.funcOf(class) orelse return error.TestUnexpectedResult;
-            const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+            const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
             try std.testing.expect(jsPlainFunction(class) == null);
             try std.testing.expect(jsChunkFn(class) == null);
             const activations = machine.vm_activation_allocations;
@@ -13240,10 +13240,10 @@ test "deferred class capture allocation failure restores its runtime environment
 /// declaration), else the statement creating it. Templates remember a miss so
 /// expression closures stop probing the registry on every creation.
 fn closureDefinitionLocation(vm: *Interpreter, tmpl: *bc.FnTemplate) ?interp.DebugStatementLocation {
-    if (!tmpl.vm_definition_unregistered) {
+    if (!@atomicLoad(bool, &tmpl.vm_definition_unregistered, .monotonic)) {
         if (vm.debugStatementLocation(tmpl.definition_node)) |location| return location;
         // An interpreter without a registry has nothing to remember.
-        if (vm.debug_statement_locations != null) tmpl.vm_definition_unregistered = true;
+        if (vm.debug_statement_locations != null) @atomicStore(bool, &tmpl.vm_definition_unregistered, true, .monotonic);
     }
     return vm.currentDebugLocation();
 }
@@ -13266,7 +13266,8 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         const materialized = try materializeDirectEvalEnvironment(vm, defining_frame, plan);
         materialized.environment.markCaptured();
     }
-    const admission_reason: interp.BytecodeAdmissionReason = switch (tmpl.admission) {
+    const template = @import("compiler.zig").templateSnapshot(tmpl);
+    const admission_reason: interp.BytecodeAdmissionReason = switch (template.admission) {
         .plain_compiled => .template_plain_compiled,
         .plain_parameter_prologue => .template_plain_rejected_parameter_prologue,
         .plain_unsupported_lowering => .template_plain_rejected_unsupported_lowering,
@@ -13283,10 +13284,7 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         break :blk fenv;
     } else vm.env;
     // A deferred template's body, once some closure of it has compiled it.
-    const plain_chunk: ?*bc.Chunk = if (LazyFunction.of(tmpl)) |lazy|
-        if (lazy.state.load(.acquire) == .compiled) tmpl.chunk else null
-    else
-        tmpl.chunk;
+    const plain_chunk = template.chunk;
     // The function object and its Function share one cell; the Function is
     // initialized here, before the next allocation can collect.
     const closure = try gc_mod.allocClosure(vm.arena);
@@ -13314,11 +13312,9 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
         .private_map = vm.call_state.current_private_map,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else plain_chunk,
         .lazy_template = if (tmpl.lazy != null and plain_chunk == null) tmpl else null,
-        .vm_inline_calls_safe = if (plain_chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
-        .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
-        .async_chunk = if (tmpl.is_async and !tmpl.is_generator) tmpl.chunk else null,
+        .gen_chunk = if (tmpl.is_generator) template.chunk else null,
+        .async_chunk = if (tmpl.is_async and !tmpl.is_generator) template.chunk else null,
         .frame = frame,
-        .local_count = if (plain_chunk != null or tmpl.lazy == null) tmpl.local_count else 0,
         .is_method = tmpl.is_method,
         // An arrow captures `this`/`new.target`/`super`/field-init context
         // LEXICALLY at creation — exactly like the tree-walker's makeFunction.
@@ -13362,58 +13358,66 @@ fn makeClosure(vm: *Interpreter, chunk: *const bc.Chunk, tmpl: *bc.FnTemplate, f
     return Value.obj(obj);
 }
 
-/// The chunk to run for a plain closure whose `chunk` is null: compiles a
-/// deferred template's body on the closure's first call (see
-/// `compiler.LazyFunction`). Null means the closure runs on the tree-walker,
-/// as it always has when no template is pending.
-pub inline fn lazyChunk(vm: *Interpreter, func: *Function) EvalError!?*bc.Chunk {
-    if (func.lazy_template == null) return null;
-    return resolveLazyFunction(vm, func);
-}
+pub const ResolvedPlainFunction = struct {
+    function: *Function,
+    chunk: ?*bc.Chunk,
+};
 
-fn publishLazyChunk(func: *Function, tmpl: *const bc.FnTemplate, chunk: *bc.Chunk) void {
-    func.local_count = tmpl.local_count;
-    func.vm_inline_calls_safe = interp.vmChunkAllowsInlineCalls(chunk);
-    @atomicStore(?*bc.Chunk, &func.chunk, chunk, .release);
-    func.lazy_template = null;
-    // Constants of the new chunk are now reachable from an object that may
-    // already be old.
+fn publishLazyChunk(func: *Function, chunk: *bc.Chunk) void {
+    // The only Function mutation on compiled resolution is this idempotent
+    // pointer publication. Derived execution metadata belongs to the Chunk.
+    if (@cmpxchgStrong(?*bc.Chunk, &func.chunk, null, chunk, .acq_rel, .acquire)) |existing|
+        std.debug.assert(existing == chunk);
     gc_mod.rememberFunction(func);
 }
 
 /// For hosts that act on a function's bytecode before it has run (tier-up
 /// requests): compile a deferred body now. Null when there is no chunk; a
 /// rejected body is left for its first call to move to the tree-walker.
-pub fn compileDeferredForHost(func: *Function) error{ OutOfMemory, StackExhausted }!?*bc.Chunk {
-    if (func.chunk) |chunk| return chunk;
-    const tmpl = func.lazy_template orelse return null;
-    const chunk = (try LazyFunction.of(tmpl).?.ensureCompiled(tmpl)) orelse return null;
-    publishLazyChunk(func, tmpl, chunk);
+pub fn compileDeferredForHost(vm: *Interpreter, original: *Function) (EvalError || error{StackExhausted})!?*bc.Chunk {
+    if (original.compiledChunk()) |chunk| return chunk;
+    const template = original.lazy_template orelse return null;
+    const object = original.obj orelse return null;
+    const root = try vm.pushTempRoot(Value.obj(object));
+    defer vm.restoreTempRoots(root);
+    const chunk = (try LazyFunction.of(template).?.ensureCompiled(template)) orelse return null;
+    const current = Interpreter.funcOf(vm.tempRoot(root, Value.obj(object))).?;
+    publishLazyChunk(current, chunk);
     return chunk;
 }
 
-fn resolveLazyFunction(vm: *Interpreter, func: *Function) EvalError!?*bc.Chunk {
-    const tmpl = func.lazy_template orelse return func.chunk;
-    const lazy = LazyFunction.of(tmpl).?;
-    const compiled = lazy.ensureCompiled(tmpl) catch |err| switch (err) {
+/// Resolve through an actual wrapping-object root. A rejected body's view
+/// preparation can allocate and move Function storage, so return that refreshed
+/// pointer together with the immutable compiled result.
+pub fn resolvePlainFunction(vm: *Interpreter, original: *Function) EvalError!ResolvedPlainFunction {
+    if (original.compiledChunk()) |chunk| return .{ .function = original, .chunk = chunk };
+    const template = original.lazy_template orelse return .{ .function = original, .chunk = null };
+    const object = original.obj orelse return vm.throwError("InternalError", "deferred function has no function object");
+    const root = try vm.pushTempRoot(Value.obj(object));
+    defer vm.restoreTempRoots(root);
+    const lazy = LazyFunction.of(template).?;
+    const compiled = lazy.ensureCompiled(template) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.StackExhausted => return vm.throwUncatchableError("RangeError", "Maximum call stack size exceeded."),
     };
+    var current = Interpreter.funcOf(vm.tempRoot(root, Value.obj(object))).?;
     if (compiled) |chunk| {
-        publishLazyChunk(func, tmpl, chunk);
-        return chunk;
+        publishLazyChunk(current, chunk);
+        return .{ .function = current, .chunk = chunk };
     }
-    // The body cannot run on the VM. A function defined in program code
-    // simply tree-walks; a nested one first trades its closure Environment
-    // for a live view of the defining frames, which its body resolves
-    // through by name.
-    const viewed = if (lazy.fallback_plan) |plan| try viewDefiningFrames(vm, func, tmpl, plan) else func;
-    viewed.bytecode_admission_reason = switch (tmpl.admission) {
-        .plain_parameter_prologue => .template_plain_rejected_parameter_prologue,
-        else => .template_plain_rejected_unsupported_lowering,
-    };
-    viewed.lazy_template = null;
-    return null;
+    if (lazy.fallback_plan) |plan| {
+        if (current.fallback_closure.load(.acquire) == null) {
+            current = viewDefiningFrames(vm, current, template, plan) catch |err| {
+                // A concurrent contender may already have installed the exact
+                // usable projection while this one's allocation failed.
+                const winner = Interpreter.funcOf(vm.tempRoot(root, Value.obj(object))).?;
+                if (err == error.OutOfMemory and winner.fallback_closure.load(.acquire) != null)
+                    return .{ .function = winner, .chunk = null };
+                return err;
+            };
+        }
+    }
+    return .{ .function = current, .chunk = null };
 }
 
 /// Rebuild a rejected deferred closure's Environment as the one a generator
@@ -13446,12 +13450,15 @@ fn viewDefiningFrames(vm: *Interpreter, func: *Function, tmpl: *const bc.FnTempl
         defer vm.restoreTempEnvRoots(view_root);
         const fenv = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(fenv, vm.tempEnvRoot(view_root, closure_env), false);
+        vm.setTempEnvRoot(view_root, fenv);
         try fenv.putFnName(tmpl.self_name, vm.tempRoot(callee_root, Value.obj(callee_object)));
-        closure_env = fenv;
+        closure_env = vm.tempEnvRoot(view_root, fenv);
     }
     const current = Interpreter.funcOf(vm.tempRoot(callee_root, Value.obj(callee_object))).?;
-    current.closure = closure_env;
-    gc_mod.barrierFunctionEdge(current, @ptrCast(closure_env));
+    // Shade the candidate before publishing its edge. Every contender starts
+    // from the immutable definition environment; the first complete graph wins.
+    gc_mod.barrierCellFrom(@ptrCast(gc_mod.functionCell(current)), @ptrCast(closure_env));
+    _ = current.fallback_closure.cmpxchgStrong(null, closure_env, .acq_rel, .acquire);
     return current;
 }
 
@@ -13524,7 +13531,7 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
         if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (!func.is_generator and !func.is_async and !func.is_class_constructor) {
-                if (func.chunk orelse try lazyChunk(vm, func)) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
+                if (func.compiledChunk()) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
             }
         }
     }
@@ -13655,7 +13662,7 @@ fn constructAtSite(vm: *Interpreter, callee: Value, args: []const Value, site: i
             // chunk shortcut (a plain-function chunk is the only constructible one).
             if (func.is_arrow or func.is_method or func.is_generator or func.is_async)
                 return interp.throwNotAConstructor(vm, callee, site);
-            if (func.chunk orelse try lazyChunk(vm, func)) |fchunk| {
+            if (func.compiledChunk()) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
                 const this_root = try vm.pushTempRoot(this_val);
                 defer vm.restoreTempRoots(this_root);
@@ -13715,11 +13722,9 @@ const Activation = struct {
     stack_trace_call_frame: interp.StackTraceCallFrame = undefined,
 };
 
-/// Return an inactive activation whose frame was never captured. The pool is
-/// interpreter-local, so independent contexts and shared-realm threads never
-/// contend on it. Arena allocations cannot be individually freed; recycling
-/// here avoids retaining one frame/slot/Exec allocation for every completed JS
-/// call until Context teardown.
+/// Recycle inactive activation metadata and retain only a private attached
+/// frame. Captured frame cells have independent graph ownership; pool metadata
+/// and reusable Exec buffers remain arena-owned and bounded by call depth.
 fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     if (act.optimizer_profile_active) {
         act.chunk.optimizer_profile.merge(act.optimizer_delta);
@@ -13740,8 +13745,8 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.ip = 0;
     act.exec.frame = null;
     act.exec.chunk = null;
-    // The saved caller fields need no reset: the pool is not a GC root, and
-    // `buildActivation` rewrites every one before it publishes the Exec.
+    // Pool roots retain only attached Frame cells, never inactive Exec state.
+    // `buildActivation` rewrites saved caller fields before publishing the Exec.
     act.exec.debug_environment = null;
     act.exec.environment_depth = 0;
     act.exec.abrupt_environment_depth = 0;
@@ -13873,7 +13878,7 @@ fn validateParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *Chu
     const key: bc.ParameterLayoutKey = .{
         .params = func.params.ptr,
         .params_len = func.params.len,
-        .local_count = func.local_count,
+        .local_count = fchunk.local_count,
         .param_count = fchunk.param_count,
         .rest_parameter_index = fchunk.rest_parameter_index orelse std.math.maxInt(u32),
         .has_non_simple_parameters = fchunk.has_non_simple_parameters,
@@ -13890,7 +13895,7 @@ fn validateParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *Chu
 }
 
 fn checkParameterLayout(vm: *Interpreter, func: *const Function, fchunk: *const Chunk) EvalError!void {
-    const slot_count = func.local_count;
+    const slot_count = fchunk.local_count;
     const pattern_indices = fchunk.destructuring_parameter_indices;
     const default_indices = fchunk.default_parameter_indices;
     var pattern_cursor: usize = 0;
@@ -13958,7 +13963,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.publishExecRoot(&provisional);
     var provisional_registered = true;
     defer if (provisional_registered) vm.popExecRoot(&provisional);
-    const act = try acquireActivation(vm, func.local_count, &provisional);
+    const act = try acquireActivation(vm, fchunk.local_count, &provisional);
     ensureBindingReferenceStorage(vm, &act.exec, fchunk) catch |err| {
         releaseActivation(vm, act);
         return err;
@@ -14300,7 +14305,7 @@ inline fn jsPlainFunction(callee: Value) ?*Function {
 
 inline fn jsChunkFn(callee: Value) ?*Function {
     const func = jsPlainFunction(callee) orelse return null;
-    if (func.chunk == null) return null;
+    if (func.compiledChunk() == null) return null;
     return func;
 }
 
@@ -14672,7 +14677,7 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
         defer ctx.destroy();
         _ = try ctx.evaluate("function escapeActivation(seed){return function(delta){return seed+delta;};}for(var warm=0;warm<64;warm++)escapeActivation(warm);");
         const function = Interpreter.funcOf(ctx.global_object.getOwn("escapeActivation").?).?;
-        const chunk = function.chunk.?;
+        const chunk = function.compiledChunk().?;
         const saved_active_context = gc_mod.setActiveContext(ctx);
         defer gc_mod.restoreActiveContext(saved_active_context);
         var completed = false;
@@ -14705,9 +14710,8 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
                 free_count += 1;
                 next = activation.next_free;
             }
-            // This function captures one defining frame. That frame is Context-
-            // arena owned and must stay out of the reusable frame pool; its
-            // activation is still recycled.
+            // This function captures one defining frame. Capturers retain its
+            // cell independently of the recycled activation metadata.
             try std.testing.expect(free_count <= machine.vm_activation_allocations);
             try std.testing.expect(machine.vm_activation_allocations - free_count <= 1);
             if (failing.has_induced_failure) {
@@ -14799,7 +14803,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
     for (cases) |case| {
         const function_value = ctx.global_object.getOwn(case.name) orelse return error.TestUnexpectedResult;
         const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-        const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+        const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
         var completed = false;
         var induced_failures: usize = 0;
         for (0..512) |fail_index| {
@@ -14867,7 +14871,7 @@ test "vm: prepared activation survives a moving collection before execution" {
     const subject_before = ctx.global_object.getOwn("activationMovingSubject").?.asObj();
     const function_value = ctx.global_object.getOwn("activationMovingTarget") orelse return error.TestUnexpectedResult;
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
 
     var machine = ctx.interpreter();
     try ctx.pushActiveInterpreter(&machine);
@@ -14920,7 +14924,7 @@ test "vm: mixed destructuring rest executes deferred empty-tail defaults" {
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .tdz_marker = tdz_marker };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     var saw_ordered_rest = false;
     for (function_chunk.code.items) |instruction|
         saw_ordered_rest = saw_ordered_rest or instruction.op == .collect_rest_parameter;
@@ -14956,7 +14960,7 @@ test "vm: named rest allocation failure restores the caller activation" {
 
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const arguments = [_]Value{ Value.num(4), Value.num(5), Value.num(6) };
 
     // Warm the reusable activation so the fault below lands at the first fresh
@@ -15015,7 +15019,7 @@ test "vm: deferred rest tail allocation failure restores the caller activation" 
 
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(?u32, 1), function_chunk.rest_parameter_index);
     var saw_deferred_rest = false;
     for (function_chunk.code.items) |instruction|
@@ -15080,7 +15084,7 @@ test "vm: destructuring parameter allocation failure restores the caller activat
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{0}, function_chunk.destructuring_parameter_indices);
     const input = try machine.newArray();
     try input.asObj().appendElement(allocator, Value.num(13));
@@ -15146,7 +15150,7 @@ test "vm: BigInt closed default allocation failure restores the caller activatio
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{0}, function_chunk.default_parameter_indices);
 
     const warm = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
@@ -15215,7 +15219,7 @@ test "vm: own arguments default allocation failure restores the caller activatio
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{0}, function_chunk.default_parameter_indices);
     try std.testing.expect(function_chunk.arguments_slot != null);
 
@@ -15282,7 +15286,7 @@ test "vm: parameter-safe string default allocation failure restores the caller a
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{1}, function_chunk.default_parameter_indices);
     const input = try Value.strAlloc(allocator, "parameter-safe");
     const arguments = [_]Value{input};
@@ -15350,7 +15354,7 @@ test "vm: parameter property getter allocation failure restores the caller activ
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{1}, function_chunk.default_parameter_indices);
     const input = env.get("propertyInput") orelse return error.TestUnexpectedResult;
     const arguments = [_]Value{input};
@@ -15418,7 +15422,7 @@ test "vm: parameter call allocation failure restores the caller activation" {
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{2}, function_chunk.default_parameter_indices);
     const callee = env.get("allocate") orelse return error.TestUnexpectedResult;
     const input = try Value.strAlloc(allocator, "parameter-call");
@@ -15487,7 +15491,7 @@ test "vm: parameter construction allocation failure restores the caller activati
     };
     const function_value = try run(&machine, root, null);
     const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{2}, function_chunk.default_parameter_indices);
     const constructor = env.get("Box") orelse return error.TestUnexpectedResult;
     const input = try Value.strAlloc(allocator, "parameter-construction");
@@ -15559,7 +15563,7 @@ test "vm: base class field allocation failure restores the caller activation" {
     };
     const constructor = try run(&machine, root, null);
     const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
-    _ = function.chunk orelse return error.TestUnexpectedResult;
+    _ = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const input = try Value.strAlloc(allocator, "argument");
     const arguments = [_]Value{input};
 
@@ -15631,7 +15635,7 @@ test "vm: derived class field allocation failure restores the caller activation"
     };
     const constructor = try run(&machine, root, null);
     const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
-    const constructor_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const constructor_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     try std.testing.expect(constructor_chunk.is_derived_constructor);
     const input = try Value.strAlloc(allocator, "argument");
     const arguments = [_]Value{input};
@@ -17595,7 +17599,7 @@ test "vm: optimizer executes native class definition effects" {
     });
     try std.testing.expectEqual(@as(f64, 10), (try run(&machine, program, null)).asNum());
     const function = Interpreter.funcOf(env.get("make").?) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var saw_enter = false;
@@ -17654,7 +17658,7 @@ test "vm: optimizer preserves computed class names and static blocks" {
     });
     try std.testing.expectEqual(@as(f64, 13), (try run(&machine, program, null)).asNum());
     const function = Interpreter.funcOf(env.get("make").?) orelse return error.TestUnexpectedResult;
-    const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+    const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     var saw_eval = false;
     for (artifact.native_operations.?.descriptors) |descriptor| {
@@ -17696,7 +17700,7 @@ test "vm: native class exception resumes without replaying static effects" {
     });
     try std.testing.expectEqual(@as(f64, 12), (try run(&machine, program, null)).asNum());
     const function = Interpreter.funcOf(env.get("fail").?) orelse return error.TestUnexpectedResult;
-    const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+    const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     var saw_eval = false;
     for (artifact.native_operations.?.descriptors) |descriptor| {
@@ -17756,7 +17760,7 @@ test "vm: native class step exhaustion resumes without replaying static effects"
     try std.testing.expectEqual(@as(f64, 24), env.get("count").?.asNum());
 
     const function = Interpreter.funcOf(env.get("build").?) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     var saw_eval = false;
@@ -17830,7 +17834,7 @@ test "vm: native class OOM unwinds without replaying static effects" {
     try std.testing.expectEqual(@as(f64, 24), env.get("count").?.asNum());
 
     const function = Interpreter.funcOf(env.get("build").?) orelse return error.TestUnexpectedResult;
-    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const function_chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     var saw_eval = false;
@@ -17891,7 +17895,7 @@ test "vm: class definitions agree across tree bytecode and native parents" {
         if (configuration.native and jit.optimizer_supported) {
             const function = Interpreter.funcOf(ctx.global_object.getOwn("make").?) orelse
                 return error.TestUnexpectedResult;
-            const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+            const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
                 return error.TestUnexpectedResult;
             var saw_native_class = false;
             for (artifact.native_operations.?.descriptors) |descriptor| {
@@ -22505,7 +22509,7 @@ test "vm: direct native calls refuse activation-aware for-in artifacts" {
 
     const function = Interpreter.funcOf(ctx.global_object.getOwn("directForIn").?) orelse
         return error.TestUnexpectedResult;
-    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const chunk = function.compiledChunk() orelse return error.TestUnexpectedResult;
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(artifact.requires_activation_context);
@@ -22927,7 +22931,7 @@ test "vm: explicit native caller entry misses before reentrant leaf effects" {
     try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > hits_before);
     for ([_][]const u8{ "callerCapture", "callerReceiver" }) |name| {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+        const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
         try std.testing.expect(artifact.entry_enabled and (!artifact.has_side_exits or artifact.continuation_only_exits));
         const attempts_before = optimizer_native_attempts.load(.monotonic);
         try std.testing.expectEqual(@as(?Value, null), try tryRunNativeDirectCall(&machine, function, &arguments));
@@ -27076,7 +27080,7 @@ test "vm: quickens warmed numeric property update traces" {
 
     const function_value = env.get("update").?;
     const function = Interpreter.funcOf(function_value).?;
-    const function_chunk = function.chunk.?;
+    const function_chunk = function.compiledChunk().?;
     const before = quick_property_update_hits.load(.monotonic);
     const loop_tails_before = quick_property_loop_tail_hits.load(.monotonic);
     const specialized_before = quick_property_specialized_hits.load(.monotonic);
@@ -27467,7 +27471,7 @@ test "vm: optimizer activation entry refuses direct elision before callbacks" {
     defer gc_mod.restoreActiveContext(saved_context);
     for ([_][]const u8{ "activationReceiver", "activationTarget" }) |name| {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-        const chunk = function.chunk.?;
+        const chunk = function.compiledChunk().?;
         const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
         try std.testing.expect(artifact.entry_enabled and artifact.has_continuation_exits and artifact.requires_activation_context);
         const calls = ctx.global_object.getOwn("activationCalls").?.asNum();
@@ -27618,7 +27622,7 @@ test "vm: optimizer seeded activation reads preserve coercion GC and result orde
                 if (native and jit.optimizer_supported) {
                     for ([_][]const u8{ "seededReceiver", "seededTarget", "seededRaw", "seededConstruction" }) |name| {
                         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-                        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                        const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                         try std.testing.expect(artifact.entry_enabled and artifact.requires_activation_context);
                     }
                 }
@@ -27644,13 +27648,13 @@ test "vm: optimizer captured binding admission" {
     )).asNum());
     for ([_][]const u8{ "capturedReader", "capturedWriter" }) |name| {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode);
+        const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode);
         const fully_native = if (artifact) |code| code.entry_enabled and !code.has_side_exits else false;
         try std.testing.expect(fully_native);
         try std.testing.expect(artifact.?.requires_frame_context and artifact.?.requires_activation_context);
         const before = optimizer_native_hits.load(.monotonic);
         var machine = ctx.interpreter();
-        const result = try runFunction(&machine, function, function.chunk.?, if (std.mem.eql(u8, name, "capturedWriter")) &.{Value.num(11)} else &.{}, Value.undef(), Value.undef());
+        const result = try runFunction(&machine, function, function.compiledChunk().?, if (std.mem.eql(u8, name, "capturedWriter")) &.{Value.num(11)} else &.{}, Value.undef(), Value.undef());
         try std.testing.expectEqual(@as(f64, 11), result.asNum());
         try std.testing.expect(optimizer_native_hits.load(.monotonic) > before);
     }
@@ -27753,7 +27757,7 @@ test "vm: optimizer captured binding seeded effects preserve coercion and aliase
                 const holder = ctx.global_object.getOwn("cap").?.asObj();
                 for ([_][]const u8{ "read", "write", "replace", "add" }) |name| {
                     const function = Interpreter.funcOf(holder.getOwn(name).?).?;
-                    const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                    const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                     try std.testing.expect(artifact.entry_enabled and artifact.requires_frame_context);
                     const hits = optimizer_native_hits.load(.monotonic);
                     _ = try ctx.evaluate(if (std.mem.eql(u8, name, "read")) "cap.read()" else if (std.mem.eql(u8, name, "write")) "cap.write(3)" else if (std.mem.eql(u8, name, "replace")) "cap.replace(3)" else "cap.add(1)");
@@ -27790,7 +27794,7 @@ test "vm: optimizer captured binding shared frames preserve mapped and lexical c
             const holder = ctx.global_object.getOwn("sharedCaptures").?.asObj();
             for ([_][]const u8{ "bump", "read" }) |name| {
                 const function = Interpreter.funcOf(holder.getOwn(name).?).?;
-                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                 try std.testing.expect(code.entry_enabled and code.has_continuation_exits and code.requires_frame_context);
             }
         }
@@ -27827,7 +27831,7 @@ test "vm: optimizer captured binding frame edges relocate without cached values"
         const holder = ctx.global_object.getOwn("movingCapture").?.asObj();
         for ([_][]const u8{ "read", "write" }) |name| {
             const function = Interpreter.funcOf(holder.getOwn(name).?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and !code.has_side_exits and code.requires_frame_context);
             var machine = ctx.interpreter();
             const steps = machine.steps;
@@ -27862,7 +27866,7 @@ test "vm: optimizer captured binding regions preserve moving checkpoints and sto
         const holder = ctx.global_object.getOwn("captureRegion").?.asObj();
         const function = Interpreter.funcOf(holder.getOwn("run").?).?;
         if (native) {
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.osr != null and code.requires_frame_context);
             var reads = false;
             var writes = false;
@@ -27922,7 +27926,7 @@ test "vm: optimizer environment binding admission" {
     );
     for ([_][]const u8{ "environmentStore", "environmentType", "retainedStore", "retainedCall" }) |name| {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode);
+        const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode);
         const fully_native = if (artifact) |code| code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) else false;
         try std.testing.expect(fully_native);
         try std.testing.expect(artifact.?.requires_execution_context and artifact.?.requires_activation_context);
@@ -28002,7 +28006,7 @@ test "vm: optimizer environment binding proxy effects resolve once and retain re
         )).asStr());
         if (native and jit.optimizer_supported) for ([_][]const u8{ "proxyWrite", "proxyCall", "proxyAdd", "proxyLogical" }) |name| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
         };
     };
@@ -28028,7 +28032,7 @@ test "vm: optimizer environment binding logical diamonds retain values and exact
         for ([_][]const u8{ "logicalOr", "logicalAnd", "logicalNullish" }, 0..) |name, operation| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
             if (native and jit.optimizer_supported) {
-                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                 try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
             }
             for (inputs, 0..) |source, index| {
@@ -28037,7 +28041,7 @@ test "vm: optimizer environment binding logical diamonds retain values and exact
                 try machine.setMember(Value.obj(scope), "value", input);
                 const steps = machine.steps;
                 const hits = optimizer_native_hits.load(.monotonic);
-                const result = try runFunction(&machine, function, function.chunk.?, &.{Value.num(17)}, Value.undef(), Value.undef());
+                const result = try runFunction(&machine, function, function.compiledChunk().?, &.{Value.num(17)}, Value.undef(), Value.undef());
                 const assigned = switch (operation) {
                     0 => index < 8,
                     1 => index >= 8,
@@ -28081,7 +28085,7 @@ test "vm: optimizer environment binding reentry preserves recursive setters and 
         )).asStr());
         if (native and jit.optimizer_supported) for ([_][]const u8{ "nestedWriter", "nestedReader", "nestedCaught" }) |name| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and code.requires_execution_context);
         };
     };
@@ -28197,7 +28201,7 @@ test "vm: optimizer environment binding shared references remain invocation loca
         )).asNum());
         if (native) {
             const function = Interpreter.funcOf(ctx.global_object.getOwn("environmentBump").?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
         }
     }
@@ -28224,7 +28228,7 @@ test "vm: optimizer environment binding regions relocate bases and preserve budg
         );
         const function = Interpreter.funcOf(ctx.global_object.getOwn("environmentRegion").?).?;
         if (native) {
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.osr != null and code.requires_execution_context);
         }
         ctx.collectGarbage();
@@ -28360,7 +28364,7 @@ test "vm: optimizer continuation callbacks preserve budgets branches getters loo
         const function = Interpreter.funcOf(ctx.global_object.getOwn("budgetWrite").?).?;
         const rhs = ctx.global_object.getOwn(if (case.getter) "getterSubject" else "budgetRhs").?;
         if (native and jit.optimizer_supported) {
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect((code.entry_enabled or code.osr != null) and code.has_continuation_exits);
         }
         for (0..2) |mode| for (0..32) |index| {
@@ -28371,7 +28375,7 @@ test "vm: optimizer continuation callbacks preserve budgets branches getters loo
             var stop: std.atomic.Value(bool) = .init(mode == 1);
             machine.stop_flag = &stop;
             var record = Record{ .steps = 0, .value = 0, .error_kind = 0, .effect = 0 };
-            if (runFunction(&machine, function, function.chunk.?, &.{ rhs, Value.num(case.argument) }, Value.undef(), Value.undef())) |result| {
+            if (runFunction(&machine, function, function.compiledChunk().?, &.{ rhs, Value.num(case.argument) }, Value.undef(), Value.undef())) |result| {
                 record.value = result.rawBits();
             } else |err| {
                 if (err != error.Throw) return err;
@@ -28496,7 +28500,7 @@ test "vm: optimizer continuation callbacks isolate four shared realm workers" {
         )).asNum());
         if (native) {
             const function = Interpreter.funcOf(ctx.global_object.getOwn("sharedContinuationCaller").?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and code.has_continuation_exits);
         }
     }
@@ -28521,7 +28525,7 @@ test "vm: optimizer continuation direct entry proves read only inputs before wor
     machine.jit_execution_allowed = true;
     for ([_][]const u8{ "guardedUnary", "guardedStrictUnary", "guardedProperty" }) |name| {
         const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-        const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+        const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
         try std.testing.expect(code.has_side_exits and code.continuation_only_exits);
         const input = if (std.mem.eql(u8, name, "guardedProperty")) ctx.global_object.getOwn("guardedSubject").? else Value.num(7);
         const steps = machine.steps;
@@ -28575,7 +28579,7 @@ test "vm: optimizer environment binding TDZ and immutable References preserve wa
         try std.testing.expectEqualStrings("[64,7,64,7]", result.asStr());
         if (native and jit.optimizer_supported) for ([_][]const u8{ "referenceTdz", "referenceConst" }) |name| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
         };
     }
@@ -28602,7 +28606,7 @@ test "vm: optimizer environment binding callback reentry budgets preserve exact 
         const function = Interpreter.funcOf(ctx.global_object.getOwn("budgetWrite").?).?;
         const rhs = ctx.global_object.getOwn("budgetRhs").?;
         if (native and jit.optimizer_supported) {
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits));
         }
         for (0..2) |mode| for (0..32) |index| {
@@ -28613,7 +28617,7 @@ test "vm: optimizer environment binding callback reentry budgets preserve exact 
             var stop: std.atomic.Value(bool) = .init(mode == 1);
             machine.stop_flag = &stop;
             var record = Record{ .steps = 0, .value = 0, .error_kind = 0, .effect = 0 };
-            if (runFunction(&machine, function, function.chunk.?, &.{rhs}, Value.undef(), Value.undef())) |result| {
+            if (runFunction(&machine, function, function.compiledChunk().?, &.{rhs}, Value.undef(), Value.undef())) |result| {
                 record.value = result.rawBits();
             } else |err| {
                 if (err != error.Throw) return err;
@@ -28679,7 +28683,7 @@ test "vm: optimizer environment binding seeded effects preserve serialized and s
             try std.testing.expectEqualStrings(expected, (try ctx.evaluate(program)).asStr());
             if (native and jit.optimizer_supported) for ([_][]const u8{ "seedWrite", "seedAdd", "seedOr", "seedAnd", "seedNullish", "seedCall", "seedMissing" }) |name| {
                 const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                 try std.testing.expect(code.entry_enabled and (!code.has_side_exits or code.continuation_only_exits) and code.requires_execution_context);
             };
         };
@@ -28706,7 +28710,7 @@ test "vm: optimizer environment binding callable receiver survives post getter c
         );
         const function = Interpreter.funcOf(ctx.global_object.getOwn("receiverCall").?).?;
         if (native and jit.optimizer_supported) {
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and code.continuation_only_exits and code.requires_execution_context);
         }
         for (0..2) |mode| for (0..32) |index| {
@@ -28717,7 +28721,7 @@ test "vm: optimizer environment binding callable receiver survives post getter c
             var stop: std.atomic.Value(bool) = .init(mode == 1);
             machine.stop_flag = &stop;
             var observed = Record{ .steps = 0, .value = 0, .error_kind = 0, .getter_calls = 0, .method_calls = 0 };
-            if (runFunction(&machine, function, function.chunk.?, &.{}, Value.undef(), Value.undef())) |result| {
+            if (runFunction(&machine, function, function.compiledChunk().?, &.{}, Value.undef(), Value.undef())) |result| {
                 observed.value = result.rawBits();
             } else |err| {
                 if (err != error.Throw) return err;
@@ -29010,7 +29014,7 @@ test "vm: optimizer closure allocation observes live defining-frame writes" {
         try std.testing.expectEqualStrings("[6,6,6,12,12]", (try ctx.evaluate("function closureGc(){if(typeof $vm!=='undefined')$vm.gc();}\nfunction closureFactory(value){var f=function(){return value;};value=value+1;return f;}\nfunction arrowFactory(value){var f=()=>value;value=value+1;return f;}\nfunction generatorFactory(value){var f=function*(){yield value;};value=value+1;return f;}\nfunction mutateFactory(value){var getter=function(){closureGc();return value;};var setter=function(v){closureGc();value=v;};setter(11);var first=value;value=first+1;return [getter,setter,value];}\nfor(var warm=0;warm<64;warm++){closureFactory(warm);arrowFactory(warm);generatorFactory(warm);mutateFactory(warm);}\nvar observed=mutateFactory(5);\nJSON.stringify([closureFactory(5)(),arrowFactory(5)(),generatorFactory(5)().next().value,observed[0](),observed[2]]);\n")).asStr());
         if (native and jit.optimizer_supported) for ([_][]const u8{ "closureFactory", "arrowFactory", "generatorFactory", "mutateFactory" }) |name| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-            const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(code.entry_enabled and code.canonical_locals and code.requires_execution_context);
             try std.testing.expect(!code.has_side_exits or code.continuation_only_exits);
             var allocated = false;
@@ -29020,7 +29024,7 @@ test "vm: optimizer closure allocation observes live defining-frame writes" {
             try std.testing.expect(allocated);
             var machine = ctx.interpreter();
             const native_hits = optimizer_native_hits.load(.monotonic);
-            _ = try runFunction(&machine, function, function.chunk.?, &.{Value.num(5)}, Value.undef(), Value.undef());
+            _ = try runFunction(&machine, function, function.compiledChunk().?, &.{Value.num(5)}, Value.undef(), Value.undef());
             try std.testing.expect(optimizer_native_hits.load(.monotonic) > native_hits);
         };
     };
@@ -29036,7 +29040,7 @@ test "vm: optimizer closure allocation preserves function template and lexical c
         try std.testing.expectEqual(@as(f64, 6), (try ctx.evaluate("asyncGeneratorTemplateValue")).asNum());
         if (native and jit.optimizer_supported) for ([_][]const u8{ "ordinaryTemplate", "namedTemplate", "immutableTemplate", "thisTemplate", "ClosureConstructor", "generatorTemplate", "asyncTemplate", "asyncGeneratorTemplate" }) |name| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-            const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(artifact.entry_enabled and artifact.canonical_locals);
             try std.testing.expect(!artifact.has_side_exits or artifact.continuation_only_exits);
         };
@@ -29265,7 +29269,7 @@ test "vm: optimizer closure allocation preserves mapped lexical eval and recursi
         if (native and jit.optimizer_supported) {
             for ([_][]const u8{ "mappedFactory", "lexicalFactory", "constFactory" }) |name| {
                 const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-                const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                 try std.testing.expect(artifact.entry_enabled and artifact.canonical_locals);
             }
         }
@@ -29302,7 +29306,7 @@ test "vm: optimizer closure allocation retains realm module and retirement conte
         try std.testing.expectEqualStrings("[true,13,6]", (try ctx.evaluate("JSON.stringify(moduleCaptured())")).asStr());
         if (native and jit.optimizer_supported) for ([_][]const u8{ "realmFactory", "moduleFactory" }) |name| {
             const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-            const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+            const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
             try std.testing.expect(artifact.entry_enabled and artifact.canonical_locals);
         };
         ctx.clearJitCode();
@@ -29339,7 +29343,7 @@ test "vm: optimizer enumeration preserves oracle controls in shared modes" {
             try std.testing.expect(snapshot.runtime_operations.count(.enum_next) > 0);
             for ([_][]const u8{ "enumEarly", "enumBreak" }) |name| {
                 const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?).?;
-                const code = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+                const code = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
                 try std.testing.expect(code.entry_enabled);
             }
         }
@@ -29637,7 +29641,7 @@ test "vm: optimizer nested for-in publishes cleanup for every enum_next" {
             for ([_][]const u8{ "nestedThrow", "sequentialThrow", "finallyThrow" }) |name| {
                 const function = Interpreter.funcOf(ctx.global_object.getOwn(name).?) orelse
                     return error.TestUnexpectedResult;
-                const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+                const artifact = function.compiledChunk().?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
                     return error.TestUnexpectedResult;
                 const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
                 var enum_next_count: usize = 0;

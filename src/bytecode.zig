@@ -910,6 +910,9 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    /// Frozen with the instruction stream. Tail calls transfer activations to
+    /// the heap driver and cannot execute through the native-stack inline path.
+    inline_calls_safe: bool = true,
     /// This chunk is the body of a derived class constructor. Return completion
     /// validates object/undefined results and reads the activation's bound `this`.
     is_derived_constructor: bool = false,
@@ -1043,8 +1046,21 @@ pub const Chunk = struct {
         return .{ .arena = arena };
     }
 
+    pub fn isTailCall(op: Op) bool {
+        return switch (op) {
+            .tail_call, .tail_call_eval, .tail_call_eval_with_this, .tail_call_method, .tail_call_with_this, .tail_call_spread, .tail_call_with_this_spread => true,
+            else => false,
+        };
+    }
+
+    pub fn allowsInlineCalls(self: *const Chunk) bool {
+        for (self.code.items) |instruction| if (isTailCall(instruction.op)) return false;
+        return true;
+    }
+
     /// Allocate the inline-cache table. Call once after emitting all code.
     pub fn finalize(self: *Chunk) std.mem.Allocator.Error!void {
+        self.inline_calls_safe = self.allowsInlineCalls();
         self.ics = try self.arena.alloc(InlineCache, self.code.items.len);
         @memset(self.ics, .{});
         self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
@@ -1125,6 +1141,7 @@ pub const Chunk = struct {
     pub fn emit(self: *Chunk, op: Op, a: u32) std.mem.Allocator.Error!usize {
         const idx = self.code.items.len;
         try self.code.append(self.arena, .{ .op = op, .a = a });
+        if (isTailCall(op)) self.inline_calls_safe = false;
         return idx;
     }
 
@@ -1132,6 +1149,7 @@ pub const Chunk = struct {
     pub fn emitAB(self: *Chunk, op: Op, a: u32, b: u32) std.mem.Allocator.Error!usize {
         const idx = self.code.items.len;
         try self.code.append(self.arena, .{ .op = op, .a = a, .b = b });
+        if (isTailCall(op)) self.inline_calls_safe = false;
         return idx;
     }
 
