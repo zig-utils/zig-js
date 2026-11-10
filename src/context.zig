@@ -36383,6 +36383,45 @@ test "Object reflection moving entries_get" {
     try expectProxyMetadataMoving("var target={get value(){proxyMovingLoop(20000);return proxySubject;},other:7};", "(function(){var result=Object.entries(target);return result[0][0]==='value'&&result[0][1]===proxySubject&&result[1][1]===7;})()");
 }
 
+test "Object.fromEntries moving key conversion retains the partial result" {
+    try expectProxyMetadataMoving(
+        "var entryKey={[Symbol.toPrimitive](){proxyMovingLoop(20000);return '1';}};var sourceEntries=[[entryKey,proxySubject]];",
+        "(function(){var result=Object.fromEntries(sourceEntries);return Object.keys(result).join(',')==='1'&&result[1]===proxySubject&&result[1].marker===37;})()",
+    );
+}
+
+test "Object.fromEntries moving iterator and entry boundaries preserve identities" {
+    const result_expression = "(function(){var result=Object.fromEntries(sourceEntries);return Object.keys(result).join(',')==='1'&&result[1]===proxySubject&&result[1].marker===37;})()";
+    for ([_]struct { name: []const u8, setup: []const u8 }{
+        .{ .name = "iterator lookup", .setup = "var sourceEntries={get [Symbol.iterator](){proxyMovingLoop(20000);return function(){var sent=false;return {next(){if(sent)return {done:true};sent=true;return {done:false,value:['1',proxySubject]};}};};}};" },
+        .{ .name = "next lookup", .setup = "var sourceEntries={[Symbol.iterator](){var sent=false;return {get next(){proxyMovingLoop(20000);return function(){if(sent)return {done:true};sent=true;return {done:false,value:['1',proxySubject]};};}};}};" },
+        .{ .name = "next call", .setup = "var sourceEntries={[Symbol.iterator](){var sent=false;return {next(){if(sent)return {done:true};sent=true;proxyMovingLoop(20000);return {done:false,value:['1',proxySubject]};}};}};" },
+        .{ .name = "done getter", .setup = "var sourceEntries={[Symbol.iterator](){var sent=false;return {next(){if(sent)return {done:true};sent=true;return {get done(){proxyMovingLoop(20000);return false;},value:['1',proxySubject]};}};}};" },
+        .{ .name = "value getter", .setup = "var sourceEntries={[Symbol.iterator](){var sent=false;return {next(){if(sent)return {done:true};sent=true;return {done:false,get value(){proxyMovingLoop(20000);return ['1',proxySubject];}};}};}};" },
+        .{ .name = "entry key getter", .setup = "var sourceEntries=[{get 0(){proxyMovingLoop(20000);return '1';},1:proxySubject}];" },
+        .{ .name = "entry value getter", .setup = "var sourceEntries=[{0:'1',get 1(){proxyMovingLoop(20000);return proxySubject;}}];" },
+    }) |case| {
+        errdefer std.debug.print("Object.fromEntries moving boundary: {s}\n", .{case.name});
+        try expectProxyMetadataMoving(case.setup, result_expression);
+    }
+}
+
+test "Object.fromEntries moving coercion preserves exact keys and abrupt completion" {
+    try expectProxyMetadataMoving(
+        "var keptSymbol=Symbol('kept');var entryKey={[Symbol.toPrimitive](){proxyMovingLoop(20000);return keptSymbol;}};var sourceEntries=[[entryKey,proxySubject]];",
+        "(function(){var result=Object.fromEntries(sourceEntries);return Object.getOwnPropertySymbols(result)[0]===keptSymbol&&result[keptSymbol]===proxySubject;})()",
+    );
+    for ([_][]const u8{ "String.fromCharCode(0xd800,0,0xe9)", "String.fromCharCode(0,97,0xe9)" }) |key_source| {
+        const setup = try std.fmt.allocPrint(std.testing.allocator, "var expectedKey={s};var entryKey={{[Symbol.toPrimitive](){{proxyMovingLoop(20000);return {s};}}}};var sourceEntries=[[entryKey,proxySubject]];", .{ key_source, key_source });
+        defer std.testing.allocator.free(setup);
+        try expectProxyMetadataMoving(setup, "(function(){var result=Object.fromEntries(sourceEntries);return Object.keys(result)[0]===expectedKey&&result[expectedKey]===proxySubject;})()");
+    }
+    try expectProxyMetadataMoving(
+        "var order=[],closed=0;var entryKey={[Symbol.toPrimitive](){order.push('convert');proxyMovingLoop(20000);throw proxySubject;}};var entry={get 0(){order.push('key');return entryKey;},get 1(){order.push('value');return proxySubject;}};var sourceEntries={[Symbol.iterator](){return {next(){return {done:false,value:entry};},return(){closed++;order.push('close');throw 99;}};}};",
+        "(function(){try{Object.fromEntries(sourceEntries);}catch(error){return error===proxySubject&&closed===1&&order.join(',')==='key,value,convert,close';}return false;})()",
+    );
+}
+
 test "Object reflection moving assign_own_keys" {
     try expectProxyMetadataMoving("var target={};var source=new Proxy({value:proxySubject},{ownKeys(){proxyMovingLoop(20000);return ['value'];}});", "Object.assign(target,source)===target&&target.value===proxySubject");
 }

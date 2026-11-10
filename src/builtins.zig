@@ -1005,22 +1005,30 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
     // RequireObjectCoercible(iterable): undefined/null throw.
     if (iterable.isNull() or iterable.isUndefined())
         return self.throwError("TypeError", "Object.fromEntries requires an iterable argument");
+    const input_root = try self.pushTempRoot(iterable);
+    defer self.restoreTempRoots(input_root);
     const result = try self.newObject();
-    const iterator_record = try self.getIteratorRecord(iterable);
-    const iter = iterator_record.iterator;
+    const result_root = try self.pushTempRoot(result);
+    const iterator_record = try self.getIteratorRecord(self.tempRoot(input_root, iterable));
+    const iterator_root = try self.pushTempRoot(iterator_record.iterator);
+    const next_root = try self.pushTempRoot(iterator_record.next_method);
+    const scratch = self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena);
     while (true) {
+        const step_roots = self.gc_temp_roots.items.len;
+        defer self.restoreTempRoots(step_roots);
         // IteratorStep: a next() that isn't callable / doesn't return an object
         // throws WITHOUT closing the iterator.
-        const r = try self.callValueWithThis(iterator_record.next_method, &.{}, iter);
+        const r = try self.callValueWithThis(self.tempRoot(next_root, iterator_record.next_method), &.{}, self.tempRoot(iterator_root, iterator_record.iterator));
         if (!isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
-        if ((try self.getProperty(r, "done")).toBoolean()) break;
-        const entry = try self.getProperty(r, "value");
+        const step_root = try self.pushTempRoot(r);
+        if ((try self.getProperty(self.tempRoot(step_root, r), "done")).toBoolean()) break;
+        const entry = try self.getProperty(self.tempRoot(step_root, r), "value");
         // AddEntriesFromIterable requires an ECMAScript Object (the engine's
         // Symbol/BigInt primitives are object-tagged). Create the throw
         // completion before IteratorClose so an abrupt `return()` cannot win.
         if (!isRealObject(entry)) {
             self.exception = try self.makeError("TypeError", "Object.fromEntries entry is not an object");
-            self.iteratorCloseKeepingThrow(iter);
+            self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, iterator_record.iterator));
             try self.notifyDebuggerException(false);
             return error.Throw;
         }
@@ -1028,23 +1036,68 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
         // adder does ToPropertyKey(k) + CreateDataPropertyOrThrow — so the key's
         // ToString runs AFTER reading "1", and an abrupt completion in any step
         // closes the iterator (keeping the original throw).
-        const k_raw = self.getProperty(entry, "0") catch |e| {
-            self.iteratorCloseKeepingThrow(iter);
+        const entry_root = try self.pushTempRoot(entry);
+        const k_raw = self.getProperty(self.tempRoot(entry_root, entry), "0") catch |e| {
+            self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, iterator_record.iterator));
             return e;
         };
-        const v = self.getProperty(entry, "1") catch |e| {
-            self.iteratorCloseKeepingThrow(iter);
+        const key_root = try self.pushTempRoot(k_raw);
+        const v = self.getProperty(self.tempRoot(entry_root, entry), "1") catch |e| {
+            self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, iterator_record.iterator));
             return e;
         };
-        const key = self.keyOf(k_raw) catch |e| {
-            self.iteratorCloseKeepingThrow(iter);
+        const value_root = try self.pushTempRoot(v);
+        // Coercion may run arbitrary JavaScript and relocate every continued
+        // operand. Keep its primitive result alive while copying the key bytes.
+        const primitive = self.toPropertyKeyValue(self.tempRoot(key_root, k_raw)) catch |e| {
+            self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, iterator_record.iterator));
             return e;
         };
+        const primitive_root = try self.pushTempRoot(primitive);
+        const key = try scratch.dupe(u8, try self.keyOf(self.tempRoot(primitive_root, primitive)));
+        defer scratch.free(key);
         // CreateDataPropertyOrThrow(result, key, v): an own data property —
         // NOT [[Set]], so a poisoned Object.prototype setter is never invoked.
-        try result.asObj().setOwn(self.arena, self.root_shape, key, v);
+        self.tempRoot(result_root, result).asObj().setOwn(self.arena, self.root_shape, key, self.tempRoot(value_root, v)) catch |e| {
+            self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, iterator_record.iterator));
+            return e;
+        };
     }
-    return result;
+    return self.tempRoot(result_root, result);
+}
+
+test "Object.fromEntries allocation failures release invocation roots and key scratch" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator, enable_gc: bool) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const Context = @import("context.zig").Context;
+            const context = try Context.createWith(std.testing.allocator, .{ .enable_gc = enable_gc, .enable_jit = false });
+            defer context.destroy();
+            const entries = try context.evaluate("[['1',{marker:37}],['\\0é','kept']]");
+            const saved_gc = gc_mod.setActiveContext(context);
+            defer gc_mod.restoreActiveContext(saved_gc);
+            var machine = context.interpreter();
+            machine.arena = arena.allocator();
+            machine.scratch_allocator = backing;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.depth == 0);
+                std.debug.assert(machine.env == &context.env);
+            }
+            const result = try objectFromEntries(&machine, Value.undef(), &.{entries});
+            try std.testing.expectEqual(@as(f64, 37), result.asObj().getOwn("1").?.asObj().getOwn("marker").?.asNum());
+            const encoded = try value.encodeStringKey(arena.allocator(), "\x00é");
+            try std.testing.expectEqualStrings("kept", result.asObj().getOwn(encoded).?.asStr());
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    for ([_]bool{ false, true }) |enable_gc|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{enable_gc});
 }
 
 pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
