@@ -26,6 +26,56 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "capture-free ordered RegExp tree semantics",
+        .source =
+        \\(function(){
+        \\var text = " /*one*/ //line\n /*two*/ ";
+        \\var scanner = /(?:\s|\/\/.*|\/\*[^]*?\*\/)*/gd;
+        \\var m = scanner.exec(text);
+        \\if (!m || m[0] !== text || m.index !== 0 || scanner.lastIndex !== text.length || m.indices[0][1] !== text.length) throw Error("comment scanner");
+        \\scanner.lastIndex = 1;
+        \\m = scanner.exec(text);
+        \\if (!m || m.index !== 1 || m[0] !== text.slice(1)) throw Error("scanner from");
+        \\var cases = [["(?:ab|a)*?c","ababac","ababac"],["(?:a|ab)*b","aab","aab"],["(?:a?|b)*","aab","aab"],["(?:a*?)*b","aaab","aaab"],["a{1,3}?","aaa","a"],["(?:a*|b)+?c","aaabc","aaabc"]];
+        \\for (var i=0;i<cases.length;i++) {
+        \\  m=new RegExp(cases[i][0],"d").exec(cases[i][1]);
+        \\  if (!m || m[0]!==cases[i][2] || m.indices[0][0]!==0 || m.indices[0][1]!==cases[i][2].length) throw Error("priority "+i);
+        \\}
+        \\if ("aaab".replace(/(?:a|aa)*?b/g,"X") !== "X") throw Error("replace");
+        \\if (JSON.stringify("zaaabq".split(/(?:a|aa)*?b/)) !== '["z","q"]') throw Error("split");
+        \\if (JSON.stringify("ab".match(/a*?/g)) !== '["","",""]') throw Error("empty progress");
+        \\if (/^(?:a|aa)*?b$/.test("a".repeat(16))) throw Error("adversarial reject");
+        \\return 12;
+        \\})()
+        ,
+        .expected = 12,
+    },
+    .{
+        .name = "capture-free ordered RegExp generator semantics",
+        .source =
+        \\(function*(){
+        \\var text = " /*one*/ //line\n /*two*/ ";
+        \\var scanner = /(?:\s|\/\/.*|\/\*[^]*?\*\/)*/gd;
+        \\var m = scanner.exec(text);
+        \\if (!m || m[0] !== text || m.index !== 0 || scanner.lastIndex !== text.length || m.indices[0][1] !== text.length) throw Error("comment scanner");
+        \\scanner.lastIndex = 1;
+        \\m = scanner.exec(text);
+        \\if (!m || m.index !== 1 || m[0] !== text.slice(1)) throw Error("scanner from");
+        \\var cases = [["(?:ab|a)*?c","ababac","ababac"],["(?:a|ab)*b","aab","aab"],["(?:a?|b)*","aab","aab"],["(?:a*?)*b","aaab","aaab"],["a{1,3}?","aaa","a"],["(?:a*|b)+?c","aaabc","aaabc"]];
+        \\for (var i=0;i<cases.length;i++) {
+        \\  m=new RegExp(cases[i][0],"d").exec(cases[i][1]);
+        \\  if (!m || m[0]!==cases[i][2] || m.indices[0][0]!==0 || m.indices[0][1]!==cases[i][2].length) throw Error("priority "+i);
+        \\}
+        \\if ("aaab".replace(/(?:a|aa)*?b/g,"X") !== "X") throw Error("replace");
+        \\if (JSON.stringify("zaaabq".split(/(?:a|aa)*?b/)) !== '["z","q"]') throw Error("split");
+        \\if (JSON.stringify("ab".match(/a*?/g)) !== '["","",""]') throw Error("empty progress");
+        \\if (/^(?:a|aa)*?b$/.test("a".repeat(16))) throw Error("adversarial reject");
+        \\return 12;
+        \\})().next().value
+        ,
+        .expected = 12,
+    },
+    .{
         .name = "literal RegExp prefixes preserve sparse search and scoped flags",
         .source =
         \\(function*(){
