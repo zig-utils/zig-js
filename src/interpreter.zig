@@ -20791,6 +20791,9 @@ pub const Interpreter = struct {
             if (!cmp.isUndefined() and !cmp.isCallable())
                 return self.throwError("TypeError", "Array.prototype.toSorted requires the comparator argument to be a function or undefined");
             if (ilen > (1 << 22)) return null;
+            var operation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+            defer operation_arena.deinit();
+            const operation_allocator = operation_arena.allocator();
             const result = try self.newArray();
             const result_root = try self.pushTempRoot(result);
             const cmp_root = try self.pushTempRoot(cmp);
@@ -20801,16 +20804,16 @@ pub const Interpreter = struct {
             var items: std.ArrayListUnmanaged(Value) = .empty;
             while (k < ilen) : (k += 1) {
                 const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k);
-                try items.append(self.arena, element);
-                _ = try self.pushTempRoot(element);
+                const element_root = try self.pushTempRoot(element);
+                try items.append(operation_allocator, self.tempRoot(element_root, element));
             }
-            const order = try self.arena.alloc(usize, items.items.len);
+            const order = try operation_allocator.alloc(usize, items.items.len);
             for (order, 0..) |*index, item_index| index.* = item_index;
             if (order.len > 1) {
-                const temp = try self.arena.alloc(usize, order.len);
+                const temp = try operation_allocator.alloc(usize, order.len);
                 try self.mergeSortRootIndices(order, temp, value_roots, items.items, cmp_root, cmp);
             }
-            const sorted = try self.arena.alloc(Value, order.len);
+            const sorted = try operation_allocator.alloc(Value, order.len);
             for (sorted, order) |*element, item_index|
                 element.* = self.tempRoot(value_roots + item_index, items.items[item_index]);
             try self.tempRoot(result_root, result).asObj().replaceDenseElementsAndSetLength(self.arena, sorted, sorted.len);
@@ -21204,6 +21207,11 @@ pub const Interpreter = struct {
             const cmp = self.arrayMethodArgument(roots, args, 0);
             if (!cmp.isUndefined() and !cmp.isCallable())
                 return self.throwError("TypeError", "Array.prototype.sort requires the comparator argument to be a function or undefined");
+            // Gathering, merge indices, and the dense writeback snapshot are
+            // invocation-local. Destination elements copy from this storage.
+            var operation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+            defer operation_arena.deinit();
+            const operation_allocator = operation_arena.allocator();
             // Gather the *present* elements (holes excluded), sort them — with
             // `undefined` ordered last and never passed to the comparator — then
             // write them back, leaving holes at the tail.
@@ -21216,14 +21224,14 @@ pub const Interpreter = struct {
             while (i < ilen) : (i += 1) {
                 if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i)) {
                     const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
-                    try present.append(self.arena, element);
-                    _ = try self.pushTempRoot(element);
+                    const element_root = try self.pushTempRoot(element);
+                    try present.append(operation_allocator, self.tempRoot(element_root, element));
                 }
             }
-            const order = try self.arena.alloc(usize, present.items.len);
+            const order = try operation_allocator.alloc(usize, present.items.len);
             for (order, 0..) |*index, item_index| index.* = item_index;
             if (order.len > 1) {
-                const temp = try self.arena.alloc(usize, order.len);
+                const temp = try operation_allocator.alloc(usize, order.len);
                 try self.mergeSortRootIndices(order, temp, value_roots, present.items, cmp_root, cmp);
             }
             const sorted_receiver = self.tempRoot(roots, receiver).asObj();
@@ -21239,7 +21247,7 @@ pub const Interpreter = struct {
                 for (try sorted_receiver.ownKeysWithScratch(key_snapshot.arena.allocator(), self.scratch_allocator orelse self.arena)) |key| if (value.canonicalIndex(key) != null) {
                     _ = try self.deleteOwn(self.tempRoot(roots, receiver).asObj(), key);
                 };
-                const sorted = try self.arena.alloc(Value, order.len);
+                const sorted = try operation_allocator.alloc(Value, order.len);
                 for (sorted, order) |*element, item_index|
                     element.* = self.tempRoot(value_roots + item_index, present.items[item_index]);
                 try self.tempRoot(roots, receiver).asObj().replaceDenseElementsAndSetLength(self.arena, sorted, ilen); // indices past the sorted run read as holes

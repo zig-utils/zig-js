@@ -20455,6 +20455,104 @@ test "Events canonicalize persistent and compared physical StringData" {
     )).asBool());
 }
 
+test "array sorting scratch: retained sort calls reclaim operation buffers" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const values = [];
+        \\  for (let index = 0; index < 256; ++index) values.push(index);
+        \\  function compare(left, right) { return left - right; }
+        \\  return function () {
+        \\    values.reverse();
+        \\    if (values.sort(compare) !== values || values.length !== 256)
+        \\      throw new Error("sort changed receiver or length");
+        \\    for (let index = 0; index < values.length; ++index)
+        \\      if (values[index] !== index) throw new Error("sort changed retained values");
+        \\    return 4;
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    // A retained receiver and comparator isolate native sorting scratch from
+    // closure churn. Automatic collection alone must keep public calls bounded.
+    for (0..1000) |_| {
+        const result = try ctx.callProtected(callback, null, &.{});
+        defer std.debug.assert(ctx.unprotectValue(result));
+        try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
+    }
+}
+
+test "array sorting scratch: retained toSorted calls reclaim operation buffers" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const values = [];
+        \\  for (let index = 0; index < 256; ++index) values.push(255 - index);
+        \\  function compare(left, right) { return left - right; }
+        \\  return function () {
+        \\    const sorted = values.toSorted(compare);
+        \\    if (sorted === values || sorted.length !== 256 || values.length !== 256)
+        \\      throw new Error("toSorted changed receiver or length");
+        \\    for (let index = 0; index < values.length; ++index)
+        \\      if (sorted[index] !== index || values[index] !== 255 - index)
+        \\        throw new Error("toSorted changed retained values");
+        \\    return 4;
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    for (0..1000) |_| {
+        const result = try ctx.callProtected(callback, null, &.{});
+        defer std.debug.assert(ctx.unprotectValue(result));
+        try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
+    }
+}
+
+test "array sorting scratch: abrupt retained calls reclaim operation buffers" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const values = [];
+        \\  for (let index = 0; index < 256; ++index) values.push(255 - index);
+        \\  const sentinel = {};
+        \\  let throwGetter = false;
+        \\  function compare() { throw sentinel; }
+        \\  function getLast() { if (throwGetter) throw sentinel; return 0; }
+        \\  Object.defineProperty(values, "255", {get: getLast, configurable: true});
+        \\  return function () {
+        \\    let caught = 0;
+        \\    throwGetter = false;
+        \\    try { values.sort(compare); } catch (error) { if (error === sentinel) ++caught; }
+        \\    try { values.toSorted(compare); } catch (error) { if (error === sentinel) ++caught; }
+        \\    throwGetter = true;
+        \\    try { values.sort(compare); } catch (error) { if (error === sentinel) ++caught; }
+        \\    try { values.toSorted(compare); } catch (error) { if (error === sentinel) ++caught; }
+        \\    if (caught !== 4 || values.length !== 256 || values[0] !== 255)
+        \\      throw new Error("sorting lost abrupt completion or mutated receiver");
+        \\    return caught;
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    for (0..1000) |_| {
+        const result = try ctx.callProtected(callback, null, &.{});
+        defer std.debug.assert(ctx.unprotectValue(result));
+        try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
+    }
+}
+
 test "Array default sort compares representation-aware UTF-16 code units" {
     try std.testing.expect((try evalIn(
         \\let calls = "";
