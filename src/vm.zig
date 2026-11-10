@@ -100,6 +100,9 @@ pub const Frame = struct {
     slot_allocator: ?std.mem.Allocator = null,
     slot_capacity: usize = 0,
     slots: []Value,
+    /// Arena-owned immutable capture metadata. Null retains the conservative
+    /// contract of synthetic frames. Private recycled frames clear this view.
+    capture_layout: ?*const bc.FrameCaptureLayout = null,
     parent: ?*Frame,
     /// Exact lexical Environment captured by the function whose activation
     /// owns this frame. Frame slots are deliberately absent from that chain;
@@ -143,6 +146,33 @@ pub const Frame = struct {
     /// stores that the owning activation's root does not cover take the GC
     /// write barrier (`gc.barrierFrameStore`, `gc.barrierReleasedFrame`).
     gc_function_traced: std.atomic.Value(bool) = .init(false),
+
+    pub const SlotIterator = struct {
+        slots: []Value,
+        uncaptured: []const u32,
+        index: usize = 0,
+        exclusion: usize = 0,
+
+        pub fn next(self: *SlotIterator) ?*Value {
+            while (self.index < self.slots.len) {
+                const index = self.index;
+                self.index += 1;
+                if (self.exclusion < self.uncaptured.len and self.uncaptured[self.exclusion] == index) {
+                    self.exclusion += 1;
+                    continue;
+                }
+                return &self.slots[index];
+            }
+            return null;
+        }
+    };
+
+    pub fn liveSlots(self: *Frame, active: bool) SlotIterator {
+        return .{
+            .slots = self.slots,
+            .uncaptured = if (!active) if (self.capture_layout) |layout| layout.uncaptured_slots else &.{} else &.{},
+        };
+    }
 
     // `pub` so the GC's parallel root trace can take the same lock when it reads
     // an escaped frame's slots via a cross-thread captured-frame walk; see
@@ -298,6 +328,12 @@ const OperandStack = struct {
 /// and persists across `yield`/resume, which is what makes suspension faithful
 /// (the whole operand stack is saved, so a `yield` can sit mid-expression).
 pub const Exec = struct {
+    pub fn ownsFrame(self: *const Exec, frame: *const Frame) bool {
+        if (self.frame != frame) return false;
+        const chunk = self.chunk orelse return frame.capture_layout == null;
+        return frame.capture_layout == null or frame.capture_layout == &chunk.frame_capture_layout;
+    }
+
     stack: OperandStack = .empty,
     acc: Value = Value.undef(),
     ip: usize = 0,
@@ -13763,6 +13799,7 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
         } else {
             @memset(act.slot_storage, Value.undef());
             frame.parent = null;
+            frame.capture_layout = null;
             frame.mapped_arguments = null;
             frame.mapped_parameter_indices = &.{};
             frame.closure_environment = null;
@@ -14021,6 +14058,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     // this invocation. Never reinitialize atomics visible to a concurrent marker.
     frame.parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null;
     frame.closure_environment = func.closure;
+    frame.capture_layout = &fchunk.frame_capture_layout;
     vm.replaceExecRoot(&provisional, &act.exec);
     provisional_registered = false;
     errdefer discardActivation(vm, act);

@@ -20451,6 +20451,266 @@ test "own-key snapshots: retained callbacks reclaim enumeration buffers" {
     }
 }
 
+test "lexical slot lifetimes: dead block targets retire while a block capture stays live" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        errdefer std.debug.print("lexical slot lifetime mode {s}\n", .{@tagName(mode)});
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .heap_limit_bytes = 64 * 1024 * 1024 });
+        defer ctx.destroy();
+        ctx.setBytecodeExecutionModeForTesting(mode);
+        const callback = try ctx.evaluateProtected(
+            \\(function () {
+            \\  const state = {count: 0, sum: 0};
+            \\  const multiplier = 7;
+            \\  const registry = new FinalizationRegistry(held => {
+            \\    state.count++;
+            \\    state.sum += held * multiplier;
+            \\  });
+            \\  globalThis.lexicalLifetimeRegistry = registry;
+            \\  const refs = [];
+            \\  for (let i = 0; i < 2; i++) {
+            \\    const first = {marker: i * 3 + 1};
+            \\    const second = {marker: i * 3 + 2};
+            \\    const third = {marker: i * 3 + 3};
+            \\    registry.register(first, first.marker);
+            \\    registry.register(second, second.marker);
+            \\    registry.register(third, third.marker);
+            \\    refs.push(new WeakRef(first), new WeakRef(second), new WeakRef(third));
+            \\  }
+            \\  let liveCapture;
+            \\  {
+            \\    const live = {marker: 99};
+            \\    liveCapture = () => live;
+            \\    registry.register(live, 99);
+            \\  }
+            \\  let calls = 0;
+            \\  return function () {
+            \\    calls++;
+            \\    $drainFinalizationCleanup();
+            \\    if (calls === 251) {
+            \\      return state.count + ':' + state.sum + ':' +
+            \\        refs.map(ref => ref.deref() === undefined).join(',') + ':' +
+            \\        (liveCapture() === liveCapture() && liveCapture().marker === 99);
+            \\    }
+            \\    return 4;
+            \\  };
+            \\})()
+        );
+        defer std.debug.assert(ctx.unprotectValue(callback));
+        for (0..251) |index| {
+            const result = try ctx.callProtected(callback, null, &.{});
+            defer std.debug.assert(ctx.unprotectValue(result));
+            if (index == 250) {
+                try std.testing.expect(result.get().isString());
+                try std.testing.expectEqualStrings("6:147:true,true,true,true,true,true:true", result.get().asStr());
+            } else {
+                try std.testing.expect(result.get().isNumber());
+                try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
+            }
+            if (index == 0 or index == 249) ctx.collectGarbage();
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "lexical slot lifetimes: abrupt exits and dynamic captures survive compaction" {
+    const cases = [_]struct { name: []const u8, body: []const u8, expected: []const u8 }{
+        .{ .name = "unrelated function in repeated scope", .body =
+        \\  for (let id = 0; id < 2; id++) {
+        \\    const roots = [];
+        \\    const unrelated = function (input) { return input; };
+        \\    if (unrelated(id) !== id) throw new Error('unrelated result');
+        \\    for (let i = 0; i < 3; i++) {
+        \\      let target = {marker: id * 3 + i + 1};
+        \\      track(target); roots.push(target); target = null;
+        \\    }
+        \\  }
+        , .expected = "6:21:true:true" },
+        .{ .name = "normal and abrupt exits", .body =
+        \\  { const target = {marker: 1}; track(target); }
+        \\  leave: { const target = {marker: 2}; track(target); break leave; }
+        \\  for (let i = 0; i < 2; i++) {
+        \\    const target = {marker: i + 3}; track(target); continue;
+        \\  }
+        \\  try { throw {marker: 5}; } catch (target) { track(target); }
+        \\  switch (1) { case 1: const target = {marker: 6}; track(target); break; }
+        \\  try { const target = {marker: 7}; track(target); }
+        \\  finally { const target = {marker: 8}; track(target); }
+        , .expected = "8:36:true:true" },
+        .{ .name = "direct eval capture", .body =
+        \\  { const target = {marker: 1}; track(target); }
+        \\  { const live = {marker: 99}; eval('check = () => live.marker === 99'); }
+        , .expected = "1:1:true:true" },
+        .{ .name = "mapped arguments", .body =
+        \\  { const target = {marker: 1}; track(target); }
+        \\  const args = arguments;
+        \\  check = () => args[0] === parameter && parameter.marker === 99;
+        , .expected = "1:1:true:true" },
+        .{ .name = "class and iteration captures", .body =
+        \\  { const target = {marker: 1}; track(target); }
+        \\  const readers = [];
+        \\  for (let i = 0; i < 2; i++) {
+        \\    const live = {marker: i + 10};
+        \\    readers.push(() => live.marker + i);
+        \\  }
+        \\  { const live = {marker: 99}; class Reader { read() { return live; } }
+        \\    const reader = new Reader();
+        \\    check = () => reader.read() === reader.read() && reader.read().marker === 99
+        \\      && readers[0]() === 10 && readers[1]() === 12;
+        \\  }
+        , .expected = "1:1:true:true" },
+        .{ .name = "suspended generator capture", .body =
+        \\  { const target = {marker: 1}; track(target); }
+        \\  { const live = {marker: 99};
+        \\    function* reader() { yield live; yield live; }
+        \\    const iterator = reader(); const first = iterator.next().value;
+        \\    check = () => { const second = iterator.next().value;
+        \\      return first === second && second.marker === 99; };
+        \\  }
+        , .expected = "1:1:true:true" },
+    };
+    const prefix =
+        \\(function (parameter) {
+        \\  const state = {count: 0, sum: 0};
+        \\  const registry = new FinalizationRegistry(held => { state.count++; state.sum += held; });
+        \\  globalThis.lexicalLifetimeRegistry = registry;
+        \\  const refs = [];
+        \\  function track(target) { registry.register(target, target.marker); refs.push(new WeakRef(target)); }
+        \\  let check = () => true;
+    ;
+    const suffix =
+        \\  return function () {
+        \\    $drainFinalizationCleanup();
+        \\    return state.count + ':' + state.sum + ':'
+        \\      + refs.every(ref => ref.deref() === undefined) + ':' + check();
+        \\  };
+        \\})({marker: 99})
+    ;
+    for (cases) |case| {
+        for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+            errdefer std.debug.print("lexical slot case {s}, mode {s}\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer ctx.destroy();
+            ctx.setBytecodeExecutionModeForTesting(mode);
+            ctx.collectGarbage();
+            // Put the live capture graph behind a discardable batch so the
+            // dense-prefix evacuation policy has real movement to perform.
+            _ = try ctx.evaluate(
+                \\globalThis.lexicalDiscard = [];
+                \\for (let i = 0; i < 4096; i++) lexicalDiscard.push({i});
+            );
+            const source = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, "\n", case.body, "\n", suffix });
+            defer std.testing.allocator.free(source);
+            const callback = try ctx.evaluateProtected(source);
+            defer std.debug.assert(ctx.unprotectValue(callback));
+            _ = try ctx.evaluate("lexicalDiscard = null");
+            ctx.collectGarbage();
+            const moved = ctx.compactGarbage();
+            try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+            const result = try ctx.callProtected(callback, null, &.{});
+            defer std.debug.assert(ctx.unprotectValue(result));
+            try std.testing.expect(result.get().isString());
+            try std.testing.expectEqualStrings(case.expected, result.get().asStr());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "lexical slot lifetimes: VM defining projections omit proven invocation-only bindings" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    ctx.collectGarbage();
+    _ = try ctx.evaluate(
+        \\globalThis.projectionDiscard = [];
+        \\for (let i = 0; i < 4096; i++) projectionDiscard.push({i});
+    );
+    // The VM's per-iteration capture classification proves `roots` cannot be
+    // read by the generator. Its defining projection must omit that slot while
+    // preserving the independently captured live cell and generator identity.
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const state = {count: 0, sum: 0}; const refs = [];
+        \\  const registry = new FinalizationRegistry(held => { state.count++; state.sum += held; });
+        \\  globalThis.projectionRegistry = registry;
+        \\  function track(target) { registry.register(target, target.marker); refs.push(new WeakRef(target)); }
+        \\  let reader;
+        \\  for (let id = 0; id < 2; id++) {
+        \\    const roots = []; const live = {marker: 99};
+        \\    reader = function* () { yield live; yield live; };
+        \\    for (let i = 0; i < 3; i++) {
+        \\      let target = {marker: id * 3 + i + 1};
+        \\      track(target); roots.push(target); target = null;
+        \\    }
+        \\  }
+        \\  const iterator = reader();
+        \\  return function () {
+        \\    $drainFinalizationCleanup(); const first = iterator.next().value;
+        \\    return state.count + ':' + state.sum + ':'
+        \\      + refs.every(ref => ref.deref() === undefined) + ':'
+        \\      + (first === iterator.next().value && first.marker === 99);
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    _ = try ctx.evaluate("projectionDiscard = null");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, ctx.compactGarbage().status);
+    const result = try ctx.callProtected(callback, null, &.{});
+    defer std.debug.assert(ctx.unprotectValue(result));
+    try std.testing.expectEqualStrings("6:21:true:true", result.get().asStr());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "lexical slot lifetimes: deferred debugger views retain fresh outer bindings" {
+    const Capture = struct {
+        values: [2]f64 = @splat(-1),
+        hits: usize = 0,
+
+        fn statement(raw: *anyopaque, machine: *interp.Interpreter, location: interp.DebugStatementLocation) interp.EvalError!void {
+            if (!location.debugger_statement) return;
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const result = try machine.evaluateForDebugger("hidden.marker", machine.env, machine.this_value, machine.strict);
+            if (self.hits < self.values.len and result.isNumber()) self.values[self.hits] = result.asNum();
+            self.hits += 1;
+        }
+    };
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    ctx.collectGarbage();
+    _ = try ctx.evaluate(
+        \\globalThis.debuggerDiscard = [];
+        \\for (let i = 0; i < 4096; i++) debuggerDiscard.push({i});
+    );
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const readers = [];
+        \\  for (let i = 0; i < 2; i++) {
+        \\    const hidden = {marker: 99 + i};
+        \\    readers.push(function* () { debugger; yield 42; });
+        \\  }
+        \\  const iterators = readers.map(reader => reader());
+        \\  return function () { return iterators.map(iterator => iterator.next().value).join(','); };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    _ = try ctx.evaluate("debuggerDiscard = null");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, ctx.compactGarbage().status);
+    // Attach after compilation and collection. A debugger-authored expression
+    // must still resolve each defining scope's independently retained value.
+    var capture = Capture{};
+    ctx.debug_statement_ctx = &capture;
+    ctx.debug_statement_hook = Capture.statement;
+    const result = try ctx.callProtected(callback, null, &.{});
+    defer std.debug.assert(ctx.unprotectValue(result));
+    try std.testing.expectEqualStrings("42,42", result.get().asStr());
+    try std.testing.expectEqual(@as(usize, 2), capture.hits);
+    try std.testing.expectEqual([2]f64{ 99, 100 }, capture.values);
+}
+
 test "captured frames: retained callbacks reclaim unreachable captures automatically" {
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,

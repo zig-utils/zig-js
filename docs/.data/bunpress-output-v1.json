@@ -35,8 +35,8 @@
     },
     {
       "path": "advanced/memory-and-gc/index.html",
-      "bytes": 233442,
-      "sha256": "4391c6d37397f951d9cc1b25c3716f5aac1148692035833dee1af62552929b95"
+      "bytes": 234493,
+      "sha256": "64b82492f7f67012e831a80a47de739bdacbbefcb3005aca0344b6ee65f9f350"
     },
     {
       "path": "advanced/verification/index.html",
@@ -279,5 +279,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "c8f453b58ec5f797295fd506645927e970e3cca04f9c462fe4e926f515c15dbe"
+  "tree_sha256": "abef4603eb2f187d3e517057211b24d7b653746f3aea788057e8a497613b3a28"
 }

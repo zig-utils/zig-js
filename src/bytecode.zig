@@ -899,6 +899,14 @@ pub const ParameterLayoutKey = struct {
     }
 };
 
+/// Invocation temporaries and lexical bindings that no nested function, eval
+/// or debugger view can capture. A running Exec still owns every slot. Captured frames omit these edges once
+/// their activation is gone; retaining a sibling closure cannot extend an
+/// unrelated block's binding lifetime. Immutable before chunk publication.
+pub const FrameCaptureLayout = struct {
+    uncaptured_slots: []const u32 = &.{},
+};
+
 pub const Chunk = struct {
     const DebugSite = struct { instruction: usize, node: *const ast.Node };
 
@@ -910,6 +918,7 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    frame_capture_layout: FrameCaptureLayout = .{},
     /// Frozen with the instruction stream. Tail calls transfer activations to
     /// the heap driver and cannot execute through the native-stack inline path.
     inline_calls_safe: bool = true,

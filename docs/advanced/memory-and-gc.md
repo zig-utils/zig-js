@@ -89,6 +89,21 @@ entering the pool. Before a quiescent collection, pools detach their private
 frames so the collector can reclaim unused slot buffers while keeping reusable
 activation metadata.
 
+A captured frame traces lexical bindings that can be observed at a nested
+function, class, direct-eval or debugger site. Immutable compiler metadata omits
+bindings in unrelated blocks and invocation-only lowering temporaries from that
+captured graph. Running executions still trace every slot, including native
+execution. This preserves operands across callbacks and abrupt completions;
+returning a closure does not keep the last objects of an unrelated loop alive.
+Direct-eval and debugger environments independently trace and rewrite the exact
+bindings in their live views. Marking, relocation and escaped-frame barrier
+transfer use the same capture layout, without clearing readable slot values.
+Repeated lexical bindings reuse the compiler's existing per-iteration capture
+classification. Defining-scope projections omit bindings proved invocation-only;
+current eval and debugger views retain the active binding set. Other scopes
+containing potential captures remain conservatively retained, including captures
+in branches that do not run.
+
 ## Generational collection
 
 A nursery with an age-based promotion policy is implemented and benchmarked. The

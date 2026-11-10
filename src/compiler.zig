@@ -278,6 +278,10 @@ const SlotBinding = struct {
     /// parameter expressions. A later body direct eval may create a nearer
     /// same-named binding, so body references retain an exact dynamic probe.
     parameter_with_eval_boundary: bool = false,
+    /// Repeated-body capture analysis puts observable bindings in Environment
+    /// Records. A false value proves this remaining slot is invocation-only;
+    /// deferred scope projections must not resurrect its retired value.
+    capturable: bool = true,
     /// Runtime records outside this lexical slot must not shadow it. This is
     /// the owning scope's boundary, not the depth at a later reference site.
     lexical_environment_depth: u32 = 0,
@@ -338,6 +342,9 @@ const FnScope = struct {
     /// identity to apply Annex B.3.5 without weakening destructuring catches.
     lexical_scope_is_catch_param: std.ArrayListUnmanaged(bool) = .empty,
     lexical_scope_environment_depth: std.ArrayListUnmanaged(u32) = .empty,
+    /// Active compiler-only proofs. Frozen snapshots keep the binding result,
+    /// never a pointer to a repeated-body analysis on the compiler's stack.
+    lexical_scope_capture_proofs: std.ArrayListUnmanaged(?*const RepeatedBodyCaptures) = .empty,
     slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
     count: u32 = 0,
     lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
@@ -388,6 +395,7 @@ const FnScope = struct {
         copy.lexical_scopes = .empty;
         copy.lexical_scope_is_catch_param = .empty;
         copy.lexical_scope_environment_depth = .empty;
+        copy.lexical_scope_capture_proofs = .empty;
         copy.lexical_slots = .empty;
         copy.slot_names = .empty;
         copy.lexical_name_counts = null;
@@ -433,6 +441,12 @@ const FnScope = struct {
             .immutable = immutable,
             .tdz_checked = tdz_checked,
             .parameter_with_eval_boundary = parameter_with_eval_boundary,
+            .capturable = if (!lexical or self.lexical_scope_capture_proofs.items.len == 0)
+                true
+            else if (self.lexical_scope_capture_proofs.items[self.lexical_scope_capture_proofs.items.len - 1]) |proof|
+                proof.nameCaptured(name)
+            else
+                true,
             .lexical_environment_depth = if (lexical and self.lexical_scope_environment_depth.items.len != 0)
                 self.lexical_scope_environment_depth.items[self.lexical_scope_environment_depth.items.len - 1]
             else
@@ -457,6 +471,7 @@ const FnScope = struct {
         try self.lexical_scopes.append(arena, bindings);
         try self.lexical_scope_is_catch_param.append(arena, false);
         try self.lexical_scope_environment_depth.append(arena, environment_depth);
+        try self.lexical_scope_capture_proofs.append(arena, null);
         self.version +%= 1;
     }
 
@@ -468,6 +483,7 @@ const FnScope = struct {
         while (names.next()) |name| self.forgetLexicalName(name.*);
         _ = self.lexical_scope_is_catch_param.pop();
         _ = self.lexical_scope_environment_depth.pop();
+        _ = self.lexical_scope_capture_proofs.pop();
     }
 
     fn markCurrentLexicalScopeCatchParameter(self: *FnScope) void {
@@ -687,6 +703,7 @@ fn compilePlainBody(
     compiled.local_count = scope.count;
     compiled.mapped_parameter_indices = try finalizeMappedParameterIndices(arena, scope, mapped_parameter_indices);
     compiled.lexical_slots = scope.lexical_slots.items;
+    try sub_c.finalizeFrameCaptureLayout();
     try retainDebugLocalNames(arena, compiled, scope);
     try compiled.finalize();
     admission.* = .plain_compiled;
@@ -813,7 +830,7 @@ pub const LazyFunction = struct {
     fn reject(self: *LazyFunction, tmpl: *bc.FnTemplate, admission: bc.FnTemplateAdmission) error{ OutOfMemory, StackExhausted }!?*Chunk {
         if (self.parent) |parent| {
             const plan = try self.program.arena.create(bc.DirectEvalPlan);
-            plan.* = buildDirectEvalPlan(self.program.arena, parent, .variable, self.environment_depth) catch |err| switch (err) {
+            plan.* = buildDirectEvalPlan(self.program.arena, parent, .variable, self.environment_depth, true) catch |err| switch (err) {
                 // Eligibility admits only chains whose body records exist.
                 error.Unsupported => unreachable,
                 else => |e| return e,
@@ -855,12 +872,13 @@ fn directEvalBindings(
     arena: std.mem.Allocator,
     bindings: *const SecureStringMapUnmanaged(SlotBinding),
     slot_limit: u32,
+    capture_only: bool,
 ) CompileError![]const bc.DirectEvalBinding {
     var visible_count: usize = 0;
     var count_it = bindings.iterator();
     while (count_it.next()) |entry|
         visible_count += @intFromBool(
-            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment and entry.value_ptr.slot < slot_limit,
+            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment and entry.value_ptr.slot < slot_limit and (!capture_only or entry.value_ptr.capturable),
         );
 
     const retained = try arena.alloc(bc.DirectEvalBinding, visible_count);
@@ -871,7 +889,7 @@ fn directEvalBindings(
         const binding = entry.value_ptr.*;
         // Captured runtime cells are supplied by their original Environment,
         // not by the placeholder slot used for static name classification.
-        if (!isUserVisibleBindingName(name) or binding.environment or binding.slot >= slot_limit) continue;
+        if (!isUserVisibleBindingName(name) or binding.environment or binding.slot >= slot_limit or (capture_only and !binding.capturable)) continue;
         retained[retained_index] = .{
             .name = name,
             .slot = binding.slot,
@@ -891,12 +909,12 @@ fn directEvalBindings(
     return retained;
 }
 
-fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBinding), slot_limit: u32) usize {
+fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBinding), slot_limit: u32, capture_only: bool) usize {
     var count: usize = 0;
     var it = bindings.iterator();
     while (it.next()) |entry|
         count += @intFromBool(
-            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment and entry.value_ptr.slot < slot_limit,
+            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment and entry.value_ptr.slot < slot_limit and (!capture_only or entry.value_ptr.capturable),
         );
     return count;
 }
@@ -904,7 +922,9 @@ fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBin
 /// Freeze the active slot-backed scope stack without copying activation values.
 /// The current declaration target is retained even when empty; functions with
 /// parameter expressions additionally retain their outer parameter record.
-/// Empty lexical scopes are semantically inert and omitted. Runtime Environment
+/// Defining-scope projections omit frame bindings proved invocation-only by
+/// repeated-body capture analysis. The current eval/debugger frame keeps its
+/// complete active binding set. Empty lexical scopes are omitted. Runtime Environment
 /// Records are retained only as exact segment counts; materialization recovers
 /// captured identities from Frame closure edges and the current segment from
 /// the activation's live runtime chain.
@@ -913,6 +933,7 @@ fn buildDirectEvalPlan(
     scope: *const FnScope,
     current_target: bc.DirectEvalScopeKind,
     current_environment_depth: u32,
+    capture_current: bool,
 ) CompileError!bc.DirectEvalPlan {
     if (current_target == .parameter and scope.parameter_names == null) return error.Unsupported;
     var frame_count: usize = 0;
@@ -928,7 +949,7 @@ fn buildDirectEvalPlan(
             scope_count += 1;
             scope_count += @intFromBool(frame_scope.parameter_names != null);
             for (frame_scope.lexical_scopes.items) |lexical|
-                scope_count += @intFromBool(directEvalFrameBindingCount(lexical, frame_scope.visible_slot_limit) != 0);
+                scope_count += @intFromBool(directEvalFrameBindingCount(lexical, frame_scope.visible_slot_limit, capture_current or frame_count > 1) != 0);
         }
         cursor_phase = frame_scope.parent_binding_phase;
     }
@@ -958,7 +979,7 @@ fn buildDirectEvalPlan(
         const frame_depth: u32 = @intCast(frame_count - outer_index - 1);
         if (frame_scope.parameter_names) |parameters| {
             scopes[scope_index] = .{
-                .bindings = try directEvalBindings(arena, parameters, frame_scope.visible_slot_limit),
+                .bindings = try directEvalBindings(arena, parameters, frame_scope.visible_slot_limit, capture_current or frame_depth != 0),
                 .kind = .parameter,
                 .declaration_target = frame_depth == 0 and current_target == .parameter,
                 .frame_depth = frame_depth,
@@ -967,7 +988,7 @@ fn buildDirectEvalPlan(
         }
         if (frame.phase == .body) {
             scopes[scope_index] = .{
-                .bindings = try directEvalBindings(arena, frame_scope.bodyNames(), frame_scope.visible_slot_limit),
+                .bindings = try directEvalBindings(arena, frame_scope.bodyNames(), frame_scope.visible_slot_limit, capture_current or frame_depth != 0),
                 .kind = .variable,
                 .declaration_target = frame_depth == 0 and current_target == .variable,
                 .frame_depth = frame_depth,
@@ -978,9 +999,9 @@ fn buildDirectEvalPlan(
                 frame_scope.lexical_scope_is_catch_param.items,
                 frame_scope.lexical_scope_environment_depth.items,
             ) |lexical, is_catch_param, environment_depth| {
-                if (directEvalFrameBindingCount(lexical, frame_scope.visible_slot_limit) == 0) continue;
+                if (directEvalFrameBindingCount(lexical, frame_scope.visible_slot_limit, capture_current or frame_depth != 0) == 0) continue;
                 scopes[scope_index] = .{
-                    .bindings = try directEvalBindings(arena, lexical, frame_scope.visible_slot_limit),
+                    .bindings = try directEvalBindings(arena, lexical, frame_scope.visible_slot_limit, capture_current or frame_depth != 0),
                     .kind = .lexical,
                     .is_catch_param = is_catch_param,
                     .frame_depth = frame_depth,
@@ -1639,7 +1660,12 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool, floor: us
     return switch (node.*) {
         .identifier => |id| in_fn and identifierReferenceMatches(name, id),
 
-        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .private_identifier, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt, .debugger_stmt => false,
+        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .private_identifier, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt => false,
+
+        // An explicit pause inside a deferred body can inspect any visible
+        // binding, even without a source-level reference. Preserve fresh cells
+        // just as for direct eval; an active body's own slots remain rooted.
+        .debugger_stmt => in_fn and directEvalReferenceMatches(name),
 
         // A nested function/arrow (expression or declaration): everything it (and
         // any deeper closure) references is captured — descend with `in_fn = true`.
@@ -2284,6 +2310,10 @@ pub const Compiler = struct {
     /// lowered. Nested blocks reuse its exact captured-name and catch-pattern
     /// results instead of walking the root once per lexical declaration.
     repeated_body_captures: ?*const RepeatedBodyCaptures = null,
+    /// Scope maps survive lexical pop in the compiler arena. These records
+    /// classify capture edges without another recursive AST walk.
+    capture_scopes: std.ArrayListUnmanaged(CaptureScope) = .empty,
+    active_capture_scopes: std.ArrayListUnmanaged(usize) = .empty,
     /// >0 while compiling the body of a `try` whose catch handler is still live on
     /// the VM handler stack (the no-finally case). A call in tail position there
     /// must NOT be a tail call: the handler has to survive the call so a throw from
@@ -3129,6 +3159,7 @@ pub const Compiler = struct {
         chunk.local_count = scope.count;
         chunk.mapped_parameter_indices = try finalizeMappedParameterIndices(arena, scope, mapped_parameter_indices);
         chunk.lexical_slots = scope.lexical_slots.items;
+        try c.finalizeFrameCaptureLayout();
         try retainDebugLocalNames(arena, chunk, scope);
         try chunk.finalize();
         return .{ .chunk = chunk, .local_count = scope.count };
@@ -3209,6 +3240,7 @@ pub const Compiler = struct {
 
     /// Emit a load of `name` to the appropriate location (local / upvalue / global).
     fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
+        if (std.mem.eql(u8, name, "eval")) self.observeCaptureScopes();
         const resolution = self.resolveWithDepth(name);
         if (try self.dynamicBindingReferencePlanResolved(name, resolution)) |reference| {
             try self.emitLoadBindingReference(reference, false, false, false);
@@ -3914,12 +3946,69 @@ pub const Compiler = struct {
         return true;
     }
 
+    const CaptureScope = struct {
+        bindings: *SecureStringMapUnmanaged(SlotBinding),
+        observable: bool = false,
+    };
+
     fn pushLexicalScope(self: *Compiler) CompileError!void {
-        if (self.scope) |scope| try scope.pushLexicalScopeAtDepth(self.arena, self.environment_depth);
+        if (self.scope) |scope| {
+            // Reserve before changing either stack. Scope exit is infallible,
+            // including the deferred exit of a rejected compilation.
+            try self.capture_scopes.ensureUnusedCapacity(self.arena, 1);
+            try self.active_capture_scopes.ensureUnusedCapacity(self.arena, 1);
+            try scope.pushLexicalScopeAtDepth(self.arena, self.environment_depth);
+            scope.lexical_scope_capture_proofs.items[scope.lexical_scope_capture_proofs.items.len - 1] = self.repeated_body_captures;
+            self.active_capture_scopes.appendAssumeCapacity(self.capture_scopes.items.len);
+            self.capture_scopes.appendAssumeCapacity(.{ .bindings = scope.currentLexicalScope() });
+        }
     }
 
     fn popLexicalScope(self: *Compiler) void {
-        if (self.scope) |scope| scope.popLexicalScope();
+        if (self.scope) |scope| {
+            _ = self.active_capture_scopes.pop().?;
+            scope.popLexicalScope();
+        }
+    }
+
+    /// A fallback/debugger may resolve any name visible at a closure's defining
+    /// site, not just its syntactic free names. Mark the whole visible prefix.
+    /// Once marked, its ancestors have already been marked too.
+    fn observeCaptureScopes(self: *Compiler) void {
+        var index = self.active_capture_scopes.items.len;
+        while (index > 0) {
+            index -= 1;
+            const scope = &self.capture_scopes.items[self.active_capture_scopes.items[index]];
+            if (scope.observable) break;
+            scope.observable = true;
+        }
+    }
+
+    fn finalizeFrameCaptureLayout(self: *Compiler) CompileError!void {
+        std.debug.assert(self.active_capture_scopes.items.len == 0);
+        var slots: std.ArrayListUnmanaged(u32) = .empty;
+        // Lowering temporaries are invocation state, never lexical bindings a
+        // child AST, direct eval or debugger can name. Catch/destructuring source
+        // temporaries must not retain their operand after the activation ends.
+        const function_scope = self.scope orelse return;
+        for (function_scope.slot_names.items, 0..) |name, slot|
+            if (!isUserVisibleBindingName(name)) try slots.append(self.arena, @intCast(slot));
+        for (self.capture_scopes.items) |scope| {
+            var bindings = scope.bindings.iterator();
+            while (bindings.next()) |entry| {
+                const binding = entry.value_ptr;
+                if (!binding.environment and (!scope.observable or !binding.capturable))
+                    try slots.append(self.arena, binding.slot);
+            }
+        }
+        std.mem.sort(u32, slots.items, {}, std.sort.asc(u32));
+        // Each lexical declaration gets its own physical slot. Scope aliases
+        // must not introduce duplicate or out-of-frame exclusions.
+        for (slots.items, 0..) |slot, index| {
+            std.debug.assert(slot < self.chunk.local_count);
+            std.debug.assert(index == 0 or slots.items[index - 1] < slot);
+        }
+        self.chunk.frame_capture_layout.uncaptured_slots = slots.items;
     }
 
     fn emitEnterEnvironment(self: *Compiler) CompileError!void {
@@ -4249,7 +4338,10 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.init_private_field, try self.chunk.addName(field.name));
                 _ = try self.chunk.emit(.pop, 0);
             },
-            .debugger_stmt => _ = try self.chunk.emit(.nop, 0),
+            .debugger_stmt => {
+                self.observeCaptureScopes();
+                _ = try self.chunk.emit(.nop, 0);
+            },
             .block => |stmts| {
                 if (node == self.environment_function_body) {
                     try self.compileEnvironmentBody(stmts);
@@ -4377,6 +4469,7 @@ pub const Compiler = struct {
                 self.popLoop();
             },
             .with_stmt => |w| {
+                self.observeCaptureScopes();
                 // ECMA-262 WithStatement restores the outer environment for
                 // every completion. Jumps carry their target environment depth,
                 // handlers retain the exact unwind prefix, and function exit
@@ -4633,8 +4726,9 @@ pub const Compiler = struct {
     fn compileRepeatedBody(self: *Compiler, body: *Node) CompileError!void {
         if (self.scope == null) return self.compileStmt(body);
         var captures = try RepeatedBodyCaptures.init(self.arena, self.hash_state, body, self.stack_floor);
-        if (!captures.any()) return self.compileStmt(body);
-        if (!try repeatedBodyCapturesSupported(body, &captures, self.stack_floor)) return error.Unsupported;
+        // The empty result is still a proof: frame-backed lexical values cannot
+        // become captures merely because the body creates an unrelated function.
+        if (captures.any() and !try repeatedBodyCapturesSupported(body, &captures, self.stack_floor)) return error.Unsupported;
         const saved_captures = self.repeated_body_captures;
         self.repeated_body_captures = &captures;
         defer self.repeated_body_captures = saved_captures;
@@ -7312,6 +7406,7 @@ pub const Compiler = struct {
     }
 
     fn compileClass(self: *Compiler, node: *Node, inferred_name: ?[]const u8, name_from_stack: bool) CompileError!void {
+        self.observeCaptureScopes();
         const c = node.class_expr;
         const captures_frame = if (self.scope) |scope|
             try classDeferredBodiesCaptureFrame(self.arena, scope, c.members, c.name, self.stack_floor)
@@ -7343,6 +7438,7 @@ pub const Compiler = struct {
                 self.scope.?,
                 if (self.function_binding_phase == .parameters) .parameter else .variable,
                 self.environment_depth,
+                true,
             );
             break :capture plan;
         } else null;
@@ -7398,6 +7494,7 @@ pub const Compiler = struct {
     }
 
     fn addCurrentDirectEvalPlan(self: *Compiler) CompileError!u32 {
+        self.observeCaptureScopes();
         const scope = self.scope orelse return error.Unsupported;
         if (self.function_binding_phase == .parameters)
             if (self.chunk.parameter_direct_eval_plan) |plan_index| return plan_index;
@@ -7406,6 +7503,7 @@ pub const Compiler = struct {
             scope,
             if (self.function_binding_phase == .parameters) .parameter else .variable,
             self.environment_depth,
+            false,
         );
         const plan_index = try self.chunk.addDirectEvalPlan(plan);
         if (self.function_binding_phase == .parameters)
@@ -7443,6 +7541,7 @@ pub const Compiler = struct {
         fnode: *const ast.FunctionNode,
         named_expr: bool,
     ) CompileError!u32 {
+        self.observeCaptureScopes();
         // InstantiateGeneratorFunctionObject / InstantiateAsyncFunctionObject
         // capture the current lexical environment. Env-mode bodies need live
         // views of defining frame slots, with the same binding identity and
@@ -7454,6 +7553,7 @@ pub const Compiler = struct {
                 self.scope.?,
                 if (self.function_binding_phase == .parameters) .parameter else .variable,
                 self.environment_depth,
+                true,
             );
             break :blk plan;
         } else null;
@@ -7944,7 +8044,7 @@ test "compiler direct eval plan retains ordered live binding identity" {
     try scope.pushLexicalScope(allocator);
     const inner_slot = try scope.addLexicalChecked(allocator, "value", true);
 
-    const plan = try buildDirectEvalPlan(allocator, &scope, .variable, 0);
+    const plan = try buildDirectEvalPlan(allocator, &scope, .variable, 0, false);
     try std.testing.expectEqual(@as(usize, 3), plan.scopes.len);
 
     const function_scope = plan.scopes[0];
@@ -8003,7 +8103,7 @@ test "compiler direct eval plan preserves defining-frame and runtime-environment
     };
     _ = try inner.addLocal(allocator, "innerVariable", false, false);
 
-    const plan = try buildDirectEvalPlan(allocator, &inner, .variable, 0);
+    const plan = try buildDirectEvalPlan(allocator, &inner, .variable, 0, false);
     try std.testing.expectEqual(@as(usize, 3), plan.scopes.len);
     try std.testing.expectEqualStrings("outerVariable", plan.scopes[0].bindings[0].name);
     try std.testing.expectEqual(bc.DirectEvalScopeKind.variable, plan.scopes[0].kind);
@@ -8023,7 +8123,7 @@ test "compiler direct eval plan preserves defining-frame and runtime-environment
     inner.parent_environment_depth = 1;
     inner.parent_direct_eval_environment_depth = 1;
     outer.lexical_scope_environment_depth.items[0] = 1;
-    const interleaved = try buildDirectEvalPlan(allocator, &inner, .variable, 2);
+    const interleaved = try buildDirectEvalPlan(allocator, &inner, .variable, 2, false);
     try std.testing.expectEqual(@as(u32, 1), interleaved.scopes[1].environment_depth);
     try std.testing.expectEqual(@as(usize, 1), interleaved.frame_boundaries.len);
     try std.testing.expectEqual(@as(u32, 0), interleaved.frame_boundaries[0].child_frame_depth);

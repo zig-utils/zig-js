@@ -1947,7 +1947,8 @@ fn traceCapturedFrameContents(current: *vm.Frame, v: anytype, lock_slots: bool) 
     if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
     traceFrameMappedParameters(current, v);
     const held = current.lockSlots(lock_slots);
-    for (current.slots) |slot| markValueInternal(v, "captured VM frame slot", slot);
+    var slots = current.liveSlots(false);
+    while (slots.next()) |slot| markValueInternal(v, "captured VM frame slot", slot.*);
     current.unlockSlots(held);
 }
 
@@ -1973,9 +1974,10 @@ pub fn barrierReleasedFrame(frame: *vm.Frame) void {
     if (frame.direct_eval_parameter_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCellFrom(owner, environment);
     if (frame.mapped_arguments) |arguments| barrierCellFrom(owner, arguments);
     const parallel = bytecode.ic_seqlock_enabled.load(.monotonic);
-    for (0..frame.slots.len) |slot| {
+    var slots = frame.liveSlots(false);
+    while (slots.next()) |slot| {
         const held = frame.lockSlots(parallel);
-        const stored = frame.slots[slot];
+        const stored = slot.*;
         frame.unlockSlots(held);
         barrierValueFrom(owner, stored);
     }
@@ -2012,7 +2014,8 @@ fn relocateCapturedFrame(raw: ?*anyopaque, v: anytype) void {
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
         relocateFrameMappedParameters(current, v);
-        for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+        var slots = current.liveSlots(false);
+        while (slots.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     }
 }
 
@@ -2088,6 +2091,76 @@ pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     if (f.compiledChunk()) |chunk| relocateChunk(chunk, v);
     if (f.gen_chunk) |chunk| relocateChunk(chunk, v);
     if (f.async_chunk) |chunk| relocateChunk(chunk, v);
+}
+
+test "lexical slot lifetimes: active owners and captured views trace and relocate matching edges" {
+    var old_objects: [3]Object = undefined;
+    var new_objects: [3]Object = undefined;
+    var slots: [3]Value = undefined;
+    var owner_chunk = bytecode.Chunk.init(std.testing.allocator);
+    owner_chunk.frame_capture_layout.uncaptured_slots = &.{1};
+    var other_chunk = bytecode.Chunk.init(std.testing.allocator);
+    var frame = vm.Frame{ .slots = &slots, .parent = null, .capture_layout = &owner_chunk.frame_capture_layout };
+    const Visitor = struct {
+        objects: *[3]Object,
+        seen: [3]bool = @splat(false),
+
+        fn concurrent(_: *const @This()) bool {
+            return false;
+        }
+        fn mark(self: *@This(), maybe_cell: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe_cell))) {
+                .optional => maybe_cell orelse return,
+                .pointer => maybe_cell,
+                else => @compileError("expected pointer"),
+            };
+            for (self.objects, 0..) |*object, index|
+                if (@intFromPtr(cell) == @intFromPtr(object)) {
+                    self.seen[index] = true;
+                };
+        }
+    };
+    const Plan = struct {
+        old: *[3]Object,
+        new: *[3]Object,
+        seen: [3]bool = @splat(false),
+
+        pub fn resolve(self: *@This(), pointer: *anyopaque) *anyopaque {
+            for (self.old, 0..) |*object, index| {
+                if (pointer == @as(*anyopaque, @ptrCast(object))) {
+                    self.seen[index] = true;
+                    return @ptrCast(&self.new[index]);
+                }
+            }
+            return pointer;
+        }
+    };
+    // A Frame-cell walk, its own running Exec, and an env-mode Exec retaining
+    // that same parent must agree between marking and relocation. In particular,
+    // the env-mode Exec cannot claim ownership merely because frame is non-null,
+    // nor can a recursive call claim an ancestor that shares its same Chunk.
+    for (0..4) |path| {
+        for (&slots, &old_objects) |*slot, *object| slot.* = Value.obj(object);
+        var visitor = Visitor{ .objects = &old_objects };
+        var plan = Plan{ .old = &old_objects, .new = &new_objects };
+        if (path == 0) {
+            traceFrame(&frame, &visitor);
+            relocateCapturedFrame(&frame, &plan);
+        } else {
+            var recursive_frame = vm.Frame{ .slots = &.{}, .parent = &frame, .capture_layout = &owner_chunk.frame_capture_layout };
+            var exec = vm.Exec{
+                .frame = if (path == 3) &recursive_frame else &frame,
+                .chunk = if (path == 2) &other_chunk else &owner_chunk,
+            };
+            traceExecRoots(&exec, &visitor);
+            relocateExecRoots(&exec, &plan);
+        }
+        const expected = [3]bool{ true, path == 1, true };
+        try std.testing.expectEqual(expected, visitor.seen);
+        try std.testing.expectEqual(expected, plan.seen);
+        for (slots, 0..) |slot, index|
+            try std.testing.expectEqual(if (expected[index]) &new_objects[index] else &old_objects[index], slot.asObj());
+    }
 }
 
 test "Function marking and relocation cover every managed field" {
@@ -2530,7 +2603,8 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
         if (current.closure_environment) |environment| markManaged(v, environment);
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
         if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
-        for (current.slots) |slot| markValue(v, slot);
+        var slots = current.liveSlots(g.exec.ownsFrame(current));
+        while (slots.next()) |slot| markValue(v, slot.*);
     }
     markValue(v, g.this_value);
     v.mark(g.home_object);
@@ -2563,7 +2637,8 @@ pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
-        for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+        var slots = current.liveSlots(g.exec.ownsFrame(current));
+        while (slots.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     }
     gc_relocation.rewriteValueSlot(v, &g.this_value);
     gc_relocation.rewriteOptionalSlot(v, Object, &g.home_object);
@@ -3045,7 +3120,8 @@ fn traceExecRoots(exec: *vm.Exec, v: anytype) void {
         if (f.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
         traceFrameMappedParameters(f, v);
         const held = f.lockSlots(lock_slots);
-        for (f.slots) |slot| markValueInternal(v, "interpreter VM frame slot", slot);
+        var slots = f.liveSlots(exec.ownsFrame(f));
+        while (slots.next()) |slot| markValueInternal(v, "interpreter VM frame slot", slot.*);
         f.unlockSlots(held);
     }
 }
@@ -3114,7 +3190,8 @@ fn relocateExecRoots(exec: *vm.Exec, v: anytype) void {
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
         relocateFrameMappedParameters(current, v);
-        for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+        var slots = current.liveSlots(exec.ownsFrame(current));
+        while (slots.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     }
 }
 
