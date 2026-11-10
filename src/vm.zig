@@ -93,6 +93,12 @@ inline fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) Ev
 /// so a closure can outlive the call that created it. Globals live in the
 /// Environment, not here.
 pub const Frame = struct {
+    /// Managed frames are address-pinned cells. Their slot buffer has the same
+    /// lifetime as the cell, including capacity outside the current live prefix.
+    /// Synthetic and arena-only frames leave this ownership metadata empty.
+    gc_managed: bool = false,
+    slot_allocator: ?std.mem.Allocator = null,
+    slot_capacity: usize = 0,
     slots: []Value,
     parent: ?*Frame,
     /// Exact lexical Environment captured by the function whose activation
@@ -189,6 +195,7 @@ pub const Frame = struct {
 
     pub fn activationView(self: *Frame) interp.ActivationFrameView {
         return .{
+            .owner = self,
             .slots = self.slots,
             .mapped_arguments = self.mapped_arguments,
             .mapped_parameter_indices = self.mapped_parameter_indices,
@@ -3279,10 +3286,9 @@ fn publishDirectEvalFunctionEnvironment(
     scope: bc.DirectEvalScope,
     candidate: *Environment,
 ) EvalError!*Environment {
-    // Frame is an external precise root rather than a managed owner. Shade the
-    // candidate before release-publication so a concurrent marker that already
-    // scanned the formerly-null edge cannot miss the retained Environment.
-    gc_mod.barrierCell(@ptrCast(candidate));
+    // Publish through the exact owner before the atomic edge becomes visible.
+    // Synthetic frames retain the unowned precise-root barrier.
+    gc_mod.barrierCellFrom(if (frame.gc_managed) @ptrCast(frame) else null, @ptrCast(candidate));
     const cache = directEvalEnvironmentCache(frame, scope.kind);
     const observed = cache.cmpxchgStrong(null, candidate, .acq_rel, .acquire) orelse
         return candidate;
@@ -4479,7 +4485,12 @@ test "callee parameter initialization restores metadata after allocation failure
             .cur_func_params = &caller_params,
             .binding_const = true,
             .binding_hoisted = true,
-            .call_state = .{ .in_param_expr = false, .in_param_default = true, .current_private_map = &caller_private_map, .in_field_initializer = true, },
+            .call_state = .{
+                .in_param_expr = false,
+                .in_param_default = true,
+                .current_private_map = &caller_private_map,
+                .in_field_initializer = true,
+            },
         };
         var function = Function{
             .params = parsed.params,
@@ -7771,12 +7782,44 @@ const optimizer_max_runtime_operation_percent: usize = 10;
 /// cheaply enough to run before compiling.
 fn optimizerLowersNatively(op: bc.Op) bool {
     return switch (op) {
-        .nop, .load_const, .load_undefined, .load_null, .load_true, .load_false,
-        .pop, .dup, .swap, .set_acc, .load_local, .store_local,
-        .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict,
-        .not, .inc, .dec, .to_numeric, .neg, .pos,
-        .jump, .jump_if_false, .jump_if_false_peek, .jump_if_true_peek,
-        .ret, .ret_undef, .halt,
+        .nop,
+        .load_const,
+        .load_undefined,
+        .load_null,
+        .load_true,
+        .load_false,
+        .pop,
+        .dup,
+        .swap,
+        .set_acc,
+        .load_local,
+        .store_local,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .eq,
+        .neq,
+        .eq_strict,
+        .neq_strict,
+        .not,
+        .inc,
+        .dec,
+        .to_numeric,
+        .neg,
+        .pos,
+        .jump,
+        .jump_if_false,
+        .jump_if_false_peek,
+        .jump_if_true_peek,
+        .ret,
+        .ret_undef,
+        .halt,
         => true,
         else => false,
     };
@@ -12925,7 +12968,9 @@ test "class call guards restore direct VM entry state through allocation failure
             var root = Environment{ .arena = allocator, .fn_scope = true };
             const root_shape = try Shape.createRoot(allocator);
             try interp.installGlobals(&root, root_shape);
-            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape,.call_state = .{ .bytecode_execution_mode = .required, } });
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape, .call_state = .{
+                .bytecode_execution_mode = .required,
+            } });
             const class = try run(&machine, chunk, null);
             const function = Interpreter.funcOf(class) orelse return error.TestUnexpectedResult;
             const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
@@ -13633,7 +13678,7 @@ fn constructAtSite(vm: *Interpreter, callee: Value, args: []const Value, site: i
 const Activation = struct {
     exec: Exec = .{},
     chunk: *Chunk,
-    frame: *Frame,
+    frame: ?*Frame,
     optimizer_delta: jit.OptimizerProfile.Delta = .{},
     optimizer_profile_active: bool = false,
     /// Full backing store retained when `frame.slots` is narrowed for a call.
@@ -13653,9 +13698,6 @@ const Activation = struct {
     legacy_call_frame_active: bool = false,
     /// The legacy argument buffers hold values that release must clear.
     legacy_arguments_used: bool = false,
-    /// The frame escaped into a closure when this activation was released;
-    /// the next acquire allocates a fresh frame instead of reusing it.
-    frame_detached: bool = false,
     next_free: ?*Activation = null,
     // The operand-stack index in the *caller* where this call's result lands
     // (callee + args were popped off before the call ran). Unused for the
@@ -13697,6 +13739,7 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.acc = Value.undef();
     act.exec.ip = 0;
     act.exec.frame = null;
+    act.exec.chunk = null;
     // The saved caller fields need no reset: the pool is not a GC root, and
     // `buildActivation` rewrites every one before it publishes the Exec.
     act.exec.debug_environment = null;
@@ -13706,20 +13749,21 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.class_strict_base = false;
     act.exec.strict_initialized = false;
     if (act.exec.binding_references.len != 0) @memset(act.exec.binding_references, .empty);
-    if (act.frame.escaped.load(.monotonic)) {
-        // A closure owns the frame and its slots now. Recycle the rest of the
-        // activation; the next acquire gives it a fresh frame.
-        act.frame_detached = true;
-    } else {
-        act.frame.mapped_arguments = null;
-        act.frame.mapped_parameter_indices = &.{};
-        act.frame.closure_environment = null;
-        // Release stores order every earlier store; only pay for one when a
-        // direct eval actually published an environment on this frame.
-        if (act.frame.direct_eval_environment.load(.monotonic) != null)
-            act.frame.direct_eval_environment.store(null, .release);
-        if (act.frame.direct_eval_parameter_environment.load(.monotonic) != null)
-            act.frame.direct_eval_parameter_environment.store(null, .release);
+    if (act.frame) |frame| {
+        if (frame.escaped.load(.acquire)) {
+            // Capturers own the cell now. The inactive activation retains no
+            // pointer or interior slot alias into collectible frame storage.
+            act.frame = null;
+            act.slot_storage = &.{};
+        } else {
+            @memset(act.slot_storage, Value.undef());
+            frame.parent = null;
+            frame.mapped_arguments = null;
+            frame.mapped_parameter_indices = &.{};
+            frame.closure_environment = null;
+            frame.direct_eval_environment.store(null, .release);
+            frame.direct_eval_parameter_environment.store(null, .release);
+        }
     }
     const pool = activationPool(vm);
     act.next_free = if (pool.*) |raw| @ptrCast(@alignCast(raw)) else null;
@@ -13732,44 +13776,65 @@ inline fn activationPool(vm: *Interpreter) *?*anyopaque {
     return vm.vm_activation_pool orelse &vm.vm_activation_free;
 }
 
-fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation {
+/// Only attached, private frames remain in a free list. Their user edges were
+/// cleared on release; the list retains the cell header, never stale Exec state.
+/// Callers trace interpreter-private lists only under the root-publication
+/// protocol, and a Context list exists only for a single-threaded realm.
+pub fn traceActivationPool(first: ?*anyopaque, visitor: anytype) void {
+    var next = first;
+    while (next) |raw| {
+        const act: *Activation = @ptrCast(@alignCast(raw));
+        if (act.frame) |frame| if (frame.gc_managed) visitor.mark(frame);
+        next = act.next_free;
+    }
+}
+
+/// A quiescent collection retires unused managed storage, while keeping the
+/// arena-owned activation metadata reusable. Dropping both aliases before the
+/// sweep lets the collector reclaim private Frame cells and their full slot
+/// capacity. Active and escaped frames are never members of this free list.
+pub fn trimActivationPoolFrames(first: ?*anyopaque) void {
+    var next = first;
+    while (next) |raw| {
+        const act: *Activation = @ptrCast(@alignCast(raw));
+        if (act.frame) |frame| if (frame.gc_managed) {
+            std.debug.assert(!frame.escaped.load(.acquire));
+            act.frame = null;
+            act.slot_storage = &.{};
+        };
+        next = act.next_free;
+    }
+}
+
+fn acquireActivation(vm: *Interpreter, local_count: usize, root: *Exec) EvalError!*Activation {
     const pool = activationPool(vm);
     if (pool.*) |raw| {
         const act: *Activation = @ptrCast(@alignCast(raw));
-        if (act.frame_detached) {
-            // The previous frame escaped into a closure: keep the activation
-            // and its buffers, but never the captured frame or its slots.
-            const slots = try vm.arena.alloc(Value, @max(local_count, act.slot_storage.len));
-            const frame = try vm.arena.create(Frame);
-            frame.* = .{ .slots = slots[0..local_count], .parent = null };
+        root.frame = act.frame;
+        if (act.frame == null or act.slot_storage.len < local_count) {
+            // Replacing the cell also replaces its complete owned buffer. A
+            // captured buffer is never resized, and old private capacity dies
+            // with its previous cell after this infallible ownership handoff.
+            const frame = try gc_mod.allocFrame(vm.arena, local_count);
+            root.frame = frame;
             act.frame = frame;
-            act.slot_storage = slots;
-            act.frame_detached = false;
-        } else if (act.slot_storage.len < local_count) {
-            act.slot_storage = try vm.arena.alloc(Value, local_count);
+            act.slot_storage = frame.slots;
         }
         pool.* = act.next_free;
         act.next_free = null;
-        // `releaseActivation` already cleared the frame's per-call edges and
-        // `buildActivation` reinitializes the whole frame before publishing it.
-        act.frame.slots = act.slot_storage[0..local_count];
-        @memset(act.frame.slots, Value.undef());
+        act.frame.?.slots = act.slot_storage[0..local_count];
+        @memset(act.frame.?.slots, Value.undef());
         return act;
     }
 
-    const slots = try vm.arena.alloc(Value, local_count);
-    @memset(slots, Value.undef());
-    const frame = try vm.arena.create(Frame);
-    frame.* = .{ .slots = slots, .parent = null };
+    // Allocate arena metadata before the managed cell. Publish the initialized
+    // cell through the already registered provisional Exec before any later
+    // allocation can invoke recovery.
     const act = try vm.arena.create(Activation);
     act.* = .{
         .chunk = undefined,
-        .frame = frame,
-        .slot_storage = slots,
-        .legacy_inline_arguments = @splat(Value.undef()),
-        .legacy_argument_storage = &.{},
-        .legacy_call_frame = undefined,
-        .legacy_call_frame_active = false,
+        .frame = null,
+        .slot_storage = &.{},
         .saved_strict = undefined,
         .saved_active_call_frame = undefined,
         .saved_debug_call_frame = undefined,
@@ -13779,6 +13844,13 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_cur_func_args_needed = undefined,
     };
     vm.vm_activation_allocations += 1;
+    // A failed frame allocation still leaves reusable arena metadata. Return
+    // it to the pool instead of stranding one Activation on every failed call.
+    errdefer releaseActivation(vm, act);
+    const frame = try gc_mod.allocFrame(vm.arena, local_count);
+    root.frame = frame;
+    act.frame = frame;
+    act.slot_storage = frame.slots;
     return act;
 }
 
@@ -13882,12 +13954,16 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     // still belong to the caller's established roots. Publication below is then
     // infallible for the lifetime of this provisional activation.
     try vm.reserveExecRoot();
-    const act = try acquireActivation(vm, func.local_count);
+    var provisional: Exec = .{};
+    vm.publishExecRoot(&provisional);
+    var provisional_registered = true;
+    defer if (provisional_registered) vm.popExecRoot(&provisional);
+    const act = try acquireActivation(vm, func.local_count, &provisional);
     ensureBindingReferenceStorage(vm, &act.exec, fchunk) catch |err| {
         releaseActivation(vm, act);
         return err;
     };
-    const frame = act.frame;
+    const frame = act.frame.?;
     const slots = frame.slots;
     const pattern_indices = fchunk.destructuring_parameter_indices;
     const default_indices = fchunk.default_parameter_indices;
@@ -13936,12 +14012,12 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     act.exec.saved_call_state = vm.call_state;
     act.exec.frame = frame;
     act.exec.chunk = fchunk;
-    frame.* = .{
-        .slots = slots,
-        .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
-        .closure_environment = func.closure,
-    };
-    vm.publishExecRoot(&act.exec);
+    // Ownership, lock and trace metadata belong to the cell's lifetime, not
+    // this invocation. Never reinitialize atomics visible to a concurrent marker.
+    frame.parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null;
+    frame.closure_environment = func.closure;
+    vm.replaceExecRoot(&provisional, &act.exec);
+    provisional_registered = false;
     errdefer discardActivation(vm, act);
     if (!func.is_arrow) if (func.obj) |function_object| {
         act.legacy_call_frame = .{
@@ -14171,7 +14247,7 @@ fn syncDebugEnvironmentFromFrame(act: *Activation) EvalError!void {
     const environment = act.exec.debug_environment orelse return;
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
     for (act.chunk.debug_local_names, 0..) |name, slot| {
-        if (name.len != 0) try environment.put(name, act.frame.readSlot(slot, parallel_sync));
+        if (name.len != 0) try environment.put(name, act.frame.?.readSlot(slot, parallel_sync));
     }
 }
 
@@ -14180,8 +14256,8 @@ fn syncFrameFromDebugEnvironment(act: *Activation) void {
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
     for (act.chunk.debug_local_names, 0..) |name, slot| {
         if (name.len != 0) {
-            const current = act.frame.readSlot(slot, parallel_sync);
-            act.frame.writeSlot(slot, environment.getLocal(name) orelse current, parallel_sync);
+            const current = act.frame.?.readSlot(slot, parallel_sync);
+            act.frame.?.writeSlot(slot, environment.getLocal(name) orelse current, parallel_sync);
         }
     }
 }
@@ -14500,6 +14576,33 @@ fn expectActivationDriverClean(machine: *Interpreter, caller_environment: *Envir
     try std.testing.expectEqual(machine.vm_activation_allocations, free_count);
 }
 
+test "vm: failed frame preparation preserves reusable activation metadata" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = false });
+    defer ctx.destroy();
+    const previous_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(previous_context);
+    var machine = ctx.interpreter();
+    machine.vm_activation_pool = null;
+    var unavailable = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 1 });
+    machine.arena = unavailable.allocator();
+    var provisional: Exec = .{};
+    // Metadata allocation succeeds, then the complete slot allocation fails.
+    try std.testing.expectError(error.OutOfMemory, acquireActivation(&machine, 4, &provisional));
+    try std.testing.expect(provisional.frame == null);
+    try std.testing.expectEqual(@as(usize, 1), machine.vm_activation_allocations);
+    const pooled: *Activation = @ptrCast(@alignCast(machine.vm_activation_free.?));
+    try std.testing.expect(pooled.frame == null);
+    try std.testing.expectEqual(@as(usize, 0), pooled.slot_storage.len);
+    machine.arena = ctx.arena();
+    const recovered = try acquireActivation(&machine, 4, &provisional);
+    try std.testing.expectEqual(pooled, recovered);
+    try std.testing.expectEqual(@as(usize, 1), machine.vm_activation_allocations);
+    try std.testing.expectEqual(recovered.frame.?, provisional.frame.?);
+    try std.testing.expectEqual(@as(usize, 4), recovered.frame.?.slots.len);
+    releaseActivation(&machine, recovered);
+}
+
 test "vm: precise exec root admission fails before bytecode execution" {
     const Context = @import("context.zig").Context;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -14598,7 +14701,7 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
                 const activation: *Activation = @ptrCast(@alignCast(raw));
                 // The activation is pooled, but a captured frame is only ever
                 // referenced as detached: the next acquire replaces it.
-                try std.testing.expect(activation.frame_detached or !activation.frame.escaped.load(.acquire));
+                try std.testing.expect(activation.frame == null or !activation.frame.?.escaped.load(.acquire));
                 free_count += 1;
                 next = activation.next_free;
             }
@@ -14625,7 +14728,7 @@ test "vm: escaped closure allocation failures preserve frame ownership" {
             var pooled = machine.vm_activation_free;
             while (pooled) |raw| {
                 const activation: *Activation = @ptrCast(@alignCast(raw));
-                if (activation.frame == frame) try std.testing.expect(activation.frame_detached);
+                try std.testing.expect(activation.frame != frame);
                 pooled = activation.next_free;
             }
             try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "retainedActivation", closure);
@@ -15450,7 +15553,9 @@ test "vm: base class field allocation failure restores the caller activation" {
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .call_state = .{ .bytecode_execution_mode = .required, },
+        .call_state = .{
+            .bytecode_execution_mode = .required,
+        },
     };
     const constructor = try run(&machine, root, null);
     const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
@@ -15520,7 +15625,9 @@ test "vm: derived class field allocation failure restores the caller activation"
         .env = &env,
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
-        .call_state = .{ .bytecode_execution_mode = .required, },
+        .call_state = .{
+            .bytecode_execution_mode = .required,
+        },
     };
     const constructor = try run(&machine, root, null);
     const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
@@ -15605,7 +15712,9 @@ test "vm: captured super references reject an uninitialized this binding" {
         .root_shape = root_shape,
         .tdz_marker = tdz_marker,
         .this_initialized = false,
-        .call_state = .{ .home_object = home, },
+        .call_state = .{
+            .home_object = home,
+        },
     };
     const chunk = try allocator.create(Chunk);
     chunk.* = Chunk.init(allocator);
@@ -15653,7 +15762,9 @@ test "vm: captured super writes cache native rejection and preserve exact fallba
         .tdz_marker = tdz_marker,
         .this_value = Value.obj(receiver),
         .jit_owner = &owner,
-        .call_state = .{ .home_object = home, },
+        .call_state = .{
+            .home_object = home,
+        },
     };
     try machine.setMember(Value.obj(parent), "value", Value.num(0));
     const native_hits_before = optimizer_native_hits.load(.monotonic);
@@ -15705,7 +15816,9 @@ test "vm: super deletion caches native rejection and preserves exact fallback" {
         .tdz_marker = tdz_marker,
         .this_value = Value.obj(receiver),
         .jit_owner = &owner,
-        .call_state = .{ .home_object = home, },
+        .call_state = .{
+            .home_object = home,
+        },
     };
     const native_hits_before = optimizer_native_hits.load(.monotonic);
     const slots = try allocator.alloc(Value, compiled.local_count);
@@ -29575,4 +29688,3 @@ test "vm: for-in honors proxy prototypes and candidate descriptors in every mode
         )).asStr());
     };
 }
-

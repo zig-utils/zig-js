@@ -1145,8 +1145,9 @@ fn printLifecycleTelemetry(
     const finalizers = totals.finalizers;
     const options_profile = if (std.mem.eql(u8, workload, "context_full_feature")) "gc_full_wasm" else "gc_default";
     try writer.print(
-        "zig-js-context-lifecycle\t{{\"schema_version\":1,\"scenario\":\"{s}\",\"context_options_profile\":\"{s}\",\"iterations\":{d},\"sample\":{d},\"create_ns\":{d},\"work_ns\":{d},\"destroy_ns\":{d},\"phase_total_ns\":{d},\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"baseline_rss_bytes\":{d},\"max_live_rss_bytes\":{d},\"post_destroy_rss_bytes\":{d},\"retained_delta_bytes\":{d},\"peak_rss_bytes\":{d},\"rss_checkpoints\":[{d},{d},{d},{d}],\"finalizers\":{{",
+        "zig-js-context-lifecycle\t{{\"schema_version\":{d},\"scenario\":\"{s}\",\"context_options_profile\":\"{s}\",\"iterations\":{d},\"sample\":{d},\"create_ns\":{d},\"work_ns\":{d},\"destroy_ns\":{d},\"phase_total_ns\":{d},\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"baseline_rss_bytes\":{d},\"max_live_rss_bytes\":{d},\"post_destroy_rss_bytes\":{d},\"retained_delta_bytes\":{d},\"peak_rss_bytes\":{d},\"rss_checkpoints\":[{d},{d},{d},{d}],\"finalizers\":{{",
         .{
+            @as(u8, if (@hasField(js.Context.GcFinalizerStats, "frames")) 2 else 1),
             workload,
             options_profile,
             jobs,
@@ -1169,7 +1170,7 @@ fn printLifecycleTelemetry(
         },
     );
     try writer.print(
-        "\"cells\":{d},\"bulk_cell_frees_skipped\":{d},\"objects\":{d},\"strings\":{d},\"environments\":{d},\"functions\":{d},\"bound_functions\":{d},\"promises\":{d},\"generators\":{d},\"iter_helpers\":{d},\"module_namespaces\":{d},\"object_backing_releases\":{d},\"array_buffers\":{d},\"shared_array_buffers\":{d},\"promise_reactions\":{d}}}}}\n",
+        "\"cells\":{d},\"bulk_cell_frees_skipped\":{d},\"objects\":{d},\"strings\":{d},\"environments\":{d},\"functions\":{d},\"bound_functions\":{d},\"promises\":{d},\"generators\":{d},\"iter_helpers\":{d},\"module_namespaces\":{d}",
         .{
             finalizers.cells,
             finalizers.bulk_cell_frees_skipped,
@@ -1182,6 +1183,15 @@ fn printLifecycleTelemetry(
             finalizers.generators,
             finalizers.iter_helpers,
             finalizers.module_namespaces,
+        },
+    );
+    // Shared measurement overlays can execute an older nine-kind engine. Emit
+    // its original schema instead of fabricating a missing frame counter.
+    if (comptime @hasField(js.Context.GcFinalizerStats, "frames"))
+        try writer.print(",\"frames\":{d}", .{finalizers.frames});
+    try writer.print(
+        ",\"object_backing_releases\":{d},\"array_buffers\":{d},\"shared_array_buffers\":{d},\"promise_reactions\":{d}}}}}\n",
+        .{
             finalizers.object_backing_releases,
             finalizers.array_buffers,
             finalizers.shared_array_buffers,

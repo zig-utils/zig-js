@@ -45,7 +45,18 @@ requireValue(same(inventoriedKinds, declaredKinds), "CellKind inventory drift");
 requireValue(unique(inventoriedKinds).length === inventoriedKinds.length, "duplicate CellKind entry");
 for (const entry of entries) {
   requireValue(["heap", "mixed_explicit"].includes(entry.ownership), `${entry.kind}: invalid ownership`);
-  requireValue(entry.mobility === "movable_when_policy_active", `${entry.kind}: mobility policy drift`);
+  if (entry.kind === "frame") {
+    requireValue(entry.mobility === "pinned_owner_rewrite_children", "frame: pinned-owner policy drift");
+    requireValue(entry.rewrite === "relocateCapturedFrame", "frame: child rewrite drift");
+    requireValue(gcSource.includes("if (kind == .frame) return false;"), "frame: address pin missing");
+    requireValue(gcSource.includes(".frame => relocateCapturedFrame(cell, v)"), "frame: pinned child dispatch missing");
+    for (const hook of ["canRelocate", "canRelocateYoung"]) {
+      const start = gcSource.indexOf(`pub fn ${hook}(`), end = gcSource.indexOf("\n    }", start);
+      requireValue(start >= 0 && end > start && gcSource.slice(start, end).includes("cellAddressIsRelocatable(cell, kind)"), `frame: ${hook} must honor address pinning`);
+    }
+  } else {
+    requireValue(entry.mobility === "movable_when_policy_active", `${entry.kind}: mobility policy drift`);
+  }
   requireValue(String(entry.rewrite || "").startsWith("relocate"), `${entry.kind}: rewrite operation missing`);
   const text = source(entry.source || "", `${entry.kind}: source missing`);
   requireValue(text.includes(entry.anchor || ""), `${entry.kind}: source anchor drift`);
@@ -71,6 +82,10 @@ requireValue(ids.length >= 25, "pointer inventory unexpectedly small"); requireV
 const native = surfaces.find((entry: any) => entry.id === "native-jit-frame");
 requireValue(!!native, "native JIT frame inventory missing");
 requireValue(native.disposition === "allow_quiescent_or_declared_precise_checkpoint_reject_other_live_frames", "native JIT frame quiescent/rejection disposition drift");
+for (const id of ["vm-frame-owners", "direct-eval-frame-views", "legacy-call-frame-views", "context-activation-pool", "interpreter-activation-pool"])
+  requireValue(ids.includes(id), `managed frame pointer surface missing: ${id}`);
+requireValue(gcSource.includes("if (activation.frame.owner) |owner| markManaged(v, owner);"), "direct-eval frame owner trace missing");
+requireValue(gcSource.includes("if (fr.lazy_vm_frame) |frame| traceCapturedFrame(frame, v);"), "legacy argument frame owner trace missing");
 const tags: string[] = [], categories: string[] = [];
 for (const entry of surfaces) {
   const id = entry.id || "<missing>";

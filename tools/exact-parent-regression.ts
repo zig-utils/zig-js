@@ -9,7 +9,7 @@ declare const __dirname: string;
 declare const __filename: string;
 export const ROOT = __dirname === "tools" ? "." : __dirname.slice(0, __dirname.lastIndexOf("/tools"));
 export const DEFAULT_SCHEMA = `${ROOT}/docs/.data/performance-attribution-schema-v4.json`;
-export const DEFAULT_LIFECYCLE_PROFILE = `${ROOT}/docs/.data/context-lifecycle-profile-v1.json`;
+export const DEFAULT_LIFECYCLE_PROFILE = `${ROOT}/docs/.data/context-lifecycle-profile-v2.json`;
 const REVISION_RE = /^[0-9a-f]{40}$/;
 const SHARED_MEASUREMENT_OVERLAY_PATHS = [
   "bench/comparison_zig_js.zig", "bench/frontend_parse.zig",
@@ -77,22 +77,30 @@ export function timeMetric(stderr: string, label: string): number { const match 
 export function parsePeakRss(stderr: string): number { return Math.round(timeMetric(stderr, "maximum resident set size")); }
 export function runnerArguments(mode: string, workload: string, jobs: number, lanes: number): string[] { if (mode === "single" || mode === "single_no_jit" || mode === "single_observed" || mode === "context_lifecycle") { requireValue(lanes === 1, `${mode} mode requires one lane`); return [mode, workload, String(jobs), "1", mode === "single_observed" ? "--native-observability-telemetry" : "--darwin-rusage"]; } requireValue(["independent_steady", "independent_cold", "shared", "module_cold"].includes(mode), `unsupported benchmark mode: ${mode}`); return [mode, workload, String(jobs), "1", String(lanes), "--darwin-rusage"]; }
 
-const FINALIZER_KINDS = ["objects", "strings", "environments", "functions", "bound_functions", "promises", "generators", "iter_helpers", "module_namespaces"];
-const FINALIZER_FIELDS = ["cells", "bulk_cell_frees_skipped", ...FINALIZER_KINDS, "object_backing_releases", "array_buffers", "shared_array_buffers", "promise_reactions"];
+const LEGACY_FINALIZER_KINDS = ["objects", "strings", "environments", "functions", "bound_functions", "promises", "generators", "iter_helpers", "module_namespaces"];
+const FINALIZER_KINDS = [...LEGACY_FINALIZER_KINDS, "frames"];
+function finalizerFields(kinds: string[]): string[] { return ["cells", "bulk_cell_frees_skipped", ...kinds, "object_backing_releases", "array_buffers", "shared_array_buffers", "promise_reactions"]; }
 export function validateLifecycleProfile(profile: any): any {
-  requireValue(profile && profile.schema_version === 1 && profile.profile_id === "zig-js-context-lifecycle-v1" && profile.status === "frozen" && profile.owner_issue === 661 && profile.runner === "bench/comparison_zig_js.zig" && profile.mode === "context_lifecycle" && profile.lanes === 1 && typeof profile.sample_boundary === "string" && profile.sample_boundary.length > 0, "lifecycle profile identity drift");
+  const version = profile && profile.schema_version;
+  requireValue((version === 1 || version === 2) && profile.profile_id === `zig-js-context-lifecycle-v${version}` && profile.status === "frozen" && profile.owner_issue === (version === 1 ? 661 : 1116) && profile.runner === "bench/comparison_zig_js.zig" && profile.mode === "context_lifecycle" && profile.lanes === 1 && typeof profile.sample_boundary === "string" && profile.sample_boundary.length > 0, "lifecycle profile identity drift");
   requireValue(Array.isArray(profile.scenarios) && JSON.stringify(profile.scenarios.map((entry: any) => entry.id)) === JSON.stringify(["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"]), "lifecycle scenario inventory drift");
   requireValue(profile.scenarios.every((entry: any) => ["gc_default", "gc_full_wasm"].includes(entry.context_options_profile) && Number.isInteger(entry.expected_checksum_per_iteration)), "lifecycle scenario contract is invalid");
   requireValue(JSON.stringify(Object.keys(profile.context_options_profiles).sort()) === JSON.stringify(["gc_default", "gc_full_wasm"]), "lifecycle context options inventory drift");
   requireValue(JSON.stringify(profile.required_phase_fields) === JSON.stringify(["create_ns", "work_ns", "destroy_ns", "phase_total_ns", "cpu_user_ns", "cpu_system_ns"]), "lifecycle phase field inventory drift");
   requireValue(JSON.stringify(profile.required_memory_fields) === JSON.stringify(["baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints"]), "lifecycle memory field inventory drift");
-  requireValue(JSON.stringify(profile.finalizer_kind_fields) === JSON.stringify(FINALIZER_KINDS) && JSON.stringify(profile.required_finalizer_fields) === JSON.stringify(FINALIZER_FIELDS), "lifecycle finalizer field inventory drift");
+  const kinds = version === 1 ? LEGACY_FINALIZER_KINDS : FINALIZER_KINDS;
+  requireValue(JSON.stringify(profile.finalizer_kind_fields) === JSON.stringify(kinds) && JSON.stringify(profile.required_finalizer_fields) === JSON.stringify(finalizerFields(kinds)), "lifecycle finalizer field inventory drift");
   const soak = profile.soak_policy; requireValue(soak.minimum_iterations === 8 && JSON.stringify(soak.checkpoint_fractions) === "[0.25,0.5,0.75,1]" && soak.maximum_post_destroy_growth_bytes === 8 * 1024 * 1024 && soak.maximum_post_destroy_growth_fraction === 0.05 && soak.reject_material_monotonic_growth === true, "lifecycle soak policy drift");
   requireValue(Array.isArray(profile.publication_guards) && profile.publication_guards.length === 6, "lifecycle publication guard inventory drift");
   return profile;
 }
 export function loadLifecycleProfile(path = DEFAULT_LIFECYCLE_PROFILE): any { return validateLifecycleProfile(JSON.parse(readText(path))); }
-export function validateLifecycleTelemetry(value: any, expectedScenario: string, iterations: number, sample = 0, profile = loadLifecycleProfile()): LifecycleTelemetry {
+function lifecycleProfileForVersion(version: unknown): any {
+  requireValue(version === 1 || version === 2, "unsupported lifecycle telemetry schema");
+  return loadLifecycleProfile(`${ROOT}/docs/.data/context-lifecycle-profile-v${version}.json`);
+}
+export function validateLifecycleTelemetry(value: any, expectedScenario: string, iterations: number, sample = 0, profile?: any): LifecycleTelemetry {
+  profile = profile || lifecycleProfileForVersion(value && value.schema_version);
   const scenario = profile.scenarios.find((entry: any) => entry.id === expectedScenario);
   requireValue(Boolean(scenario), `unknown lifecycle scenario: ${expectedScenario}`);
   requireValue(value && value.schema_version === profile.schema_version, "lifecycle telemetry schema drift");
@@ -104,8 +112,9 @@ export function validateLifecycleTelemetry(value: any, expectedScenario: string,
   requireValue(value.baseline_rss_bytes > 0 && value.max_live_rss_bytes >= value.baseline_rss_bytes && value.peak_rss_bytes >= value.max_live_rss_bytes && value.post_destroy_rss_bytes > 0, "lifecycle RSS accounting drift");
   requireValue(Number.isInteger(value.retained_delta_bytes) && value.retained_delta_bytes === value.post_destroy_rss_bytes - value.baseline_rss_bytes, "lifecycle retained RSS delta drift");
   requireValue(Array.isArray(value.rss_checkpoints) && value.rss_checkpoints.length === 4 && value.rss_checkpoints.every((entry: unknown) => Number.isInteger(entry) && Number(entry) > 0), "lifecycle RSS checkpoints are invalid");
-  requireValue(value.finalizers && FINALIZER_FIELDS.every((name) => Number.isInteger(value.finalizers[name]) && value.finalizers[name] >= 0), "lifecycle finalizer accounting is incomplete");
-  const kindTotal = FINALIZER_KINDS.reduce((sum, name) => sum + value.finalizers[name], 0);
+  requireValue(value.finalizers && profile.required_finalizer_fields.every((name: string) => Number.isInteger(value.finalizers[name]) && value.finalizers[name] >= 0), "lifecycle finalizer accounting is incomplete");
+  requireValue(profile.schema_version !== 1 || !("frames" in value.finalizers), "schema-v1 telemetry contains schema-v2 frames");
+  const kindTotal = profile.finalizer_kind_fields.reduce((sum: number, name: string) => sum + value.finalizers[name], 0);
   requireValue(value.finalizers.cells === kindTotal && value.finalizers.bulk_cell_frees_skipped === value.finalizers.cells && value.finalizers.cells > 0, "lifecycle cells were not finalized exactly once");
   if (iterations >= profile.soak_policy.minimum_iterations) {
     const checkpoints = value.rss_checkpoints as number[], tolerance = Math.max(profile.soak_policy.maximum_post_destroy_growth_bytes, Math.ceil(value.baseline_rss_bytes * profile.soak_policy.maximum_post_destroy_growth_fraction));
@@ -399,13 +408,22 @@ export function selfTest(): void {
   const observedArguments = runnerArguments("single_observed", "representative_json", 2200, 1); requireValue(observedArguments[observedArguments.length - 1] === "--native-observability-telemetry", "single_observed telemetry option drift");
   requireValue(JSON.stringify(runnerArguments("single_no_jit", "representative_vm_arithmetic_number", 10000, 1)) === '["single_no_jit","representative_vm_arithmetic_number","10000","1","--darwin-rusage"]', "single_no_jit exact-parent argument drift");
   const lifecycleArguments = runnerArguments("context_lifecycle", "context_no_evaluation", 1, 1); requireValue(JSON.stringify(lifecycleArguments) === '["context_lifecycle","context_no_evaluation","1","1","--darwin-rusage"]', "context lifecycle runner arguments drift");
-  const lifecycleFixture: LifecycleTelemetry = { schema_version: 1, scenario: "context_no_evaluation", context_options_profile: "gc_default", iterations: 1, sample: 0, create_ns: 10, work_ns: 0, destroy_ns: 20, phase_total_ns: 30, cpu_user_ns: 20, cpu_system_ns: 5, baseline_rss_bytes: 100_000_000, max_live_rss_bytes: 110_000_000, post_destroy_rss_bytes: 100_000_000, retained_delta_bytes: 0, peak_rss_bytes: 120_000_000, rss_checkpoints: [100_000_000, 100_000_000, 100_000_000, 100_000_000], finalizers: { cells: 1, bulk_cell_frees_skipped: 1, objects: 1, strings: 0, environments: 0, functions: 0, bound_functions: 0, promises: 0, generators: 0, iter_helpers: 0, module_namespaces: 0, object_backing_releases: 1, array_buffers: 0, shared_array_buffers: 0, promise_reactions: 0 } };
+  const lifecycleFixture: LifecycleTelemetry = { schema_version: 2, scenario: "context_no_evaluation", context_options_profile: "gc_default", iterations: 1, sample: 0, create_ns: 10, work_ns: 0, destroy_ns: 20, phase_total_ns: 30, cpu_user_ns: 20, cpu_system_ns: 5, baseline_rss_bytes: 100_000_000, max_live_rss_bytes: 110_000_000, post_destroy_rss_bytes: 100_000_000, retained_delta_bytes: 0, peak_rss_bytes: 120_000_000, rss_checkpoints: [100_000_000, 100_000_000, 100_000_000, 100_000_000], finalizers: { cells: 1, bulk_cell_frees_skipped: 1, objects: 1, strings: 0, environments: 0, functions: 0, bound_functions: 0, promises: 0, generators: 0, iter_helpers: 0, module_namespaces: 0, frames: 0, object_backing_releases: 1, array_buffers: 0, shared_array_buffers: 0, promise_reactions: 0 } };
   const lifecycleProfile = loadLifecycleProfile();
   requireValue(validateLifecycleCollectionRequest("context_first_source", 8, 336, lifecycleProfile).context_options_profile === "gc_default", "lifecycle collection request drift");
   expectFailure(() => validateLifecycleCollectionRequest("context_first_source", 1, 42, lifecycleProfile), "at least 8 cold iterations");
   expectFailure(() => validateLifecycleCollectionRequest("context_first_source", 8, 42, lifecycleProfile), "checksum/profile drift");
   for (const scenario of ["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"]) { const fixture = JSON.parse(JSON.stringify(lifecycleFixture)); fixture.scenario = scenario; fixture.context_options_profile = lifecycleProfile.scenarios.find((entry: any) => entry.id === scenario).context_options_profile; requireValue(parseLifecycleTelemetry(`zig-js-context-lifecycle\t${JSON.stringify(fixture)}\n`, scenario, 1).scenario === scenario, `${scenario} lifecycle fixture drift`); }
+  const legacyLifecycle = JSON.parse(JSON.stringify(lifecycleFixture)); legacyLifecycle.schema_version = 1; delete legacyLifecycle.finalizers.frames;
+  const legacyParsed = parseLifecycleTelemetry(`zig-js-context-lifecycle\t${JSON.stringify(legacyLifecycle)}\n`, legacyLifecycle.scenario, 1);
+  requireValue(legacyParsed.schema_version === 1 && !("frames" in legacyParsed.finalizers), "historical lifecycle telemetry was changed");
+  expectFailure(() => validateLifecycleTelemetry(legacyLifecycle, legacyLifecycle.scenario, 1, 0, lifecycleProfile), "schema drift");
+  const mislabeledLegacy = JSON.parse(JSON.stringify(lifecycleFixture)); mislabeledLegacy.schema_version = 1; expectFailure(() => validateLifecycleTelemetry(mislabeledLegacy, mislabeledLegacy.scenario, 1), "schema-v1 telemetry contains schema-v2 frames");
+  const unknownLifecycle = JSON.parse(JSON.stringify(lifecycleFixture)); unknownLifecycle.schema_version = 99; expectFailure(() => validateLifecycleTelemetry(unknownLifecycle, unknownLifecycle.scenario, 1), "unsupported lifecycle telemetry schema");
   const incompleteFinalizers = JSON.parse(JSON.stringify(lifecycleFixture)); incompleteFinalizers.finalizers.cells = 2; expectFailure(() => validateLifecycleTelemetry(incompleteFinalizers, lifecycleFixture.scenario, 1), "not finalized exactly once");
+  const missingFrames = JSON.parse(JSON.stringify(lifecycleFixture)); delete missingFrames.finalizers.frames; expectFailure(() => validateLifecycleTelemetry(missingFrames, lifecycleFixture.scenario, 1), "accounting is incomplete");
+  const frameFinalizers = JSON.parse(JSON.stringify(lifecycleFixture)); frameFinalizers.finalizers.frames = 1; expectFailure(() => validateLifecycleTelemetry(frameFinalizers, lifecycleFixture.scenario, 1), "not finalized exactly once");
+  frameFinalizers.finalizers.cells = 2; frameFinalizers.finalizers.bulk_cell_frees_skipped = 2; requireValue(validateLifecycleTelemetry(frameFinalizers, lifecycleFixture.scenario, 1).finalizers.frames === 1, "frame finalizer accounting drift");
   const retainingSoak = JSON.parse(JSON.stringify(lifecycleFixture)); Object.assign(retainingSoak, { iterations: 16, post_destroy_rss_bytes: 130_000_000, retained_delta_bytes: 30_000_000, peak_rss_bytes: 140_000_000, max_live_rss_bytes: 140_000_000, rss_checkpoints: [100_000_000, 110_000_000, 120_000_000, 130_000_000] }); retainingSoak.finalizers.cells = 16; retainingSoak.finalizers.bulk_cell_frees_skipped = 16; retainingSoak.finalizers.objects = 16; expectFailure(() => validateLifecycleTelemetry(retainingSoak, lifecycleFixture.scenario, 16), "bounded plateau");
   const timing = "        0.13 real         0.07 user         0.02 sys\n            91750400  maximum resident set size\n"; requireValue(timeMetric(timing, "user") === 0.07 && timeMetric(timing, "sys") === 0.02 && parsePeakRss(timing) === 91750400, "macOS time layout parse drift");
   requireValue(processCpuOccupancy(130, 70, 20) === 90 / 130 && processCpuOccupancy(0, 0, 0) === 1, "process CPU occupancy drift");

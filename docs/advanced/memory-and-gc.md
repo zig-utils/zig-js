@@ -79,6 +79,16 @@ a fresh ad-hoc store site is a missing barrier.
 The AST is immutable and arena-owned, outside the GC heap. Functions reference it
 by pointer without the collector tracing it.
 
+In GC mode, VM frames are managed cells with individually owned slot buffers.
+Active executions and reusable activation pools retain their attached frames;
+closures, parent-frame links, and direct-eval views retain escaped frames. A
+completed activation drops its aliases to an escaped frame, so unreachable
+frame/closure/environment cycles can be collected and the slot buffer released.
+Reused private frames have their slot values and per-call edges cleared before
+entering the pool. Before a quiescent collection, pools detach their private
+frames so the collector can reclaim unused slot buffers while keeping reusable
+activation metadata.
+
 ## Generational collection
 
 A nursery with an age-based promotion policy is implemented and benchmarked. The
@@ -116,6 +126,9 @@ Moving collection exists, but under an explicit contract
   declared precise checkpoint;
 - published code, tier metadata, bytecode chunks, and native-frame storage
   **do not move**;
+- managed VM frame cells and their slot buffers stay address-stable during both
+  nursery relocation and full compaction; managed values in those slots still
+  follow the relocation plan;
 - running JS threads, generic/native-host checkpoints, conservative stack scans,
   and in-flight concurrent/parallel collections **fail closed**.
 
@@ -123,9 +136,11 @@ C and Objective-C embedders get the same boundaries through
 `ZJSGlobalContextCreateGarbageCollected`, `ZJSContextRequestGarbageCompaction`,
 and `ZJSContextCompactGarbage`.
 
-The checked-in relocation inventory covers all nine production cell kinds and 27
-pointer surfaces, each naming its representation, source anchor, and required
-relocation or pinning rule. The drift gate is cheap and runs in ordinary CI:
+The checked-in relocation inventory covers every production cell kind, including
+pinned VM frames, and pointer surfaces for their owners, direct-eval views, and
+activation pools. Each entry names its representation, source anchor, and
+required relocation or pinning rule. The drift gate is cheap and runs in
+ordinary CI:
 
 ```bash
 zig build gc-relocation-inventory-check

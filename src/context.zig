@@ -5491,6 +5491,7 @@ pub const Context = struct {
         generators: usize = 0,
         iter_helpers: usize = 0,
         module_namespaces: usize = 0,
+        frames: usize = 0,
         object_backing_releases: usize = 0,
         array_buffers: usize = 0,
         shared_array_buffers: usize = 0,
@@ -5508,6 +5509,7 @@ pub const Context = struct {
                 .generator => self.generators += 1,
                 .iter_helper => self.iter_helpers += 1,
                 .module_ns => self.module_namespaces += 1,
+                .frame => self.frames += 1,
             }
         }
     };
@@ -9085,11 +9087,13 @@ pub const Context = struct {
         }
         var full_collection = false;
         if (h.shouldCollectOld() or self.hasQuiescentPromotionDebt(h)) {
+            vm.trimActivationPoolFrames(self.vm_activation_pool);
             h.collect();
             if (self.markWorkCollectionAborted(h)) return;
             self.noteQuiescentFullCollection(h);
             full_collection = true;
         } else if (h.shouldCollectYoung()) {
+            vm.trimActivationPoolFrames(self.vm_activation_pool);
             const result = self.collectYoungAfterRootValidation(h);
             if (result.status == .unsupported) h.collectYoung();
             if (self.markWorkCollectionAborted(h)) return;
@@ -20134,6 +20138,89 @@ test "own-key snapshots: retained callbacks reclaim enumeration buffers" {
         defer std.debug.assert(ctx.unprotectValue(result));
         try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
     }
+}
+
+test "captured frames: retained callbacks reclaim unreachable captures automatically" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  var sequence = 0, previous;
+        \\  function factory(value) { return function () { return value; }; }
+        \\  return function () {
+        \\    for (var index = 0; index < 100; ++index) {
+        \\      if (previous && previous() !== sequence - 1)
+        \\        throw new Error("retained capture changed");
+        \\      var next = factory(sequence);
+        \\      if (previous === next || next() !== sequence)
+        \\        throw new Error("fresh capture changed");
+        \\      previous = next;
+        \\      sequence += 1;
+        \\    }
+        \\    return sequence;
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    // The public retained-call boundary must reclaim unreachable captures by
+    // automatic collection while preserving the latest closure and its value.
+    for (0..1000) |batch| {
+        const result = ctx.callProtected(callback, null, &.{}) catch |err| {
+            const accounting = ctx.runtimeHeapAccounting();
+            std.debug.print("captured frames: completed {d} batches ({d} captures), collections={d}, full={d}, live_bytes={d}\n", .{
+                batch, batch * 100, accounting.collections, accounting.full_collections, accounting.live_bytes,
+            });
+            return err;
+        };
+        defer std.debug.assert(ctx.unprotectValue(result));
+        try std.testing.expectEqual(@as(f64, @floatFromInt((batch + 1) * 100)), result.get().asNum());
+    }
+    try std.testing.expect(ctx.runtimeHeapAccounting().collections > 0);
+}
+
+test "captured frames: eval-only closure retains its live binding view" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const reader = try ctx.evaluateProtected(
+        \\(function () {
+        \\  function makeReader(seed) {
+        \\    var value = { number: seed };
+        \\    return eval("(function () { return value.number; })");
+        \\  }
+        \\  for (var warm = 0; warm < 80; ++warm) makeReader(warm);
+        \\  return makeReader(41);
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(reader));
+    ctx.collectGarbage();
+    _ = ctx.compactGarbage();
+    const result = try ctx.callProtected(reader, null, &.{});
+    defer std.debug.assert(ctx.unprotectValue(result));
+    try std.testing.expectEqual(@as(f64, 41), result.get().asNum());
+}
+
+test "captured frames: unreachable closure and frame cycles are finalized" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    var finalizers = Context.GcFinalizerStats{};
+    ctx.gc_finalizer_stats_out = &finalizers;
+    defer ctx.gc_finalizer_stats_out = null;
+    _ = try ctx.evaluate(
+        \\for (var index = 0; index < 256; ++index) {
+        \\  (function () {
+        \\    var cycle;
+        \\    function read() { return cycle; }
+        \\    cycle = { read: read };
+        \\    return 0;
+        \\  })();
+        \\}
+        \\0;
+    );
+    ctx.collectGarbage();
+    try std.testing.expect(finalizers.frames > 0);
 }
 
 test "C-API property-name snapshot preserves exact secure membership" {

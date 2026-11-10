@@ -5,21 +5,39 @@ quiescent precise-GC realm, automatic quiescent slab-pressure compaction after a
 full collection leaves at least 512 KiB of reclaimable fragmented backing, or a
 `Context.requestGarbageCompaction` consumed at the current AArch64 numeric
 tier's declared precise checkpoint. Published code, tier metadata, bytecode
-chunks, and native-frame storage do not move; the checkpoint has already
-materialized every managed local/operand in registered roots. Running JS
-threads, generic/native-host checkpoints, conservative stack scans, and
-in-flight concurrent/parallel collections still fail closed. C and Objective-C
+chunks, native-frame storage, and managed VM frame addresses do not move; the
+checkpoint has already materialized every managed local/operand in registered
+roots. Running JS threads, generic/native-host checkpoints, conservative stack
+scans, and in-flight concurrent/parallel collections still fail closed. C and Objective-C
 embedders use `ZJSGlobalContextCreateGarbageCollected`,
 `ZJSContextRequestGarbageCompaction`, and `ZJSContextCompactGarbage` for the
 same scheduled/direct boundaries.
 
 The checked-in
 [`gc-relocation-inventory.json`](../.data/gc-relocation-inventory.json) covers
-all nine production cell kinds and 27 pointer surfaces across runtime edges,
+every production cell kind and its pointer surfaces across runtime edges,
 realm and interpreter roots, C and Objective-C handles, private ABI references,
 inspector frames, threads/workers, promises/modules/timers, WebAssembly, native
 stack scanning, and the existing native JIT frame. Every entry names its current
 representation, source anchor, and required relocation or pinning rule.
+
+Managed `vm.Frame` cells have an explicit `pinned_owner_rewrite_children` policy.
+Both nursery movement and full compaction reject moving their addresses, while
+`relocateCapturedFrame` rewrites the environments, mapped arguments, and managed
+slot values they retain. The separately allocated slot buffer stays with its
+frame until finalization, preserving native slot pointers and direct-eval views
+of the slots, escape flag, and slot lock.
+
+Functions, parent-frame links, direct-eval view owners, and lazy argument views
+retain these cells. Active execution roots and activation pools also mark their
+attached frames.
+Release clears a reusable private frame's user edges; an escaped frame is
+detached from the pool without leaving a frame or slot alias behind. A closure
+cycle through a frame or its eval environment is an ordinary tracing graph.
+Before a quiescent collection, pools detach private frames under the collector's
+existing ownership gate, allowing unused slot buffers to be reclaimed.
+The inventory records these owner/view edges and both Context and interpreter
+pool roots explicitly.
 
 Run the drift gate with:
 
@@ -148,7 +166,7 @@ waiters, and the host exception slot. Queue, handle, and native-record addresses
 and ordering remain stable; only their managed payloads change.
 
 [#350](https://github.com/zig-utils/zig-js/issues/350) composes those helpers
-into the collector-facing root and exact nine-kind cell dispatch. Its Context
+into the collector-facing root and exhaustive cell-kind dispatch. Its Context
 entrypoint opens a short-lived relocation token only after every fail-closed
 gate passes. A protected cyclic/aliased graph is moved repeatedly with exact
 live-cell/live-byte accounting, and deterministic scratch OOM proves the plan
@@ -221,11 +239,13 @@ compacts usefully at the quiescent host boundary and reaches a dense fixed point
 A raw old-space address is valid only while the relocation safepoint is held
 and its forwarding record remains live. Long-lived embedding references must
 use stable handle storage whose contained value is rewritten; the handle's own
-address does not move. A live frame may move only at a checkpoint whose compiler
-and runtime jointly declare complete materialization; the current AArch64
-numeric tier is the sole admitted path. Other native frames and conservative
-stack scans remain unsupported; each future tier or native boundary must add
-its own precise maps, rewrite protocol, or per-cell pinning before admission.
+address does not move. Managed values referenced by a live native frame may move
+only at a checkpoint whose compiler and runtime jointly declare complete
+materialization; the current AArch64 numeric tier is the sole admitted path.
+The `vm.Frame` cell and its slot-buffer addresses remain pinned at that
+checkpoint. Other native frames and conservative stack scans remain unsupported;
+each future tier or native boundary must add its own precise maps, rewrite
+protocol, or per-cell pinning before admission.
 
 ## Focused Evidence
 

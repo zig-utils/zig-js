@@ -73,6 +73,7 @@ pub const CellKind = enum {
     generator,
     iter_helper,
     module_ns,
+    frame,
 };
 
 /// Mark a `Value` if it carries a heap reference. Objects always use the heap
@@ -155,7 +156,7 @@ inline fn markWeakObject(v: anytype, slot: *?*Object) void {
 
 inline fn markManaged(v: anytype, cell: anytype) void {
     const Cell = @TypeOf(cell.*);
-    if (Cell == interp.Environment) {
+    if (Cell == interp.Environment or Cell == vm.Frame) {
         if (cell.gc_managed) v.mark(cell);
         return;
     }
@@ -1209,6 +1210,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     const concurrent = v.concurrent();
     if (concurrent) e.lockBindingsForTrace();
     if (e.activation) |*activation| {
+        if (activation.frame.owner) |owner| markManaged(v, owner);
         if (activation.frame.mapped_arguments) |arguments| v.mark(arguments);
         for (activation.bindings) |binding|
             markValueInternal(v, "direct-eval VM activation binding", activation.frame.read(binding.slot));
@@ -1245,6 +1247,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
 /// take `binding_lock` while their payload slots are rewritten.
 pub fn relocateEnv(e: *Environment, v: anytype) void {
     if (e.activation) |*activation| {
+        if (activation.frame.owner) |owner| relocateCapturedFrame(owner, v);
         gc_relocation.rewriteOptionalSlot(v, Object, &activation.frame.mapped_arguments);
         for (activation.bindings) |binding| {
             if (binding.slot < activation.frame.slots.len)
@@ -1892,6 +1895,8 @@ fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
 fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     const first: *vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else return;
     const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
+    var retained: ?*vm.Frame = first;
+    while (retained) |current| : (retained = current.parent) markManaged(v, current);
     const epoch = minorTraceEpoch(v);
     if (epoch == 0) {
         var frame: ?*vm.Frame = first;
@@ -1946,34 +1951,45 @@ fn traceCapturedFrameContents(current: *vm.Frame, v: anytype, lock_slots: bool) 
     current.unlockSlots(held);
 }
 
-/// Barrier a store into a captured VM frame that its own activation's root
-/// does not cover (an upvalue store, or a direct-eval view write). Frames are
-/// arena storage rather than cells, and old Functions are not rescanned by
-/// minor cycles, so a frame flagged as reachable from a traced Function
-/// retains a young stored cell as a remembered target until it tenures. An
-/// unflagged frame has no tenured Function capturer: when one is promoted, its
-/// promotion trace sees the frame's then-current contents and cards it.
+/// Stores through upvalues and eval views use the managed Frame as their
+/// exact owner. Legacy arena/fixture frames retain the traced-capturer target
+/// barrier because they have no collector-owned header.
 pub inline fn barrierFrameStore(frame: *vm.Frame, stored: Value) void {
-    if (!frame.gc_function_traced.load(.monotonic)) return;
-    barrierValue(stored);
+    if (frame.gc_managed) {
+        barrierValueFromManaged(frame, stored);
+    } else if (frame.gc_function_traced.load(.monotonic)) barrierValue(stored);
 }
 
-/// An escaped frame stops being a precise root when its activation ends. The
-/// activation's own stores into it were unbarriered while it was a root, so a
-/// flagged frame retains each young cell it still holds the same way.
+/// Active frame roots cover ordinary local/native stores. Before an escaped
+/// frame loses that publication, transfer every retained edge to its cell's
+/// owner barrier, including old-to-young edges created while it was active.
 pub fn barrierReleasedFrame(frame: *vm.Frame) void {
-    if (!frame.escaped.load(.monotonic) or !frame.gc_function_traced.load(.monotonic)) return;
-    if (frame.closure_environment) |environment| if (environment.gc_managed) barrierCell(@ptrCast(environment));
-    if (frame.direct_eval_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCell(@ptrCast(environment));
-    if (frame.direct_eval_parameter_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCell(@ptrCast(environment));
-    if (frame.mapped_arguments) |arguments| barrierCell(@ptrCast(arguments));
+    if (!frame.escaped.load(.acquire)) return;
+    if (!frame.gc_managed and !frame.gc_function_traced.load(.monotonic)) return;
+    const owner: ?*anyopaque = if (frame.gc_managed) @ptrCast(frame) else null;
+    if (frame.parent) |parent| if (parent.gc_managed) barrierCellFrom(owner, parent);
+    if (frame.closure_environment) |environment| if (environment.gc_managed) barrierCellFrom(owner, environment);
+    if (frame.direct_eval_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCellFrom(owner, environment);
+    if (frame.direct_eval_parameter_environment.load(.acquire)) |environment| if (environment.gc_managed) barrierCellFrom(owner, environment);
+    if (frame.mapped_arguments) |arguments| barrierCellFrom(owner, arguments);
     const parallel = bytecode.ic_seqlock_enabled.load(.monotonic);
     for (0..frame.slots.len) |slot| {
         const held = frame.lockSlots(parallel);
         const stored = frame.slots[slot];
         frame.unlockSlots(held);
-        barrierValue(stored);
+        barrierValueFrom(owner, stored);
     }
+}
+
+/// Private frames are reachable only through their owner's published Exec or
+/// cleared activation pool. Those roots scan live children at each safepoint;
+/// a marker must not independently read lock-free local/native writes or pool
+/// resets. Escape is monotonic release-publication of immutable frame metadata.
+/// Escaped slots then use the same lock as upvalue and eval-view stores.
+fn traceFrame(frame: *vm.Frame, visitor: anytype) void {
+    if (visitor.concurrent() and !frame.escaped.load(.acquire)) return;
+    if (frame.parent) |parent| markManaged(visitor, parent);
+    traceCapturedFrameContents(frame, visitor, visitor.concurrent());
 }
 
 /// Owner barrier for a Function field written after creation.
@@ -2508,6 +2524,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
         if (handler.environment) |environment| markManaged(v, environment);
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent) {
+        markManaged(v, current);
         if (current.closure_environment) |environment| markManaged(v, environment);
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
         if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
@@ -3012,24 +3029,15 @@ fn traceExecRoots(exec: *vm.Exec, v: anytype) void {
         markManaged(v, env);
         traceEnv(env, v);
     };
-    // The activation's frame slots (and its captured-frame parent chain for
-    // upvalues) are arena-backed locals — invisible to both the precise
-    // object graph and the native-stack scan, exactly like the operand stack
-    // above. Without tracing them an object live only through a VM local is
-    // swept mid-collection (a use-after-free that surfaces as a garbage
-    // `restricted_to` ⇒ spurious ConcurrentAccessError).
-    //
-    // Once a closure captures a frame it is marked `escaped`, and the VM
-    // serializes its slots with `slot_lock` (see `store_local`/`load_upval`).
-    // A cross-thread closure makes this parent-chain walk reach a *running*
-    // peer's live escaped frame, so under a concurrent/parallel trace the
-    // read must take that same lock or it races the mutator's slot store.
-    // Gated on `v.concurrent()` + `escaped`: a stop-the-world trace (no
-    // mutator running) and never-captured frames (the vast majority) lock
-    // nothing.
+    // Mark each frame header and directly scan active slots. Private local and
+    // native stores are covered by Exec root publication rather than per-store
+    // barriers; independently queued private-cell tracing skips those writes.
+    // Parent frames can be escaped into a running peer, so their slot reads use
+    // the same escaped-frame lock as upvalue writes during concurrent tracing.
     const lock_slots = v.concurrent();
     var fr: ?*vm.Frame = exec.frame;
     while (fr) |f| : (fr = f.parent) {
+        markManaged(v, f);
         if (f.closure_environment) |environment| markManaged(v, environment);
         if (f.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
         if (f.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
@@ -3185,6 +3193,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     // invisible to both the precise object graph and the conservative native
     // stack scan. The VM flushes `acc`/`ip` into each `Exec` at the safepoint
     // before collecting, so these reads are current.
+    vm.traceActivationPool(machine.vm_activation_free, v);
     for (machine.gc_execs.items) |exec| traceExecRoots(exec, v);
     for (machine.gc_binding_reference_roots.items) |reference| switch (reference) {
         .environment => |environment| markManaged(v, environment),
@@ -3275,6 +3284,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (fr.arguments) |args| markValue(v, args);
         if (fr.lazy_func) |function| v.mark(functionCell(function));
         if (fr.lazy_env) |env| markManaged(v, env);
+        if (fr.lazy_vm_frame) |frame| traceCapturedFrame(frame, v);
         // Tree-walker frames read their snapshot from `gc_temp_roots`; VM
         // frames own a stable activation-local copy that must be traced here.
         if (fr.lazy_args_root == null)
@@ -4397,6 +4407,9 @@ pub const Binding = struct {
     }
 
     fn cellAddressIsRelocatable(cell: *anyopaque, kind: Kind) bool {
+        // Native code and eval views retain typed frame/interior slot pointers.
+        // Pin the owner address while still relocating every movable child.
+        if (kind == .frame) return false;
         if (kind == .generator) {
             const generator: *vm.Generator = @ptrCast(@alignCast(cell));
             return !generator.native_resume_active.load(.acquire) and
@@ -4428,6 +4441,7 @@ pub const Binding = struct {
             .generator => relocateGenerator(@ptrCast(@alignCast(cell)), v),
             .iter_helper => relocateIterHelper(@ptrCast(@alignCast(cell)), v),
             .module_ns => relocateModuleNs(@ptrCast(@alignCast(cell)), v),
+            .frame => relocateCapturedFrame(cell, v),
         }
     }
 
@@ -4500,6 +4514,7 @@ pub const Binding = struct {
         if (ctx.reserved_thread_oom_error) |err| markValue(v, err);
         markValue(v, ctx.private_async_context);
         traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
+        vm.traceActivationPool(ctx.vm_activation_pool, v);
 
         if (par != null) ctx.lockMicrotasks();
         for (ctx.microtasks.pendingItems()) |mt| traceMicrotask(mt, v);
@@ -4656,6 +4671,7 @@ pub const Binding = struct {
             .generator => traceGenerator(@ptrCast(@alignCast(cell)), v),
             .iter_helper => traceIterHelper(@ptrCast(@alignCast(cell)), v),
             .module_ns => traceModuleNs(@ptrCast(@alignCast(cell)), v),
+            .frame => traceFrame(@ptrCast(@alignCast(cell)), v),
         }
     }
 
@@ -4772,6 +4788,13 @@ pub const Binding = struct {
         const ctx = self.realmForCell(cell) orelse return;
         if (ctx.gc_finalizer_stats_out) |stats| stats.addKind(kind);
         switch (kind) {
+            .frame => {
+                const frame: *vm.Frame = @ptrCast(@alignCast(cell));
+                if (frame.slot_allocator) |allocator| {
+                    allocator.free(frame.slots.ptr[0..frame.slot_capacity]);
+                    frame.slot_allocator = null;
+                }
+            },
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
                 if (o.cApiObjectOwner()) |owner| ctx.queueCApiObjectFinish(owner);
@@ -5304,6 +5327,7 @@ fn managedCellType(comptime kind: CellKind) type {
         .generator => vm.Generator,
         .iter_helper => value.IterHelper,
         .module_ns => interp.ModuleNs,
+        .frame => vm.Frame,
     };
 }
 
@@ -5790,6 +5814,27 @@ fn allocCell(comptime T: type, kind: CellKind, arena: std.mem.Allocator) std.mem
     if (kind == .environment) if (active_interpreter) |machine|
         machine.recordExecutionTier(.environment_allocations);
     return cell;
+}
+
+/// Slot bytes are allocated before the cell, so its complete initialized
+/// payload can be handed to a precise root without an intervening allocation.
+/// Only managed frames own individually freeable backing; arena mode retains
+/// its established bulk lifetime and synthetic Frames retain default metadata.
+pub fn allocFrame(arena: std.mem.Allocator, count: usize) std.mem.Allocator.Error!*vm.Frame {
+    const managed = allocationsAreManaged();
+    const allocator = temporaryAllocator(arena);
+    const slots = try allocator.alloc(Value, count);
+    errdefer allocator.free(slots);
+    @memset(slots, Value.undef());
+    const frame = try allocCell(vm.Frame, .frame, arena);
+    frame.* = .{
+        .slots = slots,
+        .parent = null,
+        .gc_managed = managed,
+        .slot_allocator = if (managed) allocator else null,
+        .slot_capacity = count,
+    };
+    return frame;
 }
 
 pub fn allocEnv(arena: std.mem.Allocator) std.mem.Allocator.Error!*Environment {

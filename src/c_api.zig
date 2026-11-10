@@ -1033,6 +1033,8 @@ const ReachabilityVisitor = struct {
             .iter_helper
         else if (Pointer == *interp.ModuleNs)
             .module_ns
+        else if (Pointer == *vm.Frame)
+            .frame
         else
             @compileError("unclassified reachability cell " ++ @typeName(Pointer));
         const pointer: *anyopaque = @ptrCast(cell);
@@ -1743,6 +1745,7 @@ fn privateHeapSnapshotNodeName(node: PrivateHeapSnapshotNode, allocator: std.mem
         .generator => "Generator",
         .iter_helper => "IteratorHelper",
         .module_ns => "ModuleNamespace",
+        .frame => "VMFrame",
     };
 }
 
@@ -1785,6 +1788,11 @@ fn privateHeapSnapshotFallbackSize(cell: ReachabilityCell) !PrivateHeapSnapshotS
         .generator => .{ .shallow = @sizeOf(vm.Generator) },
         .iter_helper => .{ .shallow = @sizeOf(value.IterHelper) },
         .module_ns => .{ .shallow = @sizeOf(interp.ModuleNs) },
+        .frame => blk: {
+            const frame: *vm.Frame = @ptrCast(@alignCast(cell.pointer));
+            break :blk .{ .shallow = try std.math.add(usize, @sizeOf(vm.Frame),
+                try std.math.mul(usize, frame.slot_capacity, @sizeOf(Value))) };
+        },
     };
 }
 
@@ -2008,6 +2016,7 @@ fn privateHeapSnapshotClassName(node: PrivateHeapSnapshotNode) []const u8 {
         .generator => "Generator",
         .iter_helper => "IteratorHelper",
         .module_ns => "ModuleNamespace",
+        .frame => "VMFrame",
     };
 }
 

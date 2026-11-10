@@ -1319,6 +1319,7 @@ pub const CapturedBindingValue = struct {
 /// escaped-slot lock, so there is exactly one binding value and one no-GIL
 /// synchronization ruling rather than an Environment snapshot to reconcile.
 pub const ActivationFrameView = struct {
+    owner: ?*vm.Frame = null,
     slots: []Value,
     mapped_arguments: ?*value.Object,
     mapped_parameter_indices: []const u32,
@@ -1369,7 +1370,9 @@ pub const ActivationFrameView = struct {
         const held = self.lockSlots();
         self.slots[slot] = stored;
         self.unlockSlots(held);
-        if (self.gc_function_traced) |traced| if (traced.load(.monotonic)) gc_mod.barrierValue(stored);
+        if (self.owner) |owner| {
+            gc_mod.barrierFrameStore(owner, stored);
+        } else if (self.gc_function_traced) |traced| if (traced.load(.monotonic)) gc_mod.barrierValue(stored);
     }
 
     pub fn markEscaped(self: *const ActivationFrameView) void {
@@ -12699,6 +12702,17 @@ pub const Interpreter = struct {
     pub fn publishExecRoot(self: *Interpreter, exec: *vm.Exec) void {
         if (self.gc == null) return;
         self.gc_execs.appendAssumeCapacity(exec);
+    }
+
+    /// Transfer an existing precise-root registration without allocating.
+    /// The old and replacement Exec must describe the same prepared frame.
+    pub fn replaceExecRoot(self: *Interpreter, previous: *vm.Exec, replacement: *vm.Exec) void {
+        if (self.gc == null) return;
+        for (self.gc_execs.items) |*root| if (root.* == previous) {
+            root.* = replacement;
+            return;
+        };
+        unreachable;
     }
 
     /// Register a running VM `Exec` as a precise GC root for the duration of its
