@@ -3,7 +3,7 @@
   "kind": "zig_js_vm_quickening_inventory",
   "issue": 659,
   "parent_issue": 498,
-  "date": "2026-11-03",
+  "date": "2026-11-10",
   "status": "inventory_only_no_performance_claim",
   "entries": [
     {
@@ -32,7 +32,7 @@
         {"path": "src/vm.zig", "text": "test \"vm: inherited host callbacks survive precise GC and shared lookup modes\""},
         {"path": "src/vm.zig", "text": "test \"vm: cached named reads follow prototype, accessor and shape edits\""}
       ],
-      "metrics": []
+      "metrics": ["quick_named_inherited_hits", "quick_named_resolve_hits"]
     },
     {
       "id": "quick-global-binding",
@@ -309,6 +309,8 @@
       "quick_arguments_store_hits",
       "quick_array_length_hits",
       "quick_array_prototype_data_hits",
+      "quick_named_inherited_hits",
+      "quick_named_resolve_hits",
       "quick_array_push_hits",
       "quick_global_binding_hits",
       "quick_literal_transition_hits",

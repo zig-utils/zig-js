@@ -48,4 +48,4 @@ The exact numeric recurrence body recognizers and precomputed recurrence result/
 
 ## Drift gate
 
-The validator binds this inventory to 2 plan types, 6 tagged quickening types, 2 chunk metadata fields, 0 structural-candidate flags, and 25 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
+The validator binds this inventory to 2 plan types, 6 tagged quickening types, 2 chunk metadata fields, 0 structural-candidate flags, and 27 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
