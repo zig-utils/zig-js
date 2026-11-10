@@ -213,7 +213,7 @@ fn noteSeedCase(profile: WatchdogProfile, seed: u64, comptime case_name: []const
     watchdog_context = null;
     watchdog_timed_out.store(false, .release);
     watchdog_cleanup_acknowledged.store(false, .release);
-    watchdog_profile.store(@intFromEnum(profile), .release);
+    watchdog_profile.store(@backingInt(profile), .release);
     watchdog_seed.store(seed, .release);
     watchdog_case_name = case_name;
     const configured_timeout_ms = watchdog_configured_timeout_ms.load(.acquire);
@@ -5334,6 +5334,8 @@ fn runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa: std.mem.Allocato
     };
     defer ctx.destroy();
 
+    // Adoption observers follow the settling-thread rule, so their shared
+    // totals need atomic read/modify/write even when join observers run here.
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -5372,10 +5374,10 @@ fn runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa: std.mem.Allocato
         \\    }}, shared, tid, {d}, {d}, {d});
         \\    t.asyncJoin().then(
         \\      (bundle) => {{
-        \\        globalThis.__propWaitAsyncLateAsyncScore += verifyBundle(bundle, tid, {d}, {d});
-        \\        globalThis.__propWaitAsyncLateAsyncCount++;
+        \\        Atomics.add(globalThis, '__propWaitAsyncLateAsyncScore', verifyBundle(bundle, tid, {d}, {d}));
+        \\        Atomics.add(globalThis, '__propWaitAsyncLateAsyncCount', 1);
         \\      }},
-        \\      () => {{ globalThis.__propWaitAsyncLateAsyncScore = -1000000; }});
+        \\      () => {{ Atomics.store(globalThis, '__propWaitAsyncLateAsyncScore', -1000000); }});
         \\    threads.push(t);
         \\  }}
         \\  for (let tid = 0; tid < threads.length; tid++) {{
@@ -5384,25 +5386,25 @@ fn runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa: std.mem.Allocato
         \\      throw new Error('property waitAsync late join did not return the child promise');
         \\    joined.then(
         \\      (bundle) => {{
-        \\        globalThis.__propWaitAsyncLateJoinScore += verifyBundle(bundle, tid, {d}, {d}) + {d};
-        \\        globalThis.__propWaitAsyncLateJoinCount++;
+        \\        Atomics.add(globalThis, '__propWaitAsyncLateJoinScore', verifyBundle(bundle, tid, {d}, {d}) + {d});
+        \\        Atomics.add(globalThis, '__propWaitAsyncLateJoinCount', 1);
         \\      }},
-        \\      () => {{ globalThis.__propWaitAsyncLateJoinScore = -1000000; }});
+        \\      () => {{ Atomics.store(globalThis, '__propWaitAsyncLateJoinScore', -1000000); }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
         \\  globalThis.__propWaitAsyncLateReady = function(expectedAsync, expectedJoin, expectedCount) {{
-        \\    return globalThis.__propWaitAsyncLateAsyncScore === expectedAsync &&
-        \\      globalThis.__propWaitAsyncLateJoinScore === expectedJoin &&
-        \\      globalThis.__propWaitAsyncLateAsyncCount === expectedCount &&
-        \\      globalThis.__propWaitAsyncLateJoinCount === expectedCount;
+        \\    return Atomics.load(globalThis, '__propWaitAsyncLateAsyncScore') === expectedAsync &&
+        \\      Atomics.load(globalThis, '__propWaitAsyncLateJoinScore') === expectedJoin &&
+        \\      Atomics.load(globalThis, '__propWaitAsyncLateAsyncCount') === expectedCount &&
+        \\      Atomics.load(globalThis, '__propWaitAsyncLateJoinCount') === expectedCount;
         \\  }};
         \\  globalThis.__propWaitAsyncLateCheck = function(expectedAsync, expectedJoin, expectedCount) {{
         \\    if (!globalThis.__propWaitAsyncLateReady(expectedAsync, expectedJoin, expectedCount))
         \\      throw new Error('bad property waitAsync late scores async=' +
-        \\        globalThis.__propWaitAsyncLateAsyncScore + '/' + expectedAsync +
-        \\        ' join=' + globalThis.__propWaitAsyncLateJoinScore + '/' + expectedJoin +
-        \\        ' counts=' + globalThis.__propWaitAsyncLateAsyncCount + ',' +
-        \\        globalThis.__propWaitAsyncLateJoinCount + '/' + expectedCount);
+        \\        Atomics.load(globalThis, '__propWaitAsyncLateAsyncScore') + '/' + expectedAsync +
+        \\        ' join=' + Atomics.load(globalThis, '__propWaitAsyncLateJoinScore') + '/' + expectedJoin +
+        \\        ' counts=' + Atomics.load(globalThis, '__propWaitAsyncLateAsyncCount') + ',' +
+        \\        Atomics.load(globalThis, '__propWaitAsyncLateJoinCount') + '/' + expectedCount);
         \\    return 1;
         \\  }};
         \\  return 1;
@@ -5459,6 +5461,13 @@ fn runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa: std.mem.Allocato
     }
     if (!ready) {
         std.debug.print("seed {d}: property waitAsync late-settlement did not reach expected async/join scores\n", .{seed});
+        const detail_source = try std.fmt.allocPrint(gpa, "[Atomics.load(globalThis,'__propWaitAsyncLateAsyncScore'),Atomics.load(globalThis,'__propWaitAsyncLateJoinScore'),Atomics.load(globalThis,'__propWaitAsyncLateAsyncCount'),Atomics.load(globalThis,'__propWaitAsyncLateJoinCount'),{d},{d},{d}].join(':')", .{ expected_async_score, expected_join_score, nthreads });
+        defer gpa.free(detail_source);
+        const detail = ctx.evaluate(detail_source) catch |err| {
+            std.debug.print("seed {d}: failure-only score diagnostic threw {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (detail.isString()) std.debug.print("seed {d}: actual async/join score/count and expected score/count {s}; keys={d} timeout-ms={d}\n", .{ seed, detail.asStr(), keys, timeout_ms });
         return false;
     }
 
@@ -17091,6 +17100,8 @@ fn runMidScriptPropertyWaitAsyncLateSettlementGc(gpa: std.mem.Allocator, seed: u
     };
     defer ctx.destroy();
 
+    // Adoption observers follow the settling-thread rule, so their shared
+    // totals need atomic read/modify/write even when join observers run here.
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -17149,10 +17160,10 @@ fn runMidScriptPropertyWaitAsyncLateSettlementGc(gpa: std.mem.Allocator, seed: u
         \\      }}, shared, gate, tid, {d}, {d}, {d});
         \\      t.asyncJoin().then(
         \\        (bundle) => {{
-        \\          globalThis.__midgcPropWaitAsyncLateAsyncScore += verifyBundle(bundle, tid, {d}, {d});
-        \\          globalThis.__midgcPropWaitAsyncLateAsyncCount++;
+        \\          Atomics.add(globalThis, '__midgcPropWaitAsyncLateAsyncScore', verifyBundle(bundle, tid, {d}, {d}));
+        \\          Atomics.add(globalThis, '__midgcPropWaitAsyncLateAsyncCount', 1);
         \\        }},
-        \\        () => {{ globalThis.__midgcPropWaitAsyncLateAsyncScore = -1000000; }});
+        \\        () => {{ Atomics.store(globalThis, '__midgcPropWaitAsyncLateAsyncScore', -1000000); }});
         \\      threads.push(t);
         \\    }})(tid);
         \\  }}
@@ -17180,25 +17191,25 @@ fn runMidScriptPropertyWaitAsyncLateSettlementGc(gpa: std.mem.Allocator, seed: u
         \\        throw new Error('midgc property waitAsync late join did not return the child promise');
         \\      joined.then(
         \\        (bundle) => {{
-        \\          globalThis.__midgcPropWaitAsyncLateJoinScore += verifyBundle(bundle, tid, {d}, {d}) + {d};
-        \\          globalThis.__midgcPropWaitAsyncLateJoinCount++;
+        \\          Atomics.add(globalThis, '__midgcPropWaitAsyncLateJoinScore', verifyBundle(bundle, tid, {d}, {d}) + {d});
+        \\          Atomics.add(globalThis, '__midgcPropWaitAsyncLateJoinCount', 1);
         \\        }},
-        \\        () => {{ globalThis.__midgcPropWaitAsyncLateJoinScore = -1000000; }});
+        \\        () => {{ Atomics.store(globalThis, '__midgcPropWaitAsyncLateJoinScore', -1000000); }});
         \\    }})(tid);
         \\  }}
         \\  globalThis.__midgcPropWaitAsyncLateReady = function(expectedAsync, expectedJoin, expectedCount) {{
-        \\    return globalThis.__midgcPropWaitAsyncLateAsyncScore === expectedAsync &&
-        \\      globalThis.__midgcPropWaitAsyncLateJoinScore === expectedJoin &&
-        \\      globalThis.__midgcPropWaitAsyncLateAsyncCount === expectedCount &&
-        \\      globalThis.__midgcPropWaitAsyncLateJoinCount === expectedCount;
+        \\    return Atomics.load(globalThis, '__midgcPropWaitAsyncLateAsyncScore') === expectedAsync &&
+        \\      Atomics.load(globalThis, '__midgcPropWaitAsyncLateJoinScore') === expectedJoin &&
+        \\      Atomics.load(globalThis, '__midgcPropWaitAsyncLateAsyncCount') === expectedCount &&
+        \\      Atomics.load(globalThis, '__midgcPropWaitAsyncLateJoinCount') === expectedCount;
         \\  }};
         \\  globalThis.__midgcPropWaitAsyncLateCheck = function(expectedAsync, expectedJoin, expectedCount) {{
         \\    if (!globalThis.__midgcPropWaitAsyncLateReady(expectedAsync, expectedJoin, expectedCount))
         \\      throw new Error('bad midgc property waitAsync late scores async=' +
-        \\        globalThis.__midgcPropWaitAsyncLateAsyncScore + '/' + expectedAsync +
-        \\        ' join=' + globalThis.__midgcPropWaitAsyncLateJoinScore + '/' + expectedJoin +
-        \\        ' counts=' + globalThis.__midgcPropWaitAsyncLateAsyncCount + ',' +
-        \\        globalThis.__midgcPropWaitAsyncLateJoinCount + '/' + expectedCount);
+        \\        Atomics.load(globalThis, '__midgcPropWaitAsyncLateAsyncScore') + '/' + expectedAsync +
+        \\        ' join=' + Atomics.load(globalThis, '__midgcPropWaitAsyncLateJoinScore') + '/' + expectedJoin +
+        \\        ' counts=' + Atomics.load(globalThis, '__midgcPropWaitAsyncLateAsyncCount') + ',' +
+        \\        Atomics.load(globalThis, '__midgcPropWaitAsyncLateJoinCount') + '/' + expectedCount);
         \\    return 1;
         \\  }};
         \\  return keep.length;
@@ -17271,6 +17282,13 @@ fn runMidScriptPropertyWaitAsyncLateSettlementGc(gpa: std.mem.Allocator, seed: u
     }
     if (!ready) {
         std.debug.print("seed {d}: midgc property waitAsync late-settlement did not reach expected async/join scores\n", .{seed});
+        const detail_source = try std.fmt.allocPrint(gpa, "[Atomics.load(globalThis,'__midgcPropWaitAsyncLateAsyncScore'),Atomics.load(globalThis,'__midgcPropWaitAsyncLateJoinScore'),Atomics.load(globalThis,'__midgcPropWaitAsyncLateAsyncCount'),Atomics.load(globalThis,'__midgcPropWaitAsyncLateJoinCount'),{d},{d},{d}].join(':')", .{ expected_async_score, expected_join_score, nthreads });
+        defer gpa.free(detail_source);
+        const detail = ctx.evaluate(detail_source) catch |err| {
+            std.debug.print("seed {d}: failure-only score diagnostic threw {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (detail.isString()) std.debug.print("seed {d}: actual async/join score/count and expected score/count {s}; keys={d} timeout-ms={d}\n", .{ seed, detail.asStr(), keys, timeout_ms });
         return false;
     }
 
