@@ -57099,8 +57099,51 @@ test "own-key snapshots: every allocation failure reclaims native buffers" {
     const object = try context.evaluate(
         "(function(){const a=[];a[5]=1;a[2]=2;Object.defineProperty(a,'named',{get(){return 3;},enumerable:true});a[Symbol('s')]=4;return a;})()",
     );
+    const FaultTrace = struct {
+        const Attempt = struct { fail_index: usize, allocations: usize, resizes: usize, allocated: usize, freed: usize, induced: bool };
+        attempts: [128]Attempt = undefined,
+        count: usize = 0,
+        omitted: usize = 0,
+
+        fn record(self: *@This(), allocator: *const std.testing.FailingAllocator) void {
+            if (self.count == self.attempts.len) {
+                self.omitted += 1;
+                return;
+            }
+            self.attempts[self.count] = .{
+                .fail_index = allocator.fail_index,
+                .allocations = allocator.alloc_index,
+                .resizes = allocator.resize_index,
+                .allocated = allocator.allocated_bytes,
+                .freed = allocator.freed_bytes,
+                .induced = allocator.has_induced_failure,
+            };
+            self.count += 1;
+        }
+
+        fn dump(self: *const @This()) void {
+            for (self.attempts[0..self.count]) |attempt|
+                std.debug.print("own-key fault trace: fail_index={d} allocations={d} resizes={d} bytes={d}/{d} induced={any}\n", .{ attempt.fail_index, attempt.allocations, attempt.resizes, attempt.allocated, attempt.freed, attempt.induced });
+            if (self.omitted != 0) std.debug.print("own-key fault trace: {d} attempts omitted\n", .{self.omitted});
+        }
+    };
+    var trace: FaultTrace = .{};
+    errdefer trace.dump();
     const Probe = struct {
-        fn run(backing: std.mem.Allocator, source_context: *Context, source_object: Value) !void {
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
+            return backing.rawAlloc(len, alignment, ra);
+        }
+
+        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
+            backing.rawFree(memory, alignment, ra);
+        }
+
+        fn run(backing: std.mem.Allocator, source_context: *Context, source_object: Value, fault_trace: *FaultTrace) !void {
+            // The standard helper supplies this exact allocator. Record after
+            // snapshot cleanup, without allocating or changing the fault sweep.
+            defer fault_trace.record(@ptrCast(@alignCast(backing.ptr)));
             var machine = source_context.interpreter();
             machine.scratch_allocator = backing;
             var snapshot = try machine.objectOwnKeysList(source_object.asObj());
@@ -57113,7 +57156,17 @@ test "own-key snapshots: every allocation failure reclaims native buffers" {
             try std.testing.expect(value.isRealSymbolKey(snapshot.items[4]));
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{ context, object });
+    var backing = std.testing.allocator;
+    // Force every buffer growth through an allocation the replay can fail.
+    // Host-address-dependent in-place resize/remap is outside its allocation
+    // counter, as in the parser's existing exhaustive growth fixtures.
+    const non_resizing: std.mem.Allocator = .{ .ptr = &backing, .vtable = &.{
+        .alloc = Probe.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = Probe.free,
+    } };
+    try std.testing.checkAllAllocationFailures(non_resizing, Probe.run, .{ context, object, &trace });
 }
 
 test "own-key snapshots: symbol recovery caches the symbol-owned spelling" {
