@@ -29,8 +29,8 @@
       "class": "owner_maintained_pinned_source",
       "status": "allowed",
       "scope": "production",
-      "locator": "https://codeload.github.com/zig-utils/zig-regex/tar.gz/16df9870ca4a4ec8d0b932e90a62a8b3fb9af563",
-      "pin": "zig_regex-0.2.1-omky0XpKGwAtdEvHWpryg6oE2rs1j5VuYkzU61ETnnEG",
+      "locator": "https://codeload.github.com/zig-utils/zig-regex/tar.gz/da4d2a6aa51bf9de3a0665d577eaced0657db606",
+      "pin": "zig_regex-0.2.1-omky0aC4GwC4AIyKR4VQlAqg_DrQHptL36ij4LWacrYh",
       "license": "MIT",
       "affects_runtime_semantics": true,
       "runtime_semantics": "Implements JavaScript RegExp semantics."
@@ -192,7 +192,7 @@
   ],
   "boundaries": {
     "production_zig_packages": [
-      {"name": "zig_regex", "repository": "zig-utils/zig-regex", "revision": "16df9870ca4a4ec8d0b932e90a62a8b3fb9af563", "hash": "zig_regex-0.2.1-omky0XpKGwAtdEvHWpryg6oE2rs1j5VuYkzU61ETnnEG", "edge": "zig-regex"},
+      {"name": "zig_regex", "repository": "zig-utils/zig-regex", "revision": "da4d2a6aa51bf9de3a0665d577eaced0657db606", "hash": "zig_regex-0.2.1-omky0aC4GwC4AIyKR4VQlAqg_DrQHptL36ij4LWacrYh", "edge": "zig-regex"},
       {"name": "zig_gc", "repository": "zig-utils/zig-gc", "revision": "9bdb139cb4c6cdaa37b6fa2abebcf549cfe43762", "hash": "zig_gc-0.0.1-e4SVf1WzBAA0WpyH09Vg97LmvYYKPjZ9n8LBvrwGxh-V", "edge": "zig-gc"}
     ],
     "owned_sibling_checkouts": [
