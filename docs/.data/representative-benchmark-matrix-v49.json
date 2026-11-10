@@ -1,0 +1,74 @@
+{
+  "schema_version": 49,
+  "matrix_id": "zig-js-representative-v49",
+  "status": "frozen",
+  "frozen_date": "2026-11-10",
+  "owner_issue": 1116,
+  "history_policy": "This version hash-inherits every V48 scored row and publication decision. It selects the explicit managed-frame lifecycle profile and re-pins the collector and shared runner after their versioned accounting changes. Historical manifests and lifecycle v1 data remain immutable. Later integration, workload, metric or publication changes require a new version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v48",
+    "path": "docs/.data/representative-benchmark-matrix-v48.json",
+    "sha256": "edbec3d354b3f88807ea689f65200058e634a79d6e54a33a374368548e6f9727",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "instrumentation_overhead_integration",
+      "memory_inventory_diagnostics",
+      "memory_pressure_diagnostics",
+      "tier_attribution",
+      "runtime_operation_diagnostics",
+      "json_pipeline_integration"
+    ]
+  },
+  "change": "Version managed-frame lifecycle finalizers and strict legacy telemetry replay, and update the exact-parent collector and shared native runner pins. This is a contract and provenance update; it publishes no new timing or throughput evidence.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "55ffcab0862182b452ff688b8170c1a5e8af68b78c4afb1b62c173e8a01d82fd",
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "6719c94c685371a5d1d5e8c2cd019f9816daef969c86bffc8d5152b71a350bc2"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "9b638839aadc247d5b3381d1dc7cc1cffd47a4bee6d73dfc2bd13d4ee7bedee9"
+      }
+    ],
+    "publication_boundary": "V49 preserves every inherited scored workload, job count, checksum, timing boundary, process classification, allocation replay, and publication gate. It versions managed-frame finalizer accounting as lifecycle schema v2 and updates only the affected collector and shared runner identities. Historical v1 lifecycle artifacts retain their exact schema and reconciliation; no performance improvement is claimed by this contract update."
+  },
+  "context_lifecycle_integration": {
+    "profile": {
+      "path": "docs/.data/context-lifecycle-profile-v2.json",
+      "sha256": "085f3bd6f3485d49320d72784ff2d319e4184cca694b6c7a740812ac21d0d2f8"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "6719c94c685371a5d1d5e8c2cd019f9816daef969c86bffc8d5152b71a350bc2"
+    },
+    "publication_boundary": "V49 preserves every inherited scored workload, job count, checksum, timing boundary, process classification, allocation replay, and publication gate. It versions managed-frame finalizer accounting as lifecycle schema v2 and updates only the affected collector and shared runner identities. Historical v1 lifecycle artifacts retain their exact schema and reconciliation; no performance improvement is claimed by this contract update."
+  },
+  "no_jit_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "6719c94c685371a5d1d5e8c2cd019f9816daef969c86bffc8d5152b71a350bc2"
+    },
+    "publication_boundary": "V49 updates only the shared runner identity. Required-bytecode and no-native modes, logical work, jobs, checksums, attribution and publication boundaries are inherited unchanged."
+  },
+  "string_indexing_integration": {
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "6719c94c685371a5d1d5e8c2cd019f9816daef969c86bffc8d5152b71a350bc2"
+    },
+    "publication_boundary": "V49 updates only the shared runner identity. String representations, widths, logical work, jobs, checksums, attribution and publication boundaries are inherited unchanged."
+  }
+}

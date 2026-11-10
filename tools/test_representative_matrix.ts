@@ -37,6 +37,9 @@ export function selfTest(): void {
   rejects("lifecycle scenario drift", value => value.context_lifecycle_integration.scenarios.pop(), "scenario inventory drift");
   rejects("lifecycle telemetry drift", value => value.context_lifecycle_integration.telemetry.pop(), "telemetry inventory drift");
   rejects("lifecycle runner drift", value => { value.context_lifecycle_integration.runner.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+  rejects("lifecycle frame accounting cannot use the legacy profile", value => {
+    value.context_lifecycle_integration.profile = { path: "docs/.data/context-lifecycle-profile-v1.json", sha256: "3286810faef598fc62ce68f8a56825de48d749a7ae4778df270afd890780c6f2" };
+  }, "V49 lifecycle managed-frame accounting contract drift");
   rejects("no-JIT mode drift", value => value.no_jit_integration.modes.pop(), "mode inventory drift");
   rejects("no-JIT Context drift", value => { value.no_jit_integration.context_options.enable_jit = true; }, "Context options drift");
   rejects("no-JIT source drift", value => { value.no_jit_integration.source.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
@@ -92,7 +95,7 @@ export function selfTest(): void {
   rejects("process classifier hash drift", value => { value.exact_parent_integration.process_classifier.sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.process_classifier.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
   rejects("JSON pipeline collector hash drift", value => { value.json_pipeline_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
   rejects("shared process classifier mirror drift", value => { value.json_pipeline_integration.process_classifier.sha256 = "0".repeat(64); }, "shared process classifier mirror drift");
-  rejects("unsupported future matrix", value => { value.schema_version = 49; }, "unsupported representative matrix schema");
+  rejects("unsupported future matrix", value => { value.schema_version = 50; }, "unsupported representative matrix schema");
   console.log("representative matrix structural tests: 84/84 passed");
 }
 

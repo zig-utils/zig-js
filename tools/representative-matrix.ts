@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v48.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v49.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 48, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 49, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,51 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 48),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 49),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 49) {
+    for (const name of ["tier_attribution", "implemented_families_append", "deferred_families_remove", "pending_metric_panels", "completed_metric_panels", "instrumentation_overhead_integration", "memory_inventory_diagnostics", "memory_pressure_diagnostics", "runtime_operation_diagnostics", "json_pipeline_integration"])
+      requireValue(child[name] === undefined, `v49 must inherit ${name} unchanged`);
+    const replacement = child.exact_parent_integration;
+    requireValue(
+      replacement && typeof replacement === "object" && same(Object.keys(replacement).sort(), ["native_runners", "path", "publication_boundary", "sha256"]),
+      "v49 replaces only the exact-parent collector and shared native runner pins",
+    );
+    requireValue(replacement.path === inherited.exact_parent_integration.path && replacement.path === "tools/exact-parent-regression.ts", "v49 exact-parent path drift");
+    const runners = replacement.native_runners, inheritedRunners = inherited.exact_parent_integration.native_runners;
+    requireValue(Array.isArray(runners) && same(runners.map((runner: any) => runner.path), inheritedRunners.map((runner: any) => runner.path)), "v49 native runner inventory drift");
+    for (let index = 0; index < runners.length; index += 1) {
+      if (runners[index].path !== "bench/comparison_zig_js.zig")
+        requireValue(runners[index].sha256 === inheritedRunners[index].sha256, `v49 must inherit ${runners[index].path} unchanged`);
+    }
+    for (const name of ["context_lifecycle_integration", "no_jit_integration", "string_indexing_integration"]) {
+      const integration = child[name];
+      const keys = name === "context_lifecycle_integration" ? ["profile", "publication_boundary", "runner"] : ["publication_boundary", "runner"];
+      requireValue(integration && typeof integration === "object" && same(Object.keys(integration).sort(), keys), `v49 ${name} replacement inventory drift`);
+      requireValue(integration.runner.path === "bench/comparison_zig_js.zig" && integration.runner.sha256 === runners[0].sha256, `v49 ${name} runner pin drift`);
+    }
+    requireValue(child.context_lifecycle_integration.profile.path === "docs/.data/context-lifecycle-profile-v2.json", "v49 must select the managed-frame lifecycle profile");
+    const exactParent = { ...inherited.exact_parent_integration, ...replacement };
+    const merged = {
+      ...inherited,
+      ...child,
+      exact_parent_integration: exactParent,
+      context_lifecycle_integration: { ...inherited.context_lifecycle_integration, ...child.context_lifecycle_integration },
+      no_jit_integration: { ...inherited.no_jit_integration, ...child.no_jit_integration },
+      string_indexing_integration: { ...inherited.string_indexing_integration, ...child.string_indexing_integration },
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: { ...inherited.completed_metric_panels.efficiency_thermal, scored_integration: exactParent },
+      },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 48) {
     requireValue(child.tier_attribution === undefined, "v48 must inherit the attribution sidecar unchanged");
@@ -808,7 +846,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 48, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 49, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   if (manifest.schema_version >= 40) {
     const diagnostics = manifest.memory_inventory_diagnostics;
@@ -1059,6 +1097,10 @@ export function validate(manifest: any, root = ROOT): void {
       requireValue(same(lifecycle.engines || [], ["zig-js"]) && same(lifecycle.lanes || [], [1]), "V19 context lifecycle engine/lane boundary drift");
       requireValue(same(lifecycle.scenarios || [], ["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"]), "V19 context lifecycle scenario inventory drift");
       validatePinnedFile(lifecycle.profile, "V19 context lifecycle profile", root);
+      if (manifest.schema_version >= 49) {
+        const profile = JSON.parse(readText(root + "/" + lifecycle.profile.path));
+        requireValue(lifecycle.profile.path === "docs/.data/context-lifecycle-profile-v2.json" && profile.schema_version === 2 && profile.profile_id === "zig-js-context-lifecycle-v2" && profile.owner_issue === 1116 && profile.finalizer_kind_fields.includes("frames"), "V49 lifecycle managed-frame accounting contract drift");
+      }
       validatePinnedFile(lifecycle.runner, "V19 context lifecycle runner", root);
       requireValue(same(lifecycle.telemetry || [], ["create_ns", "work_ns", "destroy_ns", "cpu_user_ns", "cpu_system_ns", "baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints", "gc_finalizer_stats"]), "V19 context lifecycle telemetry inventory drift");
       requireValue(typeof lifecycle.publication_boundary === "string" && lifecycle.publication_boundary.length > 0, "V19 context lifecycle publication boundary is missing");
