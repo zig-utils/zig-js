@@ -115,7 +115,10 @@ pub const Cache = struct {
         source: []const u8,
         flags: []const u8,
         owned: *OwnedProgram,
-        matcher: ?Regex.Matcher = null,
+        // Matcher state is substantially larger than the key/program metadata.
+        // Its arena-owned header is created on first use and never moved while
+        // leases or live captures retain this entry.
+        matcher: ?*Regex.Matcher = null,
         pins: usize = 0,
     };
 
@@ -165,12 +168,17 @@ pub const Cache = struct {
             };
         }
 
-        fn matcher(self: *Lease) *Regex.Matcher {
+        fn matcher(self: *Lease) !*Regex.Matcher {
             return switch (self.owner) {
                 .cached => |cached| blk: {
                     const entry = &cached.cache.entries[cached.index];
-                    if (entry.matcher == null) entry.matcher = entry.owned.regex.?.matcherWithScratchAllocator(entry.owned.matcher_arena.allocator());
-                    break :blk &entry.matcher.?;
+                    if (entry.matcher == null) {
+                        const allocator = entry.owned.matcher_arena.allocator();
+                        const scratch = try allocator.create(Regex.Matcher);
+                        scratch.* = entry.owned.regex.?.matcherWithScratchAllocator(allocator);
+                        entry.matcher = scratch;
+                    }
+                    break :blk entry.matcher.?;
                 },
                 .transient => |*transient| blk: {
                     if (transient.matcher == null) transient.matcher = transient.owned.regex.?.matcherWithScratchAllocator(transient.owned.matcher_arena.allocator());
@@ -183,10 +191,8 @@ pub const Cache = struct {
         pub fn find(self: *Lease, input: []const u8) !?OwnedMatch {
             const owned_program = self.owned();
             const allocator = owned_program.beginMatch();
-            const found = self.matcher().find(input) catch |err| {
-                owned_program.finishMatchAttempt(false);
-                return err;
-            };
+            errdefer owned_program.finishMatchAttempt(false);
+            const found = try (try self.matcher()).find(input);
             owned_program.finishMatchAttempt(found != null);
             return if (found) |match| .{
                 .value = match,
@@ -198,10 +204,8 @@ pub const Cache = struct {
         pub fn findFrom(self: *Lease, input: []const u8, start: usize) !?OwnedMatch {
             const owned_program = self.owned();
             const allocator = owned_program.beginMatch();
-            const found = self.matcher().findFrom(input, start) catch |err| {
-                owned_program.finishMatchAttempt(false);
-                return err;
-            };
+            errdefer owned_program.finishMatchAttempt(false);
+            const found = try (try self.matcher()).findFrom(input, start);
             owned_program.finishMatchAttempt(found != null);
             return if (found) |match| .{
                 .value = match,
@@ -243,7 +247,7 @@ pub const Cache = struct {
     }
 
     fn destroyEntry(entry: *Entry) void {
-        if (entry.matcher) |*matcher| matcher.deinit();
+        if (entry.matcher) |matcher| matcher.deinit();
         entry.owned.deinit();
     }
 
@@ -289,7 +293,7 @@ pub const Cache = struct {
             if (!self.occupied[candidate]) continue;
             const entry = &self.entries[candidate];
             if (inUse(entry)) continue;
-            if (entry.matcher) |*matcher| matcher.deinit();
+            if (entry.matcher) |matcher| matcher.deinit();
             const owned = entry.owned;
             owned.reset();
             self.occupied[candidate] = false;
@@ -365,6 +369,23 @@ fn compileOwned(backing: std.mem.Allocator, pattern: []const u8) !*Cache.OwnedPr
     return owned;
 }
 
+test "RegExp program cache cold matching fits a bounded allocator" {
+    var bytes: [64 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&bytes);
+    const allocator = fixed.allocator();
+    const cache = try allocator.create(Cache);
+    defer allocator.destroy(cache);
+    cache.* = Cache.init(allocator);
+    defer cache.deinit();
+    const owned = try compileOwned(allocator, "memory");
+    var lease = cache.adopt("memory", "", owned);
+    defer lease.release();
+    var found = (try lease.find("out of memory")).?;
+    defer found.deinit();
+    try std.testing.expectEqualStrings("memory", found.value.slice);
+    try std.testing.expectEqual(@as(usize, 1), cache.len);
+}
+
 test "RegExp program cache compares complete immutable keys by value" {
     var cache = Cache.init(std.testing.allocator);
     defer cache.deinit();
@@ -377,6 +398,26 @@ test "RegExp program cache compares complete immutable keys by value" {
     try std.testing.expect(cache.acquire("a", "gi") == null);
     try std.testing.expect(cache.acquire("a\x00c", "gi") == null);
     try std.testing.expect(cache.acquire("a\x00b", "g") == null);
+}
+
+test "RegExp program cache retries matcher setup after allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var cache = Cache.init(allocator);
+    defer cache.deinit();
+    const program = try compileOwned(allocator, "memory");
+    var lease = cache.adopt("memory", "", program);
+    defer lease.release();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, lease.find("out of memory"));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), cache.matcherCount());
+    try std.testing.expectEqual(@as(usize, 0), program.live_results);
+    failing.fail_index = std.math.maxInt(usize);
+    var found = (try lease.find("out of memory")).?;
+    defer found.deinit();
+    try std.testing.expectEqualStrings("memory", found.value.slice);
+    try std.testing.expectEqual(@as(usize, 1), cache.matcherCount());
 }
 
 test "RegExp program cache reclaims an unpinned eviction" {
