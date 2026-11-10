@@ -57091,16 +57091,19 @@ test "Interpreter Symbol index disperses predictable encoded-key collisions exac
 }
 
 test "own-key snapshots: every allocation failure reclaims native buffers" {
+    const Context = @import("context.zig").Context;
+    const context = try Context.create(std.testing.allocator);
+    defer context.destroy();
+    // Keep the exact source object and Symbol spelling fixed across the fault
+    // sweep. Fresh realms and Symbols are not allocations of this operation.
+    const object = try context.evaluate(
+        "(function(){const a=[];a[5]=1;a[2]=2;Object.defineProperty(a,'named',{get(){return 3;},enumerable:true});a[Symbol('s')]=4;return a;})()",
+    );
     const Probe = struct {
-        fn run(backing: std.mem.Allocator) !void {
-            const context = try @import("context.zig").Context.create(std.testing.allocator);
-            defer context.destroy();
-            const object = try context.evaluate(
-                "(function(){const a=[];a[5]=1;a[2]=2;Object.defineProperty(a,'named',{get(){return 3;},enumerable:true});a[Symbol('s')]=4;return a;})()",
-            );
-            var machine = context.interpreter();
+        fn run(backing: std.mem.Allocator, source_context: *Context, source_object: Value) !void {
+            var machine = source_context.interpreter();
             machine.scratch_allocator = backing;
-            var snapshot = try machine.objectOwnKeysList(object.asObj());
+            var snapshot = try machine.objectOwnKeysList(source_object.asObj());
             defer snapshot.deinit();
             try std.testing.expectEqual(@as(usize, 5), snapshot.items.len);
             try std.testing.expectEqualStrings("2", snapshot.items[0]);
@@ -57110,7 +57113,7 @@ test "own-key snapshots: every allocation failure reclaims native buffers" {
             try std.testing.expect(value.isRealSymbolKey(snapshot.items[4]));
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{ context, object });
 }
 
 test "own-key snapshots: symbol recovery caches the symbol-owned spelling" {
