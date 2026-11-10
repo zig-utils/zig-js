@@ -27,6 +27,18 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "BCP47 captured separator choices tree semantics",
+        .tree_walker = true,
+        .source = "(function(){\n" ++ @embedFile("regexp_language_tag_probe.js") ++ "\n})()",
+        .expected = 860,
+    },
+    .{
+        .name = "BCP47 captured separator choices generator semantics",
+        .source = "(function*(){\n" ++ @embedFile("regexp_language_tag_probe.js") ++ "\n})().next().value",
+        .expected = 860,
+        .required_bytecode = true,
+    },
+    .{
         .name = "URL receiver brands tree semantics",
         .tree_walker = true,
         .source = "(function(){\n" ++ @embedFile("url_receiver_probe.js") ++ "\n})()",
