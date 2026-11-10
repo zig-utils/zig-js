@@ -33,6 +33,25 @@ const Interpreter = interpreter.Interpreter;
 const HostError = value.HostError;
 pub const SerializeLimitError = HostError || error{MessageTooLarge};
 
+/// Operation-local handles keep root indices authoritative when a getter or
+/// allocation recovery relocates cells. Fallbacks are used only without GC.
+const RootedValue = struct {
+    slot: usize,
+    fallback: Value,
+
+    fn init(machine: *Interpreter, v: Value) HostError!RootedValue {
+        return .{ .slot = try machine.pushTempRoot(v), .fallback = v };
+    }
+
+    fn get(root: RootedValue, machine: *Interpreter) Value {
+        return machine.tempRoot(root.slot, root.fallback);
+    }
+
+    fn object(root: RootedValue, machine: *Interpreter) *value.Object {
+        return root.get(machine).asObj();
+    }
+};
+
 const SharedRefToken = [16]u8;
 const wire_magic = "ZJSC".*;
 const wire_version: u8 = 2;
@@ -167,7 +186,7 @@ const Writer = struct {
 
     fn tag(w: *Writer, t: Tag) error{OutOfMemory}!void {
         try w.reserve(@sizeOf(u8));
-        try w.out.append(w.gpa, @intFromEnum(t));
+        try w.out.append(w.gpa, @backingInt(t));
     }
     fn byte(w: *Writer, b: u8) error{OutOfMemory}!void {
         try w.reserve(@sizeOf(u8));
@@ -238,8 +257,8 @@ const Reader = struct {
 
     fn tag(r: *Reader) Error!Tag {
         const b = try r.byte();
-        if (b > @intFromEnum(Tag.file)) return error.Malformed;
-        return @enumFromInt(b);
+        if (b > @backingInt(Tag.file)) return error.Malformed;
+        return @fromBackingInt(@intCast(b));
     }
     fn byte(r: *Reader) Error!u8 {
         if (r.pos >= r.bytes.len) return error.Malformed;
@@ -320,7 +339,7 @@ const Serializer = struct {
     const ArraySnapshot = struct { logical_len: usize, elements: []Value, holes: []bool };
 
     fn rootSnapshotValue(s: *Serializer, v: Value) HostError!void {
-        if (v.isObject()) _ = try s.self.pushTempRoot(v);
+        _ = try s.self.pushTempRoot(v);
     }
 
     fn snapshotSetEntries(s: *Serializer, o: *value.Object) HostError![]Value {
@@ -372,7 +391,7 @@ const Serializer = struct {
         for (elements, 0..) |el, i| {
             const hole = if (hole_map) |h| h.index.containsContext(i, h.hash_context) else false;
             holes[i] = hole;
-            if (!hole) try s.rootSnapshotValue(el);
+            try s.rootSnapshotValue(if (hole) Value.undef() else el);
         }
         return .{ .logical_len = @max(n, o.arrayLengthFloor()), .elements = elements, .holes = holes };
     }
@@ -402,7 +421,10 @@ const Serializer = struct {
         s.next_id = next_id;
     }
 
-    fn ser(s: *Serializer, v: Value, depth: u16) HostError!void {
+    fn ser(s: *Serializer, input: Value, depth: u16) HostError!void {
+        const root = try RootedValue.init(s.self, input);
+        defer s.self.restoreTempRoots(root.slot);
+        const v = root.get(s.self);
         switch (v.kind()) {
             .undefined => try s.w.tag(.undef),
             .null => try s.w.tag(.null_v),
@@ -416,25 +438,27 @@ const Serializer = struct {
             },
             .string => {
                 try s.w.tag(.string);
-                try s.writeValueStr(v);
+                try s.writeValueStr(root.get(s.self));
             },
-            .object => try s.serObject(v.asObj(), depth),
+            .object => try s.serObject(root.object(s.self), depth),
         }
     }
 
-    fn serObject(s: *Serializer, o: *value.Object, depth: u16) HostError!void {
+    fn serObject(s: *Serializer, input: *value.Object, depth: u16) HostError!void {
+        const o = try RootedValue.init(s.self, Value.obj(input));
+        defer s.self.restoreTempRoots(o.slot);
         // BigInts are JS *values*: no identity to preserve, no memo entry.
-        if (o.is_bigint) {
-            if (o.bigIntText()) |t| {
+        if (o.object(s.self).is_bigint) {
+            if (o.object(s.self).bigIntText()) |t| {
                 try s.w.tag(.bigint_text);
                 try s.writeStr(t);
             } else {
                 try s.w.tag(.bigint);
-                try s.w.int(i128, o.bigIntValue());
+                try s.w.int(i128, o.object(s.self).bigIntValue());
             }
             return;
         }
-        const identity = value.RuntimeObjectIdentity.init(o);
+        const identity = value.RuntimeObjectIdentity.init(o.object(s.self));
         if (s.memoizedId(identity)) |id| {
             try s.w.tag(.ref);
             try s.w.int(u32, id);
@@ -442,22 +466,22 @@ const Serializer = struct {
         }
         // The DataCloneError set: values with behavior or identity that cannot
         // cross a serialization boundary.
-        if (o.jsFunction() != null or o.native != null or o.hostCallback() != null or o.boundFunction() != null)
+        if (o.object(s.self).jsFunction() != null or o.object(s.self).native != null or o.object(s.self).hostCallback() != null or o.object(s.self).boundFunction() != null)
             return s.throwClone("DataCloneError: function objects cannot be cloned");
-        if (o.is_symbol) return s.throwClone("DataCloneError: Symbol values cannot be cloned");
-        if (o.proxyTarget() != null or o.proxy_revoked)
+        if (o.object(s.self).is_symbol) return s.throwClone("DataCloneError: Symbol values cannot be cloned");
+        if (o.object(s.self).proxyTarget() != null or o.object(s.self).proxy_revoked)
             return s.throwClone("DataCloneError: Proxy objects cannot be cloned");
-        if (o.promiseData() != null) return s.throwClone("DataCloneError: Promise objects cannot be cloned");
-        if (o.generator() != null) return s.throwClone("DataCloneError: generator objects cannot be cloned");
-        if (o.is_weak or o.weakRefTarget() != null)
+        if (o.object(s.self).promiseData() != null) return s.throwClone("DataCloneError: Promise objects cannot be cloned");
+        if (o.object(s.self).generator() != null) return s.throwClone("DataCloneError: generator objects cannot be cloned");
+        if (o.object(s.self).is_weak or o.object(s.self).weakRefTarget() != null)
             return s.throwClone("DataCloneError: weak collections cannot be cloned");
-        if (o.moduleNs() != null) return s.throwClone("DataCloneError: module namespaces cannot be cloned");
-        if (o.is_arguments) return s.throwClone("DataCloneError: arguments objects cannot be cloned");
-        if (o.behavior.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
+        if (o.object(s.self).moduleNs() != null) return s.throwClone("DataCloneError: module namespaces cannot be cloned");
+        if (o.object(s.self).is_arguments) return s.throwClone("DataCloneError: arguments objects cannot be cloned");
+        if (o.object(s.self).behavior.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
 
         try s.rememberObject(identity);
 
-        if (o.arrayBuffer()) |ab| {
+        if (o.object(s.self).arrayBuffer()) |ab| {
             if (ab.is_shared) {
                 const storage = ab.shared orelse return s.throwClone("DataCloneError: malformed SharedArrayBuffer");
                 if (@sizeOf(SharedRefToken) > s.w.limit -| s.w.out.items.len) {
@@ -495,16 +519,16 @@ const Serializer = struct {
             try s.writeStr(ab.bytes());
             return;
         }
-        if (o.typedArray()) |ta| {
+        if (o.object(s.self).typedArray()) |ta| {
             try s.w.tag(.typed_array);
-            try s.w.byte(@intFromEnum(ta.kind));
+            try s.w.byte(@backingInt(ta.kind));
             try s.serObject(ta.buffer, try s.childDepth(depth));
             try s.w.int(u64, try s.wireU64(ta.byte_offset, "DataCloneError: TypedArray offset is too large"));
             try s.w.int(u64, if (ta.track_length) 0 else try s.wireU64(ta.length, "DataCloneError: TypedArray length is too large"));
             try s.w.byte(@intFromBool(ta.track_length));
             return;
         }
-        if (o.dataView()) |dv| {
+        if (o.object(s.self).dataView()) |dv| {
             try s.w.tag(.data_view);
             try s.serObject(dv.buffer, try s.childDepth(depth));
             try s.w.int(u64, try s.wireU64(dv.byte_offset, "DataCloneError: DataView offset is too large"));
@@ -512,117 +536,123 @@ const Serializer = struct {
             try s.w.byte(@intFromBool(dv.track_length));
             return;
         }
-        if (o.behavior.is_date) {
+        if (o.object(s.self).behavior.is_date) {
             try s.w.tag(.date);
-            try s.w.num(o.dateMs());
+            try s.w.num(o.object(s.self).dateMs());
             return;
         }
-        if (o.behavior.is_regex) {
+        if (o.object(s.self).behavior.is_regex) {
             try s.w.tag(.regexp);
-            try s.writeStr(o.regexSource());
-            try s.writeStr(o.regexFlags());
+            try s.writeStr(o.object(s.self).regexSource());
+            try s.writeStr(o.object(s.self).regexFlags());
             return;
         }
-        if (o.is_map) {
+        if (o.object(s.self).is_map) {
             try s.w.tag(.map);
             const root_mark = s.self.gc_temp_roots.items.len;
             defer s.self.restoreTempRoots(root_mark);
-            const entries = try s.snapshotMapEntries(o);
+            const entries = try s.snapshotMapEntries(o.object(s.self));
             defer s.w.gpa.free(entries);
             try s.w.int(u32, try s.wireU32(entries.len, "DataCloneError: too many Map entries"));
             if (entries.len == 0) return;
             const child_depth = try s.childDepth(depth);
-            for (entries) |entry| {
-                try s.ser(entry.key, child_depth);
-                try s.ser(entry.val, child_depth);
+            for (entries, 0..) |entry, index| {
+                try s.ser(s.self.tempRoot(root_mark + index * 2, entry.key), child_depth);
+                try s.ser(s.self.tempRoot(root_mark + index * 2 + 1, entry.val), child_depth);
             }
             return;
         }
-        if (o.is_set) {
+        if (o.object(s.self).is_set) {
             try s.w.tag(.set);
             const root_mark = s.self.gc_temp_roots.items.len;
             defer s.self.restoreTempRoots(root_mark);
-            const entries = try s.snapshotSetEntries(o);
+            const entries = try s.snapshotSetEntries(o.object(s.self));
             defer s.w.gpa.free(entries);
             try s.w.int(u32, try s.wireU32(entries.len, "DataCloneError: too many Set entries"));
             if (entries.len == 0) return;
             const child_depth = try s.childDepth(depth);
-            for (entries) |entry| try s.ser(entry, child_depth);
+            for (entries, 0..) |entry, index| try s.ser(s.self.tempRoot(root_mark + index, entry), child_depth);
             return;
         }
-        if (o.behavior.is_error) {
+        if (o.object(s.self).behavior.is_error) {
             try s.w.tag(.error_obj);
-            try s.writeStr(o.errorName());
-            const msg = try s.self.getProperty(Value.obj(o), "message");
-            if (msg.isString()) {
+            try s.writeStr(o.object(s.self).errorName());
+            const msg = try RootedValue.init(s.self, try s.self.getProperty(o.get(s.self), "message"));
+            if (msg.get(s.self).isString()) {
                 try s.w.byte(1);
-                try s.writeValueStr(msg);
+                try s.writeValueStr(msg.get(s.self));
             } else {
                 try s.w.byte(0);
             }
             // HTML structured clone copies an Error's own `cause` when present
             // (an own `cause` of `undefined` still counts as present).
-            if (o.getOwn("cause")) |cause| {
+            if (o.object(s.self).getOwn("cause")) |cause| {
+                const rooted_cause = try RootedValue.init(s.self, cause);
                 try s.w.byte(1);
-                try s.ser(cause, try s.childDepth(depth));
+                try s.ser(rooted_cause.get(s.self), try s.childDepth(depth));
             } else {
                 try s.w.byte(0);
             }
             return;
         }
-        if (o.getOwn("\x00blobbuf")) |bufv| {
+        if (o.object(s.self).getOwn("\x00blobbuf")) |bufv| {
             // Blob/File: copy the byte payload, MIME type, and (File) name/mtime.
-            const is_file = o.getOwn("\x00filename") != null;
+            const buffer = try RootedValue.init(s.self, bufv);
+            const is_file = o.object(s.self).getOwn("\x00filename") != null;
             try s.w.tag(if (is_file) .file else .blob);
-            const bytes: []const u8 = if (bufv.isObject()) (if (bufv.asObj().arrayBuffer()) |ab| ab.bytes() else &.{}) else &.{};
+            const current_buffer = buffer.get(s.self);
+            const bytes: []const u8 = if (current_buffer.isObject()) (if (current_buffer.asObj().arrayBuffer()) |ab| ab.bytes() else &.{}) else &.{};
             try s.writeStr(bytes);
-            const tv = o.getOwn("\x00blobtype");
+            const tv = o.object(s.self).getOwn("\x00blobtype");
             if (tv != null and tv.?.isString())
                 try s.writeValueStr(tv.?)
             else
                 try s.writeStr("");
             if (is_file) {
-                const nv = o.getOwn("\x00filename");
+                const nv = o.object(s.self).getOwn("\x00filename");
                 if (nv != null and nv.?.isString())
                     try s.writeValueStr(nv.?)
                 else
                     try s.writeStr("");
-                const mv = o.getOwn("\x00filemod");
+                const mv = o.object(s.self).getOwn("\x00filemod");
                 try s.w.num(if (mv != null and mv.?.isNumber()) mv.?.asNum() else 0);
             }
             return;
         }
-        if (o.boxedPrimitive()) |p| {
+        if (o.object(s.self).boxedPrimitive()) |p| {
+            const primitive = try RootedValue.init(s.self, p);
             // Boolean/Number/String wrapper: the boxed primitive only.
             try s.w.tag(.wrapper);
-            try s.ser(p, try s.childDepth(depth));
+            try s.ser(primitive.get(s.self), try s.childDepth(depth));
             return;
         }
-        if (o.is_array) {
+        if (o.object(s.self).is_array) {
             try s.w.tag(.array);
             const root_mark = s.self.gc_temp_roots.items.len;
             defer s.self.restoreTempRoots(root_mark);
-            const snap = try s.snapshotArrayElements(o);
+            const snap = try s.snapshotArrayElements(o.object(s.self));
             defer s.w.gpa.free(snap.elements);
             defer s.w.gpa.free(snap.holes);
             try s.w.int(u64, try s.wireU64(snap.logical_len, "DataCloneError: Array length is too large"));
             try s.w.int(u32, try s.wireU32(snap.elements.len, "DataCloneError: too many Array elements"));
-            for (snap.elements, snap.holes) |el, hole| {
+            for (snap.elements, snap.holes, 0..) |el, hole, index| {
                 try s.w.byte(@intFromBool(hole));
-                if (!hole) try s.ser(el, try s.childDepth(depth));
+                if (!hole) try s.ser(s.self.tempRoot(root_mark + index, el), try s.childDepth(depth));
             }
-            try s.serNamedProps(o, true, depth);
+            try s.serNamedProps(o.object(s.self), true, depth);
             return;
         }
         try s.w.tag(.object);
-        try s.serNamedProps(o, false, depth);
+        try s.serNamedProps(o.object(s.self), false, depth);
     }
 
     /// Own enumerable named properties, read through [[Get]] (getters run),
     /// in creation order. For arrays, index-shaped keys are skipped (the
     /// elements were serialized densely already).
-    fn serNamedProps(s: *Serializer, o: *value.Object, skip_indices: bool, depth: u16) HostError!void {
-        var keys_snapshot = try builtins.ownEnumerableKeys(s.self, o);
+    fn serNamedProps(s: *Serializer, input: *value.Object, skip_indices: bool, depth: u16) HostError!void {
+        const o = try RootedValue.init(s.self, Value.obj(input));
+        defer s.self.restoreTempRoots(o.slot);
+        var keys_snapshot = try builtins.ownEnumerableKeys(s.self, o.object(s.self));
         defer keys_snapshot.deinit();
         const keys = keys_snapshot.items;
         var count: u32 = 0;
@@ -637,7 +667,7 @@ const Serializer = struct {
         for (keys) |k| {
             if (skip_indices and isIndexKey(k)) continue;
             try s.writeStr(k);
-            try s.ser(try s.self.getProperty(Value.obj(o), k), child_depth);
+            try s.ser(try s.self.getProperty(o.get(s.self), k), child_depth);
         }
     }
 };
@@ -894,7 +924,7 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         },
         .typed_array => {
             const kind = try r.byte();
-            if (kind > @intFromEnum(value.TAKind.u64)) return error.Malformed;
+            if (kind > @backingInt(value.TAKind.u64)) return error.Malformed;
             try skipSerialized(r, state, try wireChildDepth(depth));
             _ = try wireUsize(try r.int(u64));
             const len = try wireUsize(try r.int(u64));
@@ -980,11 +1010,18 @@ fn skipNamed(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
 
 const Deserializer = struct {
     self: *Interpreter,
+    scratch: std.mem.Allocator,
     r: Reader,
     /// Objects in creation order — mirrors the serializer's id numbering.
-    objs: std.ArrayListUnmanaged(*value.Object) = .empty,
+    objs: std.ArrayListUnmanaged(RootedValue) = .empty,
     frame: Frame,
     next_shared: u32 = 0,
+
+    fn rememberObject(d: *Deserializer, object: *value.Object) HostError!RootedValue {
+        const root = try RootedValue.init(d.self, Value.obj(object));
+        try d.objs.append(d.scratch, root);
+        return root;
+    }
 
     fn fail(d: *Deserializer) HostError {
         return d.self.throwError("TypeError", "structured clone: malformed payload");
@@ -1018,24 +1055,22 @@ const Deserializer = struct {
             .null_v => return Value.nul(),
             .bool_v => return Value.boolVal(try d.readFlag()),
             .number => return Value.num(d.r.num() catch return d.fail()),
-            .string => return try Value.strOwned(a, try a.dupe(u8, d.r.str() catch return d.fail())),
+            .string => return try Value.strAlloc(a, d.r.str() catch return d.fail()),
             .bigint => return d.self.makeBigInt(d.r.int(i128) catch return d.fail()),
             .bigint_text => return d.self.makeBigIntText(try a.dupe(u8, d.r.str() catch return d.fail())),
             .ref => {
                 const id = d.r.int(u32) catch return d.fail();
                 const object_index = std.math.cast(usize, id) orelse return d.fail();
                 if (object_index >= d.objs.items.len) return d.fail();
-                return Value.obj(d.objs.items[object_index]);
+                return d.objs.items[object_index].get(d.self);
             },
             .object => {
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
                 try d.deserNamedProps(o, depth);
-                return Value.obj(o);
+                return o.get(d.self);
             },
             .array => {
-                const arr = (try d.self.newArray()).asObj();
-                try d.objs.append(a, arr);
+                const arr = try d.rememberObject((try d.self.newArray()).asObj());
                 const len = try d.readUsize();
                 if (len > 4294967295) return d.fail();
                 const n = std.math.cast(usize, d.r.int(u32) catch return d.fail()) orelse return d.fail();
@@ -1043,120 +1078,122 @@ const Deserializer = struct {
                 while (i < n) : (i += 1) {
                     const hole = try d.readFlag();
                     if (hole) {
-                        try arr.appendElement(a, Value.undef());
-                        try arr.markHole(a, i);
+                        try arr.object(d.self).appendElement(a, Value.undef());
+                        try arr.object(d.self).markHole(a, i);
                     } else {
-                        try arr.appendElement(a, try d.deser(try d.childDepth(depth)));
+                        const element = try RootedValue.init(d.self, try d.deser(try d.childDepth(depth)));
+                        try arr.object(d.self).appendElement(a, element.get(d.self));
                     }
                 }
-                try arr.extendArrayLengthFloor(a, len);
+                try arr.object(d.self).extendArrayLengthFloor(a, len);
                 try d.deserNamedProps(arr, depth);
-                return Value.obj(arr);
+                return arr.get(d.self);
             },
             .date => {
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                o.behavior.is_date = true;
-                try o.initDateMs(a, d.r.num() catch return d.fail());
-                if (d.protoFor("Date")) |p| o.proto = p;
-                return Value.obj(o);
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                o.object(d.self).behavior.is_date = true;
+                try o.object(d.self).initDateMs(a, d.r.num() catch return d.fail());
+                if (d.protoFor("Date")) |p| o.object(d.self).proto = p;
+                return o.get(d.self);
             },
             .regexp => {
-                const src = try a.dupe(u8, d.r.str() catch return d.fail());
-                const flags = try a.dupe(u8, d.r.str() catch return d.fail());
+                const src = d.r.str() catch return d.fail();
+                const flags = d.r.str() catch return d.fail();
                 // Rebuild through the realm's RegExp constructor so the
                 // compiled program and lastIndex slot are consistent.
                 const ctor = d.self.env.get("RegExp") orelse return d.fail();
                 if (!ctor.isObject()) return d.fail();
-                const re = try d.self.construct(ctor, &.{ try Value.strOwned(a, src), try Value.strOwned(a, flags) });
+                const constructor = try RootedValue.init(d.self, ctor);
+                const source_value = try RootedValue.init(d.self, try Value.strAlloc(a, src));
+                const flags_value = try RootedValue.init(d.self, try Value.strAlloc(a, flags));
+                const re = try d.self.construct(constructor.get(d.self), &.{ source_value.get(d.self), flags_value.get(d.self) });
                 if (!re.isObject()) return d.fail();
-                try d.objs.append(a, re.asObj());
-                return re;
+                const root = try d.rememberObject(re.asObj());
+                return root.get(d.self);
             },
             .blob, .file => {
-                const bytes = try a.dupe(u8, d.r.str() catch return d.fail());
-                const blob_type = try a.dupe(u8, d.r.str() catch return d.fail());
+                const bytes = d.r.str() catch return d.fail();
+                const blob_type = d.r.str() catch return d.fail();
                 var name: []const u8 = "";
                 var last_mod: f64 = 0;
                 if (t == .file) {
-                    name = try a.dupe(u8, d.r.str() catch return d.fail());
+                    name = d.r.str() catch return d.fail();
                     last_mod = d.r.num() catch return d.fail();
                 }
                 const blob = try d.self.makeClonedBlob(t == .file, bytes, blob_type, name, last_mod);
                 if (!blob.isObject()) return d.fail();
-                try d.objs.append(a, blob.asObj());
-                return blob;
+                const root = try d.rememberObject(blob.asObj());
+                return root.get(d.self);
             },
             .map => {
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                o.is_map = true;
-                if (d.protoFor("Map")) |p| o.proto = p;
-                try d.self.prepareStrongCollection(o);
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                o.object(d.self).is_map = true;
+                if (d.protoFor("Map")) |p| o.object(d.self).proto = p;
+                try d.self.prepareStrongCollection(o.object(d.self));
                 const n = d.r.int(u32) catch return d.fail();
                 const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
                 while (i < n) : (i += 1) {
-                    const k = try d.deser(child_depth);
+                    const k = try RootedValue.init(d.self, try d.deser(child_depth));
                     const v = try d.deser(child_depth);
-                    try d.self.nativeMapSet(o, k, v);
+                    try d.self.nativeMapSet(o.object(d.self), k.get(d.self), v);
                 }
-                return Value.obj(o);
+                return o.get(d.self);
             },
             .set => {
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                o.is_set = true;
-                if (d.protoFor("Set")) |p| o.proto = p;
-                try d.self.prepareStrongCollection(o);
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                o.object(d.self).is_set = true;
+                if (d.protoFor("Set")) |p| o.object(d.self).proto = p;
+                try d.self.prepareStrongCollection(o.object(d.self));
                 const n = d.r.int(u32) catch return d.fail();
                 const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
-                while (i < n) : (i += 1) try d.self.nativeSetAdd(o, try d.deser(child_depth));
-                return Value.obj(o);
+                while (i < n) : (i += 1) {
+                    const entry = try d.deser(child_depth);
+                    try d.self.nativeSetAdd(o.object(d.self), entry);
+                }
+                return o.get(d.self);
             },
             .error_obj => {
                 const name = try a.dupe(u8, d.r.str() catch return d.fail());
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                o.behavior.is_error = true;
-                try o.setErrorName(a, name);
-                o.proto = d.protoFor(name) orelse d.protoFor("Error");
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                o.object(d.self).behavior.is_error = true;
+                try o.object(d.self).setErrorName(a, name);
+                const prototype = d.protoFor(name) orelse d.protoFor("Error");
+                o.object(d.self).proto = prototype;
                 if (try d.readFlag()) {
-                    const msg = try a.dupe(u8, d.r.str() catch return d.fail());
-                    try o.setOwn(a, d.self.root_shape, "message", try Value.strOwned(a, msg));
-                    try o.setAttr(a, "message", .{ .writable = true, .enumerable = false, .configurable = true });
+                    const msg = try RootedValue.init(d.self, try Value.strAlloc(a, d.r.str() catch return d.fail()));
+                    try o.object(d.self).setOwn(a, d.self.root_shape, "message", msg.get(d.self));
+                    try o.object(d.self).setAttr(a, "message", .{ .writable = true, .enumerable = false, .configurable = true });
                 }
                 if (try d.readFlag()) {
                     const cause = try d.deser(try d.childDepth(depth));
-                    try o.setOwn(a, d.self.root_shape, "cause", cause);
-                    try o.setAttr(a, "cause", .{ .writable = true, .enumerable = false, .configurable = true });
+                    try o.object(d.self).setOwn(a, d.self.root_shape, "cause", cause);
+                    try o.object(d.self).setAttr(a, "cause", .{ .writable = true, .enumerable = false, .configurable = true });
                 }
-                return Value.obj(o);
+                return o.get(d.self);
             },
             .wrapper => {
-                const p = try d.deser(try d.childDepth(depth));
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                try o.setBoxedPrimitive(a, p);
-                const ctor_name: []const u8 = switch (p.kind()) {
+                const p = try RootedValue.init(d.self, try d.deser(try d.childDepth(depth)));
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                try o.object(d.self).setBoxedPrimitive(a, p.get(d.self));
+                const ctor_name: []const u8 = switch (p.get(d.self).kind()) {
                     .number => "Number",
                     .string => "String",
                     .boolean => "Boolean",
                     else => return d.fail(),
                 };
-                if (d.protoFor(ctor_name)) |pr| o.proto = pr;
-                return Value.obj(o);
+                if (d.protoFor(ctor_name)) |pr| o.object(d.self).proto = pr;
+                return o.get(d.self);
             },
             .array_buffer => {
                 const max_raw = d.r.int(u64) catch return d.fail();
                 const bytes = d.r.str() catch return d.fail();
-                const o = try d.self.makeArrayBuffer(bytes.len);
-                try d.objs.append(a, o);
-                @memcpy(o.arrayBuffer().?.bytes()[0..bytes.len], bytes);
+                const o = try d.rememberObject(try d.self.makeArrayBuffer(bytes.len));
+                @memcpy(o.object(d.self).arrayBuffer().?.bytes()[0..bytes.len], bytes);
                 if (max_raw != std.math.maxInt(u64))
-                    o.arrayBuffer().?.max_byte_length = std.math.cast(usize, max_raw) orelse return d.fail();
-                return Value.obj(o);
+                    o.object(d.self).arrayBuffer().?.max_byte_length = std.math.cast(usize, max_raw) orelse return d.fail();
+                return o.get(d.self);
             },
             .shared_array_buffer => {
                 const index = d.r.int(u32) catch return d.fail();
@@ -1169,8 +1206,8 @@ const Deserializer = struct {
                 const storage = consumeSharedRefToken(token) orelse return d.fail();
                 // The consumed reference transfers to the wrapper. The wrapper
                 // constructor owns failure cleanup as part of that contract.
-                const o = try interpreter.makeSharedArrayBufferWrapper(d.self, storage);
-                const ab = o.arrayBuffer().?;
+                const o = try d.rememberObject(try interpreter.makeSharedArrayBufferWrapper(d.self, storage));
+                const ab = o.object(d.self).arrayBuffer().?;
                 if (fixed_raw != std.math.maxInt(u64)) {
                     const fixed = std.math.cast(usize, fixed_raw) orelse return d.fail();
                     if (fixed > storage.len() or max_raw != std.math.maxInt(u64)) return d.fail();
@@ -1183,22 +1220,20 @@ const Deserializer = struct {
                     if (max != storage.capacity or !storage.growable) return d.fail();
                     ab.max_byte_length = max;
                 }
-                try d.objs.append(a, o);
-                return Value.obj(o);
+                return o.get(d.self);
             },
             .typed_array => {
                 const kind_b = d.r.byte() catch return d.fail();
-                if (kind_b > @intFromEnum(value.TAKind.u64)) return d.fail();
-                const kind: value.TAKind = @enumFromInt(kind_b);
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                const buf = try d.deser(try d.childDepth(depth));
-                if (!buf.isObject() or buf.asObj().arrayBuffer() == null) return d.fail();
+                if (kind_b > @backingInt(value.TAKind.u64)) return d.fail();
+                const kind: value.TAKind = @fromBackingInt(@intCast(kind_b));
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                const buf = try RootedValue.init(d.self, try d.deser(try d.childDepth(depth)));
+                if (!buf.get(d.self).isObject() or buf.object(d.self).arrayBuffer() == null) return d.fail();
                 const byte_offset = try d.readUsize();
                 const length = try d.readUsize();
                 const track_length = try d.readFlag();
                 const element_size = kind.byteSize();
-                const ab = buf.asObj().arrayBuffer().?;
+                const ab = buf.object(d.self).arrayBuffer().?;
                 ab.lockBuffer();
                 const buffer_len = ab.bytes().len;
                 const resizable = ab.max_byte_length != null;
@@ -1210,27 +1245,26 @@ const Deserializer = struct {
                     const byte_length = std.math.mul(usize, length, element_size) catch return d.fail();
                     if (byte_length > buffer_len - byte_offset) return d.fail();
                 }
-                const ta = try (try o.typedArrayAllocator(a)).create(value.TypedArrayData);
+                const ta = try (try o.object(d.self).typedArrayAllocator(a)).create(value.TypedArrayData);
                 ta.* = .{
-                    .buffer = buf.asObj(),
+                    .buffer = buf.object(d.self),
                     .byte_offset = byte_offset,
                     .length = length,
                     .kind = kind,
                     .track_length = track_length,
                 };
-                try o.setTypedArray(a, ta);
-                if (d.protoFor(kind.ctorName())) |p| o.proto = p;
-                return Value.obj(o);
+                try o.object(d.self).setTypedArray(a, ta);
+                if (d.protoFor(kind.ctorName())) |p| o.object(d.self).proto = p;
+                return o.get(d.self);
             },
             .data_view => {
-                const o = (try d.self.newObject()).asObj();
-                try d.objs.append(a, o);
-                const buf = try d.deser(try d.childDepth(depth));
-                if (!buf.isObject() or buf.asObj().arrayBuffer() == null) return d.fail();
+                const o = try d.rememberObject((try d.self.newObject()).asObj());
+                const buf = try RootedValue.init(d.self, try d.deser(try d.childDepth(depth)));
+                if (!buf.get(d.self).isObject() or buf.object(d.self).arrayBuffer() == null) return d.fail();
                 const byte_offset = try d.readUsize();
                 const byte_length = try d.readUsize();
                 const track_length = try d.readFlag();
-                const ab = buf.asObj().arrayBuffer().?;
+                const ab = buf.object(d.self).arrayBuffer().?;
                 ab.lockBuffer();
                 const buffer_len = ab.bytes().len;
                 const resizable = ab.max_byte_length != null;
@@ -1239,30 +1273,31 @@ const Deserializer = struct {
                 if (track_length) {
                     if (!resizable or byte_length != 0) return d.fail();
                 } else if (byte_length > buffer_len - byte_offset) return d.fail();
-                const dv = try (try o.dataViewAllocator(a)).create(value.DataViewData);
+                const dv = try (try o.object(d.self).dataViewAllocator(a)).create(value.DataViewData);
                 dv.* = .{
-                    .buffer = buf.asObj(),
+                    .buffer = buf.object(d.self),
                     .byte_offset = byte_offset,
                     .byte_length = byte_length,
                     .track_length = track_length,
                 };
-                try o.setDataView(a, dv);
-                if (d.protoFor("DataView")) |p| o.proto = p;
-                return Value.obj(o);
+                try o.object(d.self).setDataView(a, dv);
+                if (d.protoFor("DataView")) |p| o.object(d.self).proto = p;
+                return o.get(d.self);
             },
         }
     }
 
-    fn deserNamedProps(d: *Deserializer, o: *value.Object, depth: u16) HostError!void {
-        const a = d.self.arena;
+    fn deserNamedProps(d: *Deserializer, o: RootedValue, depth: u16) HostError!void {
         const n = d.r.int(u32) catch return d.fail();
         if (n == 0) return;
         const child_depth = try d.childDepth(depth);
         var i: u32 = 0;
         while (i < n) : (i += 1) {
-            const k = try a.dupe(u8, d.r.str() catch return d.fail());
-            const v = try d.deser(child_depth);
-            try d.self.setProp(o, k, v);
+            // Shape transitions copy new names into their owned key storage;
+            // existing transitions retain their original owned name.
+            const k = d.r.str() catch return d.fail();
+            const v = try RootedValue.init(d.self, try d.deser(child_depth));
+            try d.self.setProp(o.object(d.self), k, v.get(d.self));
         }
     }
 };
@@ -1293,7 +1328,11 @@ pub fn deserialize(self: *Interpreter, bytes: []const u8) HostError!Value {
         releaseSerialized(bytes);
         return self.throwError("TypeError", "structured clone: malformed payload");
     }
-    var d = Deserializer{ .self = self, .r = .{ .bytes = frame.payload }, .frame = frame };
+    const scratch = self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena);
+    const root_mark = self.gc_temp_roots.items.len;
+    defer self.restoreTempRoots(root_mark);
+    var d = Deserializer{ .self = self, .scratch = scratch, .r = .{ .bytes = frame.payload }, .frame = frame };
+    defer d.objs.deinit(scratch);
     return d.deser(0) catch |err| {
         // Tokens already consumed by wrappers are absent from the registry;
         // manifest cleanup is idempotent and releases every later token.
@@ -1465,10 +1504,10 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
     defer storage.release();
     const token = try registerSharedRefToken(storage);
 
-    const undef_frame = try encodeFrame(std.testing.allocator, &.{}, &.{@intFromEnum(Tag.undef)});
+    const undef_frame = try encodeFrame(std.testing.allocator, &.{}, &.{@backingInt(Tag.undef)});
     defer std.testing.allocator.free(undef_frame);
     var sab_payload: [shared_array_buffer_wire_len]u8 = undefined;
-    sab_payload[0] = @intFromEnum(Tag.shared_array_buffer);
+    sab_payload[0] = @backingInt(Tag.shared_array_buffer);
     std.mem.writeInt(u32, sab_payload[1..][0..@sizeOf(u32)], 0, .little);
     @memset(sab_payload[1 + @sizeOf(u32) ..], 0xff);
     const sab_frame = try encodeFrame(std.testing.allocator, &.{token}, &sab_payload);
@@ -1486,11 +1525,11 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
     const held = consumeSharedRefToken(already_consumed) orelse return error.TestUnexpectedResult;
     held.release();
     var pair_payload: [2 * shared_array_buffer_wire_len]u8 = undefined;
-    pair_payload[0] = @intFromEnum(Tag.shared_array_buffer);
+    pair_payload[0] = @backingInt(Tag.shared_array_buffer);
     std.mem.writeInt(u32, pair_payload[1..][0..@sizeOf(u32)], 0, .little);
     @memset(pair_payload[1 + @sizeOf(u32) .. shared_array_buffer_wire_len], 0xff);
     const second_tag = shared_array_buffer_wire_len;
-    pair_payload[second_tag] = @intFromEnum(Tag.shared_array_buffer);
+    pair_payload[second_tag] = @backingInt(Tag.shared_array_buffer);
     std.mem.writeInt(u32, pair_payload[second_tag + 1 ..][0..@sizeOf(u32)], 1, .little);
     @memset(pair_payload[second_tag + 1 + @sizeOf(u32) ..], 0xff);
     const pair = try encodeFrame(std.testing.allocator, &.{ already_consumed, still_live }, &pair_payload);
@@ -1500,7 +1539,7 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
 
     const truncated_token = try registerSharedRefToken(storage);
     const truncated = try encodeFrame(std.testing.allocator, &.{truncated_token}, &.{
-        @intFromEnum(Tag.shared_array_buffer), 0, 0, 0, 0,
+        @backingInt(Tag.shared_array_buffer), 0, 0, 0, 0,
     });
     defer std.testing.allocator.free(truncated);
     releaseSerialized(truncated[0 .. truncated.len - 1]);
@@ -1511,8 +1550,8 @@ test "structured clone wire depth is bounded and rejected manifests clean up" {
     const allowed_wrappers: usize = max_nesting_depth;
     const allowed_payload = try std.testing.allocator.alloc(u8, allowed_wrappers + 1);
     defer std.testing.allocator.free(allowed_payload);
-    @memset(allowed_payload[0..allowed_wrappers], @intFromEnum(Tag.wrapper));
-    allowed_payload[allowed_wrappers] = @intFromEnum(Tag.undef);
+    @memset(allowed_payload[0..allowed_wrappers], @backingInt(Tag.wrapper));
+    allowed_payload[allowed_wrappers] = @backingInt(Tag.undef);
     const allowed_frame_bytes = try encodeFrame(std.testing.allocator, &.{}, allowed_payload);
     defer std.testing.allocator.free(allowed_frame_bytes);
     const allowed_frame = try readFrame(allowed_frame_bytes);
@@ -1528,8 +1567,8 @@ test "structured clone wire depth is bounded and rejected manifests clean up" {
     const rejected_wrappers = allowed_wrappers + 1;
     const rejected_payload = try std.testing.allocator.alloc(u8, rejected_wrappers + shared_array_buffer_wire_len);
     defer std.testing.allocator.free(rejected_payload);
-    @memset(rejected_payload[0..rejected_wrappers], @intFromEnum(Tag.wrapper));
-    rejected_payload[rejected_wrappers] = @intFromEnum(Tag.shared_array_buffer);
+    @memset(rejected_payload[0..rejected_wrappers], @backingInt(Tag.wrapper));
+    rejected_payload[rejected_wrappers] = @backingInt(Tag.shared_array_buffer);
     std.mem.writeInt(u32, rejected_payload[rejected_wrappers + 1 ..][0..@sizeOf(u32)], 0, .little);
     @memset(rejected_payload[rejected_wrappers + 1 + @sizeOf(u32) ..], 0xff);
     const rejected_frame_bytes = try encodeFrame(std.testing.allocator, &.{token}, rejected_payload);
@@ -1556,31 +1595,31 @@ test "structured clone wire rejects impossible counts and noncanonical fields" {
 
     var collection: [1 + @sizeOf(u32)]u8 = undefined;
     inline for (.{ Tag.map, Tag.set, Tag.object }) |tag| {
-        collection[0] = @intFromEnum(tag);
+        collection[0] = @backingInt(tag);
         std.mem.writeInt(u32, collection[1..][0..@sizeOf(u32)], std.math.maxInt(u32), .little);
         try Check.malformed(&collection);
     }
 
     var string: [1 + @sizeOf(u32)]u8 = undefined;
-    string[0] = @intFromEnum(Tag.string);
+    string[0] = @backingInt(Tag.string);
     std.mem.writeInt(u32, string[1..][0..@sizeOf(u32)], std.math.maxInt(u32), .little);
     try Check.malformed(&string);
 
     var array: [1 + @sizeOf(u64) + @sizeOf(u32)]u8 = undefined;
-    array[0] = @intFromEnum(Tag.array);
+    array[0] = @backingInt(Tag.array);
     std.mem.writeInt(u64, array[1..][0..@sizeOf(u64)], std.math.maxInt(u64), .little);
     std.mem.writeInt(u32, array[1 + @sizeOf(u64) ..][0..@sizeOf(u32)], std.math.maxInt(u32), .little);
     try Check.malformed(&array);
 
     var short_array: [1 + @sizeOf(u64) + @sizeOf(u32) + 1]u8 = undefined;
-    short_array[0] = @intFromEnum(Tag.array);
+    short_array[0] = @backingInt(Tag.array);
     std.mem.writeInt(u64, short_array[1..][0..@sizeOf(u64)], 0, .little);
     std.mem.writeInt(u32, short_array[1 + @sizeOf(u64) ..][0..@sizeOf(u32)], 1, .little);
     short_array[short_array.len - 1] = 1;
     try Check.malformed(&short_array);
 
-    try Check.malformed(&.{ @intFromEnum(Tag.bool_v), 2 });
-    try Check.malformed(&.{ @intFromEnum(Tag.error_obj), 0, 0, 0, 0, 2 });
-    try Check.malformed(&.{ @intFromEnum(Tag.typed_array), std.math.maxInt(u8) });
-    try Check.malformed(&.{ @intFromEnum(Tag.ref), 0, 0, 0, 0 });
+    try Check.malformed(&.{ @backingInt(Tag.bool_v), 2 });
+    try Check.malformed(&.{ @backingInt(Tag.error_obj), 0, 0, 0, 0, 2 });
+    try Check.malformed(&.{ @backingInt(Tag.typed_array), std.math.maxInt(u8) });
+    try Check.malformed(&.{ @backingInt(Tag.ref), 0, 0, 0, 0 });
 }

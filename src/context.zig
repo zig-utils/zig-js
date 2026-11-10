@@ -23919,6 +23919,37 @@ test "Atomics.waitAsync reserves async waiter capacity chunks" {
     try std.testing.expect(ctx.async_waiters.capacity > first_capacity);
 }
 
+test "structuredClone scratch: retained callbacks reclaim operation buffers" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const callback = try ctx.evaluateProtected(
+        \\(function () {
+        \\  const input = {payload: []};
+        \\  for (let index = 0; index < 256; ++index) input.payload.push(index);
+        \\  return function () {
+        \\    const copy = structuredClone(input);
+        \\    if (copy === input || copy.payload === input.payload || copy.payload.length !== 256)
+        \\      throw new Error("clone identity or length differs");
+        \\    for (let index = 0; index < 256; ++index)
+        \\      if (copy.payload[index] !== index || input.payload[index] !== index)
+        \\        throw new Error("clone changed retained values");
+        \\    return 4;
+        \\  };
+        \\})()
+    );
+    defer std.debug.assert(ctx.unprotectValue(callback));
+    // The same retained input and callback isolate clone storage ownership.
+    // Automatic collection alone must keep invocation-local buffers bounded.
+    for (0..1000) |_| {
+        const result = try ctx.callProtected(callback, null, &.{});
+        defer std.debug.assert(ctx.unprotectValue(result));
+        try std.testing.expectEqual(@as(f64, 4), result.get().asNum());
+    }
+}
+
 test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

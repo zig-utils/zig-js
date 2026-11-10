@@ -39006,12 +39006,19 @@ fn queueMicrotaskFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const v = arg0(args);
+    const argument_roots = try self.pushTempRootSlice(args);
+    defer self.restoreTempRoots(argument_roots);
+    // This consumer finishes with its wire bytes before returning. Worker and
+    // embedding callers keep their explicit, independently owned wire buffers.
+    var operation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer operation_arena.deinit();
+    const operation_allocator = operation_arena.allocator();
     // Collect + validate the transfer list before serializing.
-    var transfer: std.ArrayListUnmanaged(*value.Object) = .empty;
-    if (args.len > 1 and !args[1].isUndefined() and !args[1].isNull()) {
-        if (!args[1].isObject()) return self.throwError("TypeError", "structuredClone options must be an object");
-        const tv = try self.getProperty(args[1], "transfer");
+    var transfer: std.ArrayListUnmanaged(struct { slot: usize, fallback: Value }) = .empty;
+    const options = if (args.len > 1) self.tempRoot(argument_roots + 1, args[1]) else Value.undef();
+    if (!options.isUndefined() and !options.isNull()) {
+        if (!options.isObject()) return self.throwError("TypeError", "structuredClone options must be an object");
+        const tv = try self.getProperty(options, "transfer");
         if (!tv.isUndefined() and !tv.isNull()) {
             if (!tv.isObject() or !tv.asObj().is_array)
                 return self.throwError("TypeError", "structuredClone transfer must be an array");
@@ -39019,7 +39026,10 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
             // ordinary JS input, so a shared-realm sibling thread may mutate its
             // element storage while this builtin runs; validation itself must
             // not borrow `elements.items` directly.
-            for (try tv.asObj().internalElementsSnapshot(self.arena)) |entry| {
+            const snapshot = try tv.asObj().internalElementsSnapshot(operation_allocator);
+            const transfer_roots = try self.pushTempRootSlice(snapshot);
+            for (snapshot, 0..) |fallback, index| {
+                const entry = self.tempRoot(transfer_roots + index, fallback);
                 if (!entry.isObject() or entry.asObj().arrayBuffer() == null)
                     return self.throwDOMException("DataCloneError", "only ArrayBuffers are transferable");
                 const ab = entry.asObj().arrayBuffer().?;
@@ -39027,17 +39037,18 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
                 if (ab.isDetached()) return self.throwDOMException("DataCloneError", "cannot transfer a detached ArrayBuffer");
                 if (ab.immutable) return self.throwDOMException("DataCloneError", "cannot transfer an immutable ArrayBuffer");
                 if (ab.is_wasm_memory) return self.throwDOMException("DataCloneError", "cannot transfer a WebAssembly.Memory buffer");
-                for (transfer.items) |seen| if (seen == entry.asObj())
+                for (transfer.items) |seen| if (self.tempRoot(seen.slot, seen.fallback).asObj() == entry.asObj())
                     return self.throwDOMException("DataCloneError", "duplicate transferable");
-                try transfer.append(self.arena, entry.asObj());
+                try transfer.append(operation_allocator, .{ .slot = transfer_roots + index, .fallback = fallback });
             }
         }
     }
-    const bytes = try structured_clone.serialize(self, self.arena, v);
+    const bytes = try structured_clone.serialize(self, operation_allocator, if (args.len > 0) self.tempRoot(argument_roots, args[0]) else Value.undef());
+    defer structured_clone.releaseSerialized(bytes);
     // The move: the clone owns a copy of the bytes; the sources detach now
     // (after a fully successful serialize, so a DataCloneError mid-graph
     // leaves the inputs untouched).
-    for (transfer.items) |o| o.arrayBuffer().?.setDetached(true);
+    for (transfer.items) |entry| self.tempRoot(entry.slot, entry.fallback).asObj().arrayBuffer().?.setDetached(true);
     return structured_clone.deserialize(self, bytes);
 }
 
