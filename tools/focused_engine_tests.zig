@@ -16,6 +16,7 @@ const Case = struct {
     expected: f64,
     enable_gc: bool = false,
     required_bytecode: bool = false,
+    tree_walker: bool = false,
     jit_differential: bool = false,
 };
 
@@ -25,6 +26,18 @@ const ErrorCase = struct {
 };
 
 const frontend_cases = [_]Case{
+    .{
+        .name = "URL receiver brands tree semantics",
+        .tree_walker = true,
+        .source = "(function(){\n" ++ @embedFile("url_receiver_probe.js") ++ "\n})()",
+        .expected = 296,
+    },
+    .{
+        .name = "URL receiver brands generator semantics",
+        .source = "(function*(){\n" ++ @embedFile("url_receiver_probe.js") ++ "\n})().next().value",
+        .expected = 296,
+        .required_bytecode = true,
+    },
     .{
         .name = "literal assertion NFA tree semantics",
         .source =
@@ -3425,6 +3438,7 @@ fn evaluateNumber(gpa: std.mem.Allocator, case: Case, enable_jit: bool, enable_t
     });
     defer ctx.destroy();
     if (case.required_bytecode) ctx.setBytecodeExecutionModeForTesting(.required);
+    if (case.tree_walker) ctx.setBytecodeExecutionModeForTesting(.tree_walker);
     const result = ctx.evaluate(case.source) catch |err| {
         std.debug.print("focused engine test '{s}' threw {s}\n", .{ case.name, @errorName(err) });
         return error.FocusedTestFailed;

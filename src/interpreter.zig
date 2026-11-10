@@ -52364,6 +52364,12 @@ fn urlOrigin(arena: std.mem.Allocator, p: UrlParts) EvalError![]const u8 {
     return out.items;
 }
 
+// Web IDL §3.7.6/§3.7.7: receivers must implement the URL interface before
+// attribute conversion or operation steps. A private
+// brand cannot be forged by copying the URL component properties or prototype.
+// The existing private-brand metadata is guarded by Object.property_lock.
+const url_receiver_brand = "\x00BuiltinURLReceiver";
+
 fn urlSlot(o: *value.Object, key: []const u8) ?[]const u8 {
     if (o.getOwn(key)) |v| if (v.isString()) return v.asStr();
     return null;
@@ -52417,6 +52423,7 @@ fn urlConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (self.env.get("URL")) |c| if (c.isObject()) {
         if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
     };
+    try obj.addPrivateBrand(self.arena, url_receiver_brand);
     try urlStore(self, obj, parts);
     // Build a (snapshot) URLSearchParams over the query.
     if (self.env.get("URLSearchParams")) |uspc| if (uspc.isObject()) {
@@ -52440,6 +52447,7 @@ pub fn urlCreateDomUrlObject(self: *Interpreter, input: []const u8) EvalError!Va
     if (self.env.get("URL")) |c| if (c.isObject()) {
         if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
     };
+    try obj.addPrivateBrand(self.arena, url_receiver_brand);
     try urlStore(self, obj, parts);
     if (self.env.get("URLSearchParams")) |uspc| if (uspc.isObject()) {
         const sp = try self.construct(uspc, &.{if (parts.query) |q| try Value.strAlloc(self.arena, q) else Value.str("")});
@@ -52453,7 +52461,8 @@ fn urlGetter(comptime which: []const u8) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject()) return self.throwError("TypeError", "URL getter on non-object");
+            if (!this.isObject() or !this.asObj().hasPrivateBrand(url_receiver_brand))
+                return self.throwError("TypeError", "URL getter requires a URL receiver");
             const o = this.asObj();
             const p = urlLoad(o);
             if (std.mem.eql(u8, which, "searchParams")) return o.getOwn("\x00Usp") orelse Value.undef();
@@ -52483,7 +52492,8 @@ fn urlGetter(comptime which: []const u8) value.NativeFn {
 }
 fn urlHashSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return Value.undef();
+    if (!this.isObject() or !this.asObj().hasPrivateBrand(url_receiver_brand))
+        return self.throwError("TypeError", "URL setter requires a URL receiver");
     var p = urlLoad(this.asObj());
     var v = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     if (v.len > 0 and v[0] == '#') v = v[1..];
@@ -52500,7 +52510,8 @@ fn urlHashSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 fn urlToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "URL.toString on non-object");
+    if (!this.isObject() or !this.asObj().hasPrivateBrand(url_receiver_brand))
+        return self.throwError("TypeError", "URL.toString requires a URL receiver");
     return try Value.strAlloc(self.arena, try urlSerialize(self.arena, urlLoad(this.asObj()), false));
 }
 /// Re-seed the URL's live `.searchParams` pairs from a new query string (identity
@@ -52518,7 +52529,8 @@ fn urlSetter(comptime which: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject()) return Value.undef();
+            if (!this.isObject() or !this.asObj().hasPrivateBrand(url_receiver_brand))
+                return self.throwError("TypeError", "URL setter requires a URL receiver");
             const o = this.asObj();
             var p = urlLoad(o);
             const val = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
