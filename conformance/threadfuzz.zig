@@ -12570,6 +12570,9 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         return false;
     }
 
+    // gc() requests the next checkpoint. Queue it after the final live batch,
+    // before its existing non-allocating spin and peer release; a request after
+    // the spin can leave only a quiescent follow-up collection.
     const midgc_pressure_src: []const u8 = if (midgc)
         try std.fmt.allocPrint(
             gpa,
@@ -12585,11 +12588,11 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\          text: 'midgc-worker-tls-asynchold-' + round + '-' + i,
             \\        }});
             \\      }}
+            \\      if (round + 1 === {d} && typeof gc === 'function') gc();
             \\      let spin = 0;
             \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
             \\      if (spin < 0) keep.push({{ impossible: true }});
             \\    }}
-            \\    if (typeof gc === 'function') gc();
             \\    const beforeWaiterReject = globalThis.__workerTlsAsyncHoldRejectCount;
             \\    if (beforeWaiterReject !== 0)
             \\      throw new Error('worker terminate/ThreadLocal asyncHold waiters settled before midgc release: ' + beforeWaiterReject);
@@ -12628,7 +12631,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\  }}
             \\
         ,
-            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_spin_iters, waiter_reject_spin_limit, ntls_threads, waiter_reject_spin_limit },
+            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_rounds, gc_spin_iters, waiter_reject_spin_limit, ntls_threads, waiter_reject_spin_limit },
         )
     else
         "";
