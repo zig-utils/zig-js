@@ -27,6 +27,18 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "atomic assertion tail tree semantics",
+        .tree_walker = true,
+        .source = "(function(){\n" ++ @embedFile("regexp_atomic_assertion_probe.js") ++ "\n})()",
+        .expected = 152,
+    },
+    .{
+        .name = "atomic assertion tail generator semantics",
+        .source = "(function*(){\n" ++ @embedFile("regexp_atomic_assertion_probe.js") ++ "\n})().next().value",
+        .expected = 152,
+        .required_bytecode = true,
+    },
+    .{
         .name = "single-entry Svelte regex tree semantics",
         .tree_walker = true,
         .source = "(function(){\n" ++ @embedFile("regexp_single_entry_probe.js") ++ "\n})()",
