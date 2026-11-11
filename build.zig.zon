@@ -6,8 +6,8 @@
     .dependencies = .{
         // Homegrown regex engine, reused to back JS RegExp (pantry: zig-regex).
         .zig_regex = .{
-            .url = "https://codeload.github.com/zig-utils/zig-regex/tar.gz/732424d1c38197501d9e64c5d4c1dbe7d1a97742",
-            .hash = "zig_regex-0.2.1-omky0cHKGwBbh2FCJcgVBCKWHwrfqw4AFk8smB6Qj03k",
+            .url = "https://codeload.github.com/zig-utils/zig-regex/tar.gz/8894d4432edefed00de38f82b1901f3179128688",
+            .hash = "zig_regex-0.2.1-omky0VYBHABmcjimyKmrLL4IwrVs3COmlNptgdP3WV95",
         },
         // Precise tracing GC to unblock Phase 7 (issue #1); see
         // docs/threads/P7-gc-design.md. Opt-in contexts route heap cells

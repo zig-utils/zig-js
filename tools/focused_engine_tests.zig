@@ -27,6 +27,18 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "single-entry Svelte regex tree semantics",
+        .tree_walker = true,
+        .source = "(function(){\n" ++ @embedFile("regexp_single_entry_probe.js") ++ "\n})()",
+        .expected = 170,
+    },
+    .{
+        .name = "single-entry Svelte regex generator semantics",
+        .source = "(function*(){\n" ++ @embedFile("regexp_single_entry_probe.js") ++ "\n})().next().value",
+        .expected = 170,
+        .required_bytecode = true,
+    },
+    .{
         .name = "BCP47 captured separator choices tree semantics",
         .tree_walker = true,
         .source = "(function(){\n" ++ @embedFile("regexp_language_tag_probe.js") ++ "\n})()",
