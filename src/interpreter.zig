@@ -41481,7 +41481,7 @@ fn throwStringValueTypeError(self: *Interpreter) EvalError {
 
 /// A `Function.prototype` method (`call`/`apply`/`bind`/`toString`) that first
 /// requires `this` to be callable (a TypeError otherwise — `IsCallable`), then
-/// dispatches to the shared `builtinMethod`.
+/// executes the intrinsic, independent of same-named own properties on `this`.
 fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -41493,8 +41493,19 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
                     "|this| is not a function inside Function.prototype.bind"
                 else
                     "Function.prototype." ++ name ++ " requires that |this| be callable");
-            if (std.mem.eql(u8, name, "toString")) return self.functionToString(this.asObj());
-            return (try self.builtinMethod(this, name, args)) orelse Value.undef();
+            // ECMA-262 20.2.3.1/2/3 operate on the callable itself, without
+            // looking up its call/apply/bind properties. builtinMethod is a
+            // property-call fast path and deliberately respects own shadows;
+            // reusing it here silently dropped calls made by method spies.
+            const receiver = arg0(args);
+            const tail = if (args.len > 1) args[1..] else &.{};
+            if (comptime eq(name, "call")) return self.callValueWithThis(this, tail, receiver);
+            if (comptime eq(name, "apply")) {
+                const list = try self.argListFromArrayLike(arg(args, 1));
+                return self.callValueWithThis(this, list, receiver);
+            }
+            if (comptime eq(name, "bind")) return self.makeBound(this.asObj(), receiver, tail);
+            return self.functionToString(this.asObj());
         }
     }.call;
 }

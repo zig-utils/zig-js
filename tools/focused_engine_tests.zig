@@ -27,6 +27,18 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "function prototype own method tree semantics",
+        .tree_walker = true,
+        .source = "(function(){\n" ++ @embedFile("function_prototype_own_method_probe.js") ++ "\n})()",
+        .expected = 40,
+    },
+    .{
+        .name = "function prototype own method generator semantics",
+        .source = "(function*(){\n" ++ @embedFile("function_prototype_own_method_probe.js") ++ "\n})().next().value",
+        .expected = 40,
+        .required_bytecode = true,
+    },
+    .{
         .name = "atomic assertion tail tree semantics",
         .tree_walker = true,
         .source = "(function(){\n" ++ @embedFile("regexp_atomic_assertion_probe.js") ++ "\n})()",
