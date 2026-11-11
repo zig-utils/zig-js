@@ -172,11 +172,13 @@ with `NoMatchingCases`, but a filter that matches the *wrong* tests exits 0.
 
 `test-frontend` uses a smaller production-module executable for focused parser
 and evaluator work. It exercises representative accepted and rejected programs;
-the combined unit suite remains the integration gate. Its cases are the arrays
-in [`tools/focused_engine_tests.zig`](tools/focused_engine_tests.zig), *not* the
-`test` blocks under `src/` — so `-Dtest-filter` selects from that list, and a
-filter naming a `src/` test fails with `NoMatchingCases`. Add a case there, or
-use `zig build test -Dtest-filter=` for a `test` block.
+the combined unit suite remains the integration gate. Its ordinary cases are
+the arrays in [`tools/focused_engine_tests.zig`](tools/focused_engine_tests.zig),
+plus the `reentrant script budget` host cases in
+[`tools/reentrant_script_tests.zig`](tools/reentrant_script_tests.zig), *not* the
+`test` blocks under `src/`. `-Dtest-filter` selects these named cases; a filter
+naming a `src/` test fails with `NoMatchingCases`. Add a case there, or use
+`zig build test -Dtest-filter=` for a `test` block.
 
 ### Conformance
 

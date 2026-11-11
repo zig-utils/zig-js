@@ -3544,7 +3544,11 @@ pub fn main(init: std.process.Init) !void {
     const ran = if (std.mem.eql(u8, suite, "frontend")) blk: {
         const valid = try runCases(gpa, &frontend_cases, filter, false, false);
         const invalid = try runErrorCases(gpa, &frontend_error_cases, filter);
-        break :blk valid + invalid;
+        const reentrant = if (matchesFilter("reentrant script budget", filter))
+            try @import("reentrant_script_tests.zig").run(gpa)
+        else
+            0;
+        break :blk valid + invalid + reentrant;
     } else if (std.mem.eql(u8, suite, "vm"))
         try runCases(gpa, &vm_cases, filter, false, false)
     else if (std.mem.eql(u8, suite, "runtime"))

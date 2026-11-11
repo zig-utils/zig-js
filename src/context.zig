@@ -10462,9 +10462,25 @@ pub const Context = struct {
         }
         const prog = parsed.program;
         var machine = self.interpreter();
+        // A synchronous host callback can re-enter this realm through
+        // JSEvaluateScript. That is still part of the caller's bounded work,
+        // rather than a new allowance per nested Script. Consult the owning
+        // thread's active interpreter, never another thread's realm entry.
+        const budget_parent = if (gc_mod.currentInterpreter()) |caller|
+            if (caller.gc_realm_context == @as(*anyopaque, @ptrCast(self))) caller else null
+        else
+            null;
+        if (budget_parent) |caller| {
+            machine.steps = caller.steps;
+            machine.step_budget = caller.step_budget;
+        }
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
+        defer if (budget_parent) |caller| {
+            caller.steps = machine.steps;
+            caller.step_limit = 0;
+        };
         const async_scope = machine.enterAsyncContextScope();
         defer async_scope.leave();
         // Reserve the successful completion root before any host checkpoint or
