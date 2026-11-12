@@ -44,7 +44,9 @@ env:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Let main validation reach its existing deadlines while newer pushes wait.
+  # Keep cancellation for superseded PR runs and other non-main refs.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Each Required Check runs as its own matrix leg (fail-fast: false), so an
