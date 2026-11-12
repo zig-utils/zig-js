@@ -3,6 +3,12 @@
 This manual workflow observes the unchanged Linux Debug+TSan unit shard. It is
 diagnostic evidence, not a performance or correctness qualification.
 
+The observer is a standalone Zig standard-library executable, built separately
+from the engine. It follows the repository's native platform-tool contract and
+uses no Python, shell helper, Node or additional JavaScript runtime. Its parser
+tests and harmless-child fixtures also run as part of the existing dependency
+audit; the Home-only migrated script inventory and audit rules stay unchanged.
+
 The workflow checks out engine revision
 b42c2c8fd93ba61b9ed7d9acd3c9a5663bb2efd6 separately from the observer tooling.
 Its compiler, Pantry action, sibling sources, default optimization, Home path
@@ -60,16 +66,56 @@ the original shard successful. Supervisor termination cleans up its owned
 command group. GitHub's normal job cleanup remains responsible for the detached
 supervisor at whole-job termination; its runner tracking environment is retained.
 
+Exit observation uses native `waitid` without reaping. The leader's PID remains
+reserved until group cleanup completes, including when it exits naturally or a
+descendant closes both output handles. Cleanup gives live members up to one
+second after TERM, then sends KILL if needed. Native group inspection waits for
+completed exit within the two-second KILL/reap budget before reaping the leader
+exactly once. The first inspection after a signal attempt is immediate; ordinary
+pending-state polling remains ten milliseconds. Inspection failures and
+bounded-list overflow fail cleanup rather than claiming success. Linux uses
+proc group/state records; Darwin's harmless fixtures use the system libproc
+interface. Original command status is preserved.
+
+Darwin short BSD information uses the exit-aware argument so an unreaped zombie
+remains visible. A completed zombie is safe even when it retains its exiting
+flag. A listed member with a temporarily unavailable detail lookup or a
+nonterminal exiting state keeps cleanup pending within the original deadline.
+A signalable peer takes precedence over pending peers when deciding whether to
+send a signal. A raced signal attempt is distinguished from a posted signal;
+neither implies completed exit.
+
 Cheap validation, with harmless children only:
 
-    python3 tools/unit78-native-diagnostic.py self-test
+    zig build unit78-native-diagnostic-test unit78-native-diagnostic
+    zig-out/bin/unit78-native-diagnostic self-test
     actionlint .github/workflows/unit78-native-diagnostic.yml
 
-The self-test checks evidence caps, atomic records, Linux stat parsing with
-unusual process names, bounded child timeout and reaping, byte-preserving stream
-capture, and propagation of an actual child exit status 7. Linux debugger
-availability and native attribution remain untested until the reviewed manual
-workflow runs.
+The tests check evidence caps, atomic records, stat parsing with unusual process
+names, marker framing, bounded child timeout and reaping, byte-preserving stream
+capture, and propagation of actual exit 7 and signal failures. Harmless native
+fixture modes replace interpreter-based child programs. Three cases require a
+TERM-resistant nested descendant's kernel lock released before cleanup returns,
+with open outputs, closed outputs and an already-exited leader. An unrelated
+sentinel must remain alive throughout. The fixture records the descendant's
+PID, group and start identity before cleanup. Failure cleanup can signal only
+that individually revalidated descendant, never a group after its leader was
+reaped. The already-exited leader also checks the production short BSD lookup's
+native record size, PID, group and zombie state. Pure classifier tests separately
+cover captured exiting, missing-detail and terminal states. On Linux, additional
+fixtures bind an actual descendant and stderr pipe, reject stale/ambiguous
+identity and refuse a dead supervisor without a result. Other hosts report
+these Linux-only fixtures outside their denominator. Linux GDB availability and
+native attribution still require the reviewed manual workflow.
+
+These local controls establish observer cleanup behavior only. A Linux
+cross-compilation is not a Linux runtime result. The original shard's completion,
+sanitizer behavior, native attribution and backtraces require their own retained
+workflow evidence; harmless fixture passes do not establish those results.
+
+Expected observer errors go through the capped supervisor log. An unexpected
+native observer crash leaves no original command result and makes collection
+fail. It cannot produce an uncapped stderr artifact or imply native success.
 
 The first hosted observation on tooling revision 89e9be1 bound the native test
 and retained 24 proc samples, but GDB was absent. Its five-second sorted nm

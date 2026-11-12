@@ -112,6 +112,38 @@ pub fn build(b: *std.Build) void {
     docs_link_check_step.dependOn(&run_docs_link_check.step);
     docs_link_check_step.dependOn(&run_docs_link_check_tests.step);
 
+    // The Linux process/proc observer is a standalone native platform tool.
+    // Its harmless-child tests run with the unchanged dependency audit so a
+    // new interpreter cannot silently re-enter the completed tool migration.
+    const unit78_diagnostic = b.addExecutable(.{
+        .name = "unit78-native-diagnostic",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/unit78_native_diagnostic.zig"),
+            .target = target,
+            .optimize = std.builtin.OptimizeMode.debug,
+            .link_libc = true,
+        }),
+    });
+    const install_unit78_diagnostic = b.addInstallArtifact(unit78_diagnostic, .{});
+    const unit78_diagnostic_step = b.step("unit78-native-diagnostic", "Build the external native unit shard observer");
+    unit78_diagnostic_step.dependOn(&install_unit78_diagnostic.step);
+    const unit78_diagnostic_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/unit78_native_diagnostic.zig"),
+            .target = target,
+            .optimize = std.builtin.OptimizeMode.debug,
+            .link_libc = true,
+        }),
+    });
+    const run_unit78_diagnostic_tests = b.addRunArtifact(unit78_diagnostic_tests);
+    const run_unit78_diagnostic_fixtures = b.addRunArtifact(unit78_diagnostic);
+    run_unit78_diagnostic_fixtures.addArg("self-test");
+    const unit78_diagnostic_test_step = b.step("unit78-native-diagnostic-test", "Verify bounded observer parsing and harmless owned children");
+    unit78_diagnostic_test_step.dependOn(&run_unit78_diagnostic_tests.step);
+    unit78_diagnostic_test_step.dependOn(&run_unit78_diagnostic_fixtures.step);
+    dependency_audit_step.dependOn(&run_unit78_diagnostic_tests.step);
+    dependency_audit_step.dependOn(&run_unit78_diagnostic_fixtures.step);
+
     // Homegrown regex engine, used to back JS RegExp.
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
     const regex_mod = regex_dep.module("regex");

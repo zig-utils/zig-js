@@ -29,6 +29,12 @@ before acting on one.
 
 ---
 
+## Tooling: `tools/unit78_native_diagnostic.zig`
+
+| Symbol | Location | What it is | Ruling | Notes / phase |
+|---|---|---|---|---|
+| `interrupted_signal` | `tools/unit78_native_diagnostic.zig` | Process-local diagnostic termination flag shared by the POSIX signal handler and observer loop. | **locked, atomic** | The handler only publishes the first TERM/INT value with a release CAS. The observer reads it with acquire ordering and performs all record I/O and owned-group cleanup outside the handler. No engine state is reachable through this flag; previous handlers are restored after observation. |
+
 ## Engine: `src/builtins.zig`
 
 | Symbol | Location | What it is | Ruling | Notes / phase |

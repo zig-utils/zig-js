@@ -50,16 +50,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y gdb
           gdb --version
-      - name: Verify observer with harmless owned children
-        run: python3 diagnostic/tools/unit78-native-diagnostic.py self-test
+      - name: Build and verify observer with harmless owned children
+        working-directory: diagnostic
+        run: zig build unit78-native-diagnostic-test unit78-native-diagnostic
       - name: Start unchanged shard and bounded observer
         working-directory: zig-js
         # Matches the original gate environment, although this leg uses no Home tools.
         env:
           HOME_TOOL: ${{ github.workspace }}/Home/lang/zig-out/bin/home-tool
-        run: python3 ../diagnostic/tools/unit78-native-diagnostic.py start "$RUNNER_TEMP/unit78-evidence"
+        run: ../diagnostic/zig-out/bin/unit78-native-diagnostic start "$RUNNER_TEMP/unit78-evidence"
       - name: Collect early diagnostic evidence
-        run: python3 diagnostic/tools/unit78-native-diagnostic.py collect "$RUNNER_TEMP/unit78-evidence"
+        run: diagnostic/zig-out/bin/unit78-native-diagnostic collect "$RUNNER_TEMP/unit78-evidence"
       # Upload before awaiting the original test. A job timeout must not erase
       # the 120-second observation window. This is diagnostic, never a green gate.
       - name: Retain early observation
@@ -71,7 +72,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Await original shard exit status
-        run: python3 diagnostic/tools/unit78-native-diagnostic.py wait "$RUNNER_TEMP/unit78-evidence"
+        run: diagnostic/zig-out/bin/unit78-native-diagnostic wait "$RUNNER_TEMP/unit78-evidence"
       - name: Retain terminal observation when available
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -87,6 +87,14 @@ unknown contract profile, new caller/reference file, or reintroduction of a
 Python, MJS, or shell tool. Tracked symlinks are not
 followed because their real tracked targets are audited directly.
 
+The external unit-shard observer is another standalone native Zig platform
+tool, like the documentation-link and dependency-audit executables. Its
+`unit78-native-diagnostic` build target links only the Zig standard library and
+target C platform interface. Parser and harmless-child fixtures run through
+`unit78-native-diagnostic-test` and the existing dependency-audit step. The
+manual workflow and observer documentation are its callers; no script runtime
+or production engine dependency is added.
+
 The former system-libffi edge was removed by the owned Zig/assembly dispatcher
 tracked in [#463](https://github.com/zig-utils/zig-js/issues/463); it is no
 longer an inventory entry or link dependency.
