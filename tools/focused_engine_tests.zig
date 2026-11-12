@@ -27,6 +27,18 @@ const ErrorCase = struct {
 
 const frontend_cases = [_]Case{
     .{
+        .name = "case invariant STX regex tree semantics",
+        .tree_walker = true,
+        .source = "(function(){\n" ++ @embedFile("regexp_case_invariant_probe.js") ++ "\n})()",
+        .expected = 2001,
+    },
+    .{
+        .name = "case invariant STX regex generator semantics",
+        .source = "(function*(){\n" ++ @embedFile("regexp_case_invariant_probe.js") ++ "\n})().next().value",
+        .expected = 2001,
+        .required_bytecode = true,
+    },
+    .{
         .name = "function prototype own method tree semantics",
         .tree_walker = true,
         .source = "(function(){\n" ++ @embedFile("function_prototype_own_method_probe.js") ++ "\n})()",
