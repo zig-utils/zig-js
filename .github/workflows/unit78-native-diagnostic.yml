@@ -1,0 +1,75 @@
+name: Unit 78 native diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.18.0-dev.146+35accc06e
+
+concurrency:
+  group: unit78-native-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: Observe unchanged Linux Debug TSan unit shard 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Mark diagnostic job observation deadline
+        run: echo "UNIT78_JOB_STARTED_SECONDS=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: diagnostic
+      # Deliberately separate tooling from the exact engine under observation.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: zig-js
+          ref: b42c2c8fd93ba61b9ed7d9acd3c9a5663bb2efd6
+          fetch-depth: 3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+          ref: fdd9c2e333ea6ac2fd06d080d939ef7f11d61b1b
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+          ref: 73c802e05768a729614e9c4296abb118aa06faf9
+      - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
+        with:
+          packages: zig@${{ env.ZIG_VERSION }}
+      - name: Verify observer with harmless owned children
+        run: python3 diagnostic/tools/unit78-native-diagnostic.py self-test
+      - name: Start unchanged shard and bounded observer
+        working-directory: zig-js
+        # Matches the original gate environment, although this leg uses no Home tools.
+        env:
+          HOME_TOOL: ${{ github.workspace }}/Home/lang/zig-out/bin/home-tool
+        run: python3 ../diagnostic/tools/unit78-native-diagnostic.py start "$RUNNER_TEMP/unit78-evidence"
+      - name: Collect early diagnostic evidence
+        run: python3 diagnostic/tools/unit78-native-diagnostic.py collect "$RUNNER_TEMP/unit78-evidence"
+      # Upload before awaiting the original test. A job timeout must not erase
+      # the 120-second observation window. This is diagnostic, never a green gate.
+      - name: Retain early observation
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unit78-early-native-diagnostic
+          path: ${{ runner.temp }}/unit78-evidence
+          if-no-files-found: error
+          retention-days: 14
+      - name: Await original shard exit status
+        run: python3 diagnostic/tools/unit78-native-diagnostic.py wait "$RUNNER_TEMP/unit78-evidence"
+      - name: Retain terminal observation when available
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unit78-terminal-native-diagnostic
+          path: ${{ runner.temp }}/unit78-evidence
+          if-no-files-found: error
+          retention-days: 14
