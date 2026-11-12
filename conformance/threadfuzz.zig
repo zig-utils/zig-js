@@ -18,6 +18,28 @@ const js = @import("js");
 
 const Worker = js.Worker;
 
+// Fuzzer phase observation only. No collection is forced here: JavaScript
+// keeps reaching ordinary safepoints while the existing peers remain live.
+const ParallelCollectionCheckpoint = struct {
+    context: *js.Context,
+    before: u64 = 0,
+
+    fn completed(raw: *anyopaque, _: js.Value, _: []const js.Value) js.HostError!js.Value {
+        const machine: *js.Interpreter = @ptrCast(@alignCast(raw));
+        const checkpoint: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+        return js.Value.boolVal(checkpoint.context.gc_par_collections.load(.acquire) > checkpoint.before);
+    }
+
+    fn install(self: *@This()) !void {
+        const ctx = self.context;
+        const saved = js.gc.setActiveContext(ctx);
+        defer js.gc.restoreActiveContext(saved);
+        const function = try js.gc.allocObj(ctx.arena());
+        function.* = .{ .native = completed, .private_data = self };
+        try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "__threadfuzzParallelCollectionCompleted", js.Value.obj(function));
+    }
+};
+
 const WatchdogProfile = enum(usize) {
     default,
     amplify,
@@ -6574,6 +6596,8 @@ fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
         return false;
     };
     defer ctx.destroy();
+    var collection_checkpoint = ParallelCollectionCheckpoint{ .context = ctx };
+    if (midgc) try collection_checkpoint.install();
 
     const midgc_setup_src =
         if (midgc)
@@ -6616,6 +6640,9 @@ fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
             "";
     const midgc_release_src =
         if (midgc)
+            \\  // A fixed numeric spin is not a collection-completion edge.
+            \\  // Keep roots and peers live; the existing seed watchdog bounds progress.
+            \\  while (!__threadfuzzParallelCollectionCompleted()) {}
             \\  Atomics.store(__midgcFinAsyncGate, 'state', 1);
             \\  Atomics.notify(__midgcFinAsyncGate, 'state');
             \\  let __midgcFinAsyncWaiterSum = 0;
@@ -6767,6 +6794,7 @@ fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
 
     const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
     const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
+    collection_checkpoint.before = before_collections;
     const joined = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -12450,6 +12478,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         return false;
     };
     defer ctx.destroy();
+    var collection_checkpoint = ParallelCollectionCheckpoint{ .context = ctx };
+    if (midgc) try collection_checkpoint.install();
     var machine = ctx.interpreter();
 
     const setup_src = try std.fmt.allocPrint(
@@ -12593,6 +12623,9 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
             \\      if (spin < 0) keep.push({{ impossible: true }});
             \\    }}
+            \\    // Wait for a finishing sweep before releasing the rooted peers.
+            \\    // Ordinary safepoints do the work; the seed watchdog remains unchanged.
+            \\    while (!__threadfuzzParallelCollectionCompleted()) {{}}
             \\    const beforeWaiterReject = globalThis.__workerTlsAsyncHoldRejectCount;
             \\    if (beforeWaiterReject !== 0)
             \\      throw new Error('worker terminate/ThreadLocal asyncHold waiters settled before midgc release: ' + beforeWaiterReject);
@@ -12850,6 +12883,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     defer gpa.free(fail_src);
     const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
     const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
+    collection_checkpoint.before = before_collections;
     if (ctx.evaluate(fail_src)) |_| {
         std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold failure script returned normally\n", .{seed});
         return false;
