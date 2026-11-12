@@ -819,6 +819,44 @@ pub fn build(b: *std.Build) void {
     const c_api_inherited_host_get_step = b.step("test-c-api-inherited-host-get", "Verify observable host gets before inherited properties");
     c_api_inherited_host_get_step.dependOn(&run_c_api_inherited_host_get.step);
 
+    inline for (.{
+        .{ "reentrant-scripts", "c_api_reentrant_scripts.c", "Verify nested public Script completion, job order and scope" },
+        .{ "reentrant-timers", "c_api_reentrant_timers.c", "Verify nested Script timer checkpoint ownership" },
+    }) |fixture_spec| {
+        const fixture = b.addExecutable(.{
+            .name = "c-api-" ++ fixture_spec[0],
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
+        });
+        fixture.root_module.addCSourceFile(.{ .file = b.path("tests/" ++ fixture_spec[1]) });
+        fixture.root_module.addIncludePath(b.path("include"));
+        fixture.root_module.linkLibrary(lib);
+        const run_fixture = b.addRunArtifact(fixture);
+        run_fixture.step.dependOn(&c_api_audit_cmd.step);
+        const fixture_step = b.step("test-c-api-" ++ fixture_spec[0], fixture_spec[2]);
+        fixture_step.dependOn(&run_fixture.step);
+        c_api_test_step.dependOn(&run_fixture.step);
+    }
+    const reentrant_lifecycle = b.addExecutable(.{
+        .name = "reentrant-script-lifecycle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/reentrant_script_lifecycle.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
+        }),
+    });
+    const run_reentrant_lifecycle = b.addRunArtifact(reentrant_lifecycle);
+    const reentrant_lifecycle_step = b.step("test-script-reentrant-lifecycle", "Verify native GIL/no-GIL Script keepalive ownership");
+    reentrant_lifecycle_step.dependOn(&run_reentrant_lifecycle.step);
+    const install_reentrant_lifecycle = b.addInstallArtifact(reentrant_lifecycle, .{});
+    reentrant_lifecycle_step.dependOn(&install_reentrant_lifecycle.step);
+    c_api_test_step.dependOn(&run_reentrant_lifecycle.step);
+
     const home_public_abi_fixture = b.addExecutable(.{
         .name = "home-public-abi-7ed99c02",
         .root_module = b.createModule(.{

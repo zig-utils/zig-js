@@ -10390,8 +10390,11 @@ pub const Context = struct {
     /// the plain embedder-facing Zig API keeps the normal Script default of the
     /// global object.
     pub fn evaluateWithThis(self: *Context, source: []const u8, this_value: Value) RunError!value.Value {
-        if (self.gil) |g| if (!self.parallel_js) g.acquire();
-        defer if (self.gil) |g| if (!self.parallel_js) g.release();
+        // A native callback in serialized mode already owns the non-recursive
+        // GIL. Borrow that ownership; only release a lock this entry acquired.
+        const acquired_gil = if (self.gil) |g| !self.parallel_js and !g.holds() else false;
+        if (acquired_gil) self.gil.?.acquire();
+        defer if (acquired_gil) self.gil.?.release();
         self.assertOwnerThread();
         self.exception = null;
         const gc_saved = gc_mod.setActiveContext(self);
@@ -10464,20 +10467,22 @@ pub const Context = struct {
         var machine = self.interpreter();
         // A synchronous host callback can re-enter this realm through
         // JSEvaluateScript. That is still part of the caller's bounded work,
-        // rather than a new allowance per nested Script. Consult the owning
-        // thread's active interpreter, never another thread's realm entry.
-        const budget_parent = if (gc_mod.currentInterpreter()) |caller|
+        // rather than a new allowance or event-loop turn per nested Script.
+        // Consult the owning thread's active interpreter, never another
+        // thread's realm entry.
+        const entry_parent = if (gc_mod.currentInterpreter()) |caller|
             if (caller.gc_realm_context == @as(*anyopaque, @ptrCast(self))) caller else null
         else
             null;
-        if (budget_parent) |caller| {
+        const is_host_entry = entry_parent == null;
+        if (entry_parent) |caller| {
             machine.steps = caller.steps;
             machine.step_budget = caller.step_budget;
         }
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
-        defer if (budget_parent) |caller| {
+        defer if (entry_parent) |caller| {
             caller.steps = machine.steps;
             caller.step_limit = 0;
         };
@@ -10492,8 +10497,10 @@ pub const Context = struct {
         defer machine.restoreTempRoots(result_root_mark);
         // A later host entry is a timer checkpoint. Poll before executing the
         // new script so elapsed unrefed timeouts are already observable to it.
-        try machine.pollAbortSignalTimeouts();
-        try machine.pollTimers();
+        if (is_host_entry) {
+            try machine.pollAbortSignalTimeouts();
+            try machine.pollTimers();
+        }
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parsed.strict;
@@ -10600,15 +10607,18 @@ pub const Context = struct {
         // settled `.then`/`await` continuations and the async harness's `$DONE`
         // have executed by the time `evaluate` returns. Then the waitAsync
         // tail: block for outstanding async waiters (notify/deadline), resolve
-        // them, and drain again until quiescent.
-        if (checkpoint_error == null) machine.drainHostCheckpoint(!top_level_failed) catch |err| {
+        // them, and drain again until quiescent. Re-entry from a synchronous
+        // native callback must first let the outer Script resume; its host
+        // boundary owns these jobs, including jobs queued by the nested Script.
+        if (is_host_entry and checkpoint_error == null) machine.drainHostCheckpoint(!top_level_failed) catch |err| {
             checkpoint_error = err;
         };
         // Shell keepalive (threads mode): a pending Thread completion is a
         // pending settlement — the realm stays alive until every spawned
         // thread finishes (each drains its own queue and settles its
         // asyncJoins), then drains whatever those settlements queued here.
-        if (self.gil) |g| {
+        if (is_host_entry and self.gil != null) {
+            const g = self.gil.?;
             if (top_level_failed or checkpoint_error != null) {
                 self.teardown_stop.store(true, .release);
                 agent.interruptWaiters();
