@@ -13233,28 +13233,34 @@ fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64
         \\    }}
         \\  }});
         \\  const joined = [];
-        \\  let joinSum = 0;
-        \\  let joinCount = 0;
+        \\  // Promise reactions run after release(), outside the held grant.
+        \\  const joins = {{ sum: 0, count: 0 }};
         \\  for (const t of threads) {{
+        \\    const expectedJoinValue = joined.length + 1;
         \\    const p = t.join();
         \\    if (!(p instanceof Promise))
         \\      throw new Error('midgc asyncHold release join did not return child promise');
         \\    p.then(
         \\      (v) => {{
-        \\        joinSum += v;
-        \\        joinCount++;
+        \\        if (v !== expectedJoinValue)
+        \\          Atomics.store(joins, 'sum', -1000000);
+        \\        else
+        \\          Atomics.add(joins, 'sum', v);
+        \\        Atomics.add(joins, 'count', 1);
         \\      }},
         \\      () => {{
-        \\        joinSum = -1000000;
-        \\        joinCount = {d};
+        \\        Atomics.store(joins, 'sum', -1000000);
+        \\        Atomics.store(joins, 'count', {d});
         \\      }});
         \\    joined.push(p);
         \\  }}
-        \\  for (let spin = 0; joinCount < {d} && spin < 100000; spin++) {{
+        \\  for (let spin = 0; Atomics.load(joins, 'count') < {d} && spin < 100000; spin++) {{
         \\    $drainRunLoop();
         \\    drainMicrotasks();
         \\    Atomics.wait(gate, 'propReady', 1, 1);
         \\  }}
+        \\  const joinCount = Atomics.load(joins, 'count');
+        \\  const joinSum = Atomics.load(joins, 'sum');
         \\  if (joinCount !== {d})
         \\    throw new Error('midgc asyncHold release promises did not settle ' + joinCount);
         \\  if (joinSum !== {d})
