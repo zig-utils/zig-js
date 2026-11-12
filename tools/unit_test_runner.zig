@@ -128,6 +128,16 @@ pub fn main(init: std.process.Init.Minimal) void {
         if (selectedShard(plan, selected_index, shard_count) != shard_index) continue;
         seen += 1;
 
+        // Line-oriented CI collectors can discard an unfinished status prefix
+        // on cancellation. Record the selected lifecycle before setup starts.
+        std.debug.print("UNIT_TEST_STARTED\t{d}/{d}\t{d}/{d}\t{s}\n", .{
+            seen,
+            selected,
+            shard_index,
+            shard_count,
+            test_fn.name,
+        });
+
         std.testing.allocator_instance = .init(std.heap.page_allocator, .{
             .canary = 0xc3a701ba,
             .check_write_after_free = true,

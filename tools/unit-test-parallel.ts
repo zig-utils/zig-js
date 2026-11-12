@@ -175,7 +175,7 @@ function selfTest(): void {
   );
   requireValue(quote("a'b") === `'a'"'"'b'`, "shell quoting failed");
   const history = timingHistory([
-      "1/2 [0/2] alpha...OK (100 ms)\n2/2 [0/2] gamma...OK (20 ms)\n",
+      "UNIT_TEST_STARTED\t1/2\t0/2\talpha\n1/2 [0/2] alpha...OK (100 ms)\nUNIT_TEST_STARTED\t2/2\t0/2\tgamma\n2/2 [0/2] gamma...OK (20 ms)\n",
       "1/2 [1/2] beta...OK (90 ms)\n2/2 [1/2] delta...OK (10 ms)\n",
     ]),
     plan = scheduleTests(["alpha", "beta", "gamma", "delta"], history, 2);
