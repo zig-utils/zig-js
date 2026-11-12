@@ -148,6 +148,7 @@ def debugger_probe(root):
     if not debugger:
         save(root, "debugger-probe.json", {"available": False, "reason": "gdb absent"})
         return None
+    version = bounded_command([debugger, "--version"])
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     attempts = []
     try:
@@ -164,9 +165,9 @@ def debugger_probe(root):
             if same_process(identity):
                 os.kill(child.pid, signal.SIGCONT)
             if success:
-                save(root, "debugger-probe.json", {"available": True, "attempts": attempts})
+                save(root, "debugger-probe.json", {"available": True, "version": version, "attempts": attempts})
                 return prefix
-        save(root, "debugger-probe.json", {"available": False, "attempts": attempts})
+        save(root, "debugger-probe.json", {"available": False, "version": version, "attempts": attempts})
         return None
     finally:
         stop_group(child)
@@ -271,6 +272,8 @@ def supervise(root):
         "warning": "External debugger pauses add overhead. This is not elapsed-time qualification.",
     })
     debugger = debugger_probe(root)
+    if not debugger:
+        raise RuntimeError("debugger attach/detach probe failed; original shard was not started")
     observe(root, COMMAND, debugger)
 
 
@@ -317,7 +320,7 @@ def observe(root, command, debugger, state_reader=stat_record, scan_builds=True)
                         try:
                             target = target_for_marker(child, os.fstat(child.stdout.fileno()).st_ino)
                             save(root, "target.json", target)
-                            symbols = bounded_command(["nm", "--defined-only", target["executable"]],
+                            symbols = bounded_command(["nm", "--no-sort", "--defined-only", target["executable"]],
                                                       cap=0, witnesses=("__tsan_init", "__tsan_read", "__tsan_write"))
                             save(root, "symbol-command.json", symbols)
                         except (OSError, RuntimeError) as error:

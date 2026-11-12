@@ -25,7 +25,10 @@ not guessed.
 Before starting the shard, a harmless owned sleep child tests gdb attach,
 backtrace and detach. The observer tries ordinary gdb first, then noninteractive
 sudo gdb when available. It never changes ptrace, kernel or sanitizer settings.
-Unavailable debugging is recorded explicitly. Gdb disables init files, autoload
+The workflow explicitly installs the runner's distribution GDB package because
+Pantry has no GDB recipe, and records its actual version. Unavailable debugging
+is recorded explicitly and fails setup before starting the native workload.
+Gdb disables init files, autoload
 and debuginfod. Captures use frame-arguments none, no entry values, no locals
 and no memory dumps. Neither process environments nor arbitrary process
 arguments are collected.
@@ -67,3 +70,10 @@ unusual process names, bounded child timeout and reaping, byte-preserving stream
 capture, and propagation of an actual child exit status 7. Linux debugger
 availability and native attribution remain untested until the reviewed manual
 workflow runs.
+
+The first hosted observation on tooling revision 89e9be1 bound the native test
+and retained 24 proc samples, but GDB was absent. Its five-second sorted nm
+invocation also timed out without symbol witnesses. These failures are retained;
+they establish no native stack or sanitizer-symbol observation. The follow-up
+installs GDB explicitly and asks nm for unsorted symbols under the same helper
+budget. Engine source, full shard and all native workload limits remain fixed.

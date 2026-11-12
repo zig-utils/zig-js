@@ -43,6 +43,13 @@ jobs:
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@${{ env.ZIG_VERSION }}
+      - name: Install the diagnostic debugger
+        # Pantry has no GDB recipe. Use the runner's signed distribution
+        # package and retain its actual version before starting the engine.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gdb
+          gdb --version
       - name: Verify observer with harmless owned children
         run: python3 diagnostic/tools/unit78-native-diagnostic.py self-test
       - name: Start unchanged shard and bounded observer
