@@ -820,6 +820,8 @@ pub fn build(b: *std.Build) void {
     c_api_inherited_host_get_step.dependOn(&run_c_api_inherited_host_get.step);
 
     inline for (.{
+        .{ "call-checkpoints", "c_api_call_checkpoints.c", "Verify outer C function call job checkpoints and completions" },
+        .{ "call-checkpoint-gc", "c_api_call_checkpoint_gc.c", "Verify C call completion roots during real checkpoint GC" },
         .{ "reentrant-scripts", "c_api_reentrant_scripts.c", "Verify nested public Script completion, job order and scope" },
         .{ "reentrant-timers", "c_api_reentrant_timers.c", "Verify nested Script timer checkpoint ownership" },
     }) |fixture_spec| {
@@ -836,6 +838,28 @@ pub fn build(b: *std.Build) void {
         fixture_step.dependOn(&run_fixture.step);
         c_api_test_step.dependOn(&run_fixture.step);
     }
+    const call_budget = b.addExecutable(.{
+        .name = "c-api-call-budget",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api_call_budget.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
+        }),
+    });
+    call_budget.root_module.linkLibrary(lib);
+    const run_call_budget = b.addRunArtifact(call_budget);
+    const call_budget_step = b.step("test-c-api-call-budget", "Verify nested C function calls retain the host execution budget");
+    call_budget_step.dependOn(&run_call_budget.step);
+    const install_call_budget = b.addInstallArtifact(call_budget, .{});
+    call_budget_step.dependOn(&install_call_budget.step);
+    c_api_test_step.dependOn(&run_call_budget.step);
+
     const reentrant_lifecycle = b.addExecutable(.{
         .name = "reentrant-script-lifecycle",
         .root_module = b.createModule(.{

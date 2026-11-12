@@ -22938,40 +22938,95 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         };
     const args = collectArgs(c, argc, argv, exception) orelse return null;
     if (!obj.isCallableObject()) return null;
-    // C-ABI host callbacks run directly across the FFI boundary.
-    if (obj.hostCallback()) |cb| {
-        c.recordExecutionTier(.host_callbacks);
-        const result = cb(ctx, function, this_ref, argc, argv, exception);
-        if (result) |ref| {
-            _ = valueArgFrom(c, ref, exception) orelse return null;
-            return result;
-        }
-        if (exception != null and exception[0] != null) {
-            _ = valueArgFrom(c, exception[0], exception) orelse return null;
-            return null;
-        }
-        setException(c, exception, "TypeError: host callback returned null without exception");
+    const completion = boxedFrom(box(c, Value.undef()) orelse {
+        setException(c, exception, "OutOfMemory");
         return null;
-    }
-    // JS functions / native builtins / error constructors run on the interpreter.
+    }).?;
+    const parent = gc_mod.currentInterpreter();
+    const nested = if (parent) |caller| caller.gc_realm_context == @as(*anyopaque, @ptrCast(c)) else false;
     const gc_saved = gc_mod.setActiveContext(c);
     defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var interpreter = c.interpreter();
+    interpreter.gc_root_allocator = c.gpa;
+    if (nested) {
+        interpreter.steps = parent.?.steps;
+        interpreter.step_budget = parent.?.step_budget;
+    }
+    defer if (nested) {
+        parent.?.steps = interpreter.steps;
+        parent.?.step_limit = 0;
+    };
     c.pushActiveInterpreter(&interpreter) catch {
         setException(c, exception, "OutOfMemory");
         return null;
     };
     defer c.popActiveInterpreter(&interpreter);
+    const scope = interpreter.enterAsyncContextScope();
+    defer scope.leave();
     const this_value = valueArgFrom(c, this_ref, exception) orelse return null;
-    const res = interpreter.callValueWithThis(Value.obj(obj), args, this_value) catch |err| {
-        if (err == error.Throw) {
-            if (exception != null) exception[0] = box(c, interpreter.exception);
-        } else setException(c, exception, @errorName(err));
+    // Reserve both completion roots before user code. A checkpoint can execute
+    // arbitrary jobs and GC, or fail after the callback has already returned.
+    const roots = interpreter.pushTempRootSlice(&.{ Value.obj(obj), this_value, Value.undef(), Value.undef() }) catch {
+        setException(c, exception, "OutOfMemory");
         return null;
     };
-    return boxResult(c, exception, res);
+    defer interpreter.restoreTempRoots(roots);
+    _ = interpreter.pushTempRootSlice(args) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    var result_ref: JSValueRef = null;
+    var thrown_ref: JSValueRef = null;
+    var result_value = Value.undef();
+    var thrown_value = Value.undef();
+    if (obj.hostCallback()) |cb| {
+        // Preserve the caller's original C handles, including an echoed result.
+        c.recordExecutionTier(.host_callbacks);
+        result_ref = cb(ctx, function, this_ref, argc, argv, &thrown_ref);
+        if (result_ref) |ref| {
+            if (valueArgFrom(c, ref, &thrown_ref)) |v| result_value = v else result_ref = null;
+        } else if (thrown_ref == null) {
+            setException(c, &thrown_ref, "TypeError: host callback returned null without exception");
+        }
+    } else {
+        const outcome = interpreter.callValueWithThis(Value.obj(obj), args, this_value);
+        if (outcome) |v| {
+            result_value = v;
+            result_ref = @ptrCast(completion);
+        } else |err| {
+            if (err == error.Throw) {
+                completion.value = interpreter.exception;
+                thrown_ref = @ptrCast(completion);
+            } else setException(c, &thrown_ref, @errorName(err));
+        }
+    }
+    if (thrown_ref) |ref| thrown_value = valueArgFrom(c, ref, exception) orelse return null;
+    interpreter.setTempRoot(roots + 2, result_value);
+    interpreter.setTempRoot(roots + 3, thrown_value);
+    // ECMA-262 9.5: a nested call must finish the current execution context
+    // before initiating jobs. Only the outer C call owns this checkpoint.
+    if (!nested) interpreter.drainHostMicrotasks() catch |err| {
+        if (result_ref != null) {
+            result_ref = null;
+            if (err == error.Throw) {
+                thrown_value = interpreter.exception;
+                completion.value = thrown_value;
+                thrown_ref = @ptrCast(completion);
+            } else {
+                setException(c, &thrown_ref, @errorName(err));
+                thrown_value = valueFromContext(c, thrown_ref) orelse Value.undef();
+            }
+            interpreter.setTempRoot(roots + 3, thrown_value);
+        }
+    };
+    if (result_ref) |ref| boxedFrom(ref).?.value = interpreter.tempRoot(roots + 2, result_value);
+    if (thrown_ref) |ref| {
+        boxedFrom(ref).?.value = interpreter.tempRoot(roots + 3, thrown_value);
+        if (exception != null) exception[0] = ref;
+    }
+    return result_ref;
 }
 
 export fn JSObjectCallAsFunctionReturnValueHoldingAPILock(
