@@ -20778,6 +20778,36 @@ test "captured frames: retained callbacks reclaim unreachable captures automatic
     try std.testing.expect(ctx.runtimeHeapAccounting().collections > 0);
 }
 
+test "captured frames: mapped canonical strings survive heap recovery" {
+    for ([_]bool{ false, true }) |jit_enabled| {
+        const ctx = try Context.createWith(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = jit_enabled,
+            .heap_limit_bytes = 64 * 1024 * 1024,
+        });
+        defer ctx.destroy();
+        const frame = try ctx.evaluateProtected(@embedFile("fixtures/array-map-canonical-pressure.js"));
+        defer std.debug.assert(ctx.unprotectValue(frame));
+        for (0..5001) |index| {
+            const result = ctx.callProtected(frame, null, &.{}) catch |err| {
+                std.debug.print("canonical frame: jit={any}, callback={d}, collections={d}\n", .{
+                    jit_enabled, index, ctx.runtimeHeapAccounting().collections,
+                });
+                if (ctx.exception) |exception| {
+                    if (exception.isObject()) {
+                        if (exception.asObj().getOwn("message")) |message|
+                            if (message.isString()) std.debug.print("canonical frame exception: {s}\n", .{message.asStr()});
+                    }
+                }
+                return err;
+            };
+            defer std.debug.assert(ctx.unprotectValue(result));
+            try std.testing.expectEqual(@as(f64, @floatFromInt(index)), result.get().asNum());
+        }
+        try std.testing.expect(ctx.runtimeHeapAccounting().collections > 0);
+    }
+}
+
 test "captured frames: eval-only closure retains its live binding view" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

@@ -19586,10 +19586,16 @@ pub const Interpreter = struct {
     /// Append `v` as the next element of a method's result (an array uses its
     /// dense store; a custom species object gets CreateDataProperty at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
-        if (result.isObject() and result.asObj().is_array and result.asObj().accessorsMap() == null and
-            result.asObj().attrsMap() == null and !result.asObj().proxy_revoked and result.asObj().proxyHandler() == null and
-            result.asObj().isExtensible() and
-            try result.asObj().appendElementIfLen(self.arena, idx, v))
+        // Dense result storage may grow without an elements lock in a single
+        // thread. Keep the pending callback value alive during heap recovery,
+        // before the result array has acquired its reference to that value.
+        const roots = try self.pushTempRootSlice(&.{ result, v });
+        defer self.restoreTempRoots(roots);
+        const target = self.tempRoot(roots, result);
+        if (target.isObject() and target.asObj().is_array and target.asObj().accessorsMap() == null and
+            target.asObj().attrsMap() == null and !target.asObj().proxy_revoked and target.asObj().proxyHandler() == null and
+            target.asObj().isExtensible() and
+            try target.asObj().appendElementIfLen(self.arena, idx, self.tempRoot(roots + 1, v)))
         {
             return;
         } else {
@@ -19598,7 +19604,7 @@ pub const Interpreter = struct {
             // path, which throws if the index is non-writable / non-extensible.
             var key_storage: [32]u8 = undefined;
             const k = borrowedIndexKey(&key_storage, idx);
-            if (!result.isObject() or !try builtins.defineDescriptorResult(self, result.asObj(), k, .data(v)))
+            if (!target.isObject() or !try builtins.defineDescriptorResult(self, target.asObj(), k, .data(self.tempRoot(roots + 1, v))))
                 return self.throwError("TypeError", "Cannot create array result property");
         }
     }
