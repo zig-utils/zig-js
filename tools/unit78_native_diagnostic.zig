@@ -243,10 +243,22 @@ fn parseStat(pid: std.posix.pid_t, raw: []const u8) !Identity {
     };
 }
 
+fn readProcFileAlloc(dir: std.Io.Dir, io: std.Io, path: []const u8, gpa: std.mem.Allocator, limit: usize) ![]u8 {
+    const file = try dir.openFile(io, path, .{});
+    defer file.close(io);
+    // Procfs content is generated on read; its regular-file size can be zero.
+    // Keep the existing reached-or-exceeded cap without using stat as EOF.
+    var reader = file.readerStreaming(io, &.{});
+    return reader.interface.allocRemainingAlignedSentinel(gpa, .limited(limit), .of(u8), null) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.OutOfMemory, error.StreamTooLong => |e| return e,
+    };
+}
+
 fn statRecord(ctx: Context, pid: std.posix.pid_t, base: []const u8) !Identity {
     const path = try std.fmt.allocPrint(ctx.gpa, "{s}/{d}/stat", .{ base, pid });
     defer ctx.gpa.free(path);
-    const raw = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(65536));
+    const raw = try readProcFileAlloc(.cwd(), ctx.io, path, ctx.gpa, 65536);
     defer ctx.gpa.free(raw);
     return parseStat(pid, raw);
 }
@@ -262,8 +274,10 @@ fn shaFile(ctx: Context, path: []const u8) ![64]u8 {
     var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
     var buffer: [mib]u8 = undefined;
     while (true) {
-        const count = try file.readStreaming(ctx.io, &.{&buffer});
-        if (count == 0) break;
+        const count = file.readStreaming(ctx.io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
         hash.update(buffer[0..count]);
     }
     return std.fmt.bytesToHex(hash.finalResult(), .lower);
@@ -471,7 +485,7 @@ const OwnedChild = struct {
             _ = std.fmt.parseInt(std.posix.pid_t, entry.name, 10) catch continue;
             var path_buffer: [128]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buffer, "{s}/stat", .{entry.name});
-            const raw = directory.readFileAlloc(io, path, std.heap.page_allocator, .limited(65536)) catch |err| switch (err) {
+            const raw = readProcFileAlloc(directory, io, path, std.heap.page_allocator, 65536) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return err,
             };
@@ -634,7 +648,7 @@ fn procPath(ctx: Context, pid: std.posix.pid_t, tail: []const u8) ![]u8 {
 fn procArguments(ctx: Context, pid: std.posix.pid_t) ![]const []const u8 {
     const path = try procPath(ctx, pid, "cmdline");
     defer ctx.gpa.free(path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(512 * 1024));
+    const bytes = try readProcFileAlloc(.cwd(), ctx.io, path, ctx.gpa, 512 * 1024);
     defer ctx.gpa.free(bytes);
     return parseArguments(ctx, bytes);
 }
@@ -715,7 +729,7 @@ fn captureBuildProcesses(ctx: Context, leader: std.posix.pid_t, seen: *std.Array
         const executable = readLink(ctx, exe_path) catch continue;
         if (!std.mem.eql(u8, std.fs.path.basename(executable), "zig")) continue;
         const cmdline_path = try procPath(ctx, record.pid, "cmdline");
-        const raw = std.Io.Dir.cwd().readFileAlloc(ctx.io, cmdline_path, ctx.gpa, .limited(512 * 1024)) catch continue;
+        const raw = readProcFileAlloc(.cwd(), ctx.io, cmdline_path, ctx.gpa, 512 * 1024) catch continue;
         const arguments = try parseArguments(ctx, raw);
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(raw, &digest, .{});
@@ -753,7 +767,7 @@ fn procSample(ctx: Context, identity: Identity) !Identity {
         const pid = std.fmt.parseInt(std.posix.pid_t, name, 10) catch continue;
         var thread = statRecord(ctx, pid, path) catch continue;
         const wchan_path = try std.fs.path.join(ctx.gpa, &.{ path, name, "wchan" });
-        const wchan = std.Io.Dir.cwd().readFileAlloc(ctx.io, wchan_path, ctx.gpa, .limited(65536)) catch continue;
+        const wchan = readProcFileAlloc(.cwd(), ctx.io, wchan_path, ctx.gpa, 65536) catch continue;
         thread.wchan = std.mem.trim(u8, wchan, " \n\r\t");
         try threads.append(ctx.gpa, thread);
         if (threads.items.len == 256) {
@@ -1557,6 +1571,128 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, mode, "collect") or std.mem.eql(u8, mode, "wait")) std.process.exit(try monitor(ctx, std.mem.eql(u8, mode, "collect")));
     return error.UnknownMode;
+}
+
+test "native observer: reader regression bounded reader accepts an empty file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty", .data = "" });
+    const bytes = try readProcFileAlloc(tmp.dir, std.testing.io, "empty", std.testing.allocator, 16);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), bytes.len);
+}
+
+test "native observer: reader regression bounded reader preserves bytes across growth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const short = "a\x00b\xff\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "short", .data = short });
+    const short_read = try readProcFileAlloc(tmp.dir, std.testing.io, "short", std.testing.allocator, 16);
+    defer std.testing.allocator.free(short_read);
+    try std.testing.expectEqualSlices(u8, short, short_read);
+    var payload: [4097]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "growing", .data = &payload });
+    const growing = try readProcFileAlloc(tmp.dir, std.testing.io, "growing", std.testing.allocator, payload.len + 1);
+    defer std.testing.allocator.free(growing);
+    try std.testing.expectEqualSlices(u8, &payload, growing);
+}
+
+test "native observer: reader regression bounded reader rejects reached or exceeded caps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const limit = 257;
+    const payload: [limit + 1]u8 = @splat('x');
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "below", .data = payload[0 .. limit - 1] });
+    const below = try readProcFileAlloc(tmp.dir, std.testing.io, "below", std.testing.allocator, limit);
+    defer std.testing.allocator.free(below);
+    try std.testing.expectEqualSlices(u8, payload[0 .. limit - 1], below);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "at", .data = payload[0..limit] });
+    try std.testing.expectError(error.StreamTooLong, readProcFileAlloc(tmp.dir, std.testing.io, "at", std.testing.allocator, limit));
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "above", .data = &payload });
+    try std.testing.expectError(error.StreamTooLong, readProcFileAlloc(tmp.dir, std.testing.io, "above", std.testing.allocator, limit));
+}
+
+test "native observer: reader regression bounded reader preserves missing-file errors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.FileNotFound, readProcFileAlloc(tmp.dir, std.testing.io, "missing", std.testing.allocator, 16));
+}
+
+test "native observer: reader regression hashes an empty file through EOF" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const ctx: Context = .{ .gpa = gpa, .io = std.testing.io, .root = root };
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "empty", .data = "" });
+    const path = try ctx.path("empty");
+    defer gpa.free(path);
+    const digest = try shaFile(ctx, path);
+    try std.testing.expectEqualStrings("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &digest);
+}
+
+test "native observer: reader regression hashes abc through EOF" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const ctx: Context = .{ .gpa = gpa, .io = std.testing.io, .root = root };
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "abc", .data = "abc" });
+    const path = try ctx.path("abc");
+    defer gpa.free(path);
+    const digest = try shaFile(ctx, path);
+    try std.testing.expectEqualStrings("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", &digest);
+}
+
+test "native observer: reader regression reads live Linux stat identity" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: Context = .{ .gpa = arena.allocator(), .io = std.testing.io, .root = "." };
+    const pid = std.c.getpid();
+    const identity = try statRecord(ctx, pid, "/proc");
+    try std.testing.expectEqual(pid, identity.pid);
+    try std.testing.expectEqual(std.c.getppid(), identity.ppid);
+    try std.testing.expect(identity.start_ticks > 0);
+    try std.testing.expect(sameProcess(ctx, identity));
+}
+
+test "native observer: reader regression reads live Linux command arguments" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: Context = .{ .gpa = arena.allocator(), .io = std.testing.io, .root = "." };
+    const arguments = try procArguments(ctx, std.c.getpid());
+    try std.testing.expect(arguments.len > 0);
+    try std.testing.expect(arguments[0].len > 0);
+    const executable = try std.process.executablePathAlloc(ctx.io, ctx.gpa);
+    try std.testing.expectEqualStrings(std.fs.path.basename(executable), std.fs.path.basename(arguments[0]));
+    for (arguments) |argument| try std.testing.expect(std.mem.indexOfScalar(u8, argument, 0) == null);
+}
+
+test "native observer: reader regression samples live Linux task records" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: Context = .{ .gpa = arena.allocator(), .io = std.testing.io, .root = "." };
+    const pid = std.c.getpid();
+    const identity = try statRecord(ctx, pid, "/proc");
+    const sample = try procSample(ctx, identity);
+    try std.testing.expectEqual(pid, sample.pid);
+    try std.testing.expectEqual(identity.start_ticks, sample.start_ticks);
+    const threads = sample.threads orelse return error.MissingLiveProcThreads;
+    try std.testing.expect(threads.len > 0);
+    var found_main = false;
+    for (threads) |thread| {
+        try std.testing.expect(thread.start_ticks > 0);
+        const wchan = thread.wchan orelse return error.MissingLiveProcWchan;
+        try std.testing.expect(wchan.len > 0);
+        if (thread.pid == pid) found_main = true;
+    }
+    try std.testing.expect(found_main);
 }
 
 test "native observer: captured Darwin exit states cannot become false group completion" {
