@@ -1115,6 +1115,131 @@ fn requireReaped(pid: std.posix.pid_t) !void {
     try require(result == -1 and std.posix.errno(result) == .CHILD, "timed-out owned child was reaped exactly once");
 }
 
+const FixtureStartupStage = enum { lock_create, identity_publish, ready_write };
+const FixtureStartupError = struct {
+    version: u8 = 1,
+    policy: []const u8,
+    stage: FixtureStartupStage,
+    error_name: []const u8,
+    producer_pid: std.posix.pid_t,
+    producer_group: ?std.posix.pid_t,
+
+    // This labels diagnostic data only. It never authorizes a signal.
+    fn matchesOwnedGroup(self: FixtureStartupError, leader: std.posix.pid_t) bool {
+        return if (self.producer_group) |group| group == leader else false;
+    }
+};
+
+// DEBUG-unit78-linux-readiness: failure-only sideband. Closed-output fixtures
+// keep both output handles ignored; this record never authorizes a signal.
+fn fixtureStartupError(init: std.process.Init, args: []const []const u8, stage: FixtureStartupStage, failure: anyerror) !void {
+    if (args.len != 3) return;
+    const policy = std.fs.path.basename(args[1]);
+    if (!std.mem.eql(u8, policy, "term-open") and !std.mem.eql(u8, policy, "term-closed") and !std.mem.eql(u8, policy, "exit-closed")) return error.InvalidFixtureDiagnosticPolicy;
+    if (!std.mem.eql(u8, std.fs.path.dirname(args[1]) orelse "", std.fs.path.dirname(args[2]) orelse "")) return error.InvalidFixtureDiagnosticPath;
+    const group = getpgid(std.c.getpid());
+    const record: FixtureStartupError = .{ .policy = policy, .stage = stage, .error_name = @errorName(failure), .producer_pid = std.c.getpid(), .producer_group = if (group >= 0) group else null };
+    const bytes = try std.json.Stringify.valueAlloc(init.gpa, record, .{});
+    defer init.gpa.free(bytes);
+    if (bytes.len >= 2048) return error.FixtureDiagnosticTooLarge;
+    const destination = try std.fmt.allocPrint(init.gpa, "{s}.startup-error.json", .{args[2]});
+    defer init.gpa.free(destination);
+    const temporary = try std.fmt.allocPrint(init.gpa, "{s}.tmp", .{destination});
+    defer init.gpa.free(temporary);
+    const file = try std.Io.Dir.cwd().createFile(init.io, temporary, .{ .exclusive = true });
+    defer file.close(init.io);
+    try file.writeStreamingAll(init.io, bytes);
+    try std.Io.Dir.renameAbsolute(temporary, destination, init.io);
+}
+
+fn readFixtureDiagnostic(ctx: Context, path: []const u8, limit: usize) ![]u8 {
+    if (!std.mem.eql(u8, std.fs.path.dirname(path) orelse "", ctx.root)) return error.InvalidFixtureDiagnosticPath;
+    const file = try std.Io.Dir.cwd().openFile(ctx.io, path, .{ .follow_symlinks = false, .allow_directory = false });
+    defer file.close(ctx.io);
+    const stat = try file.stat(ctx.io);
+    if (stat.kind != .file or stat.nlink != 1) return error.InvalidFixtureDiagnosticFile;
+    if (stat.size >= limit) return error.FixtureDiagnosticTooLarge;
+    var reader = file.reader(ctx.io, &.{});
+    return reader.interface.allocRemaining(ctx.gpa, .limited(limit));
+}
+
+fn readFixtureStartupError(ctx: Context, path: []const u8, policy: []const u8) !std.json.Parsed(FixtureStartupError) {
+    const raw = try readFixtureDiagnostic(ctx, path, 2048);
+    defer ctx.gpa.free(raw);
+    const parsed = try std.json.parseFromSlice(FixtureStartupError, ctx.gpa, raw, .{ .allocate = .alloc_always });
+    errdefer parsed.deinit();
+    if (parsed.value.version != 1 or !std.mem.eql(u8, parsed.value.policy, policy) or parsed.value.producer_pid <= 0) return error.InvalidFixtureDiagnosticIdentity;
+    return parsed;
+}
+
+const FixtureReadinessStat = struct { attempts: usize = 0, size: ?u64 = null, error_name: ?[]const u8 = null };
+
+fn reportFixtureReadinessFailure(init: std.process.Init, ctx: Context, policy: []const u8, child: *OwnedChild, identity_path: []const u8, last_stat: FixtureReadinessStat) !void {
+    var arena: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena.deinit();
+    var diagnostic = ctx;
+    diagnostic.gpa = arena.allocator();
+    var status_error: ?[]const u8 = null;
+    const term = child.pollTerm() catch |err| block: {
+        status_error = @errorName(err);
+        break :block null;
+    };
+    var output: [4096]u8 = undefined;
+    var output_error: ?[]const u8 = null;
+    const captured = child.readReady(&output, 0) catch |err| block: {
+        output_error = @errorName(err);
+        break :block null;
+    };
+    const output_bytes: []const u8 = captured orelse &.{};
+    var identity_error: ?[]const u8 = null;
+    const identity = readFixtureDiagnostic(diagnostic, identity_path, 4096) catch |err| block: {
+        identity_error = @errorName(err);
+        break :block null;
+    };
+    var identity_stamp: ?FixtureStamp = null;
+    if (identity) |raw| {
+        const parsed: ?std.json.Parsed(FixtureStamp) = std.json.parseFromSlice(FixtureStamp, diagnostic.gpa, raw, .{}) catch |err| block: {
+            identity_error = @errorName(err);
+            break :block null;
+        };
+        if (parsed) |value| identity_stamp = value.value;
+    }
+    const sideband_path = try std.fmt.allocPrint(diagnostic.gpa, "{s}.startup-error.json", .{identity_path});
+    var startup_error: ?[]const u8 = null;
+    const parsed_startup: ?std.json.Parsed(FixtureStartupError) = readFixtureStartupError(diagnostic, sideband_path, policy) catch |err| block: {
+        startup_error = @errorName(err);
+        break :block null;
+    };
+    defer if (parsed_startup) |value| value.deinit();
+    const startup: ?FixtureStartupError = if (parsed_startup) |value| value.value else null;
+    const output_hex = try diagnostic.gpa.alloc(u8, output_bytes.len * 2);
+    const alphabet = "0123456789abcdef";
+    for (output_bytes, 0..) |byte, index| {
+        output_hex[index * 2] = alphabet[byte >> 4];
+        output_hex[index * 2 + 1] = alphabet[byte & 15];
+    }
+    const report = .{
+        .policy = policy,
+        .owned_leader_pid = child.pid,
+        .last_lock_stat = last_stat,
+        .observed_parent_exit = if (term) |value| @as(?i32, exitCode(value)) else null,
+        .waitid_error = status_error,
+        .captured_output_hex = output_hex,
+        .capture_at_limit = output_bytes.len == output.len,
+        .capture_error = output_error,
+        .identity_file_bytes = if (identity) |raw| @as(?usize, raw.len) else null,
+        .identity_file = identity_stamp,
+        .identity_file_error = identity_error,
+        .identity_group_matches_owned_leader = if (identity_stamp) |value| value.group == child.pid else false,
+        .startup_error = startup,
+        .startup_record_error = startup_error,
+        .startup_group_matches_owned_leader = if (startup) |value| value.matchesOwnedGroup(child.pid) else false,
+    };
+    const bytes = try std.json.Stringify.valueAlloc(diagnostic.gpa, report, .{});
+    if (bytes.len >= 24576) return error.FixtureDiagnosticTooLarge;
+    std.debug.print("[DEBUG-unit78-linux-readiness] {s}\n", .{bytes});
+}
+
 fn fixtureMain(init: std.process.Init, args: []const []const u8) !void {
     if (args.len == 0) return error.MissingFixtureMode;
     const mode = args[0];
@@ -1143,10 +1268,19 @@ fn fixtureMain(init: std.process.Init, args: []const []const u8) !void {
         if (args.len != 2 and args.len != 3) return error.MissingFixtureLock;
         const ignored: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(.TERM, &ignored, null);
-        const file = try std.Io.Dir.cwd().createFile(init.io, args[1], .{ .lock = .exclusive });
+        const file = std.Io.Dir.cwd().createFile(init.io, args[1], .{ .lock = .exclusive }) catch |err| {
+            fixtureStartupError(init, args, .lock_create, err) catch {};
+            return err;
+        };
         defer file.close(init.io);
-        if (args.len == 3) try writeFixtureStamp(init, args[2]);
-        try file.writeStreamingAll(init.io, "ready\n");
+        if (args.len == 3) writeFixtureStamp(init, args[2]) catch |err| {
+            fixtureStartupError(init, args, .identity_publish, err) catch {};
+            return err;
+        };
+        file.writeStreamingAll(init.io, "ready\n") catch |err| {
+            fixtureStartupError(init, args, .ready_write, err) catch {};
+            return err;
+        };
         try sleepMs(init.io, 30000);
     } else if (std.mem.eql(u8, mode, "resistant-parent")) {
         if (args.len != 4 and args.len != 5) return error.MissingFixtureLock;
@@ -1225,10 +1359,23 @@ fn selfTestBody(init: std.process.Init, ctx: Context, executable: []const u8) !S
         defer child.closePipe(init.io);
         defer child.stop(init.io) catch {};
         const until = nowMs(init.io) + 5000;
+        var last_stat: FixtureReadinessStat = .{};
         while (true) {
-            const ready = std.Io.Dir.cwd().statFile(init.io, lock_path, .{}) catch null;
-            if (ready) |stat| if (stat.size != 0) break;
-            if (nowMs(init.io) >= until) return error.ResistantFixtureNotReady;
+            last_stat.attempts += 1;
+            const ready = std.Io.Dir.cwd().statFile(init.io, lock_path, .{}) catch |err| block: {
+                last_stat.size = null;
+                last_stat.error_name = @errorName(err);
+                break :block null;
+            };
+            if (ready) |stat| {
+                last_stat.size = stat.size;
+                last_stat.error_name = null;
+                if (stat.size != 0) break;
+            }
+            if (nowMs(init.io) >= until) {
+                reportFixtureReadinessFailure(init, ctx, policy, &child, identity_path, last_stat) catch |err| std.debug.print("[DEBUG-unit78-linux-readiness] report failed: {s}\n", .{@errorName(err)});
+                return error.ResistantFixtureNotReady;
+            }
             try sleepMs(init.io, 10);
         }
         const lock_file = try std.Io.Dir.cwd().openFile(init.io, lock_path, .{ .mode = .read_write });
@@ -1466,4 +1613,92 @@ test "native observer: complete marker framing rejects partial and oversized lin
     try std.testing.expect(!framer.consume(huge));
     try std.testing.expect(!framer.consume(marker ++ "\n"));
     try std.testing.expect(framer.consume(marker ++ "\n"));
+}
+
+test "native observer: startup diagnostics own returned strings and label group mismatches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const ctx: Context = .{ .gpa = gpa, .io = std.testing.io, .root = root };
+    const cases = [_]struct { name: []const u8, raw: []const u8, matches: bool }{
+        .{ .name = "owned.json", .raw = "{\"version\":1,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":123,\"producer_group\":321}", .matches = true },
+        .{ .name = "unrelated.json", .raw = "{\"version\":1,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":123,\"producer_group\":999}", .matches = false },
+        .{ .name = "no-group.json", .raw = "{\"version\":1,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":123,\"producer_group\":null}", .matches = false },
+    };
+    for (cases) |case| {
+        try tmp.dir.writeFile(ctx.io, .{ .sub_path = case.name, .data = case.raw });
+        const path = try std.fs.path.join(gpa, &.{ root, case.name });
+        defer gpa.free(path);
+        const parsed = try readFixtureStartupError(ctx, path, "term-closed");
+        defer parsed.deinit();
+        // readFixtureStartupError has already freed its raw file buffer.
+        try std.testing.expectEqualStrings("term-closed", parsed.value.policy);
+        try std.testing.expectEqualStrings("IsDir", parsed.value.error_name);
+        try std.testing.expectEqual(@as(std.posix.pid_t, 123), parsed.value.producer_pid);
+        try std.testing.expectEqual(case.matches, parsed.value.matchesOwnedGroup(321));
+    }
+}
+
+test "native observer: startup diagnostic reader enforces actual file ownership and cap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const ctx: Context = .{ .gpa = gpa, .io = std.testing.io, .root = root };
+    const raw = "{\"version\":1,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":123,\"producer_group\":321}";
+    const missing = try std.fs.path.join(gpa, &.{ root, "missing.json" });
+    defer gpa.free(missing);
+    try std.testing.expectError(error.FileNotFound, readFixtureStartupError(ctx, missing, "term-closed"));
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "valid.json", .data = raw });
+    try tmp.dir.symLink(ctx.io, "valid.json", "symbolic.json", .{});
+    const symbolic = try std.fs.path.join(gpa, &.{ root, "symbolic.json" });
+    defer gpa.free(symbolic);
+    try std.testing.expectError(error.SymLinkLoop, readFixtureStartupError(ctx, symbolic, "term-closed"));
+    try std.Io.Dir.hardLink(tmp.dir, "valid.json", tmp.dir, "hard.json", ctx.io, .{});
+    const hard = try std.fs.path.join(gpa, &.{ root, "hard.json" });
+    defer gpa.free(hard);
+    try std.testing.expectError(error.InvalidFixtureDiagnosticFile, readFixtureStartupError(ctx, hard, "term-closed"));
+    const oversized: [2048]u8 = @splat(' ');
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "oversized.json", .data = &oversized });
+    const oversized_path = try std.fs.path.join(gpa, &.{ root, "oversized.json" });
+    defer gpa.free(oversized_path);
+    try std.testing.expectError(error.FixtureDiagnosticTooLarge, readFixtureStartupError(ctx, oversized_path, "term-closed"));
+    var below_cap: [2047]u8 = @splat(' ');
+    @memcpy(below_cap[0..raw.len], raw);
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "below-cap.json", .data = &below_cap });
+    const below_cap_path = try std.fs.path.join(gpa, &.{ root, "below-cap.json" });
+    defer gpa.free(below_cap_path);
+    const accepted = try readFixtureStartupError(ctx, below_cap_path, "term-closed");
+    defer accepted.deinit();
+    try std.testing.expectEqualStrings("IsDir", accepted.value.error_name);
+    try tmp.dir.createDir(ctx.io, "other", .default_dir);
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "other/outside.json", .data = raw });
+    const outside = try std.fs.path.join(gpa, &.{ root, "other/outside.json" });
+    defer gpa.free(outside);
+    try std.testing.expectError(error.InvalidFixtureDiagnosticPath, readFixtureStartupError(ctx, outside, "term-closed"));
+}
+
+test "native observer: startup schema rejects actual malformed and mismatched records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const ctx: Context = .{ .gpa = gpa, .io = std.testing.io, .root = root };
+    const cases = [_]struct { name: []const u8, raw: []const u8, expected: anyerror }{
+        .{ .name = "malformed.json", .raw = "{", .expected = error.UnexpectedEndOfInput },
+        .{ .name = "version.json", .raw = "{\"version\":2,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":123,\"producer_group\":321}", .expected = error.InvalidFixtureDiagnosticIdentity },
+        .{ .name = "policy.json", .raw = "{\"version\":1,\"policy\":\"term-open\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":123,\"producer_group\":321}", .expected = error.InvalidFixtureDiagnosticIdentity },
+        .{ .name = "zero-pid.json", .raw = "{\"version\":1,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":0,\"producer_group\":321}", .expected = error.InvalidFixtureDiagnosticIdentity },
+        .{ .name = "negative-pid.json", .raw = "{\"version\":1,\"policy\":\"term-closed\",\"stage\":\"identity_publish\",\"error_name\":\"IsDir\",\"producer_pid\":-1,\"producer_group\":321}", .expected = error.InvalidFixtureDiagnosticIdentity },
+    };
+    for (cases) |case| {
+        try tmp.dir.writeFile(ctx.io, .{ .sub_path = case.name, .data = case.raw });
+        const path = try std.fs.path.join(gpa, &.{ root, case.name });
+        defer gpa.free(path);
+        try std.testing.expectError(case.expected, readFixtureStartupError(ctx, path, "term-closed"));
+    }
 }
