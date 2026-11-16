@@ -207,6 +207,15 @@ invocation with process snapshots, and refuses Zig builds, test binaries,
 command-bearing Bun processes, and macOS `ReportCrash` work before writing an
 artifact. Bare idle Bun runtimes remain allowed.
 
+The October 17 [current-binary direct-JSC report](.data/json-jit-pipeline-jsc-2026-10-17.md)
+([84 raw samples](.data/json-jit-pipeline-jsc-2026-10-17.json)) is preserved as
+**rejected acceptance evidence** rather than retried away. Every checksum is
+exact and the structure medians move to `9.02x` at depth 4096 and `7.16x` at
+shallow 4096, but the anti-specialization JSC control has 42.14% RSD and the
+reviver/source zig-js control has 40.38% RSD. No sample was discarded. Those
+control tails make the run diagnostic-only; it does not satisfy #1019 or close
+#1021, regardless of the favorable structure medians.
+
 The October 2 [frame-reuse base control](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.md)
 ([raw samples](.data/exact-parent-json-stringify-frame-reuse-base-2026-10-02.json))
 is likewise preserved as **rejected exact-parent evidence**. Six candidate
